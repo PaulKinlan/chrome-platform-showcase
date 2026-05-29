@@ -71,24 +71,38 @@ function statusBadgeFor(channels: Channels, milestone: number): string {
 }
 
 function renderIndex(channels: Channels): string {
+  // Chromestatus's "stable.mstone" is the *next* stable cut, even when its
+  // stable_date is still a few days away. Most users are on stable-1 until
+  // the cut lands. Show that release too so the issue stream and the catalogue
+  // line up with what's actually deployed.
+  const prevStable = channels.stable.mstone - 1;
   const releases = [
     { mstone: channels.dev.mstone, status: "Dev", date: channels.dev.stable_date },
     { mstone: channels.beta.mstone, status: "Beta", date: channels.beta.stable_date },
-    { mstone: channels.stable.mstone, status: "Stable", date: channels.stable.stable_date },
+    {
+      mstone: channels.stable.mstone,
+      status: "Stable (rolling out)",
+      date: channels.stable.stable_date,
+    },
+    { mstone: prevStable, status: "Stable (live)", date: "" },
   ];
 
   const cards = releases.map((r) => {
-    const date = new Date(r.date).toLocaleDateString("en-GB", {
-      day: "numeric",
-      month: "short",
-      year: "numeric",
-    });
+    const note = r.date
+      ? `Stable date: ${
+        new Date(r.date).toLocaleDateString("en-GB", {
+          day: "numeric",
+          month: "short",
+          year: "numeric",
+        })
+      }`
+      : `Most users are here`;
     return `<li class="release-card">
       <a href="/v${r.mstone}/">
         <span class="release-label">Chrome ${r.mstone}</span>
         <span class="release-status">${escapeHTML(r.status)}</span>
       </a>
-      <p class="release-note">Stable date: ${escapeHTML(date)}</p>
+      <p class="release-note">${escapeHTML(note)}</p>
     </li>`;
   }).join("");
 
@@ -230,9 +244,12 @@ async function renderReleasePage(
 }
 
 async function knownReleaseMilestones(channels: Channels): Promise<Set<number>> {
-  // Always accept the three live channels. Also accept any v<N>/ directory that
-  // ships in the repo (this covers backfilled older releases once they exist).
+  // Always accept the three live channels plus the previous stable (since
+  // chromestatus's "stable" is the next cut, the previous mstone is what most
+  // users actually have installed). Also accept any v<N>/ directory in the
+  // repo, which covers backfilled older releases.
   const set = new Set<number>([
+    channels.stable.mstone - 1,
     channels.stable.mstone,
     channels.beta.mstone,
     channels.dev.mstone,
