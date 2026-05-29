@@ -47,11 +47,16 @@ async function readPublicAsset(path: string): Promise<Response> {
 }
 
 async function readReleaseAsset(release: string, sub: string): Promise<Response | null> {
-  const safe = sub.replace(/^\/+/, "");
-  if (!safe || safe.includes("..")) return null;
+  if (sub.includes("..")) return null;
+  // Trailing slash or path with no extension: serve <path>/index.html.
+  let key = sub.replace(/^\/+/, "");
+  if (!key) return null;
+  if (key.endsWith("/")) key += "index.html";
+  else if (!/\.[a-z0-9]+$/i.test(key)) key += "/index.html";
+
   try {
-    const file = await Deno.readFile(`./${release}/${safe}`);
-    const ext = safe.split(".").pop() ?? "";
+    const file = await Deno.readFile(`./${release}/${key}`);
+    const ext = key.split(".").pop() ?? "";
     return new Response(file, {
       headers: { "content-type": MIME[ext] ?? "application/octet-stream" },
     });
@@ -158,6 +163,8 @@ function categoryTag(category: string): string {
 }
 
 async function featureHasDemo(release: string, feature: FeatureSummary): Promise<boolean> {
+  // A feature is "built" once its folder index page exists. The feature index
+  // is what the routine writes after each concept page is in place.
   try {
     await Deno.stat(`./${release}/${slugify(feature.name)}/index.html`);
     return true;
@@ -229,7 +236,7 @@ async function renderReleasePage(
 
   <section>
     <h2>uber demo</h2>
-    <p>Concept will be locked in a GitHub issue first; humans pick the direction, the agent builds it, the result lives at <code>/${release}/showcase/</code>.</p>
+    <p>Concept is locked in a GitHub issue first; humans pick the direction, the routine builds it, the result lives at <code>/${release}/showcase/</code>. Per-feature demos below are built automatically (no human gate) — every concept the routine proposes gets shipped.</p>
   </section>
 
   <section>
