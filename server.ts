@@ -75,13 +75,13 @@ function statusBadgeFor(channels: Channels, milestone: number): string {
   return "Upcoming";
 }
 
-function renderIndex(channels: Channels): string {
+async function renderIndex(channels: Channels): Promise<string> {
   // Chromestatus's "stable.mstone" is the *next* stable cut, even when its
   // stable_date is still a few days away. Most users are on stable-1 until
   // the cut lands. Show that release too so the issue stream and the catalogue
   // line up with what's actually deployed.
   const prevStable = channels.stable.mstone - 1;
-  const releases = [
+  const releases: { mstone: number; status: string; date: string }[] = [
     { mstone: channels.dev.mstone, status: "Dev", date: channels.dev.stable_date },
     { mstone: channels.beta.mstone, status: "Beta", date: channels.beta.stable_date },
     {
@@ -92,16 +92,40 @@ function renderIndex(channels: Channels): string {
     { mstone: prevStable, status: "Stable (live)", date: "" },
   ];
 
+  // Surface any backfilled older releases that have v<N>/ folders too, so a
+  // demo for an older Chrome doesn't get hidden just because the channels API
+  // no longer mentions it.
+  const seen = new Set(releases.map((r) => r.mstone));
+  try {
+    for await (const entry of Deno.readDir(".")) {
+      if (entry.isDirectory && /^v\d+$/.test(entry.name)) {
+        const m = Number(entry.name.slice(1));
+        if (!seen.has(m)) {
+          releases.push({ mstone: m, status: "Archive", date: "" });
+          seen.add(m);
+        }
+      }
+    }
+  } catch {
+    // ignore — Deno Deploy can refuse the readDir at root in some isolates.
+  }
+  releases.sort((a, b) => b.mstone - a.mstone);
+
   const cards = releases.map((r) => {
-    const note = r.date
-      ? `Stable date: ${
+    let note: string;
+    if (r.date) {
+      note = `Stable date: ${
         new Date(r.date).toLocaleDateString("en-GB", {
           day: "numeric",
           month: "short",
           year: "numeric",
         })
-      }`
-      : `Most users are here`;
+      }`;
+    } else if (r.status === "Archive") {
+      note = "Backfilled";
+    } else {
+      note = "Most users are here";
+    }
     return `<li class="release-card">
       <a href="/v${r.mstone}/">
         <span class="release-label">Chrome ${r.mstone}</span>
@@ -280,7 +304,7 @@ Deno.serve({ port: PORT }, async (req) => {
   if (path === "/" || path === "/index.html") {
     try {
       const channels = await getChannels();
-      return new Response(renderIndex(channels), {
+      return new Response(await renderIndex(channels), {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
     } catch (err) {
