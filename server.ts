@@ -229,8 +229,14 @@ async function renderReleasePage(
 </html>`;
 }
 
-async function knownReleaseMilestones(): Promise<Set<number>> {
-  const set = new Set<number>();
+async function knownReleaseMilestones(channels: Channels): Promise<Set<number>> {
+  // Always accept the three live channels. Also accept any v<N>/ directory that
+  // ships in the repo (this covers backfilled older releases once they exist).
+  const set = new Set<number>([
+    channels.stable.mstone,
+    channels.beta.mstone,
+    channels.dev.mstone,
+  ]);
   try {
     for await (const entry of Deno.readDir(".")) {
       if (entry.isDirectory && /^v\d+$/.test(entry.name)) {
@@ -238,7 +244,7 @@ async function knownReleaseMilestones(): Promise<Set<number>> {
       }
     }
   } catch {
-    // ignore
+    // ignore — Deno Deploy filesystem may not allow readDir at the root.
   }
   return set;
 }
@@ -267,7 +273,13 @@ Deno.serve({ port: PORT }, async (req) => {
     const milestone = Number(release.slice(1));
     const sub = releaseMatch[2] ?? "/";
 
-    const known = await knownReleaseMilestones();
+    let channels: Channels;
+    try {
+      channels = await getChannels();
+    } catch (err) {
+      return new Response(`Failed to load channels: ${err}`, { status: 502 });
+    }
+    const known = await knownReleaseMilestones(channels);
     if (!known.has(milestone)) {
       return new Response(`Release ${release} not configured yet`, { status: 404 });
     }
