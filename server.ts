@@ -154,7 +154,7 @@ async function renderIndex(channels: Channels): Promise<string> {
     <section>
       <h2>releases</h2>
       <ol class="release-list">${cards}</ol>
-      <p class="note">Older Chrome releases will be backfilled as the routine works through the chromestatus archive.</p>
+      <p class="note">Or jump straight to <a href="/features">the full feature catalogue</a> to search across every release at once. Older Chrome releases will be backfilled as the routine works through the chromestatus archive.</p>
     </section>
 
     <section class="how">
@@ -274,6 +274,190 @@ async function renderReleasePage(
 </html>`;
 }
 
+// ----- /features (flat, filterable catalogue) -----
+
+async function renderFeaturesCatalogue(channels: Channels): Promise<string> {
+  const known = [...await knownReleaseMilestones(channels)].sort((a, b) => b - a);
+
+  type Row = {
+    mstone: number;
+    id: number;
+    name: string;
+    summary: string;
+    category: string;
+    hasDemo: boolean;
+  };
+
+  const rows: Row[] = [];
+  for (const m of known) {
+    try {
+      const feats = await getMilestoneFeatures(m);
+      for (const g of feats.groups) {
+        for (const f of g.features) {
+          const slug = slugify(f.name);
+          const hasDemo = await featureHasDemo(`v${m}`, f);
+          rows.push({
+            mstone: m,
+            id: f.id,
+            name: f.name,
+            summary: f.summary ?? "",
+            category: g.category,
+            hasDemo,
+          });
+        }
+      }
+    } catch {
+      // skip milestones we can't fetch
+    }
+  }
+
+  const tableRows = rows.map((r) => {
+    const slug = slugify(r.name);
+    const cat = categoryTag(r.category);
+    const demoCell = r.hasDemo
+      ? `<a class="tag tag-live" href="/v${r.mstone}/${slug}/">built &rarr;</a>`
+      : `<span class="tag tag-pending">pending</span>`;
+    const search = `${r.name} ${r.summary} ${cat} v${r.mstone}`.toLowerCase();
+    return `<tr data-search="${escapeHTML(search)}" data-mstone="${r.mstone}" data-status="${
+      escapeHTML(cat)
+    }" data-built="${r.hasDemo}">
+      <td><a href="https://chromestatus.com/feature/${r.id}" target="_blank" rel="noopener">${
+      escapeHTML(r.name)
+    }</a></td>
+      <td><span class="release-status">v${r.mstone}</span></td>
+      <td><span class="tag">${escapeHTML(cat)}</span></td>
+      <td>${demoCell}</td>
+    </tr>`;
+  }).join("");
+
+  const mstoneOptions = known.map((m) => `<option value="${m}">v${m}</option>`).join("");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>all features — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    main { max-width: 1100px; }
+    .filters {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      margin: 1rem 0 1.5rem;
+      padding: 1rem;
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+    }
+    .filters input, .filters select {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      padding: 0.45rem 0.6rem;
+      background: var(--bg-paper);
+      color: var(--text-black);
+      border: 2px solid var(--border-black);
+      outline: none;
+    }
+    .filters input:focus { box-shadow: var(--thin-shadow); }
+    .filters input[type=search] { flex: 1; min-width: 220px; }
+    .features-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    .features-table th, .features-table td { padding: 0.6rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border-black); vertical-align: top; }
+    .features-table th {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      background: var(--bg-stone);
+    }
+    .features-table tr.hidden { display: none; }
+    .features-table td a { color: var(--text-black); text-decoration: underline; text-underline-offset: 3px; }
+    .features-table td a:hover { color: var(--accent-blue); }
+    .features-table td .tag, .features-table td .release-status { font-family: var(--font-mono); }
+    .features-table td .release-status { background: var(--text-black); color: var(--bg-ivory); padding: 0.15rem 0.5rem; font-size: 0.75rem; }
+    .stats { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/">&larr; home</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">catalogue</p>
+    <h1>all features</h1>
+    <p class="lede">Every web platform feature tracked by this project, across every milestone from previous-stable to dev. Filter by name, by milestone, by status, by whether a demo exists.</p>
+  </header>
+
+  <div class="filters">
+    <input type="search" id="q" placeholder="search by name, summary, category">
+    <select id="mstone">
+      <option value="">all milestones</option>
+      ${mstoneOptions}
+    </select>
+    <select id="status">
+      <option value="">any status</option>
+      <option value="Shipped">Shipped</option>
+      <option value="Origin Trial">Origin Trial</option>
+      <option value="Dev Trial">Dev Trial</option>
+      <option value="Stepped rollout">Stepped rollout</option>
+    </select>
+    <select id="built">
+      <option value="">any demo state</option>
+      <option value="true">built</option>
+      <option value="false">pending</option>
+    </select>
+  </div>
+
+  <p class="stats"><span id="visible">${rows.length}</span> / ${rows.length} features</p>
+
+  <table class="features-table">
+    <thead>
+      <tr><th>feature</th><th>milestone</th><th>status</th><th>demo</th></tr>
+    </thead>
+    <tbody id="rows">${tableRows}</tbody>
+  </table>
+
+  <script>
+    const q = document.getElementById('q');
+    const mstone = document.getElementById('mstone');
+    const status = document.getElementById('status');
+    const built = document.getElementById('built');
+    const rows = document.querySelectorAll('#rows tr');
+    const visible = document.getElementById('visible');
+
+    function applyFilter() {
+      const qv = q.value.toLowerCase().trim();
+      const mv = mstone.value;
+      const sv = status.value;
+      const bv = built.value;
+      let count = 0;
+      for (const row of rows) {
+        const search = row.dataset.search;
+        const okq = !qv || search.includes(qv);
+        const okm = !mv || row.dataset.mstone === mv;
+        const oks = !sv || row.dataset.status === sv;
+        const okb = !bv || row.dataset.built === bv;
+        const show = okq && okm && oks && okb;
+        row.classList.toggle('hidden', !show);
+        if (show) count++;
+      }
+      visible.textContent = count;
+    }
+
+    q.addEventListener('input', applyFilter);
+    mstone.addEventListener('change', applyFilter);
+    status.addEventListener('change', applyFilter);
+    built.addEventListener('change', applyFilter);
+  </script>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>`;
+}
+
 async function knownReleaseMilestones(channels: Channels): Promise<Set<number>> {
   // Always accept the three live channels plus the previous stable (since
   // chromestatus's "stable" is the next cut, the previous mstone is what most
@@ -309,6 +493,17 @@ Deno.serve({ port: PORT }, async (req) => {
       });
     } catch (err) {
       return new Response(`Failed to render index: ${err}`, { status: 502 });
+    }
+  }
+
+  if (path === "/features" || path === "/features/") {
+    try {
+      const channels = await getChannels();
+      return new Response(await renderFeaturesCatalogue(channels), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    } catch (err) {
+      return new Response(`Failed to render features: ${err}`, { status: 502 });
     }
   }
 
