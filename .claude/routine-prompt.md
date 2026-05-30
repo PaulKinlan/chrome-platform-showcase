@@ -72,10 +72,12 @@ Iterate every category in `features_by_type`. For each feature, save the milesto
 
 ## Step 4: Build budget
 
-No per-run cap. Current channels first, then backfill, until 90-minute budget is up. **Always 2 to 3
-concept demos per feature, never 1.** Each concept must hit a distinct angle (different API surface,
-different use case, or different failure mode / edge case). 2 strong demos beat 3 mediocre ones, but
-1 is a regression — Paul flagged single-concept features as unacceptable on 2026-05-30.
+No per-run cap. Current channels first, then backfill. **Build every distinct use case the API has.
+No ceiling.** 2-3 concepts is the floor, not the cap — if the spec / planning discussion identifies
+5 distinct use cases, build 5 concept folders. Each concept hits a distinct angle (different API
+surface, different real-world use case, or different failure mode / edge case). The goal is to be
+comprehensive and inspire developers (Paul, 2026-05-30) — not to tick a box. 1 concept is a
+regression. 2 is the floor. Build them all.
 
 ## Step 5: Fetch full detail
 

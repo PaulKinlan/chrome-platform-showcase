@@ -142,13 +142,13 @@ history: 2026-05-30, mass backfill of v130-v144 shipped static cards in the name
 flagged it as a serious regression because the site is live and depth matters more than coverage.
 Don't repeat.
 
-**Also non-negotiable: 2–3 concept folders per feature.** A single concept page is not enough. Each
-concept must explore a distinct angle of the feature — a different API surface, a different
-real-world use case, or a different failure mode / edge case. The routine prompt has always said "2
-strong beats 3 mediocre"; treat 1 as a regression. Bug history: same backfill window, the rebuilt
-v130-v144 came out with exactly 1 concept per feature because I told the rebuild subagents to "keep
-the existing directory structure" — that propagated the original stub generator's 1-concept shape.
-Paul flagged it on 2026-05-30. Don't repeat.
+**Also non-negotiable: build EVERY distinct use case the API has. No ceiling.** 2-3 concepts is the
+floor, not the cap. If the spec / planning discussion identifies five distinct use cases, build five
+concept folders. The goal of this project (Paul, 2026-05-30): "be comprehensive and inspire
+developers" — demos and tools that explain the concept, not the minimum to tick a box. Each concept
+hits a distinct angle (different API surface, different real-world use case, or different failure
+mode / edge case). Bug history: 2026-05-30, the rebuilt v130-v144 backfill came out with exactly 1
+concept per feature; when I followed up I capped at 2-3. Paul flagged both. Don't cap. Don't skip.
 
 ### 8. Routine never edits top-level files
 
