@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Data to Prose — Writer API — Chrome 137</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .probe { font-family: var(--font-mono); font-size: 0.8rem; padding: var(--space-2) var(--space-3); background: var(--bg-stone); border: 1px solid var(--border-black); margin: var(--space-3) 0; }
+    .probe.ok { color: var(--accent-emerald); }
+    .probe.fail { color: var(--accent-rose); }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-4) 0; }
+    .field { display: flex; flex-direction: column; gap: 0.3rem; margin: var(--space-3) 0; }
+    label { font-family: var(--font-mono); font-size: 0.8rem; }
+    select { font-family: var(--font-mono); font-size: 0.85rem; border: 2px solid var(--border-black); padding: 0.3rem 0.6rem; background: var(--bg-ivory); }
+    textarea { width: 100%; height: 200px; font-family: var(--font-mono); font-size: 0.85rem; border: 2px solid var(--border-black); padding: var(--space-3); background: var(--bg-paper); resize: vertical; }
+    .out { font-family: var(--font-serif); font-size: 1.05rem; line-height: 1.65; padding: var(--space-4); background: var(--bg-stone); border: 2px solid var(--border-black); margin: var(--space-3) 0; min-height: 180px; white-space: pre-wrap; }
+    .warn-block { border: 2px solid var(--accent-amber); background: var(--bg-paper); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; box-shadow: var(--thin-shadow); }
+    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--accent-amber); display: block; margin-bottom: 0.4rem; }
+    .preset-row { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0; }
+    .preset { font-family: var(--font-mono); font-size: 0.78rem; padding: 0.3rem 0.6rem; border: 2px solid var(--border-black); background: var(--bg-paper); cursor: pointer; color: var(--text-black); }
+    .preset:hover { background: var(--text-black); color: var(--bg-ivory); }
+    .lane { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 720px) { .lane { grid-template-columns: 1fr; } }
+    .lane h3 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Writer API</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo · v137 · origin trial</p>
+    <h1>Data to Prose</h1>
+    <p class="lede">From the explainer use-case list: <em>&ldquo;generate textual explanations of structured data&rdquo;</em> and <em>&ldquo;expand pro/con lists into comprehensive evaluations&rdquo;</em>. Paste a JSON object (e.g. a product spec, a pros/cons table, a calendar event) and the on-device Writer turns it into a paragraph in your chosen tone.</p>
+  </header>
+
+  <div class="warn-block"><strong>Heads up · origin trial / flag</strong>Enable <code>chrome://flags/#writer-api-for-gemini-nano</code> plus the on-device model component. If the API isn't available, the demo falls back to a labelled message.</div>
+
+  <div class="probe" id="probe">probing&hellip;</div>
+
+  <label for="json" style="font-family: var(--font-mono); font-size: 0.85rem;">structured input (JSON)</label>
+  <textarea id="json">{
+  "product": "Brompton T-Line",
+  "price_gbp": 4490,
+  "weight_kg": 7.9,
+  "pros": ["titanium frame", "ultra-light", "same fold as original"],
+  "cons": ["very expensive", "single-speed", "no rear rack option"]
+}</textarea>
+
+  <div class="preset-row">
+    <button class="preset" data-key="bike">bike review</button>
+    <button class="preset" data-key="meeting">meeting summary</button>
+    <button class="preset" data-key="error">error report</button>
+  </div>
+
+  <div class="field" style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3);">
+    <div><label for="tone">tone</label><select id="tone"><option>casual</option><option selected>neutral</option><option>formal</option></select></div>
+    <div><label for="format">format</label><select id="format"><option selected>plain-text</option><option>markdown</option></select></div>
+    <div><label for="len">length</label><select id="len"><option>short</option><option selected>medium</option><option>long</option></select></div>
+  </div>
+
+  <div class="controls">
+    <button id="run">Expand into prose (streaming)</button>
+  </div>
+
+  <div class="lane">
+    <div>
+      <h3>structured input</h3>
+      <div class="out" id="echo">&mdash;</div>
+    </div>
+    <div>
+      <h3>generated prose</h3>
+      <div class="out" id="out">no output yet</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>const data = {
+  product: "Brompton T-Line", price_gbp: 4490, weight_kg: 7.9,
+  pros: ["titanium frame", "ultra-light", "same fold as original"],
+  cons: ["very expensive", "single-speed", "no rear rack option"],
+};
+
+const writer = await Writer.create({
+  tone: "neutral",
+  format: "plain-text",
+  length: "medium",
+  sharedContext:
+    "You receive structured product data as JSON. " +
+    "Write an evenhanded review paragraph covering price, weight, " +
+    "and the pros/cons. Do NOT echo raw field names.",
+});
+
+const stream = await writer.writeStreaming(
+  "Data:\n" + JSON.stringify(data, null, 2)
+);
+for await (const c of stream) out.textContent += c;</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Writer API</a> — feature index</li>
+      <li><a href="../write/">Writer brief-to-prose demo</a></li>
+      <li><a href="https://webmachinelearning.github.io/writing-assistance-apis/#writer-api" target="_blank" rel="noopener">Spec</a></li>
+      <li><a href="https://chromestatus.com/feature/4712595362414592" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const probe = document.getElementById("probe");
+  const out = document.getElementById("out");
+  const echo = document.getElementById("echo");
+  const W = self.Writer || self.ai?.writer || null;
+
+  (async () => {
+    if (!W) { probe.classList.add("fail"); probe.textContent = "Writer global not present"; return; }
+    try {
+      const a = typeof W.availability === "function" ? await W.availability() : "unknown";
+      probe.classList.add(a === "available" || a === "readily" ? "ok" : "fail");
+      probe.textContent = "Writer detected - availability=" + JSON.stringify(a);
+    } catch (e) { probe.classList.add("fail"); probe.textContent = "availability probe threw: " + e.message; }
+  })();
+
+  const presets = {
+    bike: {
+      json: '{\n  "product": "Brompton T-Line",\n  "price_gbp": 4490,\n  "weight_kg": 7.9,\n  "pros": ["titanium frame", "ultra-light", "same fold as original"],\n  "cons": ["very expensive", "single-speed", "no rear rack option"]\n}',
+      ctx: "You receive structured product data as JSON. Write an evenhanded review paragraph covering price, weight, and the pros/cons. Do NOT echo raw field names."
+    },
+    meeting: {
+      json: '{\n  "title": "Quarterly planning review",\n  "date": "2026-06-12",\n  "duration_min": 45,\n  "attendees": ["alice@corp", "bob@corp", "carol@corp"],\n  "decisions": ["ship q3 roadmap by jun 30", "promote prompt-api docs to top nav"],\n  "open_items": ["who owns the migration write-up?", "budget for translator-api server fallback"]\n}',
+      ctx: "You receive structured meeting notes as JSON. Write a one-paragraph readout for someone who missed the meeting, mentioning decisions and open items in plain prose."
+    },
+    error: {
+      json: '{\n  "service": "checkout-api",\n  "incident": "elevated 5xx on POST /pay",\n  "started_at": "2026-05-30T14:08Z",\n  "ended_at": "2026-05-30T14:31Z",\n  "duration_min": 23,\n  "impact_users": 1840,\n  "root_cause": "stripe webhook retry storm during deploy",\n  "fix": "added idempotency-key dedup at the edge"\n}',
+      ctx: "You receive incident metadata as JSON. Write a clear status-page postmortem paragraph aimed at end users (avoid jargon, mention timeline and what was fixed)."
+    },
+  };
+
+  let activeCtx = presets.bike.ctx;
+  document.querySelectorAll(".preset").forEach((b) => {
+    b.addEventListener("click", () => {
+      const p = presets[b.dataset.key];
+      document.getElementById("json").value = p.json;
+      activeCtx = p.ctx;
+    });
+  });
+
+  document.getElementById("run").addEventListener("click", async () => {
+    const raw = document.getElementById("json").value;
+    echo.textContent = raw;
+    out.textContent = "";
+    if (!W) { out.textContent = "Writer API not available."; return; }
+    try {
+      const wr = await W.create({
+        tone: document.getElementById("tone").value,
+        format: document.getElementById("format").value,
+        length: document.getElementById("len").value,
+        sharedContext: activeCtx,
+      });
+      const brief = "Data:\n" + raw;
+      if (wr.writeStreaming) for await (const c of await wr.writeStreaming(brief)) out.textContent += c;
+      else out.textContent = await wr.write(brief);
+    } catch (e) { out.textContent = "error: " + e.name + " · " + e.message; }
+  });
+</script>
+</body>
+</html>
