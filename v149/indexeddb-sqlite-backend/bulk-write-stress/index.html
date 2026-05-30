@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bulk Write Stress Test — IndexedDB SQLite backend — Chrome 149 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .controls { display: flex; gap: var(--space-3); margin: var(--space-3) 0; flex-wrap: wrap; align-items: end; }
+    .ctl { display: flex; flex-direction: column; gap: 0.3rem; }
+    .ctl label { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+    .ctl input { padding: 0.4rem 0.6rem; border: 2px solid var(--border-black); font-family: var(--font-mono); background: var(--bg-paper); color: var(--text-black); width: 110px; }
+    .ctl-btn {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: 0.45rem 1.2rem;
+      font-family: var(--font-sans);
+      cursor: pointer;
+    }
+    .ctl-btn:hover { background: var(--bg-paper); color: var(--text-black); transform: translate(-2px,-2px); box-shadow: var(--flat-shadow-hover); }
+    .ctl-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: var(--thin-shadow); }
+
+    .scoreboard {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: var(--space-3);
+      margin: var(--space-4) 0;
+    }
+    .stat {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-3) var(--space-4);
+    }
+    .stat .label { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+    .stat .v { font-family: var(--font-display); font-size: 1.6rem; color: var(--text-black); font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; IndexedDB: SQLite backend</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v149</p>
+    <h1>Bulk Write Stress Test</h1>
+    <p class="lede">Inserts <code>N</code> objects of size <code>S</code> bytes each into IndexedDB, then reads them back, then runs cursor scans. Reports throughput so you can compare across Chrome versions or flags.</p>
+  </header>
+
+  <div class="controls">
+    <div class="ctl"><label for="n">objects</label><input id="n" type="number" value="1000" min="10" max="50000"></div>
+    <div class="ctl"><label for="sz">size (bytes)</label><input id="sz" type="number" value="2048" min="32" max="65536"></div>
+    <button class="ctl-btn" id="run">Run</button>
+    <button class="ctl-btn" id="clear" style="background:var(--accent-rose);color:var(--bg-ivory);border-color:var(--accent-rose)">Wipe DB</button>
+  </div>
+
+  <div class="scoreboard">
+    <div class="stat"><div class="label">write throughput</div><div class="v" id="write-tput">—</div></div>
+    <div class="stat"><div class="label">write duration</div><div class="v" id="write-dur">—</div></div>
+    <div class="stat"><div class="label">read throughput</div><div class="v" id="read-tput">—</div></div>
+    <div class="stat"><div class="label">cursor scan</div><div class="v" id="scan-dur">—</div></div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">IndexedDB: SQLite backend</a> — feature index</li>
+      <li><a href="https://chromestatus.com/feature/5161589557821440" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+const DB = "showcase-bulk", STORE = "items";
+function openDb() {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open(DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: "id" });
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+}
+function tx(db, mode = "readwrite") { return db.transaction(STORE, mode).objectStore(STORE); }
+
+function payload(size) {
+  const arr = new Uint8Array(size);
+  crypto.getRandomValues(arr);
+  return arr;
+}
+
+async function bulkWrite(db, n, size) {
+  const t0 = performance.now();
+  const t = db.transaction(STORE, "readwrite");
+  const s = t.objectStore(STORE);
+  for (let i = 0; i < n; i++) {
+    s.put({ id: i, data: payload(size) });
+  }
+  await new Promise((res, rej) => { t.oncomplete = res; t.onerror = () => rej(t.error); });
+  return performance.now() - t0;
+}
+
+async function bulkRead(db, n) {
+  const t0 = performance.now();
+  const t = db.transaction(STORE, "readonly");
+  const s = t.objectStore(STORE);
+  await Promise.all(Array.from({ length: n }, (_, i) => new Promise((res) => {
+    const req = s.get(i);
+    req.onsuccess = () => res();
+  })));
+  return performance.now() - t0;
+}
+
+async function cursorScan(db) {
+  return new Promise((res) => {
+    const t0 = performance.now();
+    const s = tx(db, "readonly");
+    let count = 0;
+    const req = s.openCursor();
+    req.onsuccess = (e) => {
+      const c = e.target.result;
+      if (c) { count++; c.continue(); }
+      else res({ dt: performance.now() - t0, count });
+    };
+  });
+}
+
+document.getElementById("run").addEventListener("click", async () => {
+  const btn = document.getElementById("run");
+  btn.disabled = true;
+  document.getElementById("write-tput").textContent = "…";
+  const n = +document.getElementById("n").value;
+  const sz = +document.getElementById("sz").value;
+  const db = await openDb();
+  const wd = await bulkWrite(db, n, sz);
+  document.getElementById("write-tput").textContent = `${(n / (wd / 1000)).toFixed(0)} /s`;
+  document.getElementById("write-dur").textContent = `${wd.toFixed(0)} ms`;
+  const rd = await bulkRead(db, n);
+  document.getElementById("read-tput").textContent = `${(n / (rd / 1000)).toFixed(0)} /s`;
+  const cs = await cursorScan(db);
+  document.getElementById("scan-dur").textContent = `${cs.dt.toFixed(0)} ms (${cs.count})`;
+  btn.disabled = false;
+});
+
+document.getElementById("clear").addEventListener("click", async () => {
+  indexedDB.deleteDatabase(DB);
+  for (const el of ["write-tput","write-dur","read-tput","scan-dur"]) {
+    document.getElementById(el).textContent = "—";
+  }
+});
+</script>
+</body>
+</html>
