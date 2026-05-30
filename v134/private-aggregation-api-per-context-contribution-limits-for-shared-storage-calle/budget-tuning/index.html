@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Budget tuning — Private Aggregation per-context limits — Chrome 134 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .probe { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
+    .ok { color: var(--accent-emerald); font-weight: 600; }
+    .bad { color: var(--accent-rose); font-weight: 600; }
+    .warn-block { background: var(--bg-stone); border: 2px dashed var(--border-black); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.85rem; margin: var(--space-3) 0; }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-4); margin: var(--space-3) 0; align-items: baseline; }
+    .field { display: flex; flex-direction: column; gap: 0.3rem; font-family: var(--font-mono); font-size: 0.82rem; }
+    input[type="range"] { width: 200px; accent-color: var(--text-black); }
+    table.r { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.82rem; }
+    table.r th, table.r td { border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); text-align: left; }
+    table.r th { background: var(--bg-stone); }
+    .filler { color: var(--text-muted); font-style: italic; }
+    .dropped { background: var(--accent-rose); color: var(--bg-ivory); }
+    .summary { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.9rem; margin: var(--space-4) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Private Aggregation per-context limits</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v134</p>
+    <h1>Budget tuning — request more, request less</h1>
+    <p class="lede">The chromestatus rationale called out two pain points. Some Shared Storage callers want <em>more</em> than 20 contributions per report (large histograms shouldn’t need to issue a second worklet call). Others want <em>fewer</em> — but the report still pads to 20 slots for privacy. With per-context limits the caller picks. Dial the cap and the contribution count below and watch the assembled report.</p>
+  </header>
+
+  <div class="probe" id="probe">probing Private Aggregation per-context cap…</div>
+
+  <div class="warn-block">Private Aggregation lives inside Shared Storage worklets — this page replicates the bookkeeping. The production call signature in the snippet below is what Chrome 134+ honours.</div>
+
+  <h2>Configure a report</h2>
+  <div class="controls">
+    <div class="field">
+      <label for="cap">maxContributions (per-context limit)</label>
+      <input type="range" id="cap" min="1" max="100" value="20">
+      <span id="cap-val">20</span>
+    </div>
+    <div class="field">
+      <label for="contribs">contributions queued by the worklet</label>
+      <input type="range" id="contribs" min="0" max="100" value="14">
+      <span id="contribs-val">14</span>
+    </div>
+  </div>
+
+  <div class="stage">
+    <table class="r"><thead><tr><th>slot</th><th>bucket</th><th>value</th><th>note</th></tr></thead><tbody id="rows"></tbody></table>
+    <div class="summary" id="summary"></div>
+  </div>
+
+  <h2>The code</h2>
+  <pre><code>// inside Shared Storage operation
+privateAggregation.enableDebugMode();
+privateAggregation.contributeToHistogram({ bucket: 1n, value: 10n });
+privateAggregation.contributeToHistogram({ bucket: 2n, value: 25n });
+// ...
+
+// register() now accepts a maxContributions option for the operation
+sharedStorage.run('my-op', { keepAlive: false, data: {} });
+
+// declared in addModule:
+register('my-op', class {
+  async run(data) { /* ... */ }
+  static get options() { return { maxContributions: 5 }; }  // NEW
+});</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../pa-context-limits/">Baseline concept</a></li>
+      <li><a href="https://github.com/patcg-individual-drafts/private-aggregation-api" target="_blank" rel="noopener">PATCG — Private Aggregation API</a></li>
+      <li><a href="https://chromestatus.com/feature/5189366316793856" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probe = document.getElementById('probe');
+  const supported = 'sharedStorage' in window;
+  probe.innerHTML = supported
+    ? '<span class="ok">sharedStorage detected</span> — per-context limits live inside worklets; simulation below uses spec-conformant bookkeeping'
+    : '<span class="bad">sharedStorage missing</span> — simulation only';
+
+  const cap = document.getElementById('cap');
+  const contribs = document.getElementById('contribs');
+  const capVal = document.getElementById('cap-val');
+  const contribsVal = document.getElementById('contribs-val');
+  const rowsEl = document.getElementById('rows');
+  const summary = document.getElementById('summary');
+
+  function render() {
+    const c = +cap.value;
+    const n = +contribs.value;
+    capVal.textContent = c;
+    contribsVal.textContent = n;
+    rowsEl.innerHTML = '';
+    const real = Math.min(c, n);
+    const dropped = Math.max(0, n - c);
+    const padding = Math.max(0, c - n);
+
+    for (let i = 0; i < c; i++) {
+      const tr = document.createElement('tr');
+      if (i < real) {
+        const b = (i + 1).toString().padStart(2, '0');
+        tr.innerHTML = `<td>${i + 1}</td><td>0x${b}</td><td>${Math.floor(Math.random() * 50)}</td><td>real contribution</td>`;
+      } else {
+        tr.innerHTML = `<td>${i + 1}</td><td>0x00</td><td>0</td><td class="filler">noise padding</td>`;
+      }
+      rowsEl.appendChild(tr);
+    }
+    for (let i = 0; i < dropped; i++) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>—</td><td>0x${(c + i + 1).toString().padStart(2, '0')}</td><td>${Math.floor(Math.random() * 50)}</td><td class="dropped" style="padding: 0.4rem 0.8rem;">DROPPED — over cap</td>`;
+      rowsEl.appendChild(tr);
+    }
+
+    summary.textContent =
+      `maxContributions = ${c}. Worklet queued ${n}. Report transmits ${c} slots: ${real} real + ${padding} noise. ${dropped} contributions dropped.${dropped ? ' Raise the cap to capture them.' : ''}${padding > 0 ? ` Lowering the cap to ${n} would save ${padding} slots of noise bandwidth.` : ''}`;
+  }
+
+  cap.addEventListener('input', render);
+  contribs.addEventListener('input', render);
+  render();
+</script>
+</body>
+</html>
