@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spectre Mitigation — Origin-keyed Process Isolation — Chrome 142</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .threat-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-4);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 700px) { .threat-grid { grid-template-columns: 1fr; } }
+    .threat {
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      background: var(--bg-stone);
+    }
+    .threat h3 {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin: 0 0 var(--space-3);
+    }
+    .threat.bad { background: #fbe9eb; }
+    .threat.good { background: #e6f4ea; }
+    .frame {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      margin: var(--space-2) 0;
+    }
+    .frame .pid {
+      display: inline-block;
+      padding: 0.05rem 0.4rem;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      font-size: 0.7rem;
+      margin-left: 0.4rem;
+    }
+    .frame .pid.same { background: var(--accent-rose); }
+    .frame .pid.iso { background: var(--accent-emerald); }
+    .verdict {
+      font-family: var(--font-display);
+      font-size: 1.1rem;
+      padding: var(--space-2);
+      margin-top: var(--space-3);
+      border-top: 1px dashed var(--border-black);
+    }
+    .verdict.bad { color: var(--accent-rose); }
+    .verdict.good { color: var(--accent-emerald); }
+
+    .controls { display: flex; gap: var(--space-3); margin: var(--space-3) 0; flex-wrap: wrap; align-items: center; }
+    .controls label { font-family: var(--font-mono); font-size: 0.85rem; }
+
+    .readout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 600px) { .readout { grid-template-columns: 1fr; } }
+    .stat {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .stat-label {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 0.3rem;
+    }
+    .stat-val { font-family: var(--font-mono); font-size: 0.95rem; color: var(--text-black); }
+    .stat-val.on { color: var(--accent-emerald); }
+    .stat-val.off { color: var(--accent-rose); }
+    .note { font-family: var(--font-mono); color: var(--text-muted); font-size: 0.85rem; margin-top: var(--space-3); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Origin-keyed Process Isolation</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v142</p>
+    <h1>Spectre Side-Channel Mitigation</h1>
+    <p class="lede">The 2018-era reason this exists. Chrome already isolates <em>sites</em> (eTLD+1) into their own renderer processes, but two same-site origins — say <code>app.example.com</code> and <code>cdn.example.com</code> — still share one. A Spectre gadget in the lower-trust origin can read the higher-trust origin's memory. <code>Origin-Agent-Cluster: ?1</code> opts the page into per-origin process isolation, putting them in separate renderers. Pick a deployment, see which origins share a process, and read out <code>crossOriginIsolated</code> for this page.</p>
+  </header>
+
+  <section class="stage">
+    <div class="controls">
+      <label>scenario:
+        <select id="sc" style="font-family:var(--font-mono);padding:0.3rem 0.6rem;border:2px solid var(--border-black);background:var(--bg-paper);color:var(--text-black);">
+          <option value="naive">no opt-in (pre-142 default)</option>
+          <option value="cdn-only" selected>only cdn.example opts in</option>
+          <option value="both">both opt in</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="threat-grid">
+      <div class="threat bad" id="naiveCol">
+        <h3>without origin-keyed isolation</h3>
+        <div id="naiveFrames"></div>
+        <div class="verdict bad" id="naiveVerdict">—</div>
+      </div>
+      <div class="threat good">
+        <h3>with Origin-Agent-Cluster opt-in</h3>
+        <div id="isoFrames"></div>
+        <div class="verdict good" id="isoVerdict">—</div>
+      </div>
+    </div>
+
+    <div class="readout">
+      <div class="stat">
+        <div class="stat-label">window.originAgentCluster (this page)</div>
+        <div class="stat-val" id="oac">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">window.crossOriginIsolated</div>
+        <div class="stat-val" id="coi">—</div>
+      </div>
+    </div>
+
+    <p class="note">Chrome 142 made the default behaviour for opt-ins more aggressive and added knobs around how widely the policy propagates. The probe above reads the live values for the page you're on now.</p>
+  </section>
+
+  <h2>relevant headers</h2>
+<pre><code># Sent by the origin that wants its own process
+Origin-Agent-Cluster: ?1
+
+# Read in JS
+window.originAgentCluster // true if this document is in a per-origin agent cluster
+
+# Pair with COOP+COEP for SharedArrayBuffer
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Origin-keyed Process Isolation</a> — feature index</li>
+      <li><a href="../origin-isolation/">Origins → processes demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5182464632946688" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/document-sequences.html#origin-keyed-agent-clusters" target="_blank" rel="noopener">HTML spec — origin agent clusters</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const ORIGINS = [
+    { name: "app.example", trust: "high (banking session)" },
+    { name: "cdn.example", trust: "low (community-uploaded scripts)" },
+    { name: "analytics.example", trust: "medium" },
+  ];
+
+  function render() {
+    const sc = document.getElementById("sc").value;
+    const optIn = {
+      "naive": [],
+      "cdn-only": ["cdn.example"],
+      "both": ["app.example", "cdn.example"],
+    }[sc];
+
+    const naive = document.getElementById("naiveFrames");
+    const iso = document.getElementById("isoFrames");
+    naive.innerHTML = "";
+    iso.innerHTML = "";
+    let badPid = "pid 71";
+    for (const o of ORIGINS) {
+      naive.insertAdjacentHTML("beforeend",
+        `<div class="frame">${o.name} <span class="pid same">${badPid}</span><br><small>${o.trust}</small></div>`);
+    }
+    let nextPid = 81;
+    const seen = {};
+    for (const o of ORIGINS) {
+      let pid;
+      if (optIn.includes(o.name)) {
+        pid = "pid " + (nextPid++);
+        seen[o.name] = pid;
+      } else {
+        // Falls into the shared site cluster
+        seen.__shared = seen.__shared || ("pid " + (nextPid++));
+        pid = seen.__shared;
+      }
+      const klass = optIn.includes(o.name) ? "iso" : "same";
+      iso.insertAdjacentHTML("beforeend",
+        `<div class="frame">${o.name} <span class="pid ${klass}">${pid}</span><br><small>${o.trust}</small></div>`);
+    }
+
+    document.getElementById("naiveVerdict").textContent =
+      "All three share one renderer. A Spectre gadget in cdn can read app's memory.";
+    const niso = optIn.length;
+    document.getElementById("isoVerdict").textContent =
+      niso === 3
+        ? "All three are in separate processes. Spectre window closed."
+        : niso === 0
+          ? "Same as naive — no opt-in headers sent."
+          : optIn.join(", ") + " is isolated; the rest share. Partial mitigation.";
+  }
+  document.getElementById("sc").addEventListener("change", render);
+  render();
+
+  const oac = document.getElementById("oac");
+  const coi = document.getElementById("coi");
+  oac.textContent = String(!!window.originAgentCluster);
+  oac.className = "stat-val " + (window.originAgentCluster ? "on" : "off");
+  coi.textContent = String(!!window.crossOriginIsolated);
+  coi.className = "stat-val " + (window.crossOriginIsolated ? "on" : "off");
+</script>
+</body>
+</html>
