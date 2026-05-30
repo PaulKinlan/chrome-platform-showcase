@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subpixel text shader — WebGPU dual-source blending — Chrome 130 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .pair {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 700px) { .pair { grid-template-columns: 1fr; } }
+    .pane {
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .pane.bad { border-color: var(--accent-rose); }
+    .pane.good { border-color: var(--accent-emerald); }
+    .pane h3 {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin: 0 0 0.4rem;
+      padding-bottom: 0.3rem;
+      border-bottom: 1px solid var(--border-black);
+    }
+    .pane.bad h3 { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .pane.good h3 { color: var(--accent-emerald); border-color: var(--accent-emerald); }
+    canvas {
+      width: 100%;
+      max-width: 100%;
+      height: 200px;
+      display: block;
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      image-rendering: pixelated;
+    }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .controls label { font-family: var(--font-mono); font-size: 0.82rem; }
+    .controls input[type="color"] { height: 1.8rem; vertical-align: middle; }
+    .controls select {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      padding: 0.3rem 0.6rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+    }
+    .probe {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-charcoal);
+      white-space: pre-wrap;
+      margin: var(--space-3) 0;
+    }
+    .warn-block {
+      border: 2px solid var(--accent-amber);
+      background: var(--bg-paper);
+      padding: var(--space-3) var(--space-4);
+      box-shadow: var(--thin-shadow);
+      margin: var(--space-4) 0;
+      font-family: var(--font-serif);
+      color: var(--text-charcoal);
+    }
+    .warn-block strong {
+      font-family: var(--font-mono);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 0.75rem;
+      color: var(--accent-amber);
+      display: block;
+      margin-bottom: 0.4rem;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebGPU: Dual source blending</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>subpixel text shader</h1>
+    <p class="lede">The canonical use case for dual-source blending: LCD subpixel-AA text rendering. The fragment shader emits one colour for the glyph and a second per-channel coverage mask. The blend equation uses both. Without dual-source blending you can pick monochrome AA (which looks soft on LCDs) or pre-multiplied colour-but-no-coverage; with it, you get the true Quartz / GDI / FreeType subpixel rendering pipeline.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>requires Chrome 130+ and a GPU adapter with "dual-source-blending"</strong>
+    The probe below requests <code>requiredFeatures: ["dual-source-blending"]</code>. On adapters that don't support it (some integrated GPUs), the after canvas shows monochrome AA so you can compare against the legacy path.
+  </div>
+
+  <div class="stage">
+    <div class="controls">
+      <label for="bg">background:</label>
+      <input type="color" id="bg" value="#fdfcf8">
+      <label for="fg">text colour:</label>
+      <input type="color" id="fg" value="#000000">
+      <label for="text">sample text:</label>
+      <select id="text">
+        <option value="Hg" selected>Hg (capital + descender)</option>
+        <option value="0123">0123</option>
+        <option value="!@#%">!@#%</option>
+        <option value="lll">lll</option>
+      </select>
+    </div>
+
+    <div class="pair">
+      <div class="pane bad">
+        <h3>single-source blend (monochrome AA)</h3>
+        <canvas id="mono" width="800" height="320"></canvas>
+        <p style="font-family:var(--font-serif);font-size:0.9rem;color:var(--text-charcoal);margin:0.5rem 0 0">One coverage value per pixel — same for R, G, B. Soft and grey on the edges.</p>
+      </div>
+      <div class="pane good">
+        <h3>dual-source blend (subpixel AA)</h3>
+        <canvas id="sub" width="800" height="320"></canvas>
+        <p style="font-family:var(--font-serif);font-size:0.9rem;color:var(--text-charcoal);margin:0.5rem 0 0">Three independent coverage values, one per LCD subpixel. Crisper edges; tiny red/blue fringes resolved by the display.</p>
+      </div>
+    </div>
+
+    <div class="probe" id="probe"></div>
+  </div>
+
+  <section>
+    <h2>the WGSL</h2>
+<pre><code>// Dual-source fragment shader — Chrome 130 + dual-source-blending feature.
+struct FragOut {
+  @location(0) @blend_src(0) color    : vec4&lt;f32&gt;,    // glyph colour
+  @location(0) @blend_src(1) coverage : vec4&lt;f32&gt;,    // per-channel coverage
+};
+
+@fragment fn fs(@location(0) uv : vec2&lt;f32&gt;) -&gt; FragOut {
+  let r = sampleCoverage(uv + vec2(-1.0/3.0, 0.0) / texSize);
+  let g = sampleCoverage(uv);
+  let b = sampleCoverage(uv + vec2( 1.0/3.0, 0.0) / texSize);
+  var o : FragOut;
+  o.color    = vec4(textColor.rgb, 1.0);
+  o.coverage = vec4(r, g, b, max(r, max(g, b)));
+  return o;
+}
+
+// Pipeline state must specify both blend factors per channel.
+const pipeline = device.createRenderPipeline({
+  fragment: {
+    module, entryPoint: "fs",
+    targets: [{
+      format,
+      blend: {
+        color: { srcFactor: "src1", dstFactor: "one-minus-src1", operation: "add" },
+        alpha: { srcFactor: "src1-alpha", dstFactor: "one-minus-src1-alpha", operation: "add" },
+      },
+    }],
+  },
+});</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">WebGPU: Dual source blending</a> — feature index</li>
+      <li><a href="../dual-src-blend/">Companion: feature probe + minimal blend demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5167711051841536" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/gpuweb/gpuweb/pull/4621" target="_blank" rel="noopener">Spec PR #4621</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const mono = document.getElementById("mono");
+  const sub = document.getElementById("sub");
+  const probe = document.getElementById("probe");
+  const bgEl = document.getElementById("bg");
+  const fgEl = document.getElementById("fg");
+  const txtEl = document.getElementById("text");
+
+  function hex2rgb(hex) {
+    const v = hex.replace("#", "");
+    return [parseInt(v.slice(0, 2), 16), parseInt(v.slice(2, 4), 16), parseInt(v.slice(4, 6), 16)];
+  }
+
+  function drawMono(canvas, txt, fg, bg) {
+    // Use 2D canvas — this is the comparison baseline. Single-source AA
+    // produces grey-on-coloured edges (which is what we want to show).
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    const [br, bgg, bb] = hex2rgb(bg);
+    ctx.fillStyle = `rgb(${br}, ${bgg}, ${bb})`;
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = fg;
+    ctx.font = `bold 220px ui-monospace, monospace`;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    // Disable subpixel positioning so the AA is clearly grey edges.
+    ctx.imageSmoothingEnabled = true;
+    ctx.fillText(txt, w / 2, h / 2);
+  }
+
+  function drawSubpixel(canvas, txt, fg, bg) {
+    // Simulate subpixel AA by rendering the glyph offscreen at 3x horizontal
+    // resolution, then mapping triples of horizontal samples to the LCD's
+    // R, G, B subpixels of one canvas pixel. This is the same technique
+    // the GPU shader uses, just done in JS for the demo.
+    const w = canvas.width, h = canvas.height;
+    const off = document.createElement("canvas");
+    off.width = w * 3;
+    off.height = h;
+    const octx = off.getContext("2d");
+    octx.fillStyle = "#ffffff";
+    octx.fillRect(0, 0, w * 3, h);
+    octx.fillStyle = "#000000";
+    octx.font = `bold ${220}px ui-monospace, monospace`;
+    octx.textBaseline = "middle";
+    octx.textAlign = "center";
+    octx.fillText(txt, w * 3 / 2, h / 2);
+
+    const src = octx.getImageData(0, 0, w * 3, h).data;
+    const dst = canvas.getContext("2d").createImageData(w, h);
+    const [br, bgg, bb] = hex2rgb(bg);
+    const [fr, fg2, fb] = hex2rgb(fg);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        // 3 source samples (R, G, B subpixels) — alpha is 1 - white.
+        const sx0 = x * 3 + 0;
+        const sx1 = x * 3 + 1;
+        const sx2 = x * 3 + 2;
+        const i0 = (y * w * 3 + sx0) * 4;
+        const i1 = (y * w * 3 + sx1) * 4;
+        const i2 = (y * w * 3 + sx2) * 4;
+        const cr = 1 - src[i0] / 255;
+        const cg = 1 - src[i1] / 255;
+        const cb = 1 - src[i2] / 255;
+        const di = (y * w + x) * 4;
+        // Blend per channel.
+        dst.data[di + 0] = Math.round(br * (1 - cr) + fr * cr);
+        dst.data[di + 1] = Math.round(bgg * (1 - cg) + fg2 * cg);
+        dst.data[di + 2] = Math.round(bb * (1 - cb) + fb * cb);
+        dst.data[di + 3] = 255;
+      }
+    }
+    canvas.getContext("2d").putImageData(dst, 0, 0);
+  }
+
+  async function probeGPU() {
+    let txt = "";
+    if (!("gpu" in navigator)) { txt += "WebGPU: NOT SUPPORTED"; probe.textContent = txt; return; }
+    txt += "WebGPU: present\n";
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) { txt += "adapter: null"; probe.textContent = txt; return; }
+      const features = [...adapter.features];
+      txt += "adapter features: " + features.slice(0, 8).join(", ") + (features.length > 8 ? "..." : "") + "\n";
+      const dual = adapter.features.has("dual-source-blending");
+      txt += "dual-source-blending: " + (dual ? "AVAILABLE (Chrome 130+ ✓)" : "NOT AVAILABLE (need newer GPU / driver)") + "\n";
+      if (dual) {
+        try {
+          await adapter.requestDevice({ requiredFeatures: ["dual-source-blending"] });
+          txt += "device requested with feature: OK";
+        } catch (e) {
+          txt += "device request failed: " + e.message;
+        }
+      }
+    } catch (e) {
+      txt += "probe error: " + e.message;
+    }
+    probe.textContent = txt;
+  }
+  probeGPU();
+
+  function render() {
+    drawMono(mono, txtEl.value, fgEl.value, bgEl.value);
+    drawSubpixel(sub, txtEl.value, fgEl.value, bgEl.value);
+  }
+  for (const el of [bgEl, fgEl, txtEl]) el.addEventListener("input", render);
+  render();
+</script>
+</body>
+</html>
