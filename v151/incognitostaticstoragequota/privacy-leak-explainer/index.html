@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Leak Explainer — IncognitoStaticStorageQuota — Chrome 151</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .timeline {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .timeline li {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+      align-items: flex-start;
+    }
+    .timeline-dot {
+      width: 1.75rem;
+      height: 1.75rem;
+      border-radius: 50%;
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--text-charcoal);
+    }
+    .timeline-dot.fixed { background: var(--accent-emerald); border-color: var(--accent-emerald); color: var(--bg-ivory); }
+    .timeline-dot.bug   { background: var(--accent-rose); border-color: var(--accent-rose); color: var(--bg-ivory); }
+    .timeline-body { font-size: 0.875rem; color: var(--text-charcoal); line-height: 1.65; }
+    .timeline-body strong { color: var(--text-black); }
+    .formula-box {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      font-family: monospace;
+      font-size: 0.82rem;
+      color: var(--text-charcoal);
+      margin: 0.5rem 0;
+    }
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-top: 0.75rem;
+    }
+    @media (max-width: 580px) { .compare-grid { grid-template-columns: 1fr; } }
+    .compare-col {
+      border: 1px solid var(--border-black);
+      padding: 0.75rem;
+    }
+    .compare-col.bad { border-color: var(--accent-rose); background: var(--bg-paper); }
+    .compare-col.good { border-color: var(--accent-emerald); background: var(--bg-paper); }
+    .compare-col h4 { font-size: 0.85rem; margin: 0 0 0.4rem; }
+    .compare-col .value { font-family: monospace; font-size: 1rem; font-weight: 700; color: var(--text-black); }
+    .compare-col p { font-size: 0.78rem; color: var(--text-charcoal); margin: 0.3rem 0 0; }
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.875rem;
+      color: var(--text-charcoal);
+    }
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs">
+    <a href="/v151/">&larr; Chrome 151</a> /
+    <a href="/v151/incognitostaticstoragequota/">IncognitoStaticStorageQuota</a>
+  </p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v151 · Storage · Privacy Leak Explainer</p>
+    <h1>Privacy Leak Explainer</h1>
+    <p class="lede">How the storage quota leak worked, why it was a reliable Incognito detector, and exactly what Chrome 151 changed to close it.</p>
+  </header>
+
+  <section>
+    <h2>the attack</h2>
+    <div class="compare-grid">
+      <div class="compare-col bad">
+        <h4>Incognito (Chrome &lt; 151)</h4>
+        <div class="value">~120 MB</div>
+        <p>Quota = fraction of available RAM (e.g. 1/10th of 16 GiB ≈ 1.6 GiB capped at ~120 MB)</p>
+      </div>
+      <div class="compare-col good">
+        <h4>Normal mode (Chrome &lt; 151)</h4>
+        <div class="value">~10 GiB+</div>
+        <p>Quota = max(10 GiB, ceil(disk_quota_GiB)) — always at or above the 10 GiB floor</p>
+      </div>
+    </div>
+
+    <p style="font-size:0.875rem;color:var(--text-charcoal);margin-top:1rem;">Any script could call <code>navigator.storage.estimate()</code> and check if the quota was below 500 MB — with near certainty, that indicated Incognito mode.</p>
+
+    <pre><code>// Detection script (worked on Chrome &lt; 151)
+const { quota } = await navigator.storage.estimate();
+if (quota &lt; 500 * 1024 * 1024) {
+  // quota &lt; 500 MB → almost certainly Incognito mode
+  console.log('User is in Incognito');
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>why the leak existed</h2>
+    <ul class="timeline">
+      <li>
+        <span class="timeline-dot">1</span>
+        <div class="timeline-body">
+          <strong>Predictable storage quota shipped.</strong> An earlier Chrome release bucketed the <code>estimate()</code> quota for sites without unlimited storage permission to prevent fingerprinting via disk size:
+          <div class="formula-box">quota = max(10 GiB, ceil(actual_quota_GiB)) + usage</div>
+        </div>
+      </li>
+      <li>
+        <span class="timeline-dot bug">!</span>
+        <div class="timeline-body">
+          <strong>Incognito uses RAM, not disk.</strong> Incognito mode sets <code>actual_quota</code> to a fraction of available RAM rather than the disk-based value. On a typical 16 GB laptop, this is around 120 MB — far below the 10 GiB floor. The bucketing formula was supposed to apply a floor, but because the Incognito code path used a different quota source, the floor was never reached.
+          <div class="formula-box">Incognito: actual_quota ≈ 120 MB
+max(10 GiB, ceil(0.12 GiB)) = max(10 GiB, 1 GiB) → should be 10 GiB
+BUT: bug caused raw 120 MB to be returned instead</div>
+        </div>
+      </li>
+      <li>
+        <span class="timeline-dot bug">!</span>
+        <div class="timeline-body">
+          <strong>Detection trivially reliable.</strong> Because the 120 MB value is derived from RAM (which varies per device but is always well below 10 GiB on any realistic machine), a simple threshold check of &lt; 500 MB reliably identified Incognito with effectively 0 false positives.
+        </div>
+      </li>
+      <li>
+        <span class="timeline-dot fixed">✓</span>
+        <div class="timeline-body">
+          <strong>Chrome 151 fix: apply the same bucketing in Incognito.</strong> The Incognito quota source is changed so it uses the same disk-based static value that normal mode uses — the bucketing floor applies correctly in both modes. Sites calling <code>estimate()</code> now see the same &gt;10 GiB quota regardless of the browsing mode.
+          <div class="formula-box">Chrome 151: quota = max(10 GiB, ceil(disk_quota_GiB)) in both modes
+→ Incognito is no longer distinguishable via estimate()</div>
+        </div>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../quota-estimate-demo/">Quota Estimate Demo</a> — run estimate() and see the fixed values live</li>
+      <li><a href="https://chromestatus.com/feature/5143175657291776" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/estimate" target="_blank" rel="noopener">MDN — StorageManager.estimate()</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
