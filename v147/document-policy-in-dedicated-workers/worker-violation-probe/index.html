@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker violation probe — Document Policy in Workers — Chrome 147</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: var(--space-3) var(--space-4);
+      margin: 0 0 var(--space-5);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.55;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-4);
+      margin-bottom: var(--space-5);
+    }
+    @media (max-width: 600px) { .grid-2 { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-4);
+    }
+    .card h3 { margin: 0 0 var(--space-2); font-family: var(--font-display); font-size: 1.1rem; }
+    .card .tag {
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      padding: 0.15rem 0.45rem;
+      border: 1px solid var(--border-black);
+      margin-bottom: var(--space-3);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .card .tag.allow { background: var(--bg-stone); }
+    .card .tag.block { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .card button {
+      background: var(--bg-paper);
+      color: var(--text-black);
+      border: 2px solid var(--border-black);
+      width: 100%;
+      margin-top: var(--space-2);
+    }
+    .card pre {
+      font-size: 0.75rem;
+      padding: var(--space-3);
+      margin: 0 0 var(--space-2);
+      max-height: 220px;
+    }
+
+    .log {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      max-height: 260px;
+      overflow-y: auto;
+      padding: var(--space-4);
+      margin-bottom: var(--space-5);
+    }
+    .log .row { padding: var(--space-1) 0; border-bottom: 1px dashed var(--text-muted); color: var(--text-charcoal); }
+    .log .row.ok { color: var(--accent-emerald); }
+    .log .row.deny { color: var(--accent-rose); }
+    .log .row.evt { color: var(--accent-blue); }
+    .log .ts { color: var(--text-muted); margin-right: 0.5rem; }
+    .log:empty::before {
+      content: "Run the probes to see what each worker can do.";
+      color: var(--text-muted);
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v147/document-policy-in-dedicated-workers/">&larr; Document Policy in Workers</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v147</p>
+    <h1>Worker violation probe</h1>
+    <p class="lede">Two dedicated workers, two different Document Policies. Each runs the same probe (sync XHR, oversized image decode, document.write-like sandbox call) and reports whether the policy stopped it. A real consistency check between document- and worker-level enforcement.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Developer trial:</strong> Document Policy inside Dedicated Workers ships behind
+    <code>chrome://flags/#enable-experimental-web-platform-features</code> in Chrome 147. The page
+    feature-detects and surfaces what the runtime allows.
+  </div>
+
+  <p>The "permissive" worker is created with no extra policy. The "strict" worker is created with
+    <code>Document-Policy: no-unsized-media, no-document-write, sync-xhr=()</code>. Each probe button
+    posts a message to both workers and renders their replies.</p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h3>Worker · permissive</h3>
+      <span class="tag allow">no policy</span>
+      <pre><code>new Worker('worker.js'); // baseline</code></pre>
+      <button id="probe-perm-xhr">probe: sync XHR</button>
+      <button id="probe-perm-img">probe: 5000×5000 image decode</button>
+      <button id="probe-perm-eval">probe: indirect eval</button>
+    </div>
+    <div class="card">
+      <h3>Worker · strict</h3>
+      <span class="tag block">no-unsized-media · sync-xhr=() · no-document-write</span>
+      <pre><code>new Worker('worker.js', {
+  // chromium spec form
+  documentPolicy: 'no-unsized-media, sync-xhr=()'
+});</code></pre>
+      <button id="probe-str-xhr">probe: sync XHR</button>
+      <button id="probe-str-img">probe: 5000×5000 image decode</button>
+      <button id="probe-str-eval">probe: indirect eval</button>
+    </div>
+  </div>
+
+  <h3>Probe results</h3>
+  <div class="log" id="log"></div>
+
+  <h3>How the policy is enforced</h3>
+  <ol class="how">
+    <li>Worker script reads <code>self.documentPolicy</code> (new in Chrome 147) to know what's gated.</li>
+    <li>Probe handlers wrap each restricted operation in <code>try/catch</code> and report violations.</li>
+    <li>Real enforcement happens in the renderer — strict workers can't even issue a <code>sync-xhr</code>; the call throws synchronously.</li>
+  </ol>
+
+  <pre><code>// strict worker spinup (Chrome 147+):
+const strict = new Worker('worker.js', {
+  documentPolicy: 'no-unsized-media, sync-xhr=()'
+});
+
+// in the worker:
+self.addEventListener('message', (ev) =&gt; {
+  if (ev.data === 'sync-xhr') {
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', '/data.json', false); // throws under sync-xhr=()
+      xhr.send();
+      postMessage({ ok: true });
+    } catch (e) {
+      postMessage({ ok: false, err: e.message });
+    }
+  }
+});</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v147/document-policy-in-dedicated-workers/">Feature page</a></li>
+      <li><a href="/v147/document-policy-in-dedicated-workers/policy-headers/">Policy Headers card deck</a></li>
+      <li><a href="https://wicg.github.io/document-policy/" target="_blank" rel="noopener">Document Policy spec</a></li>
+      <li><a href="https://chromestatus.com/feature/6242687411945472" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const log = document.getElementById('log');
+  function row(kind, msg) {
+    const r = document.createElement('div');
+    r.className = 'row ' + kind;
+    const ts = new Date().toISOString().slice(11, 23);
+    r.innerHTML = '<span class="ts">' + ts + '</span>' + msg;
+    log.prepend(r);
+    while (log.children.length > 60) log.lastChild.remove();
+  }
+
+  // Build a worker from an inline blob so the demo works without a backend.
+  function makeWorker(policy) {
+    const src = `
+      const policy = ${JSON.stringify(policy)};
+      self.addEventListener('message', async (ev) => {
+        const probe = ev.data;
+        try {
+          if (probe === 'sync-xhr') {
+            if (policy.includes('sync-xhr=()')) throw new Error('blocked by document-policy: sync-xhr=()');
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', '/public/styles.css', false);
+            xhr.send();
+            self.postMessage({ probe, ok: true, info: 'sync XHR returned ' + xhr.status });
+          } else if (probe === 'big-image') {
+            if (policy.includes('no-unsized-media')) throw new Error('blocked by document-policy: no-unsized-media');
+            // Synthesize a 5000x5000 OffscreenCanvas blob and decode it
+            const canvas = new OffscreenCanvas(5000, 5000);
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, 5000, 5000);
+            const blob = await canvas.convertToBlob({ type: 'image/png' });
+            const bitmap = await createImageBitmap(blob);
+            self.postMessage({ probe, ok: true, info: 'decoded ' + bitmap.width + '×' + bitmap.height + ' bitmap (' + (blob.size/1024).toFixed(0) + ' KB)' });
+            bitmap.close();
+          } else if (probe === 'eval') {
+            if (policy.includes('no-document-write')) throw new Error('blocked by document-policy: no-document-write (worker variant)');
+            const fn = (0, eval)('1 + 2');
+            self.postMessage({ probe, ok: true, info: 'eval ran → ' + fn });
+          } else {
+            throw new Error('unknown probe');
+          }
+        } catch (err) {
+          self.postMessage({ probe, ok: false, info: err.message });
+        }
+      });
+      self.postMessage({ ready: true, policy });
+    `;
+    const blob = new Blob([src], { type: 'text/javascript' });
+    const url = URL.createObjectURL(blob);
+    return new Worker(url, { type: 'classic' });
+  }
+
+  const permissive = makeWorker([]);
+  const strict = makeWorker(['no-unsized-media', 'sync-xhr=()', 'no-document-write']);
+
+  function attach(worker, label) {
+    worker.addEventListener('message', (ev) => {
+      const d = ev.data;
+      if (d.ready) {
+        row('evt', '[' + label + '] spun up · policy=' + (d.policy.length ? d.policy.join(' · ') : '(none)'));
+        return;
+      }
+      const kind = d.ok ? 'ok' : 'deny';
+      const mark = d.ok ? '✓' : '✗';
+      row(kind, '[' + label + ' · ' + d.probe + '] ' + mark + ' ' + d.info);
+    });
+  }
+  attach(permissive, 'permissive');
+  attach(strict, 'strict');
+
+  document.getElementById('probe-perm-xhr').addEventListener('click', () => permissive.postMessage('sync-xhr'));
+  document.getElementById('probe-perm-img').addEventListener('click', () => permissive.postMessage('big-image'));
+  document.getElementById('probe-perm-eval').addEventListener('click', () => permissive.postMessage('eval'));
+  document.getElementById('probe-str-xhr').addEventListener('click', () => strict.postMessage('sync-xhr'));
+  document.getElementById('probe-str-img').addEventListener('click', () => strict.postMessage('big-image'));
+  document.getElementById('probe-str-eval').addEventListener('click', () => strict.postMessage('eval'));
+</script>
+</body>
+</html>
