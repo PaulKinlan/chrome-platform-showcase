@@ -3,12 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Incognito IDB — IndexedDB: SQLite backend (in-memory contexts) — Chrome 144 — chrome platform showcase</title>
+  <title>Incognito IDB — IndexedDB SQLite backend (in-memory) — Chrome 144</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    .card { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
-    .card pre { margin: 0; font-size: 0.85rem; padding: var(--space-3); overflow-x: auto; }
-    .card p { font-family: var(--font-serif); color: var(--text-charcoal); margin: 0 0 var(--space-3); }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
+    .readout { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-charcoal); white-space: pre-wrap; max-height: 300px; overflow-y: auto; }
+    label { font-family: var(--font-mono); font-size: 0.85rem; }
+    input[type="number"] { border: 2px solid var(--border-black); padding: 0.4rem; width: 7rem; font-family: var(--font-mono); }
+    .badge { font-family: var(--font-mono); font-size: 0.75rem; padding: 0.15rem 0.5rem; border: 1px solid var(--border-black); display: inline-block; }
+    .badge.ok { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .badge.no { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
   </style>
 </head>
 <body>
@@ -17,25 +22,109 @@
 
   <header class="lede-block">
     <p class="eyebrow">demo · v144</p>
-    <h1>Incognito IDB</h1>
-    <p class="lede">Step 1 of the IDB SQLite migration: incognito mode flips to SQLite-in-memory. No API change; better reliability under memory pressure.</p>
+    <h1>Incognito IDB Stress Test</h1>
+    <p class="lede">Open this page in an incognito window — the IDB backend underneath is now SQLite-in-memory. Pound the database with a configurable number of writes; the benchmark logs throughput and any errors. The web API didn't change; the engine did.</p>
   </header>
 
-  <div class="card">
-    <p>The canonical shape of the API:</p>
-<pre><code># In incognito mode, IndexedDB now uses SQLite
-# in-memory. Same web API, more reliable internals
-# under memory pressure.</code></pre>
+  <div class="stage">
+    <div class="controls">
+      <span>incognito context detected:</span>
+      <span class="badge" id="incog">checking…</span>
+    </div>
+    <div class="controls">
+      <label>write count <input type="number" id="n" value="2000" min="10" max="50000" step="100"></label>
+      <label>value size (bytes) <input type="number" id="sz" value="256" min="16" max="65536" step="16"></label>
+      <button id="run">run benchmark</button>
+      <button id="clear">clear store</button>
+    </div>
+    <div class="readout" id="log">click "run benchmark" to write to IDB</div>
   </div>
+
+  <section>
+    <h2>the test</h2>
+<pre><code>const db = await open('demo'); // window.indexedDB — unchanged API
+const tx = db.transaction('items', 'readwrite');
+for (let i = 0; i &lt; n; i++) tx.objectStore('items').put({ id: i, blob: payload });
+await tx.done;
+// In incognito the storage path now goes through SQLite in-memory.</code></pre>
+  </section>
 
   <section>
     <h2>see also</h2>
     <ul>
-      <li><a href="../">IndexedDB: SQLite backend (in-memory contexts)</a> — feature index</li>
+      <li><a href="../">IndexedDB: SQLite backend (in-memory contexts)</a></li>
+      <li><a href="https://chromestatus.com/feature/5126896685809664" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+
+<script>
+const log = document.getElementById('log');
+const incog = document.getElementById('incog');
+
+(async () => {
+  try {
+    const { quota } = await navigator.storage.estimate();
+    const small = quota && quota < 200 * 1024 * 1024 * 1024; // <200GB heuristic — incognito caps ~few GB
+    incog.textContent = small ? 'likely incognito (quota ~' + Math.round(quota / 1024 / 1024) + ' MB)' : 'persistent profile (quota ~' + Math.round(quota / 1024 / 1024) + ' MB)';
+    incog.classList.add(small ? 'ok' : 'no');
+  } catch {
+    incog.textContent = 'unknown';
+    incog.classList.add('no');
+  }
+})();
+
+function add(msg) {
+  log.textContent = (log.textContent === 'click "run benchmark" to write to IDB' ? '' : log.textContent + '\n') + msg;
+}
+
+function open() {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open('v144-demo', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('items', { keyPath: 'id' });
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+}
+
+document.getElementById('run').addEventListener('click', async () => {
+  const n = +document.getElementById('n').value;
+  const sz = +document.getElementById('sz').value;
+  const blob = new Uint8Array(sz).fill(0x61);
+  try {
+    const db = await open();
+    const t0 = performance.now();
+    await new Promise((res, rej) => {
+      const tx = db.transaction('items', 'readwrite');
+      const store = tx.objectStore('items');
+      for (let i = 0; i < n; i++) store.put({ id: 'k' + i, blob });
+      tx.oncomplete = res;
+      tx.onerror = () => rej(tx.error);
+    });
+    const dt = performance.now() - t0;
+    add(`wrote ${n} × ${sz}B in ${dt.toFixed(1)} ms (${Math.round(n / (dt / 1000))} writes/sec)`);
+    db.close();
+  } catch (e) {
+    add('error: ' + e.message);
+  }
+});
+
+document.getElementById('clear').addEventListener('click', async () => {
+  try {
+    const db = await open();
+    await new Promise((res, rej) => {
+      const tx = db.transaction('items', 'readwrite');
+      tx.objectStore('items').clear();
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+    });
+    add('store cleared');
+    db.close();
+  } catch (e) {
+    add('error: ' + e.message);
+  }
+});
+</script>
 </body>
 </html>
