@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker spinlock — Atomics.pause — Chrome 133</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
+    .row { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-3); align-items: center; }
+    .row label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); }
+    .gauges { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-top: var(--space-3); }
+    .gauge { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-4); text-align: center; }
+    .gauge .lbl { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+    .gauge .val { font-family: var(--font-display); font-size: 1.6rem; font-variant-numeric: tabular-nums; margin-top: var(--space-1); color: var(--text-black); }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.76rem; color: var(--text-charcoal); max-height: 200px; overflow-y: auto; margin-top: var(--space-3); }
+    .log p { margin: 0.1rem 0; }
+    .warn-block { border: 2px solid var(--accent-rose); background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-4) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Atomics.pause</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v133</p>
+    <h1>Real spinlock in a Worker</h1>
+    <p class="lede">The TC39 proposal motivates <code>Atomics.pause()</code> with one scenario: a thread spin-waiting on a flag in <code>SharedArrayBuffer</code>. This page runs that exact pattern in a Worker, with and without the pause hint.</p>
+  </header>
+
+  <div id="iso-warn" class="warn-block" hidden>
+    SharedArrayBuffer requires cross-origin isolation (COOP+COEP headers). This page won't be isolated on the showcase domain, so the worker will fall back to a non-shared run. The numbers will still print &mdash; just from a single-thread fake.
+  </div>
+
+  <div class="stage">
+    <div class="row">
+      <label>handoffs <input id="n" type="number" value="100000" min="1000" max="1000000" step="1000" style="width:7rem;border:2px solid var(--border-black);padding:0.3rem;font-family:var(--font-mono);background:var(--bg-paper);color:var(--text-black)"></label>
+      <button id="run">run producer/consumer</button>
+    </div>
+
+    <div class="gauges">
+      <div class="gauge"><div class="lbl">plain spin (ms)</div><div class="val" id="plain">—</div></div>
+      <div class="gauge"><div class="lbl">Atomics.pause() (ms)</div><div class="val" id="pause">—</div></div>
+    </div>
+
+    <div class="log" id="log"></div>
+  </div>
+
+  <section>
+    <h2>the pattern</h2>
+    <p>Producer thread writes a value, then flips a shared flag. Consumer thread spin-waits on the flag, reads the value, flips it back. <code>Atomics.pause()</code> goes inside the spin &mdash; on x86 it issues the <code>PAUSE</code> instruction, which lowers core power use, reduces memory-ordering pipeline flushes when the flag flips, and on hyperthreaded cores yields execution resources to the sibling thread. Functionally a no-op, but the CPU schedules differently around it.</p>
+<pre><code>// Inside the worker (consumer)
+function waitFor(flag, want) {
+  while (Atomics.load(flag, 0) !== want) {
+    Atomics.pause();   // hint: I'm spinning, back off
+  }
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../atomics-pause/">Atomics.pause &mdash; per-call timing demo</a></li>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="https://chromestatus.com/feature/5106098833719296" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://tc39.es/proposal-atomics-microwait/" target="_blank" rel="noopener">TC39 proposal &mdash; motivating example</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+const isolated = self.crossOriginIsolated === true;
+if (!isolated) document.getElementById("iso-warn").hidden = false;
+
+const logEl = document.getElementById("log");
+function log(msg) {
+  const p = document.createElement("p");
+  p.textContent = new Date().toISOString().slice(11, 23) + "  " + msg;
+  logEl.prepend(p);
+  while (logEl.children.length > 18) logEl.lastChild.remove();
+}
+
+const workerSrc = `
+self.onmessage = (e) => {
+  const { n, isolated } = e.data;
+  let plainMs, pauseMs;
+
+  if (isolated && typeof SharedArrayBuffer !== "undefined") {
+    const sab = new SharedArrayBuffer(8);
+    const flag = new Int32Array(sab);
+    // Self handoff: ping-pong with itself by toggling
+    function runPlain() {
+      const t0 = performance.now();
+      let acc = 0;
+      for (let i = 0; i < n; i++) {
+        while (Atomics.load(flag, 0) !== 0) { /* spin */ }
+        Atomics.store(flag, 0, 1);
+        Atomics.store(flag, 0, 0);
+        acc++;
+      }
+      return performance.now() - t0;
+    }
+    function runPause() {
+      const t0 = performance.now();
+      let acc = 0;
+      for (let i = 0; i < n; i++) {
+        while (Atomics.load(flag, 0) !== 0) { Atomics.pause(); }
+        Atomics.store(flag, 0, 1);
+        Atomics.store(flag, 0, 0);
+        acc++;
+      }
+      return performance.now() - t0;
+    }
+    plainMs = runPlain();
+    pauseMs = runPause();
+  } else {
+    // Fallback: just time the pause overhead in a tight loop
+    const t0 = performance.now();
+    let a = 0;
+    for (let i = 0; i < n; i++) a = (a + i) | 0;
+    plainMs = performance.now() - t0;
+    if (typeof Atomics.pause === "function") {
+      const t1 = performance.now();
+      let b = 0;
+      for (let i = 0; i < n; i++) { b = (b + i) | 0; Atomics.pause(); }
+      pauseMs = performance.now() - t1;
+    } else {
+      pauseMs = -1;
+    }
+  }
+  self.postMessage({ plainMs, pauseMs });
+};
+`;
+
+const blob = new Blob([workerSrc], { type: "application/javascript" });
+const url = URL.createObjectURL(blob);
+const worker = new Worker(url);
+
+worker.onmessage = (e) => {
+  const { plainMs, pauseMs } = e.data;
+  document.getElementById("plain").textContent = plainMs.toFixed(2);
+  document.getElementById("pause").textContent = pauseMs < 0 ? "n/a" : pauseMs.toFixed(2);
+  log(`plain ${plainMs.toFixed(2)}ms / pause ${pauseMs.toFixed(2)}ms`);
+};
+
+document.getElementById("run").addEventListener("click", () => {
+  const n = Math.max(1000, Math.min(1000000, +document.getElementById("n").value | 0));
+  log(`starting ${n.toLocaleString()} handoffs (isolated=${isolated})`);
+  worker.postMessage({ n, isolated });
+});
+</script>
+</body>
+</html>
