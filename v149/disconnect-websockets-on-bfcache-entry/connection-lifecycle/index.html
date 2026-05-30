@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connection Lifecycle Observer — Disconnect WebSockets on BFCache entry — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .demo-area {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-3);
+      box-shadow: var(--shadow-1);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: var(--space-4);
+      flex-wrap: wrap;
+      margin-bottom: var(--space-5);
+      padding: var(--space-4);
+      background: var(--surface-2);
+      border-radius: var(--radius-2);
+    }
+    .status-label {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .ws-badge {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 0.2rem 0.6rem;
+      border-radius: 999px;
+    }
+    .ws-open   { background: #e8f5e9; color: var(--positive); }
+    .ws-closed { background: #fce4ec; color: var(--negative); }
+    .ws-conn   { background: var(--accent-soft); color: var(--accent); }
+    @media (prefers-color-scheme: dark) {
+      .ws-open   { background: #0d2b16; color: #5bcb7e; }
+      .ws-closed { background: #2b0a10; color: #f47a86; }
+      .ws-conn   { background: var(--accent-soft); color: var(--accent); }
+    }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-5); }
+    .log-panel {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-2);
+      overflow: hidden;
+    }
+    .log-header {
+      background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
+      padding: var(--space-2) var(--space-4);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .log-header span {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+    .log-header button {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      padding: 0.15rem 0.6rem;
+      font-size: 0.7rem;
+      font-family: var(--font-mono);
+      border-radius: var(--radius-1);
+      cursor: pointer;
+      box-shadow: none;
+      filter: none;
+    }
+    .log-header button:hover { background: var(--surface); color: var(--fg); filter: none; transform: none; }
+    .log-body { overflow-y: auto; max-height: 300px; }
+    .log-entry {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      padding: var(--space-2) var(--space-4);
+      border-bottom: 1px solid var(--surface-2);
+      display: flex;
+      gap: var(--space-3);
+      align-items: baseline;
+    }
+    .log-entry:last-child { border-bottom: none; }
+    .log-ts { color: var(--muted); font-size: 0.7rem; white-space: nowrap; min-width: 80px; }
+    .log-evt { font-weight: 600; white-space: nowrap; }
+    .log-evt.ws-open   { color: var(--positive); }
+    .log-evt.ws-close  { color: var(--negative); }
+    .log-evt.page      { color: var(--accent); }
+    .log-evt.msg       { color: var(--warning); }
+    .log-detail { color: var(--muted); font-size: 0.7rem; }
+    .empty-log { padding: var(--space-5); text-align: center; color: var(--muted); font-family: var(--font-mono); font-size: 0.82rem; }
+    .tip-box {
+      background: var(--accent-soft);
+      border: 1px solid var(--accent);
+      border-radius: var(--radius-2);
+      padding: var(--space-4);
+      margin-top: var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      color: var(--accent);
+    }
+    .highlight-new { animation: flash 0.8s ease-out; }
+    @keyframes flash { 0% { background: var(--accent-soft); } 100% { background: transparent; } }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v149/disconnect-websockets-on-bfcache-entry/">&larr; Disconnect WebSockets on BFCache entry</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v149 · Demo 1</p>
+    <h1>Connection Lifecycle Observer</h1>
+    <p class="lede">Open a WebSocket, navigate away, come back via back button — and watch the page lifecycle + WebSocket events unfold in the log.</p>
+  </header>
+
+  <div class="demo-area">
+    <div class="status-row">
+      <span class="status-label">WebSocket state:</span>
+      <span class="ws-badge ws-closed" id="ws-status">CLOSED</span>
+      <span class="status-label">BFCache:</span>
+      <span class="ws-badge" id="bfc-status" style="background:var(--surface-2);color:var(--muted)">—</span>
+    </div>
+
+    <div class="controls">
+      <button id="btn-open" type="button">Open WebSocket</button>
+      <button id="btn-send" type="button" disabled>Send message</button>
+      <button id="btn-close" type="button" disabled>Close</button>
+    </div>
+
+    <div class="log-panel">
+      <div class="log-header">
+        <span>Lifecycle Log</span>
+        <button id="btn-clear" type="button">Clear</button>
+      </div>
+      <div class="log-body" id="log-body">
+        <div class="empty-log" id="empty-log">Open a WebSocket above to start logging. Then navigate away and back.</div>
+      </div>
+    </div>
+
+    <div class="tip-box" id="tip" style="display:none">
+      ✓ Connection was closed on BFCache entry. Navigate back to this tab to see the <code>pageshow</code> restore event.
+    </div>
+  </div>
+
+  <h2>how it works</h2>
+  <pre><code>// On pagehide, Chrome 149 closes open WebSocket connections
+// so the page can enter BFCache (persisted: true).
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) {
+    // Page entering BFCache — WebSocket will be auto-closed by Chrome 149
+    console.log('Entering BFCache, WebSocket will be closed');
+  }
+});
+
+// On pageshow, detect BFCache restore and reconnect
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) {
+    // Page restored from BFCache — reopen WebSocket
+    console.log('Restored from BFCache, reconnecting…');
+    openWebSocket();
+  }
+});
+
+// Pattern: always close gracefully and reconnect on restore
+ws.addEventListener('close', (event) => {
+  if (restoredFromBFCache) reconnect();
+});</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../bfcache-eligibility/">BFCache Eligibility Checker</a></li>
+      <li><a href="https://web.dev/articles/bfcache" target="_blank" rel="noopener">web.dev — Back/forward cache guide</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+let ws = null;
+const logBody = document.getElementById('log-body');
+const emptyLog = document.getElementById('empty-log');
+const wsStatus = document.getElementById('ws-status');
+const bfcStatus = document.getElementById('bfc-status');
+const btnOpen  = document.getElementById('btn-open');
+const btnSend  = document.getElementById('btn-send');
+const btnClose = document.getElementById('btn-close');
+let msgCount = 0;
+
+function log(evtClass, evtName, detail) {
+  emptyLog.style.display = 'none';
+  const entry = document.createElement('div');
+  entry.className = 'log-entry highlight-new';
+  entry.innerHTML = `
+    <span class="log-ts">${new Date().toLocaleTimeString()}</span>
+    <span class="log-evt ${evtClass}">${evtName}</span>
+    <span class="log-detail">${detail || ''}</span>
+  `;
+  logBody.prepend(entry);
+}
+
+function setWsStatus(state) {
+  wsStatus.className = 'ws-badge';
+  wsStatus.textContent = state;
+  if (state === 'OPEN')        wsStatus.classList.add('ws-open');
+  else if (state === 'CLOSED') wsStatus.classList.add('ws-closed');
+  else                          wsStatus.classList.add('ws-conn');
+}
+
+function openWs() {
+  // Use wss://echo.websocket.org or a local echo. Fallback to mock if blocked.
+  try {
+    ws = new WebSocket('wss://echo.websocket.org');
+    setWsStatus('CONNECTING');
+    log('page', 'new WebSocket()', 'wss://echo.websocket.org');
+    ws.addEventListener('open', () => {
+      setWsStatus('OPEN');
+      btnSend.disabled = false;
+      btnClose.disabled = false;
+      btnOpen.disabled = true;
+      log('ws-open', 'ws.onopen', 'connection established');
+    });
+    ws.addEventListener('message', (e) => {
+      log('msg', 'ws.onmessage', `data: "${e.data}"`);
+    });
+    ws.addEventListener('close', (e) => {
+      setWsStatus('CLOSED');
+      btnSend.disabled = true;
+      btnClose.disabled = true;
+      btnOpen.disabled = false;
+      ws = null;
+      log('ws-close', 'ws.onclose', `code=${e.code} wasClean=${e.wasClean}`);
+    });
+    ws.addEventListener('error', () => {
+      log('ws-close', 'ws.onerror', 'connection error (echo server may be blocked)');
+    });
+  } catch (err) {
+    log('ws-close', 'WebSocket error', err.message);
+  }
+}
+
+btnOpen.addEventListener('click', openWs);
+btnSend.addEventListener('click', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const msg = `Hello from chrome-platform-showcase #${++msgCount}`;
+  ws.send(msg);
+  log('msg', 'ws.send()', `"${msg}"`);
+});
+btnClose.addEventListener('click', () => {
+  if (ws) { ws.close(1000, 'user closed'); log('ws-close', 'ws.close()', 'user requested'); }
+});
+
+window.addEventListener('pagehide', (e) => {
+  log('page', 'pagehide', `persisted=${e.persisted}`);
+  if (e.persisted) {
+    bfcStatus.textContent = 'entering cache';
+    bfcStatus.style.background = 'var(--accent-soft)';
+    bfcStatus.style.color = 'var(--accent)';
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      document.getElementById('tip').style.display = '';
+    }
+  }
+});
+
+window.addEventListener('pageshow', (e) => {
+  log('page', 'pageshow', `persisted=${e.persisted}`);
+  if (e.persisted) {
+    bfcStatus.textContent = '✓ restored from cache';
+    bfcStatus.style.background = '#e8f5e9';
+    bfcStatus.style.color = 'var(--positive)';
+    log('ws-open', 'auto-reconnect', 'page restored from BFCache — reconnecting WebSocket');
+    openWs();
+  }
+});
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  logBody.innerHTML = '';
+  logBody.appendChild(emptyLog);
+  emptyLog.style.display = '';
+});
+
+// Log page load
+log('page', 'pageshow', 'persisted=false (fresh load)');
+</script>
+</body>
+</html>
