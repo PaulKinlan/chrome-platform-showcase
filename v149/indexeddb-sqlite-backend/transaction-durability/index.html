@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Transaction Durability — IndexedDB SQLite backend — Chrome 149 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .scenarios {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: var(--space-3);
+      margin: var(--space-4) 0;
+    }
+    .scenario {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-3);
+    }
+    .scenario h3 {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      margin: 0 0 var(--space-2);
+    }
+    .scenario p {
+      font-family: var(--font-serif);
+      font-size: 0.9rem;
+      color: var(--text-charcoal);
+      margin: 0 0 var(--space-3);
+    }
+    .scenario button {
+      width: 100%;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+    }
+
+    .console {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-charcoal);
+      max-height: 360px;
+      overflow-y: auto;
+    }
+    .console .line { padding: 0.15rem 0; border-bottom: 1px dotted var(--text-muted); }
+    .console .line:last-child { border-bottom: none; }
+    .console .t { color: var(--text-muted); margin-right: 0.5rem; }
+    .console .pass { color: var(--accent-emerald); font-weight: 700; }
+    .console .fail { color: var(--accent-rose); font-weight: 700; }
+    .console .info { color: var(--accent-blue); font-weight: 700; }
+
+    .audit {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: var(--space-3);
+      margin-top: var(--space-4);
+    }
+    .audit .card {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: var(--space-3);
+    }
+    .audit .card .lbl {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      display: block;
+      margin-bottom: 0.3rem;
+    }
+    .audit .card .val {
+      font-family: var(--font-display);
+      font-size: 1.6rem;
+    }
+    .audit .card .val.ok   { color: var(--accent-emerald); }
+    .audit .card .val.miss { color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; IndexedDB SQLite backend</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v149</p>
+    <h1>Transaction Durability</h1>
+    <p class="lede">The motivation for the SQLite backend is reliability — bug reports of missing or partially-written records. This demo runs three classic correctness scenarios that exercise atomicity, isolation, and the <code>strict</code> durability mode. Pass means the implementation behaved as IndexedDB promises.</p>
+  </header>
+
+  <div class="scenarios">
+    <div class="scenario">
+      <h3>1 · atomic abort</h3>
+      <p>Write 100 records, then throw mid-loop. Re-open and count — should be 0. A torn write would surface as a partial count.</p>
+      <button data-test="atomic">Run</button>
+    </div>
+    <div class="scenario">
+      <h3>2 · isolation</h3>
+      <p>Open two overlapping <code>readwrite</code> transactions on the same store. The second should queue behind the first, never interleave. Verify by writing a sentinel value from each.</p>
+      <button data-test="isolation">Run</button>
+    </div>
+    <div class="scenario">
+      <h3>3 · strict durability</h3>
+      <p>Open with <code>{ durability: "strict" }</code> and write a record. Read the same key back from a fresh connection. Should always return the latest value.</p>
+      <button data-test="durability">Run</button>
+    </div>
+  </div>
+
+  <h2>console</h2>
+  <div class="console" id="console"></div>
+
+  <div class="audit">
+    <div class="card"><span class="lbl">tests passed</span><span class="val ok" id="passVal">0</span></div>
+    <div class="card"><span class="lbl">tests failed</span><span class="val miss" id="failVal">0</span></div>
+    <div class="card"><span class="lbl">durability mode</span><span class="val" id="durVal" style="font-size:1.1rem;">—</span></div>
+  </div>
+
+  <section>
+    <h2>why these tests</h2>
+    <p>The SQLite migration is invisible to the API surface — these are the same IDB operations a real app issues every day. The difference shows up only when something goes wrong: a forced abort, an overlap, a write that needed to actually fsync. The pre-149 LevelDB hybrid had bug reports for each of these classes. On SQLite, the engine handles them natively.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">IndexedDB SQLite backend</a> — feature index</li>
+      <li><a href="../bulk-write-stress/">Bulk Write Stress Test</a> — throughput benchmark</li>
+      <li><a href="https://chromestatus.com/feature/5161589557821440" target="_blank" rel="noopener">ChromeStatus entry — step 2</a></li>
+      <li><a href="https://w3c.github.io/IndexedDB/" target="_blank" rel="noopener">IndexedDB spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const con = document.getElementById('console');
+  const passVal = document.getElementById('passVal');
+  const failVal = document.getElementById('failVal');
+  const durVal = document.getElementById('durVal');
+  let passes = 0, fails = 0;
+
+  function log(text, cls) {
+    const t = new Date().toISOString().slice(11, 19);
+    const div = document.createElement('div');
+    div.className = 'line';
+    div.innerHTML = '<span class="t">' + t + '</span><span class="' + (cls || '') + '">' + text + '</span>';
+    con.prepend(div);
+    while (con.children.length > 100) con.lastChild.remove();
+  }
+  function pass(t) { passes++; passVal.textContent = passes; log('PASS · ' + t, 'pass'); }
+  function fail(t) { fails++; failVal.textContent = fails; log('FAIL · ' + t, 'fail'); }
+  function info(t) { log(t, 'info'); }
+
+  // Probe whether the browser accepts the strict durability option.
+  try {
+    const r = indexedDB.open('idb-probe', 1);
+    r.onsuccess = (e) => {
+      const db = e.target.result;
+      try {
+        const tx = db.transaction(db.objectStoreNames.length ? db.objectStoreNames[0] : ['__none'], 'readwrite', { durability: 'strict' });
+        durVal.textContent = 'strict supported';
+      } catch (e) {
+        durVal.textContent = 'fallback (default)';
+      }
+      db.close();
+    };
+    r.onupgradeneeded = (e) => e.target.result.createObjectStore('s');
+    r.onerror = () => { durVal.textContent = 'unknown'; };
+  } catch (e) { durVal.textContent = 'unknown'; }
+
+  function openDB(name, store, durability) {
+    return new Promise((resolve, reject) => {
+      const r = indexedDB.open(name, 1);
+      r.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(store)) db.createObjectStore(store, { keyPath: 'id' });
+      };
+      r.onsuccess = (e) => resolve(e.target.result);
+      r.onerror = (e) => reject(e.target.error);
+    });
+  }
+  function deleteDB(name) {
+    return new Promise((resolve) => {
+      const r = indexedDB.deleteDatabase(name);
+      r.onsuccess = r.onerror = r.onblocked = () => resolve();
+    });
+  }
+  function countAll(db, store) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store, 'readonly');
+      const req = tx.objectStore(store).count();
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function testAtomicAbort() {
+    const name = 'sqlite-bk-atomic';
+    await deleteDB(name);
+    let db = await openDB(name, 's');
+    info('atomic · writing 100 records then forcing abort');
+    await new Promise((resolve) => {
+      const tx = db.transaction('s', 'readwrite');
+      const store = tx.objectStore('s');
+      for (let i = 0; i < 100; i++) store.put({ id: i, v: 'row' + i });
+      tx.oncomplete = () => resolve('completed');
+      tx.onabort = () => resolve('aborted');
+      tx.onerror = () => resolve('errored');
+      // Trigger abort once midway
+      setTimeout(() => { try { tx.abort(); } catch (_) {} }, 0);
+    });
+    db.close();
+    db = await openDB(name, 's');
+    const n = await countAll(db, 's');
+    if (n === 0) pass('atomic abort · 0 records survived (expected)');
+    else fail('atomic abort · ' + n + ' partial records present (transaction did not roll back)');
+    db.close();
+  }
+
+  async function testIsolation() {
+    const name = 'sqlite-bk-iso';
+    await deleteDB(name);
+    let db = await openDB(name, 's');
+    info('isolation · two overlapping readwrite transactions');
+    let order = [];
+    await new Promise((resolve) => {
+      const a = db.transaction('s', 'readwrite');
+      a.objectStore('s').put({ id: 1, v: 'A' });
+      a.oncomplete = () => { order.push('A'); };
+
+      const b = db.transaction('s', 'readwrite');
+      b.objectStore('s').put({ id: 1, v: 'B' });
+      b.oncomplete = () => { order.push('B'); resolve(); };
+    });
+    db.close();
+    db = await openDB(name, 's');
+    const finalVal = await new Promise((res, rej) => {
+      const tx = db.transaction('s', 'readonly');
+      const r = tx.objectStore('s').get(1);
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    if (order.join(',') === 'A,B' && finalVal && finalVal.v === 'B') {
+      pass('isolation · serialised A then B, final value = B');
+    } else {
+      fail('isolation · order=' + order.join(',') + ', value=' + (finalVal && finalVal.v));
+    }
+    db.close();
+  }
+
+  async function testDurability() {
+    const name = 'sqlite-bk-dur';
+    await deleteDB(name);
+    let db = await openDB(name, 's');
+    info('durability · writing with strict durability hint');
+    await new Promise((resolve, reject) => {
+      let tx;
+      try { tx = db.transaction('s', 'readwrite', { durability: 'strict' }); }
+      catch (e) { tx = db.transaction('s', 'readwrite'); info('strict not accepted · using default'); }
+      tx.objectStore('s').put({ id: 'k', v: 'durable' });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    db = await openDB(name, 's');
+    const got = await new Promise((res, rej) => {
+      const tx = db.transaction('s', 'readonly');
+      const r = tx.objectStore('s').get('k');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    if (got && got.v === 'durable') pass('durability · value survived re-open');
+    else fail('durability · value not found after re-open');
+    db.close();
+  }
+
+  document.querySelectorAll('.scenario button').forEach((b) => {
+    b.addEventListener('click', async () => {
+      b.disabled = true; b.textContent = 'running…';
+      try {
+        if (b.dataset.test === 'atomic') await testAtomicAbort();
+        if (b.dataset.test === 'isolation') await testIsolation();
+        if (b.dataset.test === 'durability') await testDurability();
+      } catch (e) {
+        fail(b.dataset.test + ' · threw: ' + (e && e.message));
+      }
+      b.disabled = false; b.textContent = 'Run again';
+    });
+  });
+</script>
+</body>
+</html>
