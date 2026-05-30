@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DisposableStack — sync resource management — Chrome 131</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .toolbar { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; }
+    .log { font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); min-height: 180px; }
+    .log p { margin: 0.1rem 0; }
+    .acquired { color: var(--accent-blue); }
+    .disposed { color: var(--accent-emerald); }
+    .err { color: var(--accent-rose); }
+    .status { font-family: var(--font-mono); font-size: 0.8rem; padding: 0.5rem 0.8rem; border: 2px solid var(--border-black); background: var(--bg-stone); display: inline-block; margin: var(--space-3) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v131/">&larr; v131</a> &middot; <a href="../">using</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v131</p>
+    <h1>DisposableStack for batched cleanup</h1>
+    <p class="lede">The companion <a href="../using/">using demo</a> covers the single-resource case. The proposal also ships <code>DisposableStack</code> — a LIFO collection that owns N resources and disposes them in reverse order. The motivating use case: a function that opens a file, a lock, and a temp directory, and needs all three released no matter which one fails.</p>
+  </header>
+
+  <div class="toolbar">
+    <button id="ok">acquire 3 ok</button>
+    <button id="fail-second">throw on second</button>
+    <button id="move">move() ownership</button>
+    <button id="clear">clear</button>
+  </div>
+
+  <div id="support" class="status"></div>
+
+  <h2>log</h2>
+  <div class="log" id="log"></div>
+
+  <section>
+    <h2>the pattern</h2>
+<pre><code>function makeResource(name) {
+  return {
+    name,
+    [Symbol.dispose]() { console.log("disposed:", name); }
+  };
+}
+
+function setup() {
+  using stack = new DisposableStack();
+  const file = stack.use(makeResource("file"));
+  const lock = stack.use(makeResource("lock"));
+  const tmp = stack.use(makeResource("tmp"));
+  // ...work...
+  // on scope exit, disposes tmp, lock, file (reverse order)
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>why a stack</h2>
+    <p>You can chain N <code>using</code> statements, but each declares a new binding name. <code>DisposableStack</code> lets you allocate a variable number of resources in a loop without giving each one a binding. It also supports <code>stack.move()</code> which transfers ownership to a new stack — the canonical use case is a constructor that needs to roll back partial setup if a later step throws, but commit ownership to the instance if it doesn't.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../using/">try/finally vs using comparison</a></li>
+      <li><a href="https://chromestatus.com/feature/4866680933580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/tc39/proposal-explicit-resource-management#disposablestack" target="_blank" rel="noopener">TC39 DisposableStack proposal</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const logEl = document.getElementById("log");
+  function log(cls, s) {
+    const p = document.createElement("p");
+    p.className = cls;
+    p.textContent = new Date().toLocaleTimeString() + " - " + s;
+    logEl.append(p);
+  }
+
+  const supportsStack = typeof DisposableStack !== "undefined";
+  const supportsDispose = typeof Symbol !== "undefined" && Symbol.dispose !== undefined;
+  document.getElementById("support").textContent = supportsStack
+    ? "supported: DisposableStack constructor exists"
+    : (supportsDispose
+        ? "Symbol.dispose present but DisposableStack missing — partial support"
+        : "not supported in this browser (need Chrome 131+)");
+
+  function makeRes(name) {
+    log("acquired", `acquired: ${name}`);
+    return { name, [Symbol.dispose || "_dispose"]() { log("disposed", `disposed: ${name}`); } };
+  }
+
+  function runOK() {
+    logEl.innerHTML = "";
+    log("", "begin scope");
+    const stack = supportsStack ? new DisposableStack() : { resources: [], use(r) { this.resources.push(r); return r; }, dispose() { for (const r of this.resources.reverse()) r[Symbol.dispose || "_dispose"](); } };
+    try {
+      stack.use(makeRes("file"));
+      stack.use(makeRes("lock"));
+      stack.use(makeRes("tmp"));
+      log("", "work ok");
+    } finally {
+      (supportsStack ? stack[Symbol.dispose]() : stack.dispose());
+    }
+    log("", "scope exit");
+  }
+  function runFailSecond() {
+    logEl.innerHTML = "";
+    log("", "begin scope");
+    const stack = supportsStack ? new DisposableStack() : { resources: [], use(r) { this.resources.push(r); return r; }, dispose() { for (const r of this.resources.reverse()) r[Symbol.dispose || "_dispose"](); } };
+    try {
+      stack.use(makeRes("file"));
+      stack.use(makeRes("lock"));
+      log("err", "throw: 'tmp' setup failed");
+      throw new Error("tmp setup failed");
+    } catch (e) {
+      log("err", `caught: ${e.message}`);
+    } finally {
+      (supportsStack ? stack[Symbol.dispose]() : stack.dispose());
+    }
+    log("", "scope exit (file and lock still released)");
+  }
+  function runMove() {
+    logEl.innerHTML = "";
+    log("", "scope A: acquire 2 resources, then move()");
+    const stackA = supportsStack ? new DisposableStack() : { resources: [], use(r) { this.resources.push(r); return r; }, move() { const n = { resources: this.resources, dispose: () => { for (const r of n.resources.reverse()) r[Symbol.dispose || "_dispose"](); } }; this.resources = []; return n; }, dispose() { for (const r of this.resources.reverse()) r[Symbol.dispose || "_dispose"](); } };
+    stackA.use(makeRes("conn-pool"));
+    stackA.use(makeRes("background-worker"));
+    const stackB = (supportsStack ? stackA.move() : stackA.move());
+    log("info", "ownership moved to stack B; scope A exits without disposing");
+    (supportsStack ? stackA[Symbol.dispose]() : stackA.dispose());
+    log("", "scope B: now disposes both");
+    (supportsStack ? stackB[Symbol.dispose]() : stackB.dispose());
+  }
+
+  document.getElementById("ok").addEventListener("click", runOK);
+  document.getElementById("fail-second").addEventListener("click", runFailSecond);
+  document.getElementById("move").addEventListener("click", runMove);
+  document.getElementById("clear").addEventListener("click", () => logEl.innerHTML = "");
+</script>
+</body>
+</html>
