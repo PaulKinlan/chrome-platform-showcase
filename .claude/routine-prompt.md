@@ -72,8 +72,10 @@ Iterate every category in `features_by_type`. For each feature, save the milesto
 
 ## Step 4: Build budget
 
-No per-run cap. Current channels first, then backfill, until 90-minute budget is up. 2 to 3 concept
-demos per feature. 2 strong demos beat 3 mediocre ones.
+No per-run cap. Current channels first, then backfill, until 90-minute budget is up. **Always 2 to 3
+concept demos per feature, never 1.** Each concept must hit a distinct angle (different API surface,
+different use case, or different failure mode / edge case). 2 strong demos beat 3 mediocre ones, but
+1 is a regression — Paul flagged single-concept features as unacceptable on 2026-05-30.
 
 ## Step 5: Fetch full detail
 
