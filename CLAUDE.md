@@ -32,12 +32,25 @@ v<N>/                 One folder per Chrome milestone. Each contains <feature-sl
 
 ## The routine
 
-Cron `0 * * * *` (hourly, top of hour). Runs in Anthropic's cloud as a Claude Code session against a
-fresh checkout of `main`. Soft 45-minute budget per run. Picks up where the last run left off.
+Cron `0 */2 * * *` (every 2 hours, top of hour UTC). Runs in Anthropic's cloud as a Claude Code
+session against a fresh checkout of `main`. Soft 45-minute budget per run. Picks up where the last
+run left off.
+
+Cadence was halved from hourly to every-2-hours on 2026-05-30 after the account hit a
+routines-per-day cap. If you bump it back to hourly, watch the cap.
 
 Routine prompt lives in `.claude/routine-prompt.md`. When you update the file, also push the new
 prompt to the live routine via the `RemoteTrigger` MCP tool (action `update`). Live and repo can
 drift if you forget.
+
+### Triggering a run manually
+
+Just ask Claude in chat: "run the showcase routine" (or "fire off the showcase build"). Claude calls
+`RemoteTrigger` with `action: "run"` and `trigger_id: trig_01GtXjwvzEM5mhsktARhGeSx`. The run kicks
+off immediately on top of the next scheduled tick; the next cron tick still fires as normal.
+
+Web UI alternative: https://claude.ai/code/routines/trig_01GtXjwvzEM5mhsktARhGeSx has a "Run now"
+button.
 
 ## Critical invariants (read these — every one has bitten us)
 
