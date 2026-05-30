@@ -39,6 +39,74 @@ function escapeHTML(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
+// ----- Last-commit info (fetched from GitHub, cached for 5 minutes) -----
+
+interface CommitInfo {
+  sha: string;
+  shortSha: string;
+  date: string;
+  htmlUrl: string;
+}
+
+const COMMIT_TTL_MS = 5 * 60 * 1000;
+let commitCache: { at: number; value: CommitInfo | null } | null = null;
+
+async function getLatestCommit(): Promise<CommitInfo | null> {
+  if (commitCache && Date.now() - commitCache.at < COMMIT_TTL_MS) return commitCache.value;
+  try {
+    const res = await fetch(
+      "https://api.github.com/repos/PaulKinlan/chrome-platform-showcase/commits/main",
+      { headers: { accept: "application/vnd.github+json" } },
+    );
+    if (!res.ok) {
+      commitCache = { at: Date.now(), value: null };
+      return null;
+    }
+    const data = await res.json();
+    const value: CommitInfo = {
+      sha: data.sha,
+      shortSha: String(data.sha).slice(0, 7),
+      date: data.commit?.author?.date ?? data.commit?.committer?.date ?? "",
+      htmlUrl: data.html_url,
+    };
+    commitCache = { at: Date.now(), value };
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function formatCommitLine(c: CommitInfo | null): string {
+  if (!c) return "";
+  const when = c.date ? new Date(c.date) : null;
+  const relative = when ? relativeTime(when) : "";
+  const absolute = when
+    ? when.toLocaleString("en-GB", {
+      day: "numeric",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZoneName: "short",
+    })
+    : "";
+  return `<p class="updated-line">Last updated ${escapeHTML(relative)} <span class="updated-abs">(${
+    escapeHTML(absolute)
+  })</span> &middot; commit <a href="${
+    escapeHTML(c.htmlUrl)
+  }" target="_blank" rel="noopener"><code>${escapeHTML(c.shortSha)}</code></a></p>`;
+}
+
+function relativeTime(d: Date): string {
+  const diff = Date.now() - d.getTime();
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
+}
+
 async function readPublicAsset(path: string): Promise<Response> {
   try {
     const file = await Deno.readFile("." + path);
@@ -81,6 +149,7 @@ function statusBadgeFor(channels: Channels, milestone: number): string {
 }
 
 async function renderIndex(channels: Channels): Promise<string> {
+  const commit = await getLatestCommit();
   // Chromestatus's "stable.mstone" is the *next* stable cut, even when its
   // stable_date is still a few days away. Most users are on stable-1 until
   // the cut lands. Show that release too so the issue stream and the catalogue
@@ -132,11 +201,13 @@ async function renderIndex(channels: Channels): Promise<string> {
       note = "Most users are here";
     }
     return `<li class="release-card">
-      <a href="/v${r.mstone}/">
-        <span class="release-label">Chrome ${r.mstone}</span>
-        <span class="release-status">${escapeHTML(r.status)}</span>
+      <a class="release-card-link" href="/v${r.mstone}/">
+        <span class="release-card-row">
+          <span class="release-label">Chrome ${r.mstone}</span>
+          <span class="release-status">${escapeHTML(r.status)}</span>
+        </span>
+        <span class="release-note">${escapeHTML(note)}</span>
       </a>
-      <p class="release-note">${escapeHTML(note)}</p>
     </li>`;
   }).join("");
 
@@ -154,6 +225,7 @@ async function renderIndex(channels: Channels): Promise<string> {
       <p class="eyebrow">work in progress</p>
       <h1>chrome platform showcase</h1>
       <p class="lede">A premium, hand-crafted demo for every new web platform feature shipping in Chrome. One per API. One uber-demo per release. Maintained by an automated routine; reviewed and merged by humans.</p>
+      ${formatCommitLine(commit)}
     </header>
 
     <section>
