@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mXSS round-trip — Attribute serialisation escapes — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); background: var(--bg-paper); padding: var(--space-4); margin: var(--space-4) 0; }
+    .warn-block { border: 2px solid var(--accent-rose); background: #ffeaea; padding: var(--space-3); margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.5; }
+    .warn-block strong { color: var(--accent-rose); }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .controls button { font-size: 0.85rem; padding: 0.45rem 0.9rem; }
+    .stages { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0; }
+    @media (max-width: 760px) { .stages { grid-template-columns: 1fr; } }
+    .pane { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); }
+    .pane h4 { font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em; margin-bottom: var(--space-2); padding-bottom: var(--space-2); border-bottom: 1px solid var(--border-black); }
+    .pane pre { background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.74rem; max-height: 220px; overflow: auto; margin: 0; box-shadow: none; }
+    .verdict { padding: var(--space-3); margin-top: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; border: 2px solid var(--border-black); }
+    .verdict.safe { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .verdict.unsafe { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .input-row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .input-row input { flex: 1; min-width: 280px; padding: 0.5rem; font-family: var(--font-mono); font-size: 0.78rem; border: 2px solid var(--border-black); background: var(--bg-stone); }
+    .scenario { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin: var(--space-3) 0; font-family: var(--font-serif); font-size: 0.95rem; }
+    .scenario h4 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; color: var(--text-muted); margin-bottom: var(--space-2); letter-spacing: 0.06em; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Escape &lt; and &gt; in attributes on serialization</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>The mXSS round-trip</h1>
+    <p class="lede">A real mutation-XSS pattern. A &ldquo;safe&rdquo; user input is put into an attribute. The DOM is then re-serialised via <code>outerHTML</code> &mdash; into an iframe, a server round-trip, a cache, anywhere. Pre-138, the round-trip silently became different markup. 138 closes the loop.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>This is a security fix.</strong> Several real-world XSS bugs followed the &ldquo;put attacker input in an attribute, then assume the DOM&rsquo;s textual form is faithful&rdquo; pattern. Sanitisers running on the textual form saw clean attributes; the actual reconstructed DOM had a tag boundary inside the attribute value.
+  </div>
+
+  <div class="stage">
+    <div class="input-row">
+      <input id="payload" value='&lt;img src=x onerror=alert(1)&gt;'>
+      <button id="run">round-trip &rarr;</button>
+    </div>
+    <div class="controls">
+      <button data-load='alt-payload'>load: &lt;svg&gt; payload</button>
+      <button data-load='quote-payload'>load: &quot;-broken payload</button>
+      <button data-load='polyglot'>load: SVG polyglot</button>
+    </div>
+
+    <div class="stages">
+      <div class="pane">
+        <h4>1. attribute set with user input</h4>
+        <pre id="step1"></pre>
+      </div>
+      <div class="pane">
+        <h4>2. outerHTML serialisation</h4>
+        <pre id="step2"></pre>
+      </div>
+      <div class="pane">
+        <h4>3. browser re-parses that string</h4>
+        <pre id="step3"></pre>
+      </div>
+      <div class="pane">
+        <h4>4. did the DOM round-trip safely?</h4>
+        <div id="verdict" class="verdict">awaiting&hellip;</div>
+      </div>
+    </div>
+
+    <div class="scenario">
+      <h4>scenario</h4>
+      <p>A wiki accepts a footnote whose content is dropped into <code>img.title</code> &mdash; an attribute. The HTML is then cached for cross-region replicas by reading <code>document.documentElement.outerHTML</code>. The replicas inject that HTML into other iframes via <code>iframe.contentDocument.write(...)</code>. Without 138&rsquo;s escaping, the replica iframe ends up with <em>different</em> DOM than the origin &mdash; including a runnable <code>&lt;img onerror&gt;</code>.</p>
+    </div>
+  </div>
+
+  <section>
+    <h2>the fix in one line</h2>
+<pre><code>// Pre-138: attribute serialisation escaped " and &amp; only.
+// 138: also escapes &lt; and &gt;, killing the round-trip mutation vector.
+el.title = '&lt;img src=x onerror=alert(1)&gt;';
+el.outerHTML;
+//  pre-138: &lt;span title="&lt;img src=x onerror=alert(1)&gt;"&gt;&lt;/span&gt;     // reparsed: TWO elements!
+//  138+:    &lt;span title="&amp;lt;img src=x onerror=alert(1)&amp;gt;"&gt;&lt;/span&gt;  // reparsed: same span, same attribute</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Escape &lt; and &gt; in attributes on serialization</a> &mdash; feature index</li>
+      <li><a href="../attr-escape/">Attribute escape basics</a></li>
+      <li><a href="https://chromestatus.com/feature/6264983847174144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const PRESETS = {
+    "alt-payload": '"><svg onload=alert(1)>',
+    "quote-payload": '" onmouseover="alert(1)" x="',
+    "polyglot": '"><svg><animate onbegin=alert(1)></animate></svg>',
+  };
+  document.querySelectorAll("[data-load]").forEach((b) => b.addEventListener("click", () => {
+    document.getElementById("payload").value = PRESETS[b.dataset.load];
+    run();
+  }));
+
+  function escapeText(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+  function run() {
+    const payload = document.getElementById("payload").value;
+    const step1 = `<span title="${payload}">[anchor]</span>`;
+    document.getElementById("step1").textContent = `// authored as:
+el.title = ${JSON.stringify(payload)};
+// resulting source representation:
+${step1}`;
+
+    // Real browser serialisation
+    const tmp = document.createElement("div");
+    const span = document.createElement("span");
+    span.title = payload;
+    span.textContent = "[anchor]";
+    tmp.appendChild(span);
+    const serialised = tmp.innerHTML;
+    document.getElementById("step2").textContent = serialised;
+
+    // Re-parse and inspect what came back
+    const reparse = document.createElement("div");
+    reparse.innerHTML = serialised;
+    const children = [...reparse.children];
+    let report = "// reparsed children:\n";
+    for (const c of children) report += "  " + c.outerHTML + "\n";
+
+    const onlySpan = children.length === 1 && children[0].tagName === "SPAN";
+    const titleEq = onlySpan ? children[0].title === payload : false;
+    const inspect = onlySpan && titleEq;
+    document.getElementById("step3").textContent = report + `\n// children: ${children.length}\n// title preserved: ${titleEq}`;
+
+    const v = document.getElementById("verdict");
+    if (inspect) {
+      v.className = "verdict safe";
+      v.textContent = "SAFE round-trip. Re-parsed DOM matches the original. Chrome 138's escaping prevented a tag boundary leak.";
+    } else {
+      v.className = "verdict unsafe";
+      v.textContent = `UNSAFE: re-parsed DOM ≠ original. children=${children.length}, title preserved=${titleEq}. This is the mXSS surface 138 closes.`;
+    }
+  }
+  document.getElementById("run").addEventListener("click", run);
+  run();
+</script>
+</body>
+</html>
