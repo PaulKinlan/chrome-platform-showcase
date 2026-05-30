@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>First-click latency &mdash; Compile Hints &mdash; Chrome 132</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .controls label { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-muted); display: flex; align-items: center; gap: 0.35rem; }
+    .controls select { font-family: var(--font-mono); font-size: 0.85rem; padding: 0.35rem; border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .card { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); display: flex; flex-direction: column; gap: var(--space-2); }
+    .card h3 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0; }
+    .badge { font-family: var(--font-mono); font-size: 0.78rem; padding: 0.15rem 0.45rem; border: 1px solid var(--border-black); background: var(--bg-paper); color: var(--text-charcoal); display: inline-block; }
+    .timing { font-family: var(--font-display); font-size: 1.8rem; color: var(--text-black); margin-top: var(--space-2); }
+    .timing .unit { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+    .note { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; color: var(--text-black); }
+    pre.snip { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-size: 0.78rem; overflow-x: auto; margin: var(--space-3) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Explicit Compile Hints</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v132</p>
+    <h1>First-click latency &mdash; the interaction case</h1>
+    <p class="lede">Google Workspace reported 5&ndash;7&percnt; cold-load wins from eager compile hints; the bigger story is interaction latency. Generate two large handler libraries &mdash; one with <code>//# eagerCompilation=all</code>, one without &mdash; then click each button and watch the first-click time delta.</p>
+  </header>
+
+  <section class="stage">
+    <div class="controls">
+      <label>handler library size: <select id="size">
+        <option value="500">500 functions</option>
+        <option value="2500" selected>2,500</option>
+        <option value="6000">6,000</option>
+      </select></label>
+      <button id="rebuild">Rebuild both libraries</button>
+      <button id="reset">Reset timings</button>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>library A &mdash; <span class="badge">no hint (lazy)</span></h3>
+        <button id="aClick" disabled>build, then click here</button>
+        <div class="timing" id="aTime">&mdash; <span class="unit">ms</span></div>
+        <div id="aLog" class="note" style="margin: 0; min-height: 2.5rem;"></div>
+      </div>
+      <div class="card">
+        <h3>library B &mdash; <span class="badge">eagerCompilation=all</span></h3>
+        <button id="bClick" disabled>build, then click here</button>
+        <div class="timing" id="bTime">&mdash; <span class="unit">ms</span></div>
+        <div id="bLog" class="note" style="margin: 0; min-height: 2.5rem;"></div>
+      </div>
+    </div>
+
+    <pre class="snip">// Library B starts with:
+//# eagerCompilation=all
+
+// Library A starts with no comment.
+
+// Each library defines N closures; the click handler invokes them
+// in a hot loop. Lazy library: first call pays compile cost for
+// the whole call graph. Eager library: cost was paid at script load.</pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Explicit Compile Hints</a> &mdash; feature index</li>
+      <li><a href="../compile-hints/">file-size compile timer</a></li>
+      <li><a href="https://wicg.github.io/explicit-javascript-compile-hints-file-based" target="_blank" rel="noopener">Spec</a></li>
+      <li><a href="https://chromestatus.com/feature/5100466238652416" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  function source(eager, n) {
+    let s = eager ? "//# eagerCompilation=all\n" : "";
+    for (let i = 0; i < n; i++) {
+      s += "globalThis.h" + i + " = function(x){ var v = x; for (var k=0;k<8;k++) v = (v*7+k) % 9973; return v; };\n";
+    }
+    s += "globalThis.callAll = function(n){ var t=performance.now(); var x=1; for (var i=0;i<n;i++) x = (globalThis['h'+i] || (()=>0))(x); return [x, performance.now()-t]; };\n";
+    return s;
+  }
+
+  let labelA = null, labelB = null;
+
+  async function loadLib(eager) {
+    const n = +document.getElementById("size").value;
+    const src = source(eager, n);
+    const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
+    return new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = url;
+      s.onload = () => { URL.revokeObjectURL(url); res(n); };
+      s.onerror = rej;
+      document.head.appendChild(s);
+    });
+  }
+
+  async function rebuild() {
+    // Strip globals to force re-load
+    for (const k of Object.keys(globalThis)) if (/^h\d+$/.test(k)) delete globalThis[k];
+    delete globalThis.callAll;
+
+    const aBtn = document.getElementById("aClick");
+    const bBtn = document.getElementById("bClick");
+    aBtn.disabled = bBtn.disabled = true;
+    document.getElementById("aLog").textContent = "loading lazy library...";
+    document.getElementById("bLog").textContent = "loading eager library...";
+
+    // Load lazy first
+    const t0 = performance.now();
+    const n = await loadLib(false);
+    const loadA = performance.now() - t0;
+    globalThis._callA = globalThis.callAll;
+    document.getElementById("aLog").textContent = "loaded " + n + " fns in " + loadA.toFixed(1) + "ms (script parse only)";
+
+    // Now eager
+    const t1 = performance.now();
+    await loadLib(true);
+    const loadB = performance.now() - t1;
+    globalThis._callB = globalThis.callAll;
+    document.getElementById("bLog").textContent = "loaded " + n + " fns in " + loadB.toFixed(1) + "ms (parse + eager compile)";
+
+    labelA = n;
+    labelB = n;
+    aBtn.disabled = bBtn.disabled = false;
+    aBtn.textContent = "first click (calls all " + n + ")";
+    bBtn.textContent = "first click (calls all " + n + ")";
+  }
+
+  document.getElementById("rebuild").addEventListener("click", rebuild);
+  document.getElementById("reset").addEventListener("click", () => {
+    document.getElementById("aTime").innerHTML = "&mdash; <span class='unit'>ms</span>";
+    document.getElementById("bTime").innerHTML = "&mdash; <span class='unit'>ms</span>";
+  });
+
+  document.getElementById("aClick").addEventListener("click", () => {
+    if (!globalThis._callA) return;
+    const [, t] = globalThis._callA(labelA);
+    document.getElementById("aTime").innerHTML = t.toFixed(2) + " <span class='unit'>ms first call</span>";
+    document.getElementById("aLog").textContent = "lazy: first call paid compile cost for " + labelA + " functions";
+  });
+  document.getElementById("bClick").addEventListener("click", () => {
+    if (!globalThis._callB) return;
+    const [, t] = globalThis._callB(labelB);
+    document.getElementById("bTime").innerHTML = t.toFixed(2) + " <span class='unit'>ms first call</span>";
+    document.getElementById("bLog").textContent = "eager: first call ran already-compiled bytecode";
+  });
+</script>
+</body>
+</html>
