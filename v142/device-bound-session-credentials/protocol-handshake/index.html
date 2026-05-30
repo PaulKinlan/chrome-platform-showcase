@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Protocol Handshake — Device Bound Session Credentials — Chrome 142</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .warn-block {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.5;
+      margin: 0 0 var(--space-4);
+    }
+    .steps {
+      counter-reset: step;
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-3);
+    }
+    .step {
+      counter-increment: step;
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: var(--space-3);
+      transition: var(--transition);
+      position: relative;
+    }
+    .step.done { background: var(--bg-stone); opacity: 0.7; }
+    .step.active { box-shadow: var(--flat-shadow); transform: translate(-2px, -2px); }
+    .step::before {
+      content: counter(step);
+      font-family: var(--font-display);
+      font-size: 1.3rem;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: 0.1rem 0.6rem;
+      margin-right: var(--space-3);
+    }
+    .step .actor {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      display: inline-block;
+      margin-right: var(--space-2);
+    }
+    .step .actor.client { color: var(--accent-blue); }
+    .step .actor.server { color: var(--accent-emerald); }
+    .step .actor.tpm { color: var(--accent-rose); }
+    .step p {
+      font-family: var(--font-serif);
+      font-size: 0.95rem;
+      margin: var(--space-2) 0 0;
+    }
+    .step pre {
+      box-shadow: none;
+      margin: var(--space-2) 0 0;
+      font-size: 0.72rem;
+      padding: var(--space-2) var(--space-3);
+    }
+    .controls { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; }
+    .readout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 600px) { .readout { grid-template-columns: 1fr; } }
+    .stat {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .stat-label {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 0.3rem;
+    }
+    .stat-val { font-family: var(--font-mono); font-size: 0.95rem; color: var(--text-black); }
+    .stat-val.on { color: var(--accent-emerald); }
+    .stat-val.off { color: var(--accent-rose); }
+    .note { font-family: var(--font-mono); color: var(--text-muted); font-size: 0.85rem; margin-top: var(--space-3); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; DBSC</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v142</p>
+    <h1>Protocol Handshake</h1>
+    <p class="lede">Step through the actual DBSC HTTP/JWS dance from the IETF draft: server says <code>Sec-Session-Registration</code>, client generates a TPM-backed keypair and POSTs a signed registration JWT, server returns a short-lived cookie plus the refresh URL, browser auto-renews by signing the server's nonce. This is the bit that's hard to picture from prose — the steps below run the exchange against a mocked server in your tab.</p>
+  </header>
+
+  <section class="stage">
+    <div class="warn-block">
+      Chrome 142 ships DBSC for Google's first-party origins. For other origins enable
+      <code>chrome://flags/#enable-device-bound-session-credentials</code> and serve over HTTPS. This page runs a pure-JS
+      mock of the protocol so the handshake is observable without a real server or TPM.
+    </div>
+
+    <ol class="steps" id="steps">
+      <li class="step" data-step="0">
+        <span class="actor server">server &rarr; client</span>
+        <strong>Sign-in response includes header</strong>
+        <p>The server sets a short-lived auth cookie and tells the browser to start a device-bound session.</p>
+        <pre><code>HTTP/2 200 OK
+Set-Cookie: auth_session=abc…; Max-Age=600; Secure; HttpOnly
+Sec-Session-Registration: (RS256 ES256);path="/StartSession";challenge="cha_001"</code></pre>
+      </li>
+      <li class="step" data-step="1">
+        <span class="actor tpm">browser &rarr; TPM</span>
+        <strong>Generate device-bound keypair</strong>
+        <p>Chrome asks the OS to create a non-extractable keypair inside the TPM / Secure Enclave. The private key never leaves hardware.</p>
+        <pre><code>// pseudo-internal
+const kp = await deviceTpm.generate({ alg: "ES256", extractable: false });</code></pre>
+      </li>
+      <li class="step" data-step="2">
+        <span class="actor client">client &rarr; server</span>
+        <strong>POST signed registration JWT to /StartSession</strong>
+        <p>Body is a JWS proving possession of the new private key and echoing the server's challenge.</p>
+        <pre><code>POST /StartSession
+Content-Type: application/jwt
+
+eyJ0eXAiOiJzZXNz…Y2hhX18wMDEi  ← header.payload.signature
+{ "iat": 1730…, "aud": "https://app.example", "jti": "cha_001",
+  "key": { "kty":"EC","crv":"P-256","x":"…","y":"…" } }</code></pre>
+      </li>
+      <li class="step" data-step="3">
+        <span class="actor server">server &rarr; client</span>
+        <strong>Session config + first refresh cookie</strong>
+        <p>Server confirms the binding, returns the JSON session config and a refresh cookie tagged with the session ID.</p>
+        <pre><code>HTTP/2 200 OK
+Set-Cookie: auth_session=xyz…; Max-Age=600
+Content-Type: application/json
+
+{ "session_identifier":"sess_42",
+  "refresh_url":"/RefreshSession",
+  "scope":{"include_site":true},
+  "credentials":[{"name":"auth_session","attributes":"Secure;HttpOnly"}] }</code></pre>
+      </li>
+      <li class="step" data-step="4">
+        <span class="actor client">client &rarr; server</span>
+        <strong>10 minutes later: auth_session expired, auto-refresh</strong>
+        <p>Browser intercepts the would-be request, fetches /RefreshSession with a fresh signed JWT proving the same TPM key.</p>
+        <pre><code>POST /RefreshSession
+Sec-Session-Id: sess_42
+Content-Type: application/jwt
+
+eyJhbGciOiJFUzI1Ni…  ← signed with the same device key</code></pre>
+      </li>
+      <li class="step" data-step="5">
+        <span class="actor server">server &rarr; client</span>
+        <strong>Refresh succeeds, new short-lived cookie issued</strong>
+        <p>Server validates the JWS against the registered public key, mints a fresh <code>auth_session</code> cookie. An attacker who exfiltrated the old cookie can't refresh — they don't have the TPM key.</p>
+        <pre><code>HTTP/2 200 OK
+Set-Cookie: auth_session=def…; Max-Age=600; Secure; HttpOnly</code></pre>
+      </li>
+    </ol>
+
+    <div class="controls">
+      <button id="play">play handshake</button>
+      <button id="reset">reset</button>
+    </div>
+
+    <div class="readout">
+      <div class="stat">
+        <div class="stat-label">DeviceBoundSession in navigator</div>
+        <div class="stat-val" id="api">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">current step</div>
+        <div class="stat-val" id="cur">idle</div>
+      </div>
+    </div>
+
+    <p class="note">DBSC's whole value is steps 4–5: the server bound the auth cookie to a TPM key on step 2, so any exfiltrated cookie can only buy the attacker minutes before the next refresh fails on their machine.</p>
+  </section>
+
+  <h2>see also</h2>
+  <ul>
+    <li><a href="../">DBSC</a> — feature index</li>
+    <li><a href="../dbsc-walkthrough/">Attacker scenarios demo</a></li>
+    <li><a href="https://chromestatus.com/feature/5140168270413824" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webappsec-dbsc/" target="_blank" rel="noopener">DBSC draft spec</a></li>
+  </ul>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const steps = [...document.querySelectorAll(".step")];
+  const playBtn = document.getElementById("play");
+  const resetBtn = document.getElementById("reset");
+  const apiEl = document.getElementById("api");
+  const curEl = document.getElementById("cur");
+
+  const hasAPI = "DeviceBoundSession" in window || "DeviceBoundSessionManager" in window;
+  apiEl.textContent = hasAPI ? "yes" : "no";
+  apiEl.className = "stat-val " + (hasAPI ? "on" : "off");
+
+  let running = false;
+
+  function reset() {
+    steps.forEach((s) => s.classList.remove("active", "done"));
+    curEl.textContent = "idle";
+  }
+
+  async function play() {
+    if (running) return;
+    running = true;
+    reset();
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      s.classList.add("active");
+      curEl.textContent = "step " + (i + 1) + " / " + steps.length;
+      await new Promise((r) => setTimeout(r, 1100));
+      s.classList.remove("active");
+      s.classList.add("done");
+    }
+    curEl.textContent = "complete";
+    running = false;
+  }
+
+  playBtn.addEventListener("click", play);
+  resetBtn.addEventListener("click", reset);
+</script>
+</body>
+</html>
