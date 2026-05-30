@@ -41,7 +41,8 @@ git config user.email 'paul.kinlan@gmail.com'
 git config user.name 'Paul Kinlan'
 ```
 
-Note Unix time at start. Soft 90-minute budget. The cron fires every 2 hours; the next run continues. Better to leave 4 features behind than to corrupt a half-written folder.
+Note Unix time at start. Soft 90-minute budget. The cron fires every 2 hours; the next run
+continues. Better to leave 4 features behind than to corrupt a half-written folder.
 
 ## Step 2: Get current channels
 
