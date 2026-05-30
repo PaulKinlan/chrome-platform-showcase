@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Triangle Picking — primitive_index — WebGPU — Chrome 142</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .warn-block {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.5;
+      margin: 0 0 var(--space-4);
+    }
+    canvas {
+      background: var(--text-black);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      width: 100%;
+      max-width: 480px;
+      height: 320px;
+      display: block;
+      margin: var(--space-3) 0;
+      cursor: crosshair;
+    }
+    .readout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 600px) { .readout { grid-template-columns: 1fr; } }
+    .stat {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .stat-label {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 0.3rem;
+    }
+    .stat-val { font-family: var(--font-mono); font-size: 1.2rem; color: var(--text-black); }
+    .stat-val.on { color: var(--accent-emerald); }
+    .stat-val.off { color: var(--accent-rose); }
+    .controls { display: flex; gap: var(--space-3); margin: var(--space-3) 0; flex-wrap: wrap; align-items: center; }
+    .controls label { font-family: var(--font-mono); font-size: 0.82rem; }
+    .note { font-family: var(--font-mono); color: var(--text-muted); font-size: 0.85rem; margin-top: var(--space-3); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; primitive_index</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v142</p>
+    <h1>Triangle Picking</h1>
+    <p class="lede">The use case the WebGPU CTS authors keep flagging: render a mesh to an "ID buffer" where each fragment writes its <code>primitive_index</code> as a colour, then read back the pixel under the cursor to know which triangle was clicked. Pure GPU picking, no CPU ray-tracing, no per-vertex ID attribute.</p>
+  </header>
+
+  <section class="stage">
+    <div class="warn-block">
+      Requires Chrome 142+ with WebGPU and the optional <code>primitive-index</code> adapter feature. On unsupported hardware the canvas stays black and the readouts say "no".
+    </div>
+
+    <canvas id="cv" width="480" height="320"></canvas>
+
+    <div class="readout">
+      <div class="stat">
+        <div class="stat-label">primitive-index feature</div>
+        <div class="stat-val" id="feat">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">last clicked triangle</div>
+        <div class="stat-val" id="picked">click a triangle</div>
+      </div>
+    </div>
+
+    <p class="note">The pick works by sampling the ID-render target at the cursor's pixel. Encoding <code>primitive_index</code> into red/green channels gives 65,536 unique IDs.</p>
+  </section>
+
+  <h2>shader snippet</h2>
+<pre><code>// fragment shader writes the primitive index as RG colour
+@fragment
+fn fs(@builtin(primitive_index) idx: u32) -&gt; @location(0) vec4&lt;f32&gt; {
+  let r = f32(idx &amp; 0xff) / 255.0;
+  let g = f32((idx &gt;&gt; 8) &amp; 0xff) / 255.0;
+  return vec4&lt;f32&gt;(r, g, 0.0, 1.0);
+}
+
+// later, on click: read one pixel back, decode r + g*256 = triangle index
+</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">primitive-index</a> — feature index</li>
+      <li><a href="../primitive-index/">Colour-Per-Triangle demo</a></li>
+      <li><a href="https://chromestatus.com/feature/6467722716250112" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://gpuweb.github.io/gpuweb/#dom-gpufeaturename-primitive-index" target="_blank" rel="noopener">WebGPU spec — primitive-index</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const cv = document.getElementById("cv");
+  const featEl = document.getElementById("feat");
+  const pickedEl = document.getElementById("picked");
+
+  async function init() {
+    if (!navigator.gpu) {
+      featEl.textContent = "no (WebGPU missing)";
+      featEl.className = "stat-val off";
+      return;
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      featEl.textContent = "no adapter";
+      featEl.className = "stat-val off";
+      return;
+    }
+    const hasFeat = adapter.features.has("primitive-index");
+    featEl.textContent = hasFeat ? "yes" : "no";
+    featEl.className = "stat-val " + (hasFeat ? "on" : "off");
+    if (!hasFeat) return;
+
+    const device = await adapter.requestDevice({ requiredFeatures: ["primitive-index"] });
+    const ctx = cv.getContext("webgpu");
+    const fmt = navigator.gpu.getPreferredCanvasFormat();
+    ctx.configure({ device, format: fmt, alphaMode: "premultiplied" });
+
+    // 8 triangles arranged in a fan
+    const N = 8;
+    const verts = [];
+    verts.push(0, 0);
+    for (let i = 0; i <= N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      verts.push(Math.cos(a) * 0.8, Math.sin(a) * 0.8);
+    }
+    const vbuf = device.createBuffer({ size: verts.length * 4, usage: GPUBufferUsage.VERTEX, mappedAtCreation: true });
+    new Float32Array(vbuf.getMappedRange()).set(verts);
+    vbuf.unmap();
+
+    const shader = device.createShaderModule({
+      code: `
+        @vertex
+        fn vs(@location(0) pos: vec2<f32>) -> @builtin(position) vec4<f32> {
+          return vec4<f32>(pos, 0.0, 1.0);
+        }
+        @fragment
+        fn fs(@builtin(primitive_index) idx: u32) -> @location(0) vec4<f32> {
+          let r = f32(idx & 0xffu) / 255.0;
+          let g = f32((idx >> 8u) & 0xffu) / 255.0;
+          return vec4<f32>(r, g, 0.0, 1.0);
+        }
+        @fragment
+        fn fsDisplay(@builtin(primitive_index) idx: u32) -> @location(0) vec4<f32> {
+          let h = f32(idx) / ${N}.0;
+          let r = 0.5 + 0.5 * cos(6.283 * h);
+          let g = 0.5 + 0.5 * cos(6.283 * (h + 0.33));
+          let b = 0.5 + 0.5 * cos(6.283 * (h + 0.67));
+          return vec4<f32>(r, g, b, 1.0);
+        }`,
+    });
+
+    const layout = {
+      arrayStride: 8,
+      attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }],
+    };
+
+    const pipeDisplay = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: shader, entryPoint: "vs", buffers: [layout] },
+      fragment: { module: shader, entryPoint: "fsDisplay", targets: [{ format: fmt }] },
+      primitive: { topology: "triangle-fan" },
+    });
+    const pipeId = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: shader, entryPoint: "vs", buffers: [layout] },
+      fragment: { module: shader, entryPoint: "fs", targets: [{ format: "rgba8unorm" }] },
+      primitive: { topology: "triangle-fan" },
+    });
+
+    const idTex = device.createTexture({
+      size: [cv.width, cv.height],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+
+    function render() {
+      const enc = device.createCommandEncoder();
+      const view = ctx.getCurrentTexture().createView();
+      const p1 = enc.beginRenderPass({
+        colorAttachments: [{ view, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+      });
+      p1.setPipeline(pipeDisplay);
+      p1.setVertexBuffer(0, vbuf);
+      p1.draw(verts.length / 2);
+      p1.end();
+
+      const p2 = enc.beginRenderPass({
+        colorAttachments: [{ view: idTex.createView(), clearValue: { r: 1, g: 1, b: 1, a: 1 }, loadOp: "clear", storeOp: "store" }],
+      });
+      p2.setPipeline(pipeId);
+      p2.setVertexBuffer(0, vbuf);
+      p2.draw(verts.length / 2);
+      p2.end();
+
+      device.queue.submit([enc.finish()]);
+    }
+    render();
+
+    cv.addEventListener("click", async (e) => {
+      const rect = cv.getBoundingClientRect();
+      const x = Math.floor((e.clientX - rect.left) * (cv.width / rect.width));
+      const y = Math.floor((e.clientY - rect.top) * (cv.height / rect.height));
+      const readBuf = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const enc = device.createCommandEncoder();
+      enc.copyTextureToBuffer(
+        { texture: idTex, origin: { x, y } },
+        { buffer: readBuf, bytesPerRow: 256 },
+        { width: 1, height: 1 },
+      );
+      device.queue.submit([enc.finish()]);
+      await readBuf.mapAsync(GPUMapMode.READ);
+      const arr = new Uint8Array(readBuf.getMappedRange());
+      const r = arr[0], g = arr[1];
+      readBuf.unmap();
+      if (r === 255 && g === 255) {
+        pickedEl.textContent = "background";
+      } else {
+        const idx = r | (g << 8);
+        pickedEl.textContent = "triangle #" + idx;
+      }
+    });
+  }
+
+  init().catch((e) => {
+    featEl.textContent = "error: " + e.message;
+    featEl.className = "stat-val off";
+  });
+</script>
+</body>
+</html>
