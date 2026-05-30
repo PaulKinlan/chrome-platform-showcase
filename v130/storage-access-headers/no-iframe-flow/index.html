@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>No-iframe flow — Storage Access Headers — Chrome 130 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center; margin-bottom: var(--space-3); }
+    .controls button {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      padding: 0.4rem 0.8rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      cursor: pointer;
+    }
+    .controls button.on { background: var(--text-black); color: var(--bg-ivory); }
+
+    .pipeline {
+      display: grid;
+      gap: var(--space-2);
+      margin: var(--space-3) 0;
+    }
+    .hop {
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: var(--space-3);
+    }
+    .hop h3 {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin: 0 0 var(--space-2);
+    }
+    .hop pre {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      margin: 0.4rem 0;
+      white-space: pre-wrap;
+      box-shadow: none;
+    }
+    .hop pre .req { color: var(--accent-blue); font-weight: 700; }
+    .hop pre .res { color: var(--accent-emerald); font-weight: 700; }
+    .hop pre .h   { color: var(--text-charcoal); }
+    .hop pre .hk  { color: var(--text-muted); }
+
+    .delta {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 700px) { .delta { grid-template-columns: 1fr; } }
+    .delta-card {
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .delta-card h4 {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin: 0 0 var(--space-2);
+      padding-bottom: 0.3rem;
+      border-bottom: 1px solid var(--border-black);
+    }
+    .delta-card.old h4 { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .delta-card.new h4 { color: var(--accent-emerald); border-color: var(--accent-emerald); }
+    .delta-card ul { padding-left: 1.2rem; }
+    .delta-card li {
+      font-family: var(--font-serif);
+      font-size: 0.92rem;
+      color: var(--text-charcoal);
+      margin: 0.3rem 0;
+    }
+    .warn-block {
+      border: 2px solid var(--accent-amber);
+      background: var(--bg-paper);
+      padding: var(--space-3) var(--space-4);
+      box-shadow: var(--thin-shadow);
+      margin: var(--space-4) 0;
+      font-family: var(--font-serif);
+      color: var(--text-charcoal);
+    }
+    .warn-block strong {
+      font-family: var(--font-mono);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 0.75rem;
+      color: var(--accent-amber);
+      display: block;
+      margin-bottom: 0.4rem;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Storage Access Headers</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>no-iframe flow</h1>
+    <p class="lede">The chromestatus motivation: "limits use cases by requiring the embedded resources to use an iframe." Storage Access Headers let an authenticated embed opt in to unpartitioned cookies on any cross-site network request, not just iframe loads. This page walks through the three-hop header negotiation for a subresource (an <code>&lt;img&gt;</code>, <code>&lt;script&gt;</code>, or <code>fetch()</code>) — no iframe needed.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Storage Access Headers spec walkthrough</strong>
+    The wire-level header negotiation runs inside Chrome's network stack — there is no JS surface to call. This page reproduces the request/response sequence for a non-iframe subresource so you can see what changes vs the legacy JS-only Storage Access API.
+  </div>
+
+  <div class="stage">
+    <div class="controls">
+      <strong style="font-family:var(--font-mono);font-size:0.78rem">scenario:</strong>
+      <button data-id="img" class="on">&lt;img&gt; from CDN that needs auth cookies</button>
+      <button data-id="fetch">fetch() to API for personalised data</button>
+      <button data-id="script">&lt;script&gt; needing identity cookies</button>
+    </div>
+
+    <div id="pipeline"></div>
+  </div>
+
+  <h2>vs the legacy iframe path</h2>
+  <div class="delta">
+    <div class="delta-card old">
+      <h4>before Storage Access Headers</h4>
+      <ul>
+        <li>Embed must be an <code>&lt;iframe&gt;</code> — image/script/fetch subresources can't request unpartitioned cookies.</li>
+        <li>Iframe loads its document. <code>document.hasStorageAccess()</code> probes.</li>
+        <li>If not granted, iframe calls <code>document.requestStorageAccess()</code>. Returns a promise.</li>
+        <li>User-visible permission flow may appear.</li>
+        <li>Iframe waits, then re-issues the request that needed the cookies.</li>
+        <li>Two extra round-trips per cold start. Useless if you only need a single fetch.</li>
+      </ul>
+    </div>
+    <div class="delta-card new">
+      <h4>Chrome 130+: header negotiation</h4>
+      <ul>
+        <li>Subresource sends one request. Browser advertises <code>Sec-Fetch-Storage-Access</code>.</li>
+        <li>Server inspects the header. If it has already-granted permission, it can respond with <code>Activate-Storage-Access</code> in a single round-trip.</li>
+        <li>If permission isn't granted yet, the server returns <code>Activate-Storage-Access: load</code> with a load-time prompt — still no iframe required.</li>
+        <li>Works for any cross-site subresource: <code>&lt;img&gt;</code>, <code>&lt;script&gt;</code>, <code>fetch()</code>, <code>&lt;link rel=preload&gt;</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section>
+    <h2>the headers</h2>
+<pre><code># Browser includes the header on every cross-site request that may
+# have storage access available:
+Sec-Fetch-Storage-Access: none      # request not yet using SA
+Sec-Fetch-Storage-Access: active    # request is sent with SA
+Sec-Fetch-Storage-Access: inactive  # would be active if server activates
+
+# Server can include either of these in its response:
+Activate-Storage-Access: retry; allowed-origin="https://embed.example"
+Activate-Storage-Access: load       # block subresource, ask user
+
+# Once activated, subsequent requests get the unpartitioned cookies
+# until the SA permission expires.</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Storage Access Headers</a> — feature index</li>
+      <li><a href="../sah/">Companion: header negotiation simulator</a></li>
+      <li><a href="https://chromestatus.com/feature/6146353156849664" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://privacycg.github.io/storage-access-headers" target="_blank" rel="noopener">Storage Access Headers spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const SCEN = {
+    img: {
+      label: "<img> from CDN that needs auth cookies",
+      hops: [
+        { who: "browser → cdn", req: true, headers: [
+          ["GET", "/avatars/me.jpg HTTP/1.1"],
+          ["Host", "cdn.example"],
+          ["Cookie", "(no cross-site cookies — third-party-cookie-blocked)"],
+          ["Sec-Fetch-Site", "cross-site"],
+          ["Sec-Fetch-Storage-Access", "inactive"],
+          ["Accept", "image/*"],
+        ], note: "browser advertises storage access is available but not active yet" },
+        { who: "cdn → browser", req: false, headers: [
+          ["HTTP/1.1", "401 Unauthorized"],
+          ["Activate-Storage-Access", "retry; allowed-origin=\"https://app.example\""],
+        ], note: "server says 'retry this request with SA active' — single header, no iframe" },
+        { who: "browser → cdn", req: true, headers: [
+          ["GET", "/avatars/me.jpg HTTP/1.1"],
+          ["Cookie", "session=abc123; user_id=42"],
+          ["Sec-Fetch-Storage-Access", "active"],
+        ], note: "browser retries with the unpartitioned cookies attached" },
+        { who: "cdn → browser", req: false, headers: [
+          ["HTTP/1.1", "200 OK"],
+          ["Content-Type", "image/jpeg"],
+          ["Cache-Control", "private, max-age=86400"],
+        ], note: "image loads — user sees their avatar" },
+      ],
+    },
+    fetch: {
+      label: "fetch() to API for personalised data",
+      hops: [
+        { who: "browser → api", req: true, headers: [
+          ["POST", "/v1/recommendations HTTP/1.1"],
+          ["Host", "api.example"],
+          ["Sec-Fetch-Storage-Access", "active"],
+          ["Cookie", "session=abc123"],
+          ["Content-Type", "application/json"],
+        ], note: "fetch() with credentials: 'include' — SA already activated this session" },
+        { who: "api → browser", req: false, headers: [
+          ["HTTP/1.1", "200 OK"],
+          ["Content-Type", "application/json"],
+        ], note: "personalised JSON streamed back — never needed an iframe" },
+      ],
+    },
+    script: {
+      label: "<script> needing identity cookies",
+      hops: [
+        { who: "browser → sso", req: true, headers: [
+          ["GET", "/widget.js HTTP/1.1"],
+          ["Host", "sso.example"],
+          ["Sec-Fetch-Site", "cross-site"],
+          ["Sec-Fetch-Storage-Access", "none"],
+        ], note: "first load — storage-access permission not yet granted" },
+        { who: "sso → browser", req: false, headers: [
+          ["HTTP/1.1", "401 Unauthorized"],
+          ["Activate-Storage-Access", "load"],
+        ], note: "server requests SA load-time prompt for this user" },
+        { who: "user", req: null, headers: [["(prompt)", "Allow app.example to use sso.example cookies?"]], note: "browser shows permission UI; user accepts" },
+        { who: "browser → sso", req: true, headers: [
+          ["GET", "/widget.js HTTP/1.1"],
+          ["Sec-Fetch-Storage-Access", "active"],
+          ["Cookie", "sso_session=xyz789"],
+        ], note: "browser retries with identity cookies" },
+        { who: "sso → browser", req: false, headers: [
+          ["HTTP/1.1", "200 OK"],
+          ["Content-Type", "application/javascript"],
+        ], note: "script executes with the full identity context" },
+      ],
+    },
+  };
+
+  const pipe = document.getElementById("pipeline");
+  const controls = document.querySelector(".controls");
+
+  function paint(id) {
+    const s = SCEN[id];
+    pipe.innerHTML = "";
+    for (const h of s.hops) {
+      const card = document.createElement("div");
+      card.className = "hop";
+      card.innerHTML = `<h3>${h.who}</h3>` +
+        `<pre>` +
+        h.headers.map(([k, v]) => {
+          if (k === "GET" || k === "POST" || k === "(prompt)") return `<span class="req">${k}</span> ${v}`;
+          if (k.startsWith("HTTP")) return `<span class="res">${k}</span> ${v}`;
+          return `<span class="hk">${k}:</span> <span class="h">${v}</span>`;
+        }).join("\n") +
+        `</pre>` +
+        `<p style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);margin:0.3rem 0 0">${h.note}</p>`;
+      pipe.appendChild(card);
+    }
+  }
+
+  controls.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b || !b.dataset.id) return;
+    for (const x of controls.querySelectorAll("button")) x.classList.remove("on");
+    b.classList.add("on");
+    paint(b.dataset.id);
+  });
+  paint("img");
+</script>
+</body>
+</html>
