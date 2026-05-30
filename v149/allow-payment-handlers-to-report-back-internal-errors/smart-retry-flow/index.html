@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Smart Retry Flow — Allow payment handlers to report back internal errors — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .checkout-frame {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      overflow: hidden;
+    }
+    .checkout-header {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: var(--space-3) var(--space-5);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .checkout-body {
+      padding: var(--space-5);
+      background: var(--bg-paper);
+    }
+    .order-summary {
+      border: 1px solid var(--border-black);
+      padding: var(--space-4);
+      background: var(--bg-stone);
+      margin-bottom: var(--space-4);
+    }
+    .order-line {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-charcoal);
+      padding: 0.2rem 0;
+    }
+    .order-line.total {
+      border-top: 1px solid var(--border-black);
+      margin-top: var(--space-2);
+      padding-top: var(--space-2);
+      font-weight: 500;
+      color: var(--text-black);
+    }
+
+    .payment-methods {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin-bottom: var(--space-4);
+    }
+    .method-btn {
+      font: inherit;
+      font-family: var(--font-sans);
+      font-size: 0.85rem;
+      font-weight: 500;
+      border: 2px solid var(--border-black);
+      padding: 0.65rem 1rem;
+      cursor: pointer;
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      color: var(--text-black);
+      transition: var(--transition);
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+    }
+    .method-btn:hover {
+      background: var(--bg-stone);
+      transform: translate(-1px, -1px);
+      box-shadow: var(--flat-shadow);
+    }
+    .method-btn:active {
+      transform: translate(1px, 1px);
+      box-shadow: none;
+    }
+    .method-btn.selected {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      box-shadow: var(--flat-shadow);
+    }
+    .method-btn.fallback {
+      border-color: var(--accent-amber);
+    }
+    .method-btn.fallback.selected {
+      background: var(--accent-amber);
+      border-color: var(--accent-amber);
+      color: var(--bg-ivory);
+    }
+
+    .pay-btn {
+      width: 100%;
+      font: inherit;
+      font-family: var(--font-sans);
+      font-weight: 600;
+      font-size: 1rem;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      border: 2px solid var(--border-black);
+      padding: 0.7rem 1.2rem;
+      box-shadow: var(--flat-shadow);
+      cursor: pointer;
+      transition: var(--transition);
+    }
+    .pay-btn:hover {
+      background: var(--bg-paper);
+      color: var(--text-black);
+      transform: translate(-2px, -2px);
+      box-shadow: var(--flat-shadow-hover);
+    }
+    .pay-btn:active {
+      transform: translate(1px, 1px);
+      box-shadow: var(--flat-shadow-active);
+    }
+    .pay-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    /* Result states */
+    .outcome-panel {
+      display: none;
+      padding: var(--space-4);
+      border: 2px solid var(--border-black);
+      margin-top: var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+    }
+    .outcome-panel.show { display: block; }
+    .outcome-panel.success { border-color: var(--accent-emerald); background: var(--bg-paper); }
+    .outcome-panel.cancel  { border-color: var(--accent-amber);  background: var(--bg-paper); }
+    .outcome-panel.retry   { border-color: var(--accent-rose);   background: var(--bg-paper); }
+
+    .outcome-title {
+      font-size: 1rem;
+      font-weight: 500;
+      margin-bottom: var(--space-2);
+    }
+    .outcome-title.ok     { color: var(--accent-emerald); }
+    .outcome-title.warn   { color: var(--accent-amber); }
+    .outcome-title.error  { color: var(--accent-rose); }
+
+    .log-trace {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+      margin-top: var(--space-3);
+      line-height: 1.7;
+    }
+
+    .scenario-chooser {
+      margin: var(--space-5) 0 var(--space-4);
+    }
+    .scenario-chooser label {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      margin-right: var(--space-3);
+    }
+    .scenario-chooser select {
+      font: inherit;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      border: 2px solid var(--border-black);
+      padding: 0.3rem 0.6rem;
+      background: var(--bg-paper);
+      color: var(--text-black);
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v149/allow-payment-handlers-to-report-back-internal-errors/">&larr; Allow payment handlers to report back internal errors</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v149 · Payments · demo</p>
+    <h1>Smart Retry Flow</h1>
+    <p class="lede">A simulated checkout that reacts differently to each error type: a user cancellation gets a gentle nudge to continue shopping, while an internal app error triggers an automatic retry with a fallback payment method.</p>
+  </header>
+
+  <div class="scenario-chooser">
+    <label for="outcome-select">Simulate payment handler outcome:</label>
+    <select id="outcome-select">
+      <option value="success">✓ Payment succeeds</option>
+      <option value="abort">✕ User cancels (AbortError)</option>
+      <option value="internal">⚠ Internal app error (OperationError)</option>
+    </select>
+  </div>
+
+  <div class="checkout-frame">
+    <div class="checkout-header">Checkout</div>
+    <div class="checkout-body">
+      <div class="order-summary">
+        <div class="order-line"><span>Premium Widget</span><span>£29.00</span></div>
+        <div class="order-line"><span>Shipping</span><span>£3.50</span></div>
+        <div class="order-line total"><span>Total</span><span>£32.50</span></div>
+      </div>
+
+      <div id="payment-step">
+        <div class="payment-methods">
+          <button class="method-btn selected" id="btn-primary" onclick="selectMethod('primary')">
+            💳 Card (primary)
+          </button>
+          <button class="method-btn fallback" id="btn-fallback" onclick="selectMethod('fallback')" style="display:none">
+            🏦 Bank transfer (fallback)
+          </button>
+        </div>
+        <button class="pay-btn" id="pay-btn" onclick="pay()">Pay £32.50</button>
+      </div>
+
+      <div class="outcome-panel" id="outcome-success">
+        <div class="outcome-title ok">✓ Payment confirmed</div>
+        <div>Your order #CHR-147 is on its way.</div>
+        <div class="log-trace">
+          err.name → <em>(no error)</em><br>
+          PaymentResponse.complete('success') called<br>
+          → show confirmation page
+        </div>
+      </div>
+
+      <div class="outcome-panel" id="outcome-cancel">
+        <div class="outcome-title warn">Payment cancelled</div>
+        <div>No worries — your basket is still saved. Ready when you are.</div>
+        <div class="log-trace">
+          err.name === 'AbortError' → <strong>true</strong><br>
+          → user made a deliberate choice<br>
+          → do NOT retry automatically<br>
+          → show "continue shopping" message
+        </div>
+        <button style="margin-top:var(--space-3)" onclick="resetCheckout()">← Continue shopping</button>
+      </div>
+
+      <div class="outcome-panel" id="outcome-retry">
+        <div class="outcome-title error">Payment app error — switching to fallback</div>
+        <div id="retry-status">⟳ Retrying with bank transfer…</div>
+        <div class="log-trace">
+          err.name === 'OperationError' → <strong>true</strong><br>
+          → internal handler failure, not user decision<br>
+          → auto-switch to fallback method<br>
+          → retry silently
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <pre><code>// merchant page — Chrome 149+
+async function pay(method) {
+  const request = new PaymentRequest([{ supportedMethods: method }], details);
+  try {
+    const response = await request.show();
+    await response.complete('success');
+    showOrderConfirmation(); // payment worked
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      // User pressed cancel — respect it, don't retry
+      showCancelMessage('Your basket is saved for later.');
+
+    } else if (err.name === 'OperationError') {
+      // Payment app bug — user didn't cancel, safe to retry
+      await pay(FALLBACK_METHOD); // switch to bank transfer
+
+    } else {
+      showGenericError(err.message);
+    }
+  }
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v149/allow-payment-handlers-to-report-back-internal-errors/error-signal-tester/">Error Signal Tester</a> — inspect each error name</li>
+      <li><a href="/v149/allow-payment-handlers-to-report-back-internal-errors/">Back to feature index</a></li>
+    </ul>
+  </section>
+
+  <script>
+    let selectedMethod = 'primary';
+
+    function selectMethod(m) {
+      selectedMethod = m;
+      document.getElementById('btn-primary').classList.toggle('selected', m === 'primary');
+      document.getElementById('btn-fallback').classList.toggle('selected', m === 'fallback');
+    }
+
+    function hideAllOutcomes() {
+      ['success', 'cancel', 'retry'].forEach(id => {
+        document.getElementById('outcome-' + id).classList.remove('show');
+      });
+    }
+
+    function resetCheckout() {
+      hideAllOutcomes();
+      document.getElementById('btn-fallback').style.display = 'none';
+      selectMethod('primary');
+      document.getElementById('payment-step').style.opacity = '1';
+      document.getElementById('pay-btn').disabled = false;
+    }
+
+    async function pay() {
+      const outcome = document.getElementById('outcome-select').value;
+      const payBtn = document.getElementById('pay-btn');
+      payBtn.disabled = true;
+      payBtn.textContent = '⟳ Processing…';
+
+      hideAllOutcomes();
+
+      await new Promise(r => setTimeout(r, 500));
+
+      if (outcome === 'success') {
+        document.getElementById('payment-step').style.opacity = '0.4';
+        document.getElementById('outcome-success').classList.add('show');
+        payBtn.textContent = '✓ Paid';
+        return;
+      }
+
+      if (outcome === 'abort') {
+        payBtn.disabled = false;
+        payBtn.textContent = 'Pay £32.50';
+        document.getElementById('outcome-cancel').classList.add('show');
+        return;
+      }
+
+      if (outcome === 'internal') {
+        // Show retry panel and switch to fallback
+        document.getElementById('outcome-retry').classList.add('show');
+        document.getElementById('btn-fallback').style.display = '';
+        selectMethod('fallback');
+
+        await new Promise(r => setTimeout(r, 1200));
+        document.getElementById('retry-status').textContent = '✓ Fallback payment succeeded';
+        document.getElementById('payment-step').style.opacity = '0.4';
+        payBtn.textContent = '✓ Paid via bank transfer';
+        return;
+      }
+    }
+  </script>
+</main>
+</body>
+</html>
