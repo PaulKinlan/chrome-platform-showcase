@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Silence Suppressor — Audio Level for RTC Encoded Frames — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; align-items: center; }
+    .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; }
+    .ctl-btn:hover { background: var(--bg-paper); color: var(--text-black); }
+    .status { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); margin: var(--space-3) 0; }
+    .status.ok { color: var(--accent-emerald); }
+    .status.warn { color: var(--accent-amber); }
+    .status.err { color: var(--accent-rose); }
+    .panel { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .threshold-row { display: grid; grid-template-columns: 1fr 60px; gap: var(--space-3); align-items: center; margin: var(--space-3) 0; }
+    .threshold-row label { font-family: var(--font-mono); font-size: 0.82rem; font-weight: 600; }
+    .threshold-row .val { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-muted); text-align: right; }
+    input[type="range"] { width: 100%; accent-color: var(--text-black); }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin: var(--space-4) 0; }
+    .stat { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); text-align: center; }
+    .stat .num { font-family: var(--font-display); font-size: 1.8rem; color: var(--text-black); }
+    .stat .lbl { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; }
+    .tape {
+      height: 36px;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      position: relative;
+      overflow: hidden;
+      margin: var(--space-3) 0;
+    }
+    .tape .cell {
+      position: absolute;
+      top: 0;
+      height: 100%;
+      width: 4px;
+    }
+    .tape .cell.sent { background: var(--accent-emerald); }
+    .tape .cell.dropped { background: var(--accent-rose); }
+    .legend { display: flex; gap: var(--space-4); font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); margin: var(--space-2) 0; flex-wrap: wrap; }
+    .legend-dot { display: inline-block; width: 0.9rem; height: 0.9rem; vertical-align: middle; margin-right: 0.3rem; border: 1px solid var(--border-black); }
+    .legend-dot.sent { background: var(--accent-emerald); }
+    .legend-dot.dropped { background: var(--accent-rose); }
+    .warn-block {
+      background: var(--bg-stone);
+      border-left: 4px solid var(--accent-amber);
+      padding: var(--space-3) var(--space-4);
+      margin: var(--space-4) 0;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      color: var(--text-charcoal);
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Audio level for RTC encoded frames</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>Silence Suppressor</h1>
+    <p class="lede">One of the explainer's named use cases: skip transmitting encoded audio frames whose <code>audioLevel</code> falls under a silence threshold, without decoding. This demo simulates that pipeline against a live mic — sent frames go green, dropped frames go red.</p>
+  </header>
+
+  <div class="warn-block">This page simulates the WebRTC Encoded Transform pipeline using <code>getUserMedia</code> + an <code>AnalyserNode</code>. The dropped/sent decision is the same one a real <code>TransformStream</code> over <code>RTCEncodedAudioFrame</code> would make, but no PeerConnection is opened. Open in Chrome 139+ and watch the bandwidth-saving math change with your voice.</div>
+
+  <div class="controls">
+    <button class="ctl-btn" id="start">Start mic</button>
+    <button class="ctl-btn" id="stop">Stop</button>
+  </div>
+
+  <div class="status" id="status">Click "Start" to grant mic permission. The threshold below is in dBov (lower number = louder; spec range is 0..127).</div>
+
+  <div class="panel">
+    <div class="threshold-row">
+      <label for="thresh">silence threshold (dBov)</label>
+      <input type="range" id="thresh" min="60" max="127" value="100">
+      <span class="val" id="thresh-val">100</span>
+    </div>
+    <p class="status">Frames whose audioLevel is greater than the threshold (quieter) are dropped.</p>
+    <div class="legend">
+      <span><span class="legend-dot sent"></span>frame sent</span>
+      <span><span class="legend-dot dropped"></span>frame dropped (silence)</span>
+    </div>
+    <div class="tape" id="tape"></div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="num" id="s-total">0</div><div class="lbl">total frames</div></div>
+    <div class="stat"><div class="num" id="s-sent">0</div><div class="lbl">sent</div></div>
+    <div class="stat"><div class="num" id="s-saved">0%</div><div class="lbl">bandwidth saved</div></div>
+  </div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>const sender = pc.getSenders().find(s =&gt; s.track.kind === "audio");
+const { readable, writable } = sender.createEncodedStreams();
+
+const SILENCE = 100; // dBov
+
+readable.pipeThrough(new TransformStream({
+  transform(frame, ctl) {
+    const md = frame.getMetadata();
+    // v139: audioLevel is on encoded-frame metadata, no decode needed
+    if (md.audioLevel &gt; SILENCE) {
+      // Quieter than threshold — drop. Saves uplink bandwidth in mostly-silent calls.
+      return;
+    }
+    ctl.enqueue(frame);
+  }
+})).pipeTo(writable);</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Audio level for RTC encoded frames feature page</a></li>
+      <li><a href="../encoded-frame-meter/">Encoded Frame Audio Level Meter demo</a></li>
+      <li><a href="https://github.com/guidou/webrtc-encoded-transform/blob/master/audio_level.md" target="_blank" rel="noopener">audio_level.md explainer</a></li>
+      <li><a href="https://chromestatus.com/feature/5206106602995712" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const status = document.getElementById('status');
+  const tape = document.getElementById('tape');
+  const threshIn = document.getElementById('thresh');
+  const threshVal = document.getElementById('thresh-val');
+  let stream, ac, analyser, raf;
+  let total = 0, sent = 0;
+  const cells = [];
+  const MAX_CELLS = 160;
+
+  threshIn.addEventListener('input', () => { threshVal.textContent = threshIn.value; });
+
+  function update() {
+    if (!analyser) return;
+    const buf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(buf);
+    let rms = 0;
+    for (const s of buf) rms += s * s;
+    rms = Math.sqrt(rms / buf.length);
+    const db = 20 * Math.log10(rms || 1e-10);
+    // Map -60..0 dBFS to 127..0 dBov-ish (lower dBov = louder)
+    const audioLevel = Math.round(Math.max(0, Math.min(127, -db * 2.1)));
+    const threshold = +threshIn.value;
+    const dropped = audioLevel > threshold;
+
+    total++;
+    if (!dropped) sent++;
+
+    const cell = document.createElement('div');
+    cell.className = 'cell ' + (dropped ? 'dropped' : 'sent');
+    cell.style.left = ((cells.length % MAX_CELLS) * 4) + 'px';
+    cells.push(cell);
+    tape.appendChild(cell);
+    if (cells.length > MAX_CELLS) {
+      const old = cells.shift();
+      old.remove();
+    }
+
+    document.getElementById('s-total').textContent = total;
+    document.getElementById('s-sent').textContent = sent;
+    const saved = total > 0 ? Math.round(((total - sent) / total) * 100) : 0;
+    document.getElementById('s-saved').textContent = saved + '%';
+
+    raf = requestAnimationFrame(update);
+  }
+
+  document.getElementById('start').addEventListener('click', async () => {
+    if (!navigator.mediaDevices) {
+      status.textContent = 'getUserMedia not available';
+      status.className = 'status err';
+      return;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      ac = new AudioContext();
+      const src = ac.createMediaStreamSource(stream);
+      analyser = ac.createAnalyser();
+      analyser.fftSize = 1024;
+      src.connect(analyser);
+      total = 0; sent = 0;
+      status.textContent = 'mic live — simulating per-frame audioLevel check against threshold';
+      status.className = 'status ok';
+      update();
+    } catch (e) {
+      status.textContent = 'getUserMedia failed: ' + e.message;
+      status.className = 'status err';
+    }
+  });
+
+  document.getElementById('stop').addEventListener('click', () => {
+    if (raf) cancelAnimationFrame(raf);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (ac) ac.close();
+    analyser = null;
+    status.textContent = 'stopped';
+    status.className = 'status warn';
+  });
+</script>
+</body>
+</html>
