@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Main thread vs worker latency — WebHID — Chrome 131</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; align-items: center; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .panel { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); box-shadow: var(--thin-shadow); }
+    .panel h3 { font-family: var(--font-display); font-size: 1rem; margin-bottom: var(--space-2); }
+    .panel .role { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; color: var(--text-muted); }
+    .panel .v { font-family: var(--font-display); font-size: 1.8rem; }
+    .panel.warn .v { color: var(--accent-rose); }
+    .panel.ok .v { color: var(--accent-emerald); }
+    canvas { display: block; width: 100%; height: 80px; background: var(--bg-stone); border: 1px solid var(--border-black); margin: var(--space-2) 0; }
+    .status { font-family: var(--font-mono); font-size: 0.8rem; padding: 0.5rem 0.8rem; border: 2px solid var(--border-black); background: var(--bg-stone); display: inline-block; margin: var(--space-3) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v131/">&larr; v131</a> &middot; <a href="../">WebHID in workers</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v131</p>
+    <h1>Main thread vs worker: input latency under load</h1>
+    <p class="lede">The motivating racing-wheel / MIDI-controller use case: a high-rate input device polled on the main thread suffers when layout/paint runs on the same thread. Move WebHID to a dedicated worker and input latency stays flat regardless of UI load. Drag the synthetic-jank slider.</p>
+  </header>
+
+  <div id="support" class="status"></div>
+
+  <div class="toolbar">
+    <button id="start">start simulated 1kHz input</button>
+    <button id="stop" disabled>stop</button>
+    <label style="font-family: var(--font-mono); font-size: 0.85rem;">main-thread jank: <input id="jank" type="range" min="0" max="100" value="0"> <span id="jank-val">0%</span></label>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <span class="role">poll on main thread</span>
+      <h3>old approach</h3>
+      <div class="v"><span id="main-lat">—</span>ms p99</div>
+      <canvas id="main-chart"></canvas>
+    </div>
+    <div class="panel">
+      <span class="role">poll in dedicated worker (131)</span>
+      <h3>new approach</h3>
+      <div class="v"><span id="worker-lat">—</span>ms p99</div>
+      <canvas id="worker-chart"></canvas>
+    </div>
+  </div>
+
+  <section>
+    <h2>the api</h2>
+<pre><code>// inside worker.js
+const devs = await navigator.hid.getDevices();
+const dev = devs[0];
+await dev.open();
+dev.addEventListener("inputreport", (e) =&gt; {
+  // post raw data back, or just process here
+  postMessage({ ts: performance.now(), data: e.data.buffer });
+});</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../webhid-worker/">Worker surface probe</a></li>
+      <li><a href="https://chromestatus.com/feature/5102950832939008" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://wicg.github.io/webhid/" target="_blank" rel="noopener">WebHID spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const hasWorkerHID = typeof navigator !== "undefined" && "hid" in navigator && typeof Worker !== "undefined";
+  document.getElementById("support").textContent = hasWorkerHID
+    ? "WebHID is exposed on this page; worker variant requires Chrome 131+ and a USB HID device."
+    : "WebHID not available — using simulated latency curves";
+
+  const mainChart = document.getElementById("main-chart");
+  const workerChart = document.getElementById("worker-chart");
+  const mainCtx = mainChart.getContext("2d");
+  const workerCtx = workerChart.getContext("2d");
+  let mainHist = new Array(200).fill(0), workerHist = new Array(200).fill(0);
+  let running = false, t = 0;
+
+  function draw(ctx, hist, max) {
+    const w = ctx.canvas.width = ctx.canvas.clientWidth * devicePixelRatio;
+    const h = ctx.canvas.height = ctx.canvas.clientHeight * devicePixelRatio;
+    ctx.fillStyle = "#f4f3ee"; ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    hist.forEach((v, i) => {
+      const x = (i / hist.length) * w;
+      const y = h - (Math.min(v, max) / max) * h;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  function tick() {
+    if (!running) return;
+    const jank = +document.getElementById("jank").value;
+    // main thread latency: 1ms baseline + spikes proportional to jank
+    const main = 1 + Math.random() * 2 + (Math.random() < (jank/100) ? Math.random() * 80 : 0);
+    // worker latency: 1-2ms regardless
+    const worker = 0.8 + Math.random() * 1.2;
+    mainHist.shift(); mainHist.push(main);
+    workerHist.shift(); workerHist.push(worker);
+    if (t % 6 === 0) {
+      // update p99 (approx max over window)
+      document.getElementById("main-lat").textContent = Math.max(...mainHist).toFixed(1);
+      document.getElementById("worker-lat").textContent = Math.max(...workerHist).toFixed(1);
+      draw(mainCtx, mainHist, 100);
+      draw(workerCtx, workerHist, 100);
+    }
+    t++;
+    setTimeout(tick, 8);
+  }
+
+  document.getElementById("start").addEventListener("click", () => {
+    running = true; document.getElementById("start").disabled = true; document.getElementById("stop").disabled = false; tick();
+  });
+  document.getElementById("stop").addEventListener("click", () => {
+    running = false; document.getElementById("start").disabled = false; document.getElementById("stop").disabled = true;
+  });
+  document.getElementById("jank").addEventListener("input", e => document.getElementById("jank-val").textContent = e.target.value + "%");
+  draw(mainCtx, mainHist, 100); draw(workerCtx, workerHist, 100);
+</script>
+</body>
+</html>
