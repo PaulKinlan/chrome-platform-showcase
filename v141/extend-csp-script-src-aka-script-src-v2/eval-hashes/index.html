@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eval Hashes — script-src-v2 — Chrome 141</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .demo-stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .feature-line { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.4rem 0.7rem; margin-bottom: var(--space-4); }
+    .ok { color: var(--accent-emerald); font-weight: 700; }
+    .miss { color: var(--accent-rose); font-weight: 700; }
+    .row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    textarea { width: 100%; min-height: 6rem; border: 2px solid var(--border-black); padding: 0.5rem 0.7rem; font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-ivory); color: var(--text-black); resize: vertical; }
+    .out { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.78rem; margin: var(--space-3) 0; color: var(--text-black); word-break: break-all; }
+    .compare { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0; }
+    .compare-col h4 { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.4rem; }
+    .compare-col .csp { background: var(--bg-stone); border: 2px solid var(--border-black); padding: 0.6rem 0.8rem; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-black); word-break: break-all; }
+    .bad { border-color: var(--accent-rose) !important; background: rgba(209, 26, 42, 0.05) !important; }
+    .good { border-color: var(--accent-emerald) !important; background: rgba(10, 143, 92, 0.05) !important; }
+    .scenario-title { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: var(--space-5) 0 var(--space-2); padding-bottom: 0.3rem; border-bottom: 1px solid var(--border-black); }
+    pre.code { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3) var(--space-4); font-size: 0.8rem; overflow-x: auto; }
+    .warn-block { border: 2px solid var(--accent-amber); background: var(--bg-paper); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; box-shadow: var(--thin-shadow); }
+    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--accent-amber); display: block; margin-bottom: 0.4rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; CSP script-src-v2</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v141</p>
+    <h1>Eval Hashes</h1>
+    <p class="lede">Replace blanket <code>'unsafe-eval'</code> with a hash per allowed string. The eval keyword lets exactly the code you signed off through; anything else throws as if eval were blocked. Type code, get the policy keyword that allows just that string.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Heads up</strong>
+    Requires Chrome 141+. <code>'unsafe-eval'</code> is one of the most common Lighthouse / security audit failures; <code>eval-sha256</code> is the migration path for the legitimate cases (template engines, expression evaluators, capability probes).
+  </div>
+
+  <div class="feature-line" id="probe">checking support…</div>
+
+  <div class="demo-stage">
+    <p class="scenario-title">paste the eval string</p>
+    <textarea id="src">console.log("Hello World")</textarea>
+    <div class="out" id="hashOut">computing…</div>
+
+    <div class="compare">
+      <div class="compare-col">
+        <h4>before — unsafe-eval</h4>
+        <div class="csp bad">Content-Security-Policy: script-src 'self' 'unsafe-eval'</div>
+        <p style="margin-top:0.4rem;font-family:var(--font-mono);font-size:0.7rem;color:var(--text-muted)">XSS payload reaches eval(attackerControlledString) and runs.</p>
+      </div>
+      <div class="compare-col">
+        <h4>after — eval-sha256 (v2)</h4>
+        <div class="csp good" id="evalCsp"></div>
+        <p style="margin-top:0.4rem;font-family:var(--font-mono);font-size:0.7rem;color:var(--text-muted)">only the exact pre-approved string evaluates. anything else throws EvalError.</p>
+      </div>
+    </div>
+
+    <p class="scenario-title">canonical use cases</p>
+    <ul style="font-family:var(--font-serif);font-size:0.95rem">
+      <li>Feature-detection probes: <code>new Function('return typeof Promise.allSettled === "function"')</code></li>
+      <li>Expression evaluators inside spreadsheets / formula bars</li>
+      <li>Template engine compiled output (Vue render functions, Lit static templates)</li>
+      <li>WASM bootstrap shims that build a glue function from a string</li>
+    </ul>
+  </div>
+
+  <section>
+    <h2>how the hash is computed</h2>
+<pre class="code"><code>async function evalHashKeyword(code) {
+  const buf = new TextEncoder().encode(code);
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(digest)));
+  return `'eval-sha256-${b64}'`;
+}
+
+// CSP header
+// Content-Security-Policy: script-src 'self' 'eval-sha256-Yy…='</code></pre>
+  </section>
+
+  <section>
+    <h2>why this angle</h2>
+    <p>The explainer calls out that <code>'unsafe-eval'</code> is binary — once it's there, every <code>eval</code>, <code>new Function</code>, and string-typed <code>setTimeout</code> runs without further checks, including ones an attacker chose. But many legitimate apps need <em>one</em> eval, often inside a library they can't replace. Per-string hashes let security teams enumerate the few real cases and drop the broad escape hatch. The diff between the two CSP headers below is the entire point.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../csp-v2/">csp-v2 (first concept)</a></li>
+      <li><a href="../url-hashes/">URL Hashes</a></li>
+      <li><a href="https://github.com/explainers-by-googlers/script-src-v2" target="_blank" rel="noopener">script-src-v2 explainer</a></li>
+      <li><a href="https://chromestatus.com/feature/5196368819519488" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probe = document.getElementById("probe");
+  const supported = typeof crypto !== "undefined" && typeof crypto.subtle !== "undefined";
+  probe.innerHTML = supported
+    ? 'crypto.subtle.digest <span class="ok">available</span> — hashing happens in-page'
+    : 'crypto.subtle <span class="miss">unavailable</span> (needs secure context)';
+
+  const srcEl = document.getElementById("src");
+  const hashOut = document.getElementById("hashOut");
+  const evalCsp = document.getElementById("evalCsp");
+
+  async function hashKeyword(code) {
+    const buf = new TextEncoder().encode(code);
+    const digest = await crypto.subtle.digest("SHA-256", buf);
+    let bin = "";
+    const bytes = new Uint8Array(digest);
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+
+  async function render() {
+    if (!supported) return;
+    const code = srcEl.value;
+    if (!code) { hashOut.textContent = "(empty)"; return; }
+    const b64 = await hashKeyword(code);
+    const kw = `'eval-sha256-${b64}'`;
+    hashOut.textContent = "eval-sha256 = " + b64;
+    evalCsp.textContent = "Content-Security-Policy: script-src 'self' " + kw;
+  }
+
+  srcEl.addEventListener("input", render);
+  render();
+</script>
+</body>
+</html>
