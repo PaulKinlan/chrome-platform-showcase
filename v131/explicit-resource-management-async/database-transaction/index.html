@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Async transaction with await using — Chrome 131</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .toolbar { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-4) 0; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .card { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); box-shadow: var(--thin-shadow); }
+    .card h3 { font-family: var(--font-display); font-size: 1rem; margin-bottom: var(--space-2); }
+    .card .role { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); }
+    .log { font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin: var(--space-3) 0; min-height: 200px; }
+    .log p { margin: 0.1rem 0; }
+    .ok { color: var(--accent-emerald); }
+    .err { color: var(--accent-rose); }
+    .info { color: var(--text-muted); }
+    .status { font-family: var(--font-mono); font-size: 0.8rem; padding: 0.5rem 0.8rem; border: 2px solid var(--border-black); background: var(--bg-stone); display: inline-block; margin: var(--space-3) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v131/">&larr; v131</a> &middot; <a href="../">await using</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v131</p>
+    <h1>Database transactions with await using</h1>
+    <p class="lede">The TC39 proposal's motivating use case wasn't <em>any</em> async resource — it was the database transaction. Acquire a connection, begin a transaction, do work, commit on success, roll back on error, always release the connection. With <code>await using</code>, that's three lines and one disposer.</p>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <span class="role">scenario</span>
+      <h3>commit (success)</h3>
+      <p style="font-family: var(--font-serif); font-size: 0.95rem; color: var(--text-charcoal);">All inserts succeed → the asyncDispose commits and releases the pooled connection.</p>
+    </div>
+    <div class="card">
+      <span class="role">scenario</span>
+      <h3>throw (failure)</h3>
+      <p style="font-family: var(--font-serif); font-size: 0.95rem; color: var(--text-charcoal);">One insert throws → the asyncDispose rolls back and still releases the connection.</p>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <button id="run-ok">run commit scenario</button>
+    <button id="run-fail">run throw scenario</button>
+    <button id="clear">clear</button>
+  </div>
+
+  <div id="support" class="status"></div>
+
+  <h2>log</h2>
+  <div class="log" id="log"></div>
+
+  <section>
+    <h2>the pattern</h2>
+<pre><code>async function* useTx(pool) {
+  const conn = await pool.acquire();
+  await conn.exec("BEGIN");
+  return {
+    conn,
+    async [Symbol.asyncDispose]() {
+      try { await conn.exec(this.committed ? "COMMIT" : "ROLLBACK"); }
+      finally { pool.release(conn); }
+    },
+    committed: false
+  };
+}
+
+async function transfer(pool, from, to, amount) {
+  await using tx = await useTx(pool);
+  await tx.conn.exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", [amount, from]);
+  await tx.conn.exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", [amount, to]);
+  tx.committed = true;
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../await-using/">try/finally vs await using comparison</a></li>
+      <li><a href="https://chromestatus.com/feature/5071680358842368" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/tc39/proposal-explicit-resource-management" target="_blank" rel="noopener">TC39 proposal</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const logEl = document.getElementById("log");
+  function log(cls, s) {
+    const p = document.createElement("p");
+    p.className = cls;
+    p.textContent = new Date().toLocaleTimeString() + " - " + s;
+    logEl.append(p);
+  }
+
+  const supported = typeof Symbol !== "undefined" && Symbol.asyncDispose !== undefined;
+  document.getElementById("support").textContent = supported
+    ? "supported: Symbol.asyncDispose exists"
+    : "not supported: Symbol.asyncDispose missing (need Chrome 131+)";
+
+  function makePool() {
+    let pooled = 1;
+    return {
+      acquire() { return new Promise(r => setTimeout(() => { pooled--; log("info", `pool: acquired (in pool: ${pooled})`); r({ exec: async (q) => log("", "  SQL: " + q) }); }, 30)); },
+      release(c) { pooled++; log("info", `pool: released (in pool: ${pooled})`); }
+    };
+  }
+
+  function makeTx(conn) {
+    return {
+      conn,
+      committed: false,
+      async [Symbol.asyncDispose]() {
+        try { await conn.exec(this.committed ? "COMMIT" : "ROLLBACK"); log(this.committed ? "ok" : "err", `tx: ${this.committed ? "committed" : "rolled back"}`); }
+        finally { /* release happens in pool simulator */ }
+      }
+    };
+  }
+
+  async function run(throwIt) {
+    logEl.innerHTML = "";
+    log("info", `scenario: ${throwIt ? "THROW" : "OK"}`);
+    const pool = makePool();
+    try {
+      const conn = await pool.acquire();
+      const tx = makeTx(conn);
+      try {
+        await tx.conn.exec("BEGIN");
+        await tx.conn.exec("UPDATE accounts SET balance = balance - 100 WHERE id = 'A'");
+        if (throwIt) throw new Error("insufficient funds");
+        await tx.conn.exec("UPDATE accounts SET balance = balance + 100 WHERE id = 'B'");
+        tx.committed = true;
+      } finally {
+        await tx[Symbol.asyncDispose]();
+        pool.release(conn);
+      }
+      log("ok", "scope exited cleanly");
+    } catch (e) {
+      log("err", `caught: ${e.message}`);
+    }
+  }
+
+  document.getElementById("run-ok").addEventListener("click", () => run(false));
+  document.getElementById("run-fail").addEventListener("click", () => run(true));
+  document.getElementById("clear").addEventListener("click", () => logEl.innerHTML = "");
+</script>
+</body>
+</html>
