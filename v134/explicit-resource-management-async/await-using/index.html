@@ -6,9 +6,13 @@
   <title>await using — Explicit resource management (async) — Chrome 134 — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    .card { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
-    .card pre { margin: 0; font-size: 0.85rem; padding: var(--space-3); overflow-x: auto; }
-    .card p { font-family: var(--font-serif); color: var(--text-charcoal); margin: 0 0 var(--space-3); }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .probe { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
+    .ok { color: var(--accent-emerald); font-weight: 600; }
+    .bad { color: var(--accent-rose); font-weight: 600; }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: var(--space-3) 0; }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; max-height: 280px; overflow-y: auto; }
+    .log p { margin: 0.1rem 0; white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -18,23 +22,100 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v134</p>
     <h1>await using</h1>
-    <p class="lede">await using statement for async disposal. Mirrors using for sync resources.</p>
+    <p class="lede"><code>await using db = await openDb()</code> defers <code>db[Symbol.asyncDispose]()</code> until the block exits. The buttons run real <code>await using</code> blocks against a fake async resource and stream the lifecycle to the log — including the throw-and-dispose ordering.</p>
   </header>
 
-  <div class="card">
-    <p>The canonical shape of the API:</p>
-<pre><code>await using db = await openDb();
-// db.dispose() runs at scope exit.</code></pre>
+  <div class="probe" id="probe">probing Symbol.asyncDispose...</div>
+
+  <h2>Try it</h2>
+  <div class="stage">
+    <div class="controls">
+      <button id="happy">happy path</button>
+      <button id="throws">throw inside block</button>
+      <button id="nested">nested resources</button>
+      <button id="clear">clear log</button>
+    </div>
+    <div class="log" id="log"></div>
   </div>
+
+  <h2>The code</h2>
+<pre><code>async function openDb(name) {
+  return {
+    name,
+    async [Symbol.asyncDispose]() { console.log("closing", name); }
+  };
+}
+
+async function example() {
+  await using db = await openDb("primary");
+  // ... use db ...
+}                                            // db is async-disposed HERE
+// (even if an exception is thrown)</code></pre>
 
   <section>
     <h2>see also</h2>
     <ul>
       <li><a href="../">Explicit resource management (async)</a> — feature index</li>
+      <li><a href="../../explicit-resource-management-sync/">sync counterpart (using)</a></li>
+      <li><a href="https://chromestatus.com/feature/5087324181102592" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://tc39.es/proposal-explicit-resource-management/" target="_blank" rel="noopener">TC39 proposal</a></li>
     </ul>
   </section>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+
+<script>
+  const probe = document.getElementById('probe');
+  const supported = typeof Symbol !== 'undefined' && typeof Symbol.asyncDispose !== 'undefined';
+  probe.innerHTML = supported
+    ? '<span class="ok">Symbol.asyncDispose present</span> — await using is parseable; runs natively below'
+    : '<span class="bad">Symbol.asyncDispose missing</span> — your engine will likely fail to parse the async resource block';
+
+  const log = document.getElementById('log');
+  function logLine(msg) {
+    const p = document.createElement('p');
+    p.textContent = new Date().toISOString().slice(11, 23) + '  ' + msg;
+    log.prepend(p);
+    while (log.children.length > 40) log.lastChild.remove();
+  }
+  document.getElementById('clear').addEventListener('click', () => log.innerHTML = '');
+
+  function makeResource(name) {
+    return {
+      name,
+      query: (q) => { logLine(`${name}.query(${q})`); return Promise.resolve('rows'); },
+      [Symbol.asyncDispose]: async () => {
+        logLine(`closing ${name}...`);
+        await new Promise(r => setTimeout(r, 80));
+        logLine(`${name} closed`);
+      },
+    };
+  }
+
+  function runAsync(body) {
+    // body: code that uses globals makeResource + logLine
+    const src = '(async () => { ' + body + ' })()';
+    return (new Function('makeResource', 'logLine', 'return ' + src))(makeResource, logLine);
+  }
+
+  document.getElementById('happy').addEventListener('click', async () => {
+    logLine('--- happy path ---');
+    try { await runAsync('await using db = makeResource("primary"); await db.query("SELECT 1"); logLine("end of block (db will be disposed)");'); }
+    catch (e) { logLine('caught: ' + e.message); }
+  });
+
+  document.getElementById('throws').addEventListener('click', async () => {
+    logLine('--- throw inside block ---');
+    try { await runAsync('await using db = makeResource("primary"); await db.query("SELECT 1"); logLine("about to throw"); throw new Error("boom");'); }
+    catch (e) { logLine('caught at top: ' + e.message + ' (dispose ran before the throw propagated)'); }
+  });
+
+  document.getElementById('nested').addEventListener('click', async () => {
+    logLine('--- nested resources ---');
+    try { await runAsync('await using a = makeResource("a"); await using b = makeResource("b"); await using c = makeResource("c"); logLine("end of block (dispose order: c, b, a — LIFO)");'); }
+    catch (e) { logLine('caught: ' + e.message); }
+  });
+</script>
 </body>
 </html>
