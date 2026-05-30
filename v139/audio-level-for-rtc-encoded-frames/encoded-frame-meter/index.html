@@ -3,43 +3,162 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Encoded Frame Audio Level — Audio Level for RTC Encoded Frames — Chrome 139 — chrome platform showcase</title>
+  <title>Encoded Frame Audio Level Meter — Chrome 139</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    .card { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
-    .card pre { margin: 0; font-size: 0.85rem; padding: var(--space-3); }
-    .card p { font-family: var(--font-serif); color: var(--text-charcoal); margin: 0 0 var(--space-3); }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; }
+    .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; }
+    .status { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); margin: var(--space-3) 0; }
+    .status.ok { color: var(--accent-emerald); }
+    .status.warn { color: var(--accent-amber); }
+    .status.err { color: var(--accent-rose); }
+    .meter {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .bar-row { display: grid; grid-template-columns: 60px 1fr 70px; gap: var(--space-3); align-items: center; margin: var(--space-2) 0; }
+    .bar { height: 22px; background: var(--bg-stone); border: 1px solid var(--border-black); position: relative; overflow: hidden; }
+    .bar-fill { height: 100%; background: var(--accent-emerald); transition: width 80ms linear; }
+    .bar-fill.hot { background: var(--accent-rose); }
+    .label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); text-transform: uppercase; }
+    .val { font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-black); text-align: right; }
+    canvas { width: 100%; height: 120px; background: var(--bg-paper); border: 2px solid var(--border-black); display: block; margin-top: var(--space-3); }
   </style>
 </head>
 <body>
 <main>
-  <p class="crumbs"><a href="../">&larr; Audio Level for RTC Encoded Frames</a></p>
+  <p class="crumbs"><a href="../">&larr; Audio level for RTC encoded frames</a></p>
 
   <header class="lede-block">
     <p class="eyebrow">demo · v139</p>
-    <h1>Encoded Frame Audio Level</h1>
-    <p class="lede">Each encoded audio frame now carries an audioLevel metadata field (0–127 dBov). Pipelines doing per-frame transforms can read it directly without decoding the frame.</p>
+    <h1>Encoded Frame Audio Level Meter</h1>
+    <p class="lede">Each encoded audio frame carries an audioLevel field (0–127 dBov). Pipelines doing per-frame transforms can read it without decoding. Click "Start" to mic-test against a real getUserMedia stream — the meter and trace render the level frame by frame.</p>
   </header>
 
-  <div class="card">
-    <p>The canonical shape of the API:</p>
-<pre><code>const transformer = new TransformStream({
+  <div class="controls">
+    <button class="ctl-btn" id="start">Start mic</button>
+    <button class="ctl-btn" id="stop">Stop</button>
+  </div>
+
+  <div class="status" id="status">Click "Start" to request mic permission.</div>
+
+  <div class="meter">
+    <div class="bar-row">
+      <div class="label">level</div>
+      <div class="bar"><div class="bar-fill" id="level-fill" style="width: 0%"></div></div>
+      <div class="val" id="level-val">—</div>
+    </div>
+    <div class="bar-row">
+      <div class="label">dBov</div>
+      <div class="bar"><div class="bar-fill" id="db-fill" style="width: 0%"></div></div>
+      <div class="val" id="db-val">—</div>
+    </div>
+    <canvas id="trace" width="700" height="120"></canvas>
+  </div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>const sender = pc.getSenders().find(s => s.track.kind === "audio");
+const encodedStream = sender.createEncodedStreams();
+
+const transformer = new TransformStream({
   transform(frame, ctl) {
-    console.log(&quot;level:&quot;, frame.getMetadata().audioLevel);
+    const md = frame.getMetadata();
+    // v139: md.audioLevel is 0..127 dBov (lower = louder)
+    levelMeter.update(md.audioLevel);
     ctl.enqueue(frame);
   }
 });
-encodedStream.readable.pipeThrough(transformer);</code></pre>
-  </div>
+
+encodedStream.readable.pipeThrough(transformer).pipeTo(encodedStream.writable);</code></pre>
+  </section>
 
   <section>
     <h2>see also</h2>
     <ul>
-      <li><a href="../">Audio Level for RTC Encoded Frames</a> — feature index</li>
+      <li><a href="../">RTC encoded frame audio level feature page</a></li>
+      <li><a href="https://chromestatus.com/feature/5206106602995712" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+
+<script>
+  const status = document.getElementById('status');
+  const trace = document.getElementById('trace');
+  const tctx = trace.getContext('2d');
+  const history = [];
+  let stream, analyser, raf, ac;
+
+  function drawTrace() {
+    tctx.fillStyle = '#fdfcf8';
+    tctx.fillRect(0, 0, trace.width, trace.height);
+    tctx.strokeStyle = '#0a8f5c';
+    tctx.lineWidth = 2;
+    tctx.beginPath();
+    history.forEach((v, i) => {
+      const x = i * (trace.width / 200);
+      const y = trace.height - (v / 127) * trace.height;
+      if (i === 0) tctx.moveTo(x, y); else tctx.lineTo(x, y);
+    });
+    tctx.stroke();
+  }
+
+  function tick() {
+    if (!analyser) return;
+    const buf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(buf);
+    let rms = 0;
+    for (const s of buf) rms += s * s;
+    rms = Math.sqrt(rms / buf.length);
+    const db = 20 * Math.log10(rms || 1e-10);
+    // map -60..0 dBFS to 0..127 dBov-ish
+    const audioLevel = Math.round(Math.max(0, Math.min(127, -db * 2.1)));
+    const fillPct = Math.max(0, 100 - (audioLevel / 127) * 100);
+    const isHot = audioLevel < 24;
+    const lf = document.getElementById('level-fill');
+    lf.style.width = fillPct + '%';
+    lf.classList.toggle('hot', isHot);
+    document.getElementById('level-val').textContent = audioLevel + '/127';
+    document.getElementById('db-val').textContent = db.toFixed(1) + ' dBFS';
+    const dbFill = Math.max(0, Math.min(100, (db + 60) / 60 * 100));
+    document.getElementById('db-fill').style.width = dbFill + '%';
+    history.push(127 - audioLevel);
+    while (history.length > 200) history.shift();
+    drawTrace();
+    raf = requestAnimationFrame(tick);
+  }
+
+  document.getElementById('start').addEventListener('click', async () => {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      ac = new AudioContext();
+      const src = ac.createMediaStreamSource(stream);
+      analyser = ac.createAnalyser();
+      analyser.fftSize = 2048;
+      src.connect(analyser);
+      status.textContent = 'mic streaming; computing per-frame audioLevel (simulating encoded-frame metadata)';
+      status.className = 'status ok';
+      tick();
+    } catch (e) {
+      status.textContent = 'getUserMedia failed: ' + e.message;
+      status.className = 'status err';
+    }
+  });
+  document.getElementById('stop').addEventListener('click', () => {
+    if (raf) cancelAnimationFrame(raf);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (ac) ac.close();
+    analyser = null;
+    status.textContent = 'stopped';
+    status.className = 'status warn';
+  });
+
+  drawTrace();
+</script>
 </body>
 </html>
