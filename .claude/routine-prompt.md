@@ -53,6 +53,14 @@ curl -s https://chromestatus.com/api/v0/channels | tail -c +6 > /tmp/channels.js
 Strip `)]}'\n`. `prev_stable = stable.mstone - 1`. Build order: prev_stable → stable → beta → dev.
 Within each, prefer features with the richest reference material.
 
+## Step 2b: Backfill scope (v140 → prev_stable - 1)
+
+After exhausting fresh work in the current channels, do **backfill** for older releases too. Iterate
+milestones from `prev_stable - 1` down to `140`. Within each, list candidates the same way as Step 3
+and skip any that already have a folder. **Cap backfill at 3 features per run** (regardless of how
+many milestones still have gaps) so a single run doesn't starve current-channel work in the next
+cycle. The 90-minute soft budget still applies on top of the cap.
+
 ## Step 3: List candidates per milestone
 
 ```bash
@@ -65,7 +73,8 @@ Iterate every category in `features_by_type`. For each feature, save the milesto
 
 ## Step 4: Build budget
 
-No per-run cap. 2 to 3 concept demos per feature. 2 strong demos beat 3 mediocre ones.
+No per-run cap on current-channel features. Backfill is capped at 3 per run (Step 2b). 2 to 3
+concept demos per feature. 2 strong demos beat 3 mediocre ones.
 
 ## Step 5: Fetch full detail
 
