@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Server-sync flow — pushsubscriptionchange — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); background: var(--bg-paper); padding: var(--space-4); margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .controls button { font-size: 0.85rem; padding: 0.45rem 0.9rem; }
+    .actors { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0; }
+    @media (max-width: 760px) { .actors { grid-template-columns: 1fr; } }
+    .actor { border: 2px solid var(--border-black); padding: var(--space-3); background: var(--bg-stone); }
+    .actor h3 { font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em; margin-bottom: var(--space-2); padding-bottom: var(--space-2); border-bottom: 1px solid var(--border-black); }
+    .endpoint { font-family: var(--font-mono); font-size: 0.74rem; word-break: break-all; padding: 0.4rem; background: var(--bg-paper); border: 1px solid var(--border-black); margin-top: var(--space-2); }
+    .endpoint.stale { background: #ffeaea; color: var(--accent-rose); text-decoration: line-through; }
+    .endpoint.fresh { background: #eaffea; color: var(--accent-emerald); }
+    .log { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin-top: var(--space-3); white-space: pre-wrap; max-height: 18rem; overflow-y: auto; }
+    .log .ok { color: var(--accent-emerald); font-weight: 600; }
+    .log .warn { color: var(--accent-rose); font-weight: 600; }
+    .log .info { color: var(--accent-blue); }
+    .toggle { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
+    .toggle label { font-family: var(--font-mono); font-size: 0.78rem; }
+    .toggle input { accent-color: var(--text-black); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; pushsubscriptionchange on resubscription</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>Server-sync flow</h1>
+    <p class="lede">Walk the three-actor dance: SW &rarr; browser push service &rarr; your backend. Trigger a key rotation (the case 138 added the event for) and watch the backend learn the new endpoint without the user reopening the page.</p>
+  </header>
+
+  <div class="stage">
+    <div class="controls">
+      <button id="subscribe">User subscribes</button>
+      <button id="rotate">Browser rotates VAPID key (silent resubscribe)</button>
+      <button id="send">Backend tries to send a push</button>
+      <button id="reset">reset</button>
+    </div>
+    <div class="toggle">
+      <label><input type="radio" name="ver" value="pre" checked> pre-138 (event only on unsubscribe)</label>
+      <label><input type="radio" name="ver" value="post"> 138 (event also on resubscribe)</label>
+    </div>
+
+    <div class="actors">
+      <div class="actor">
+        <h3>Service Worker</h3>
+        <div class="endpoint" id="sw-ep">no subscription</div>
+      </div>
+      <div class="actor">
+        <h3>Push service (FCM/Mozilla)</h3>
+        <div class="endpoint" id="ps-ep">no endpoint</div>
+      </div>
+      <div class="actor">
+        <h3>Your backend (subscription table)</h3>
+        <div class="endpoint" id="be-ep">empty</div>
+      </div>
+    </div>
+
+    <div class="log" id="log" aria-live="polite"></div>
+  </div>
+
+  <section>
+    <h2>the SW listener</h2>
+<pre><code>self.addEventListener("pushsubscriptionchange", async (event) =&gt; {
+  const { oldSubscription, newSubscription } = event;
+
+  // Pre-138: this event only fired on revoked/unsubscribed.
+  // 138+:    also fires on silent resubscription (key rotation, GCM &rarr; FCM migration, etc.)
+  if (newSubscription) {
+    await fetch("/api/push/replace", {
+      method: "POST",
+      body: JSON.stringify({
+        oldEndpoint: oldSubscription?.endpoint,
+        newEndpoint: newSubscription.endpoint,
+        keys: newSubscription.toJSON().keys,
+      }),
+    });
+  } else {
+    await fetch("/api/push/remove", { method: "POST", body: JSON.stringify({ endpoint: oldSubscription.endpoint }) });
+  }
+});</code></pre>
+    <p>The missing event was a long-standing bug-source: a browser would rotate VAPID keys (e.g. when migrating from GCM to FCM, or on cleanup), the old endpoint silently stopped accepting pushes, and the backend kept sending to the stale URL. The user would think they&rsquo;d unsubscribed even though the subscription was alive. 138 plugs that gap.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">pushsubscriptionchange on resubscription</a> &mdash; feature index</li>
+      <li><a href="../psc-resubscribe/">Event timeline demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5147683423256576" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const log = document.getElementById("log");
+  function logLine(kind, msg) {
+    const span = document.createElement("div");
+    span.innerHTML = `<span class="${kind}">${msg}</span>`;
+    log.appendChild(span);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  let state = { sw: null, ps: null, be: null };
+  function render() {
+    const sw = document.getElementById("sw-ep");
+    const ps = document.getElementById("ps-ep");
+    const be = document.getElementById("be-ep");
+    sw.textContent = state.sw ?? "no subscription";
+    sw.className = "endpoint" + (state.sw ? " fresh" : "");
+    ps.textContent = state.ps ?? "no endpoint";
+    ps.className = "endpoint" + (state.ps ? " fresh" : "");
+    be.textContent = state.be ?? "empty";
+    if (!state.be) be.className = "endpoint";
+    else if (state.be !== state.ps) { be.className = "endpoint stale"; }
+    else be.className = "endpoint fresh";
+  }
+
+  let counter = 1;
+  function makeEndpoint() { return "https://fcm.googleapis.com/wp/" + (Math.random().toString(36).slice(2, 12)) + counter++; }
+
+  document.getElementById("subscribe").addEventListener("click", () => {
+    const ep = makeEndpoint();
+    state = { sw: ep, ps: ep, be: ep };
+    render();
+    logLine("info", "User clicked Subscribe.");
+    logLine("ok", `Service Worker received PushSubscription { endpoint: ${ep.slice(0, 36)}… }`);
+    logLine("info", "SW POSTs the endpoint to /api/push/register.");
+    logLine("ok", "Backend stored subscription. Synced.");
+  });
+
+  document.getElementById("rotate").addEventListener("click", () => {
+    if (!state.ps) { logLine("warn", "No subscription to rotate. Subscribe first."); return; }
+    const oldEp = state.ps;
+    const newEp = makeEndpoint();
+    state.sw = newEp;
+    state.ps = newEp;
+    logLine("info", `Browser silently rotated the endpoint: ${oldEp.slice(0, 36)}… → ${newEp.slice(0, 36)}…`);
+    const ver = document.querySelector("input[name=ver]:checked").value;
+    if (ver === "post") {
+      logLine("ok", "138: pushsubscriptionchange fired with oldSubscription + newSubscription");
+      logLine("info", "SW handler runs: fetch('/api/push/replace', { oldEndpoint, newEndpoint })");
+      state.be = newEp;
+      logLine("ok", "Backend updated. State consistent across all three actors.");
+    } else {
+      logLine("warn", "pre-138: no event fired. Backend still holds the stale endpoint.");
+    }
+    render();
+  });
+
+  document.getElementById("send").addEventListener("click", () => {
+    if (!state.be) { logLine("warn", "Backend has no subscription. Subscribe first."); return; }
+    logLine("info", `Backend POSTs to ${state.be.slice(0, 36)}… via FCM`);
+    if (state.be === state.ps) {
+      logLine("ok", "Push delivered. User sees the notification.");
+    } else {
+      logLine("warn", `FCM returned 410 Gone — endpoint is stale. Push silently dropped. (Pre-138, the backend keeps trying this endpoint forever.)`);
+    }
+  });
+
+  document.getElementById("reset").addEventListener("click", () => {
+    state = { sw: null, ps: null, be: null };
+    log.innerHTML = "";
+    render();
+    logLine("info", "Reset. Click 'User subscribes' to begin.");
+  });
+
+  render();
+  logLine("info", "Ready. Try: Subscribe → Rotate (pre-138 mode) → Send push → switch to 138 mode → Rotate again → Send push.");
+</script>
+</body>
+</html>
