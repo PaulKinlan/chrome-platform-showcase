@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chunk Ordering — Out-of-order streaming — Chrome 150</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .pipeline-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      border: 1px solid var(--border-black);
+      margin-bottom: 1.5rem;
+    }
+    @media (max-width: 600px) { .pipeline-grid { grid-template-columns: 1fr; } }
+    .pipeline-col {
+      padding: 1rem;
+      background: var(--bg-paper);
+    }
+    .pipeline-col + .pipeline-col { border-left: 1px solid var(--border-black); }
+    @media (max-width: 600px) { .pipeline-col + .pipeline-col { border-left: none; border-top: 1px solid var(--border-black); } }
+    .pipeline-col h3 { font-size: 0.78rem; font-family: monospace; margin: 0 0 0.75rem; }
+    .pipeline-col.old h3 { color: var(--accent-rose); }
+    .pipeline-col.new h3 { color: var(--accent-emerald); }
+
+    .chunk-track {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      margin-bottom: 0.75rem;
+    }
+    .chunk-row {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.72rem;
+      font-family: monospace;
+    }
+    .chunk-label { color: var(--text-muted); width: 4rem; flex-shrink: 0; }
+    .chunk-bar {
+      height: 1.2rem;
+      border: 1px solid var(--border-black);
+      display: flex;
+      align-items: center;
+      padding: 0 0.3rem;
+      font-size: 0.62rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .chunk-bar.arrived { background: color-mix(in srgb, var(--accent-emerald) 15%, var(--bg-stone)); color: var(--accent-emerald); }
+    .chunk-bar.delayed { background: color-mix(in srgb, var(--accent-rose) 10%, var(--bg-stone)); color: var(--accent-rose); border-style: dashed; }
+    .chunk-bar.blocked { background: color-mix(in srgb, var(--text-muted) 10%, var(--bg-stone)); color: var(--text-muted); border-style: dashed; }
+    .chunk-bar.dispatched { background: color-mix(in srgb, var(--accent-blue) 15%, var(--bg-stone)); color: var(--accent-blue); }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+      font-size: 0.72rem;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      color: var(--text-charcoal);
+    }
+    .legend-swatch {
+      width: 0.75rem;
+      height: 0.75rem;
+      border: 1px solid var(--border-black);
+    }
+    .swatch-arrived { background: color-mix(in srgb, var(--accent-emerald) 15%, var(--bg-stone)); }
+    .swatch-delayed { background: color-mix(in srgb, var(--accent-rose) 10%, var(--bg-stone)); }
+    .swatch-blocked { background: color-mix(in srgb, var(--text-muted) 10%, var(--bg-stone)); }
+    .swatch-dispatched { background: color-mix(in srgb, var(--accent-blue) 15%, var(--bg-stone)); }
+
+    .impact-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+      margin-bottom: 1.5rem;
+    }
+    .impact-table th {
+      text-align: left;
+      padding: 0.4rem 0.6rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      font-family: monospace;
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+    }
+    .impact-table td {
+      padding: 0.4rem 0.6rem;
+      border: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+      vertical-align: top;
+    }
+    .better { color: var(--accent-emerald); font-weight: 700; }
+    .worse { color: var(--accent-rose); }
+
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.875rem;
+      color: var(--text-charcoal);
+    }
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs">
+    <a href="/v150/">&larr; Chrome 150</a> /
+    <a href="/v150/out-of-order-streaming/">Out-of-order streaming</a>
+  </p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v150 · Web APIs · Chunk Ordering</p>
+    <h1>Chunk Ordering</h1>
+    <p class="lede">What head-of-line blocking looks like at the <code>ReadableStream</code> level, and how Chrome 150's out-of-order dispatch removes the bottleneck.</p>
+  </header>
+
+  <section>
+    <h2>dispatch timeline: one delayed chunk</h2>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-swatch swatch-arrived"></div>arrived at network</div>
+      <div class="legend-item"><div class="legend-swatch swatch-delayed"></div>network delayed</div>
+      <div class="legend-item"><div class="legend-swatch swatch-blocked"></div>buffered / waiting</div>
+      <div class="legend-item"><div class="legend-swatch swatch-dispatched"></div>dispatched to reader</div>
+    </div>
+    <div class="pipeline-grid">
+      <div class="pipeline-col old">
+        <h3>Pre-Chrome 150 — in-order enforced</h3>
+        <div class="chunk-track">
+          <div class="chunk-row"><span class="chunk-label">Chunk 1</span><div class="chunk-bar arrived">arrived 0ms</div><div class="chunk-bar dispatched">dispatched ✓</div></div>
+          <div class="chunk-row"><span class="chunk-label">Chunk 2</span><div class="chunk-bar delayed">delayed…</div><div class="chunk-bar blocked">blocked</div></div>
+          <div class="chunk-row"><span class="chunk-label">Chunk 3</span><div class="chunk-bar arrived">arrived</div><div class="chunk-bar blocked">blocked — waiting for 2</div></div>
+          <div class="chunk-row"><span class="chunk-label">Chunk 4</span><div class="chunk-bar arrived">arrived</div><div class="chunk-bar blocked">blocked — waiting for 2</div></div>
+          <div class="chunk-row"><span class="chunk-label">Chunk 2</span><div class="chunk-bar arrived">finally arrived</div><div class="chunk-bar dispatched">2 → 3 → 4 flushed</div></div>
+        </div>
+        <p style="font-size:0.75rem;color:var(--text-charcoal);">Chunks 3 and 4 were ready but couldn't be delivered. Head-of-line blocking stalls the reader.</p>
+      </div>
+      <div class="pipeline-col new">
+        <h3>Chrome 150+ — out-of-order dispatch</h3>
+        <div class="chunk-track">
+          <div class="chunk-row"><span class="chunk-label">Chunk 1</span><div class="chunk-bar arrived">arrived 0ms</div><div class="chunk-bar dispatched">dispatched ✓</div></div>
+          <div class="chunk-row"><span class="chunk-label">Chunk 2</span><div class="chunk-bar delayed">delayed…</div><div class="chunk-bar blocked">waiting</div></div>
+          <div class="chunk-row"><span class="chunk-label">Chunk 3</span><div class="chunk-bar arrived">arrived</div><div class="chunk-bar dispatched">dispatched ✓</div></div>
+          <div class="chunk-row"><span class="chunk-label">Chunk 4</span><div class="chunk-bar arrived">arrived</div><div class="chunk-bar dispatched">dispatched ✓</div></div>
+          <div class="chunk-row"><span class="chunk-label">Chunk 2</span><div class="chunk-bar arrived">finally arrived</div><div class="chunk-bar dispatched">dispatched ✓</div></div>
+        </div>
+        <p style="font-size:0.75rem;color:var(--text-charcoal);">Chunks 3 and 4 delivered as soon as they arrive. Only chunk 2 itself is delayed — no blocking cascade.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>performance impact</h2>
+    <table class="impact-table">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>Pre-Chrome 150</th>
+          <th>Chrome 150+</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Time to first meaningful content</td>
+          <td>Delayed if any early chunk is slow</td>
+          <td class="better">Available chunks render immediately</td>
+        </tr>
+        <tr>
+          <td>Time to complete stream</td>
+          <td>Same (bottlenecked by slowest chunk)</td>
+          <td>Same (bottlenecked by slowest chunk)</td>
+        </tr>
+        <tr>
+          <td>Server-sent events / SSE</td>
+          <td class="worse">Re-ordering buffer adds latency</td>
+          <td class="better">Events dispatched as they arrive</td>
+        </tr>
+        <tr>
+          <td>LLM token streaming</td>
+          <td class="worse">Stall when a chunk is re-transmitted</td>
+          <td class="better">Surrounding tokens still flow</td>
+        </tr>
+        <tr>
+          <td>HTTP/3 QUIC stream retransmit</td>
+          <td class="worse">Retransmit blocks subsequent chunks</td>
+          <td class="better">Available chunks dispatched immediately</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>use cases</h2>
+    <ul style="font-size:0.875rem;color:var(--text-charcoal);line-height:1.8;padding-left:1.25rem;">
+      <li><strong>LLM token streaming</strong> — generated tokens arrive one at a time; a retransmitted packet no longer pauses the token display</li>
+      <li><strong>Progressive HTML streaming</strong> — later sections of a page render without waiting for a slow earlier section</li>
+      <li><strong>Server-sent events</strong> — real-time updates flow past any delayed event without queuing</li>
+      <li><strong>Live data dashboards</strong> — chart updates continue while a stale data chunk is re-fetched</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>no API changes required</h2>
+    <pre><code>// The ReadableStream API is unchanged.
+// Out-of-order dispatch is an internal browser improvement.
+// Your existing reader code automatically benefits:
+
+const response = await fetch('/api/tokens');
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  // Chrome 150+: read() resolves as soon as ANY chunk is available,
+  // not just the next expected chunk in sequence.
+  appendToken(decoder.decode(value, { stream: true }));
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../streaming-demo/">Streaming Demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5111042975465472" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Streams_API" target="_blank" rel="noopener">MDN — Streams API</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
