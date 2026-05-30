@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jitter budget visualiser — RTC encoded frame timestamps — Chrome 135</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .pill { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; padding: 0.2rem 0.55rem; border: 1px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); }
+    .pill.ok { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .pill.bad { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    canvas { background: var(--bg-stone); border: 2px solid var(--border-black); width: 100%; height: 200px; }
+    .gauge { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .gauge { grid-template-columns: 1fr; } }
+    .num { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); text-align: center; }
+    .num h5 { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0; }
+    .num .v { font-family: var(--font-display); font-size: 2rem; font-variant-numeric: tabular-nums; margin: 0.3rem 0 0; }
+    .num .u { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; RTC encoded frame timestamps</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v135</p>
+    <h1>Jitter budget &mdash; the use case for capture/receive timestamps</h1>
+    <p class="lede">Why the encoded-frame timestamps matter for real apps: an end-to-end media tester needs to know how much of the glass-to-glass latency is in capture, in network transit, in jitter buffer, and in render. Pre-135, all the encoded-transform middleware saw was the RTP timestamp &mdash; useless without a wall-clock anchor. The new <code>captureTime</code> and <code>receiveTime</code> properties on <code>RTCEncodedVideoFrame.metadata</code> let you slice the budget. Simulator below feeds synthetic frames through; the chart updates in real time.</p>
+  </header>
+
+  <div class="stage">
+    <div class="row">
+      <span class="pill" id="cap">RTCEncodedVideoFrame: ?</span>
+      <button id="start">start</button>
+      <button id="stop">stop</button>
+    </div>
+
+    <canvas id="chart" width="800" height="200"></canvas>
+
+    <div class="gauge">
+      <div class="num"><h5>capture &rarr; encode</h5><div class="v" id="enc">—</div><div class="u">ms</div></div>
+      <div class="num"><h5>encode &rarr; receive</h5><div class="v" id="net">—</div><div class="u">ms</div></div>
+      <div class="num"><h5>receive &rarr; render</h5><div class="v" id="ren">—</div><div class="u">ms</div></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>const tr = new RTCRtpScriptTransform(worker, { side: "receiver" });
+receiver.transform = tr;
+
+// In the worker:
+self.onrtctransform = (e) =&gt; {
+  const reader = e.transformer.readable.getReader();
+  while (true) {
+    const { value: frame, done } = await reader.read();
+    if (done) break;
+    const { captureTime, receiveTime } = frame.metadata; // NEW in 135
+    histogram.push(receiveTime - captureTime);
+    writer.write(frame);
+  }
+};</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">RTC encoded frame timestamps</a></li>
+      <li><a href="../encoded-ts/">Original demo</a></li>
+      <li><a href="https://chromestatus.com/feature/6294486420029440" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+const cap = document.getElementById("cap");
+const supported = "RTCEncodedVideoFrame" in window;
+cap.textContent = supported ? "RTCEncodedVideoFrame: yes" : "RTCEncodedVideoFrame: no";
+cap.classList.add(supported ? "ok" : "bad");
+const canvas = document.getElementById("chart");
+const ctx = canvas.getContext("2d");
+let buf = [], running = false, raf;
+function draw() {
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.strokeStyle = "#000"; ctx.lineWidth = 1;
+  for (let y = H; y > 0; y -= 30) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.globalAlpha = 0.1; ctx.stroke(); ctx.globalAlpha = 1; }
+  // 3 traces: enc, net, ren
+  const colors = ["#0022ff", "#d11a2a", "#0a8f5c"];
+  for (let trace = 0; trace < 3; trace++) {
+    ctx.strokeStyle = colors[trace]; ctx.lineWidth = 1.5; ctx.beginPath();
+    buf.forEach((b, i) => {
+      const x = (i / Math.max(buf.length, 1)) * W;
+      const y = H - b[trace] * 2;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+}
+function tick() {
+  if (!running) return;
+  const enc = 8 + Math.random() * 6;
+  const net = 25 + Math.random() * 40 + (Math.random() < 0.05 ? 60 : 0);
+  const ren = 6 + Math.random() * 4;
+  buf.push([enc, net, ren]);
+  if (buf.length > 200) buf.shift();
+  document.getElementById("enc").textContent = enc.toFixed(1);
+  document.getElementById("net").textContent = net.toFixed(1);
+  document.getElementById("ren").textContent = ren.toFixed(1);
+  draw();
+  raf = setTimeout(tick, 60);
+}
+document.getElementById("start").addEventListener("click", () => { running = true; tick(); });
+document.getElementById("stop").addEventListener("click", () => { running = false; clearTimeout(raf); });
+</script>
+</body>
+</html>
