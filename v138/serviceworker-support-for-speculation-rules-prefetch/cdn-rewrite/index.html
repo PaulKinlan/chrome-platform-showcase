@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CDN rewrite — Service Worker + Speculation Rules — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); background: var(--bg-paper); padding: var(--space-4); margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .controls button { font-size: 0.78rem; padding: 0.4rem 0.85rem; }
+    .pipe { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: center; gap: var(--space-3); margin: var(--space-4) 0; }
+    @media (max-width: 760px) { .pipe { grid-template-columns: 1fr; } .pipe .arrow { display: none; } }
+    .pipe .node { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; min-height: 6rem; }
+    .pipe .node h4 { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em; margin-bottom: var(--space-2); }
+    .pipe .arrow { font-family: var(--font-mono); font-size: 1.4rem; color: var(--text-muted); text-align: center; }
+    .log { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin-top: var(--space-3); white-space: pre-wrap; max-height: 14rem; overflow-y: auto; }
+    .log .ok { color: var(--accent-emerald); font-weight: 600; }
+    .log .warn { color: var(--accent-rose); font-weight: 600; }
+    .log .info { color: var(--accent-blue); }
+    .rule-mode { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; font-family: var(--font-mono); font-size: 0.78rem; }
+    .rule-mode label { display: flex; gap: 0.3rem; align-items: center; }
+    .rule-mode input { accent-color: var(--text-black); }
+    .warn-block { border: 2px solid var(--accent-amber); background: #fff8e6; padding: var(--space-3); margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.5; }
+    .warn-block strong { color: var(--accent-amber); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; SW support for speculation-rules prefetch</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>CDN-rewrite at the Service Worker</h1>
+    <p class="lede">Before 138, speculation-rule prefetches bypassed the Service Worker entirely &mdash; so SW-routed sites lost the prefetch optimisation, and any CDN-routing or auth-injection logic broke for speculative requests. 138 routes them through the SW so it can do exactly the same rewriting it does for real navigations.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Behind a flag in some channels.</strong> Enable <code>chrome://flags/#service-worker-speculation-rules-prefetch</code>. The demo simulates the SW behaviour so the pipeline still illustrates without registering one.
+  </div>
+
+  <div class="stage">
+    <div class="rule-mode">
+      <label><input type="radio" name="ver" value="pre"> pre-138 (SW skipped for prefetch)</label>
+      <label><input type="radio" name="ver" value="post" checked> 138 (SW handles prefetch)</label>
+    </div>
+
+    <div class="controls">
+      <button data-url="/products/138-list">prefetch /products/138-list</button>
+      <button data-url="/account/profile">prefetch /account/profile</button>
+      <button data-url="/api/recommendations">prefetch /api/recommendations</button>
+      <button id="reset">reset</button>
+    </div>
+
+    <div class="pipe">
+      <div class="node">
+        <h4>speculation rule</h4>
+        <div id="n1">awaiting prefetch&hellip;</div>
+      </div>
+      <div class="arrow">&rarr;</div>
+      <div class="node">
+        <h4>Service Worker fetch handler</h4>
+        <div id="n2">no event</div>
+      </div>
+      <div class="arrow">&rarr;</div>
+      <div class="node">
+        <h4>actual outbound request</h4>
+        <div id="n3">none</div>
+      </div>
+    </div>
+
+    <div class="log" id="log" aria-live="polite"></div>
+  </div>
+
+  <section>
+    <h2>the SW handler</h2>
+<pre><code>// In 138, prefetches from speculation rules generate a fetch event in the SW
+// with request.mode === "navigate" and a Sec-Purpose: prefetch header.
+self.addEventListener("fetch", (event) =&gt; {
+  const req = event.request;
+  const sp = req.headers.get("Sec-Purpose") || "";
+
+  // Auth header injection (couldn't do this for prefetch pre-138)
+  let r = req;
+  if (req.url.startsWith(self.location.origin + "/account/")) {
+    r = new Request(req, { headers: { ...req.headers, Authorization: "Bearer " + (await getToken()) } });
+  }
+
+  // CDN rewrite — route /products/* via the regional edge
+  const u = new URL(r.url);
+  if (u.pathname.startsWith("/products/")) {
+    u.host = "edge-eu.example.com";
+    r = new Request(u.toString(), r);
+  }
+
+  // Skip server-side analytics for speculative requests; log a counter instead
+  if (sp.includes("prefetch")) counter.add({ name: "speculative_prefetch" });
+
+  event.respondWith(fetch(r));
+});</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">SW support for speculation-rules prefetch</a> &mdash; feature index</li>
+      <li><a href="../sw-spec-prefetch/">SW + speculation rules basics</a></li>
+      <li><a href="https://chromestatus.com/feature/4996410105397248" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const log = document.getElementById("log");
+  const $ = (id) => document.getElementById(id);
+  function logLine(kind, msg) {
+    const span = document.createElement("div");
+    span.innerHTML = `<span class="${kind}">${msg}</span>`;
+    log.appendChild(span);
+    log.scrollTop = log.scrollHeight;
+  }
+  function modeIs() { return document.querySelector("input[name=ver]:checked").value; }
+
+  function rewrite(url) {
+    let final = url;
+    let auth = false;
+    if (url.startsWith("/account/")) { auth = true; }
+    if (url.startsWith("/products/")) { final = "https://edge-eu.example.com" + url; }
+    return { final, auth };
+  }
+
+  document.querySelectorAll("[data-url]").forEach((b) => b.addEventListener("click", () => {
+    const url = b.dataset.url;
+    $("n1").textContent = `<script type="speculationrules">
+{
+  "prefetch": [{ "urls": ["${url}"] }]
+}
+</` + `script>`;
+    logLine("info", `Speculation rule triggered prefetch of ${url}`);
+    if (modeIs() === "pre") {
+      $("n2").innerHTML = "<span style='color:var(--text-muted)'>(SW skipped)</span>";
+      $("n3").textContent = `GET ${url} HTTP/2\nHost: ${location.host}\n(no SW rewriting, no auth, no CDN routing)`;
+      logLine("warn", "pre-138: prefetch bypasses the Service Worker. CDN-rewrite logic does not run.");
+    } else {
+      const { final, auth } = rewrite(url);
+      $("n2").textContent = `fetch event: ${url}\nSec-Purpose: prefetch\nrewrite: ${final !== url ? "yes &rarr; " + final : "passthrough"}\nauth-inject: ${auth ? "yes" : "no"}`;
+      $("n2").innerHTML = $("n2").textContent.replace(/\n/g, "<br>");
+      $("n3").textContent = `GET ${final} HTTP/2\nHost: ${new URL(final, location.href).host}\n${auth ? "Authorization: Bearer ey…\n" : ""}Sec-Purpose: prefetch`;
+      logLine("ok", `138: SW received fetch event, rewrote &rarr; ${final}${auth ? " (auth injected)" : ""}`);
+    }
+  }));
+  document.getElementById("reset").addEventListener("click", () => {
+    $("n1").textContent = "awaiting prefetch…";
+    $("n2").textContent = "no event";
+    $("n3").textContent = "none";
+    log.innerHTML = "";
+  });
+</script>
+</body>
+</html>
