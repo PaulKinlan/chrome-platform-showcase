@@ -89,10 +89,32 @@ browsers.chrome.origintrial, blink_components).
 Slug + folder path were already decided in Step 3 from the listing. The H1 is the LISTING name, not
 the detail name.
 
-## Step 6: Design demos
+## Step 6: Design demos — interactive only, no exceptions
 
-Distinct, premium, interactive. Use the actual API. CSS → before/after slider. HTTP → server-render
-different responses (this is Deno). DOM/JS → live REPL or click-to-run.
+**Every concept demo must be interactive.** A static code-card (snippet + blurb + no UI) is NOT a
+concept demo and is unacceptable. If you can't make the feature interactive on a page in 5
+minutes, slow down and figure out how — don't ship a card. Use the right interaction for the
+feature type:
+
+- **CSS features** → live stage + toggle/slider/before-after that changes the rendered output as
+  the visitor interacts.
+- **DOM / JS features** → a try-it button that actually invokes the API and shows the result.
+  Feature-detect and degrade gracefully if the API isn't shipped yet on the visitor's browser.
+- **HTTP / header / MIME / cache / redirect / network features** → use the Deno server. Add a
+  route under the feature folder (e.g. `v<N>/<slug>/echo`) in `server.ts` that responds with the
+  relevant header / redirect / content-type behaviour. The concept page fetches from that route
+  and surfaces the negotiated outcome. ROUTINE NOTE: you are fenced out of top-level files; for
+  server-route demos, generate the feature index + concept page using the path you'd want, and
+  add a one-line TODO in the feature index referencing the route name + behaviour so the human
+  reviewer can wire it in `server.ts`. Do NOT skip the feature and do NOT downgrade to a static
+  card.
+- **Origin trial / behind-a-flag features** → ship the interactive demo, plus a visible warning
+  banner at the top: "To run this for real, enable chrome://flags/#X or join the origin trial."
+  Don't skip. Don't downgrade.
+- **OS-specific / device-specific features** → feature-detection probe AND a before-vs-after
+  rendered comparison where the difference is visual.
+- **Removals / deprecations** → feature-detection probe ("X removed in this browser? yes/no")
+  paired with a working example of the replacement API.
 
 Name each concept with a short evocative title. Slug it with the same rules.
 

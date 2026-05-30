@@ -111,7 +111,38 @@ The global `button` rule in `public/styles.css` sets BOTH `background: var(--tex
 `color: var(--bg-ivory)`. A page-local rule like `.method-btn { background: var(--bg-ivory); }`
 keeps inheriting the global light text → light-on-light invisible. Bug history: `308580a`.
 
-### 7. Routine never edits top-level files
+### 7. Every concept demo MUST be interactive — never ship a static code-card
+
+A "concept" is supposed to be hands-on. The shape depends on what the feature actually is:
+
+- **CSS features** → live stage + a toggle / slider / before-after that changes the rendered
+  output as the user interacts. A canonical sample paragraph styled with the new property, plus
+  buttons to flip between values, is the minimum.
+- **DOM / JS features** → a "try it" button that actually invokes the API in-page and shows the
+  return value or side effect. Feature-detect and fall back gracefully if the API is missing.
+- **HTTP / header / MIME / cache / redirect features** → server-side. Add a route under the
+  feature folder (e.g. `v<N>/<slug>/echo`) that the server responds to with the relevant header,
+  redirect, or content-type behaviour. The concept page then fetches from that route and surfaces
+  the negotiated outcome (headers, status, response body) in the page. `server.ts` is the place
+  to wire this in — the routine is normally fenced out of top-level files, so if a routine run
+  ends up needing a server route, queue it as a manual task.
+- **Origin trial / behind-a-flag features** → ship the interactive demo anyway, with a clearly
+  visible "to actually run this, enable chrome://flags/#X or join the origin trial" banner up
+  top. Visitors will read it. Don't skip the demo because the API might not resolve — the demo
+  should attempt the call, show what it returns, and degrade.
+- **OS-specific or device-specific features** → use a feature-detection probe to show a real
+  read of capability, and pair with a before-vs-after rendered comparison where the underlying
+  difference is visual.
+- **Removals / deprecations** → a feature-detection probe is acceptable ("X removed in this
+  browser? yes/no"), but pair it with a working example of the recommended replacement API so
+  the page is useful, not just historical.
+
+Pure code-snippet cards (snippet + paragraph + no UI) are NOT acceptable as concept pages. Bug
+history: 2026-05-30, mass backfill of v130-v144 shipped static cards in the name of throughput;
+Paul flagged it as a serious regression because the site is live and depth matters more than
+coverage. Don't repeat.
+
+### 8. Routine never edits top-level files
 
 The routine prompt is constrained to writing inside `v<N>/`. `server.ts`, `lib/`, `public/`,
 `deno.json`, `CLAUDE.md` are all off-limits to the routine. If you ever see commits touching those
