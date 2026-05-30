@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Service Discovery — Multicast Direct Sockets — Chrome 142</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .warn-block {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.5;
+      margin: 0 0 var(--space-4);
+    }
+    .net-diagram {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-4);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 700px) { .net-diagram { grid-template-columns: 1fr; } }
+    .lane {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+      min-height: 240px;
+    }
+    .lane h3 {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin: 0 0 var(--space-3);
+    }
+    .service {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      margin-bottom: var(--space-2);
+      transition: var(--transition);
+    }
+    .service.found {
+      background: var(--accent-emerald);
+      color: var(--bg-ivory);
+      border-color: var(--accent-emerald);
+    }
+    .service .ip { color: var(--text-muted); font-size: 0.72rem; }
+    .service.found .ip { color: rgba(255,255,255,0.8); }
+
+    .controls { display: flex; gap: var(--space-3); margin: var(--space-3) 0; flex-wrap: wrap; align-items: center; }
+    .controls label { font-family: var(--font-mono); font-size: 0.85rem; display: flex; gap: var(--space-2); align-items: center; }
+    .controls input[type="text"] {
+      border: 2px solid var(--border-black);
+      padding: 0.4rem 0.6rem;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      background: var(--bg-paper);
+      color: var(--text-black);
+      width: 140px;
+    }
+
+    .packet-log {
+      background: var(--text-black);
+      color: #d8d8d8;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      padding: var(--space-3);
+      border: 2px solid var(--border-black);
+      margin: var(--space-3) 0;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .packet-log .send { color: #f2c649; }
+    .packet-log .recv { color: #5fb964; }
+
+    .readout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 600px) { .readout { grid-template-columns: 1fr; } }
+    .stat {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .stat-label {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 0.3rem;
+    }
+    .stat-val { font-family: var(--font-mono); font-size: 0.95rem; color: var(--text-black); }
+    .stat-val.on { color: var(--accent-emerald); }
+    .stat-val.off { color: var(--accent-rose); }
+    .note { font-family: var(--font-mono); color: var(--text-muted); font-size: 0.85rem; margin-top: var(--space-3); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Multicast Direct Sockets</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v142</p>
+    <h1>Service Discovery (mDNS-style)</h1>
+    <p class="lede">The scenario that drove the IWA spec authors to add multicast: peer service discovery without a central rendezvous server. An Isolated Web App joins the well-known group <code>224.0.0.251:5353</code> (the mDNS address), broadcasts a query, and any matching service on the LAN replies. The simulation below runs that exchange in the browser tab; the real <code>UDPSocket</code> with <code>multicastInterface</code> only works inside an installed IWA on Chrome 142+.</p>
+  </header>
+
+  <section class="stage">
+    <div class="warn-block">
+      Real multicast UDPSocket is gated to Isolated Web Apps. Try the constructor below — outside an IWA it throws. Inside an IWA on Chrome 142+, the socket binds and joins the group.
+    </div>
+
+    <div class="controls">
+      <label>service query: <input id="q" type="text" value="_printer._tcp"></label>
+      <button id="discover">send discovery</button>
+      <button id="real">try real UDPSocket</button>
+    </div>
+
+    <div class="net-diagram">
+      <div class="lane">
+        <h3>this peer</h3>
+        <div class="service">
+          <strong>browser tab</strong>
+          <div class="ip">joined 224.0.0.251:5353</div>
+        </div>
+      </div>
+      <div class="lane">
+        <h3>LAN — replies</h3>
+        <div id="serviceHost"></div>
+      </div>
+    </div>
+
+    <div class="packet-log" id="log"></div>
+
+    <div class="readout">
+      <div class="stat">
+        <div class="stat-label">DirectSockets / UDPSocket exposed</div>
+        <div class="stat-val" id="api">—</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">discovered services</div>
+        <div class="stat-val" id="count">0</div>
+      </div>
+    </div>
+
+    <p class="note">The multicast extension to Direct Sockets is the difference between "the IWA can talk to one known IP" and "the IWA can find peers without preconfiguration" — a precondition for any LAN-only collaborative app (printing, casting, gaming, AV switchers).</p>
+  </section>
+
+  <h2>relevant API</h2>
+<pre><code>// only valid inside an Isolated Web App
+const sock = new UDPSocket({
+  remoteAddress: "224.0.0.251",
+  remotePort: 5353,
+  multicastInterface: "0.0.0.0",
+  multicastTimeToLive: 1,
+  loopback: false,
+});
+const { writable, readable } = await sock.opened;
+await writable.getWriter().write(encoded_mdns_query);
+</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Multicast Direct Sockets</a> — feature index</li>
+      <li><a href="../multicast-receiver/">Receiver demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5073740211814400" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://wicg.github.io/direct-sockets/" target="_blank" rel="noopener">Direct Sockets spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const SERVICES = {
+    "_printer._tcp": [
+      { name: "Brother MFC-J6555DW", ip: "192.168.1.50" },
+      { name: "HP LaserJet 4050", ip: "192.168.1.51" },
+    ],
+    "_chromecast._tcp": [
+      { name: "Living Room TV", ip: "192.168.1.20" },
+      { name: "Office Display", ip: "192.168.1.21" },
+    ],
+    "_ipps._tcp": [
+      { name: "Brother MFC-J6555DW", ip: "192.168.1.50" },
+    ],
+    "_workstation._tcp": [
+      { name: "alice-macbook.local", ip: "192.168.1.100" },
+      { name: "bob-thinkpad.local", ip: "192.168.1.101" },
+      { name: "lab-mini.local", ip: "192.168.1.102" },
+    ],
+  };
+
+  const apiEl = document.getElementById("api");
+  const has = "UDPSocket" in window;
+  apiEl.textContent = has ? "yes" : "no (only inside IWA)";
+  apiEl.className = "stat-val " + (has ? "on" : "off");
+
+  function log(t, klass) {
+    const d = document.createElement("div");
+    d.textContent = t;
+    if (klass) d.className = klass;
+    const l = document.getElementById("log");
+    l.appendChild(d);
+    l.scrollTop = l.scrollHeight;
+  }
+
+  document.getElementById("discover").addEventListener("click", async () => {
+    const q = document.getElementById("q").value.trim();
+    const host = document.getElementById("serviceHost");
+    host.innerHTML = "";
+    document.getElementById("count").textContent = "0";
+
+    log("→ SENDTO 224.0.0.251:5353 QUERY " + q, "send");
+    const results = SERVICES[q] || [];
+    let n = 0;
+    for (const s of results) {
+      await new Promise((r) => setTimeout(r, 350));
+      log("← RECVFROM " + s.ip + ":5353 " + s.name, "recv");
+      const el = document.createElement("div");
+      el.className = "service found";
+      el.innerHTML = `<strong>${s.name}</strong><div class="ip">${s.ip}</div>`;
+      host.appendChild(el);
+      n++;
+      document.getElementById("count").textContent = n;
+    }
+    if (!n) log("(no responders for " + q + ")", "send");
+  });
+
+  document.getElementById("real").addEventListener("click", async () => {
+    log("→ attempting new UDPSocket({remoteAddress:'224.0.0.251',remotePort:5353})", "send");
+    if (!("UDPSocket" in window)) {
+      log("← UDPSocket is undefined (outside IWA)", "recv");
+      return;
+    }
+    try {
+      const sock = new UDPSocket({
+        remoteAddress: "224.0.0.251",
+        remotePort: 5353,
+        multicastInterface: "0.0.0.0",
+        multicastTimeToLive: 1,
+      });
+      const opened = await sock.opened;
+      log("← opened: " + JSON.stringify(opened), "recv");
+    } catch (e) {
+      log("← threw: " + e.name + " — " + e.message, "recv");
+    }
+  });
+</script>
+</body>
+</html>
