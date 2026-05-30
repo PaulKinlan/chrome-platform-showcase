@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Timing Analysis — Bimodal performance timings — Chrome 145</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .phase-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.78rem;
+      margin-bottom: 1.5rem;
+    }
+    .phase-table th {
+      text-align: left;
+      padding: 0.4rem 0.6rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      font-family: monospace;
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+    }
+    .phase-table td {
+      padding: 0.4rem 0.6rem;
+      border: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+      vertical-align: top;
+    }
+    .note-cell { color: var(--text-muted); font-size: 0.72rem; }
+    code { font-family: monospace; font-size: 0.85em; }
+
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.875rem;
+      color: var(--text-charcoal);
+    }
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs">
+    <a href="/v145/">&larr; Chrome 145</a> /
+    <a href="/v145/enabling-web-applications-to-understand-bimodal-performance-timings/">Bimodal performance timings</a>
+  </p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v145 · Web APIs · Timing Analysis</p>
+    <h1>Timing Analysis</h1>
+    <p class="lede">How to use Resource Timing fields to distinguish cache hits from network fetches, which fields reveal each phase, and how to compute meaningful percentiles for each population separately.</p>
+  </header>
+
+  <section>
+    <h2>Resource Timing fields for population detection</h2>
+    <table class="phase-table">
+      <thead>
+        <tr>
+          <th>Field</th>
+          <th>Cache hit</th>
+          <th>Network fetch</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>transferSize</code></td>
+          <td>0</td>
+          <td>&gt; 0</td>
+          <td class="note-cell">Primary classifier. 0 = served from cache or service worker with no-body response.</td>
+        </tr>
+        <tr>
+          <td><code>encodedBodySize</code></td>
+          <td>&gt; 0</td>
+          <td>&gt; 0</td>
+          <td class="note-cell">The encoded size of the response body. Present even for cache hits.</td>
+        </tr>
+        <tr>
+          <td><code>connectStart</code></td>
+          <td>0</td>
+          <td>&gt; 0 (or equals <code>fetchStart</code> if reused connection)</td>
+          <td class="note-cell">0 for cache hits; non-zero when a new TCP connection was needed.</td>
+        </tr>
+        <tr>
+          <td><code>domainLookupStart</code></td>
+          <td>equals <code>fetchStart</code></td>
+          <td>equals <code>fetchStart</code> or later</td>
+          <td class="note-cell">For cache hits, no DNS lookup occurs.</td>
+        </tr>
+        <tr>
+          <td><code>duration</code></td>
+          <td>&lt; 5ms (typically)</td>
+          <td>20–2000ms (network)</td>
+          <td class="note-cell">The most directly observable bimodal split.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>classifying entries</h2>
+    <pre><code>function classifyEntry(entry) {
+  // transferSize=0 with encodedBodySize>0 → cache or service worker
+  if (entry.transferSize === 0 && entry.encodedBodySize > 0) {
+    // Further distinguish memory cache vs disk cache by duration:
+    if (entry.duration < 1) return 'memory-cache';
+    return 'disk-cache';
+  }
+  // transferSize > 0 → actual network fetch
+  if (entry.connectStart > 0) return 'network-new-connection';
+  return 'network-reused-connection';
+}
+
+const entries = performance.getEntriesByType('resource');
+const groups = { 'memory-cache': [], 'disk-cache': [], 'network-new-connection': [], 'network-reused-connection': [] };
+
+for (const e of entries) {
+  const cls = classifyEntry(e);
+  groups[cls].push(e.duration);
+}
+
+for (const [cls, durations] of Object.entries(groups)) {
+  if (!durations.length) continue;
+  durations.sort((a, b) => a - b);
+  console.log(cls, 'p50:', durations[Math.floor(durations.length * 0.5)].toFixed(2) + 'ms');
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>why averages hide bimodal distributions</h2>
+    <pre><code>// Example: 90% cache hits at 2ms, 10% network at 400ms
+// Average = (0.9 × 2) + (0.1 × 400) = 41.8ms
+// p50 = 2ms (cache — correctly)
+// p95 = 2ms (still cache)
+// p99 = 400ms (network)
+
+// The average (41.8ms) represents nothing real —
+// no request actually takes ~42ms. The bimodal split
+// reveals the true performance landscape:
+//   Fast path (cache): p50=2ms, p95=3ms — great
+//   Slow path (network): p50=400ms, p95=1200ms — needs work
+
+// Actionable insight from bimodal analysis:
+// → Improve cache hit rate (preload, service worker)
+// → Optimise network path (CDN, compression, HTTP/3)</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../bimodal-demo/">Bimodal Demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5186950448283648" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/PerformanceResourceTiming" target="_blank" rel="noopener">MDN — PerformanceResourceTiming</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
