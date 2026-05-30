@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Queue vs Interrupt — ARIA Notify API — Chrome 141</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .demo-stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .feature-line { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.4rem 0.7rem; margin-bottom: var(--space-4); }
+    .ok { color: var(--accent-emerald); font-weight: 700; }
+    .miss { color: var(--accent-rose); font-weight: 700; }
+    .row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .scenario { border: 2px solid var(--border-black); padding: var(--space-4); margin-bottom: var(--space-4); background: var(--bg-paper); }
+    .scenario h3 { margin: 0 0 var(--space-2); }
+    .scenario p { font-size: 0.95rem; margin-bottom: var(--space-3); }
+    .scenario-meta { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: var(--space-2); }
+    .pri-pill { display: inline-block; font-family: var(--font-mono); font-size: 0.7rem; padding: 0.1rem 0.4rem; border: 1px solid var(--border-black); margin-right: 0.3rem; background: var(--bg-stone); color: var(--text-black); }
+    .pri-pill.pri-important { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .pri-pill.pri-auto { background: var(--bg-stone); color: var(--text-black); }
+    .pri-pill.pri-none { background: var(--bg-stone); color: var(--text-muted); border-style: dashed; }
+    .queue { background: var(--bg-stone); border: 1px solid var(--border-black); font-family: var(--font-mono); font-size: 0.78rem; padding: var(--space-3); margin-top: var(--space-3); min-height: 4rem; color: var(--text-black); }
+    .queue-item { padding: 0.2rem 0; border-bottom: 1px dashed var(--border-black); }
+    .queue-item:last-child { border-bottom: none; }
+    .queue-item.spoken { color: var(--text-muted); text-decoration: line-through; }
+    .queue-item.speaking { color: var(--accent-blue); font-weight: 700; }
+    .burst-btn { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .burst-btn:hover { background: var(--bg-paper); color: var(--accent-rose); }
+    pre.code { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3) var(--space-4); font-size: 0.82rem; overflow-x: auto; }
+    .warn-block { border: 2px solid var(--accent-amber); background: var(--bg-paper); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; box-shadow: var(--thin-shadow); }
+    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--accent-amber); display: block; margin-bottom: 0.4rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; ARIA Notify API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v141</p>
+    <h1>Queue vs Interrupt</h1>
+    <p class="lede">The spec gives each node its own announcement queue, with a per-call option to either join the back of the queue or pre-empt whatever is currently speaking. Three scenarios from the explainer: secondary auto-fill (low priority), upload delay (auto), critical error (interrupt true). Fire them out of order and watch the queue rearrange.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Heads up</strong>
+    Requires Chrome 141+. The simulated queue panel below mirrors what the platform queue is doing — the actual spoken order depends on the screen reader engine. Enable <code>chrome://flags/#enable-experimental-web-platform-features</code> if needed.
+  </div>
+
+  <div class="feature-line" id="probe">checking support…</div>
+
+  <div class="demo-stage">
+    <div class="scenario">
+      <p class="scenario-meta"><span class="pri-pill pri-none">priority: none</span> interrupt: false</p>
+      <h3>Secondary auto-fill</h3>
+      <p>Spreadsheet finished a background autofill. Useful but not urgent — queue it behind anything already pending.</p>
+      <button data-msg="autofilled values in cells A2 through A20" data-pri="none" data-int="false" class="notify-btn">fire</button>
+    </div>
+
+    <div class="scenario">
+      <p class="scenario-meta"><span class="pri-pill pri-auto">priority: auto</span> interrupt: false</p>
+      <h3>Send is taking longer than usual</h3>
+      <p>Email send hasn't completed in the expected window. Normal priority, queued.</p>
+      <button data-msg="message is taking longer than usual to send" data-pri="auto" data-int="false" class="notify-btn">fire</button>
+    </div>
+
+    <div class="scenario">
+      <p class="scenario-meta"><span class="pri-pill pri-important">priority: important</span> interrupt: true</p>
+      <h3>Connection lost — interrupt</h3>
+      <p>The doc went offline mid-edit. Cut in line and pre-empt anything speaking right now.</p>
+      <button data-msg="connection lost — your last edit is unsaved" data-pri="important" data-int="true" class="notify-btn burst-btn">fire (interrupt)</button>
+    </div>
+
+    <div class="row" style="margin-top:var(--space-5)">
+      <button id="burst" type="button">burst all three (in order)</button>
+      <button id="clear" type="button">clear queue panel</button>
+    </div>
+
+    <div class="queue" id="queue" aria-hidden="true">queue empty</div>
+  </div>
+
+  <section>
+    <h2>the call</h2>
+<pre class="code"><code>// auto-fill announcement — low priority, queue behind anything pending
+document.body.ariaNotify(
+  "autofilled values in cells A2 through A20",
+  { priority: "none", interrupt: false },
+);
+
+// urgent — cut in line, pre-empt the current utterance
+document.body.ariaNotify(
+  "connection lost — your last edit is unsaved",
+  { priority: "important", interrupt: true },
+);</code></pre>
+  </section>
+
+  <section>
+    <h2>why this angle</h2>
+    <p>The Microsoft Edge explainer lists "secondary actions" and "failed or delayed actions" alongside their priority recommendations. A single live region cannot model both — every message goes to the same queue at the same priority, in DOM order. <code>ariaNotify</code>'s per-call <code>priority</code> and <code>interrupt</code> options let an autofill confirmation politely queue while a connection-lost error pre-empts everything. This page lines the three side by side so you can fire them in any combination and feel the difference.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">ARIA Notify API</a> — feature index</li>
+      <li><a href="../aria-notify/">Basic ariaNotify firing</a></li>
+      <li><a href="../keyboard-confirmations/">Keyboard confirmations</a></li>
+      <li><a href="https://microsoftedge.github.io/MSEdgeExplainers/Accessibility/AriaNotify/explainer.html" target="_blank" rel="noopener">Edge explainer — failed/delayed and secondary actions</a></li>
+      <li><a href="https://chromestatus.com/feature/5745430754230272" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probe = document.getElementById("probe");
+  const supported = typeof document.body.ariaNotify === "function";
+  probe.innerHTML = supported
+    ? 'document.body.ariaNotify <span class="ok">available</span>'
+    : 'document.body.ariaNotify <span class="miss">missing</span> — queue panel still simulates ordering';
+
+  const queueEl = document.getElementById("queue");
+  // Simulated platform queue. Real platform queue is hidden; this mirrors it.
+  let queue = [];
+
+  function paintQueue() {
+    if (queue.length === 0) {
+      queueEl.textContent = "queue empty";
+      return;
+    }
+    queueEl.innerHTML = "";
+    queue.forEach((item, i) => {
+      const row = document.createElement("div");
+      row.className = "queue-item " + (item.state || "");
+      const pri = item.opts.priority || "auto";
+      const intr = item.opts.interrupt ? " ⚡" : "";
+      row.textContent = (i + 1) + ". [" + pri + intr + "] " + item.msg;
+      queueEl.appendChild(row);
+    });
+  }
+
+  function enqueue(msg, opts) {
+    const item = { msg, opts, state: "pending" };
+    if (opts.interrupt) {
+      // pre-empt: drop anything currently speaking, jump to front
+      queue = queue.filter((q) => q.state !== "speaking");
+      queue.unshift(item);
+    } else {
+      // queue behind by sorting: important > auto > none, otherwise FIFO
+      const rank = { important: 0, auto: 1, none: 2 };
+      const myRank = rank[opts.priority || "auto"];
+      // insert before first item with strictly lower (higher number) rank
+      let inserted = false;
+      for (let i = 0; i < queue.length; i++) {
+        if (rank[queue[i].opts.priority || "auto"] > myRank) {
+          queue.splice(i, 0, item);
+          inserted = true;
+          break;
+        }
+      }
+      if (!inserted) queue.push(item);
+    }
+    if (supported) {
+      try { document.body.ariaNotify(msg, opts); } catch (e) { /* surfaced in panel */ }
+    }
+    paintQueue();
+    drainSoon();
+  }
+
+  // Simulate the platform speaking each queued message in turn
+  let speaking = false;
+  function drainSoon() {
+    if (speaking) return;
+    if (queue.length === 0) return;
+    speaking = true;
+    const item = queue.find((q) => q.state === "pending");
+    if (!item) { speaking = false; return; }
+    item.state = "speaking";
+    paintQueue();
+    // approximate speaking time per message
+    const ms = 900 + item.msg.length * 35;
+    setTimeout(() => {
+      item.state = "spoken";
+      paintQueue();
+      speaking = false;
+      // remove spoken after a beat
+      setTimeout(() => {
+        queue = queue.filter((q) => q.state !== "spoken");
+        paintQueue();
+        drainSoon();
+      }, 700);
+    }, ms);
+  }
+
+  document.querySelectorAll(".notify-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      enqueue(btn.dataset.msg, {
+        priority: btn.dataset.pri,
+        interrupt: btn.dataset.int === "true",
+      });
+    });
+  });
+
+  document.getElementById("burst").addEventListener("click", () => {
+    document.querySelectorAll(".notify-btn").forEach((btn, i) => {
+      setTimeout(() => btn.click(), i * 120);
+    });
+  });
+
+  document.getElementById("clear").addEventListener("click", () => {
+    queue = [];
+    paintQueue();
+  });
+</script>
+</body>
+</html>
