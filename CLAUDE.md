@@ -33,7 +33,7 @@ v<N>/                 One folder per Chrome milestone. Each contains <feature-sl
 ## The routine
 
 Cron `0 */2 * * *` (every 2 hours, top of hour UTC). Runs in Anthropic's cloud as a Claude Code
-session against a fresh checkout of `main`. Soft 45-minute budget per run. Picks up where the last
+session against a fresh checkout of `main`. Soft 90-minute budget per run. Picks up where the last
 run left off.
 
 Cadence was halved from hourly to every-2-hours on 2026-05-30 after the account hit a
@@ -43,14 +43,21 @@ Routine prompt lives in `.claude/routine-prompt.md`. When you update the file, a
 prompt to the live routine via the `RemoteTrigger` MCP tool (action `update`). Live and repo can
 drift if you forget.
 
-### Triggering a run manually
+### Triggering a manual run
 
-Just ask Claude in chat: "run the showcase routine" (or "fire off the showcase build"). Claude calls
-`RemoteTrigger` with `action: "run"` and `trigger_id: trig_01GtXjwvzEM5mhsktARhGeSx`. The run kicks
-off immediately on top of the next scheduled tick; the next cron tick still fires as normal.
+Manual runs do NOT use the remote routine — they run in Claude's local session against the working
+checkout at `/home/paulkinlan/chrome-platform-showcase/`, so they don't burn the daily routines
+quota and Paul sees the work appear in chat as it happens.
 
-Web UI alternative: https://claude.ai/code/routines/trig_01GtXjwvzEM5mhsktARhGeSx has a "Run now"
-button.
+Convention: Paul says "run showcase" (or "build the next 3 features" etc) in chat. Claude then:
+
+1. `cd /home/paulkinlan/chrome-platform-showcase && git pull --rebase`
+2. Follows `.claude/routine-prompt.md` end-to-end against this local checkout
+3. Builds the requested number of features (default 2-3), one commit per feature, pushing after each
+4. Reports each commit + URL back in chat as it lands
+
+The remote routine continues to fire on its 2-hour cron in the background. Manual + remote can both
+write to `main` safely because every run starts by skipping any folder that already exists.
 
 ## Critical invariants (read these — every one has bitten us)
 

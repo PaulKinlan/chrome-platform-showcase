@@ -41,7 +41,7 @@ git config user.email 'paul.kinlan@gmail.com'
 git config user.name 'Paul Kinlan'
 ```
 
-Note Unix time at start. Soft 45-minute budget. The cron fires every 2 hours; the next run continues. Better to leave 4 features behind than to corrupt a half-written folder.
+Note Unix time at start. Soft 90-minute budget. The cron fires every 2 hours; the next run continues. Better to leave 4 features behind than to corrupt a half-written folder.
 
 ## Step 2: Get current channels
 
@@ -171,7 +171,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 git push
 ```
 
-One feature per commit. If past 45 minutes, stop.
+One feature per commit. If past 90 minutes, stop.
 
 ## Step 9: Uber demo concept issue (only if room)
 
@@ -189,6 +189,6 @@ Log channels, per-milestone counts, features built (SHA + live URL), stop reason
 - Never edit outside `v<N>/` and `/tmp`. `server.ts`, `lib/`, `public/` are off-limits.
 - Pushes go to main. No branches.
 - Issues only for Uber demos.
-- Respect the 45-minute deadline.
+- Respect the 90-minute deadline.
 - **Slug from listing name. Milestone from listing position. CSS variables only. WCAG AA contrast.
   All four inviolable.**
