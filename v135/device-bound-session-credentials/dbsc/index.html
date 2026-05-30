@@ -6,9 +6,35 @@
   <title>DBSC — Device Bound Session Credentials — Chrome 135 — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    .card { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
-    .card pre { margin: 0; font-size: 0.85rem; padding: var(--space-3); overflow-x: auto; }
-    .card p { font-family: var(--font-serif); color: var(--text-charcoal); margin: 0 0 var(--space-3); }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .warn-block {
+      border: 2px solid #b87b00;
+      background: var(--bg-paper);
+      padding: var(--space-3) var(--space-4);
+      margin: var(--space-4) 0;
+      box-shadow: var(--thin-shadow);
+    }
+    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: #b87b00; display: block; margin-bottom: 0.4rem; }
+    .row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .pill {
+      font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+      padding: 0.2rem 0.55rem; border: 1px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal);
+    }
+    .pill.ok { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .pill.bad { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .flow { display: grid; gap: var(--space-3); margin: var(--space-3) 0; }
+    .step {
+      border: 2px solid var(--border-black); background: var(--bg-stone);
+      padding: var(--space-3) var(--space-4); display: grid; gap: var(--space-2);
+    }
+    .step h4 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0; }
+    .step .raw {
+      background: var(--bg-paper); border: 1px solid var(--border-black);
+      font-family: var(--font-mono); font-size: 0.78rem; padding: var(--space-2) var(--space-3);
+      white-space: pre-wrap; word-break: break-word; color: var(--text-charcoal);
+    }
+    .step.bad { border-color: var(--accent-rose); }
+    .step.good { border-color: var(--accent-emerald); }
   </style>
 </head>
 <body>
@@ -17,24 +43,115 @@
 
   <header class="lede-block">
     <p class="eyebrow">demo · v135</p>
-    <h1>DBSC</h1>
-    <p class="lede">Session cookies bound to a device key. Stolen cookies are useless without the device&#x27;s private key.</p>
+    <h1>DBSC live simulator</h1>
+    <p class="lede">Device Bound Session Credentials bind a session cookie to a hardware key. The browser proves possession of that key on every refresh — a stolen cookie replayed from another device just fails. Step through the simulator below to see real key generation, signing, and verification using the WebCrypto API.</p>
   </header>
 
-  <div class="card">
-    <p>The canonical shape of the API:</p>
-<pre><code># Hardware-backed key signs each session refresh.
-# Stolen cookies replayed elsewhere fail PoP check.</code></pre>
+  <div class="warn-block">
+    <strong>Flag</strong>
+    DBSC is gated on <code>chrome://flags/#device-bound-session-credentials</code> (and rolling out as an origin trial). The simulator below uses WebCrypto's <code>P-256</code> directly to show the cryptographic shape — the browser's real DBSC plumbing happens in HTTP headers.
   </div>
+
+  <div class="stage">
+    <div class="row">
+      <span class="pill" id="cap">subtle.generateKey: ?</span>
+      <button id="run">Run flow</button>
+      <button id="steal">Run flow with stolen cookie (different device)</button>
+    </div>
+
+    <div class="flow" id="flow"></div>
+  </div>
+
+  <section>
+    <h2>the protocol</h2>
+<pre><code>// Server sets up the bound session.
+Sec-Session-Registration: ...; alg=ES256
+
+// Client returns a JWK public key (private key never leaves the device).
+Sec-Session-Response: { jwk, sig }
+
+// On every refresh, the client signs the challenge with the bound key.
+Sec-Session-Challenge: nonce-xyz
+Sec-Session-Response: sig(nonce, jwk)
+
+// Server verifies the signature against the registered key.
+// Stolen cookie replayed elsewhere has no matching key → 401.</code></pre>
+  </section>
 
   <section>
     <h2>see also</h2>
     <ul>
       <li><a href="../">Device Bound Session Credentials</a> — feature index</li>
+      <li><a href="https://chromestatus.com/feature/5140168270413824" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.chrome.com/docs/web-platform/device-bound-session-credentials" target="_blank" rel="noopener">DBSC explainer</a></li>
     </ul>
   </section>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+
+<script>
+const cap = document.getElementById("cap");
+const flow = document.getElementById("flow");
+
+const hasSubtle = !!crypto.subtle;
+cap.textContent = hasSubtle ? "subtle.generateKey: yes" : "subtle.generateKey: no";
+cap.classList.add(hasSubtle ? "ok" : "bad");
+
+function addStep(title, body, kind = "") {
+  const div = document.createElement("div");
+  div.className = "step " + kind;
+  div.innerHTML = `<h4>${title}</h4><div class="raw"></div>`;
+  div.querySelector(".raw").textContent = body;
+  flow.appendChild(div);
+}
+
+function b64(bytes) {
+  let s = "";
+  for (const b of new Uint8Array(bytes)) s += String.fromCharCode(b);
+  return btoa(s).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+async function run({ stealCookie } = {}) {
+  flow.innerHTML = "";
+  if (!hasSubtle) { addStep("error", "WebCrypto unavailable"); return; }
+
+  // 1) device generates bound keypair
+  const kp = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
+  const pub = await crypto.subtle.exportKey("jwk", kp.publicKey);
+  addStep("1. device generates bound keypair (non-extractable)", `public jwk: ${JSON.stringify({ x: pub.x.slice(0, 12) + "…", y: pub.y.slice(0, 12) + "…", crv: pub.crv })}`);
+
+  // 2) server stores public key, mints session cookie
+  const sessionCookie = `dbsc-session=${b64(crypto.getRandomValues(new Uint8Array(16)))}`;
+  addStep("2. server mints session cookie bound to public key", sessionCookie);
+
+  // 3) refresh: server issues challenge
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  addStep("3. on refresh, server issues Sec-Session-Challenge", `nonce: ${b64(challenge)}`);
+
+  // 4) client signs with the device's PRIVATE key
+  const signerKey = stealCookie
+    // Attacker copied the cookie but doesn't have the private key.
+    ? (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"])).privateKey
+    : kp.privateKey;
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, signerKey, challenge);
+  addStep(
+    stealCookie ? "4. attacker holds cookie + uses their OWN device key" : "4. real device signs challenge with bound private key",
+    `signature: ${b64(sig).slice(0, 32)}…`,
+    stealCookie ? "bad" : "",
+  );
+
+  // 5) server verifies sig against ORIGINAL public key
+  const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, kp.publicKey, sig, challenge);
+  addStep(
+    "5. server verifies signature against registered public key",
+    ok ? "VERIFIED -> session refresh granted" : "FAILED -> 401, cookie revoked, attacker locked out",
+    ok ? "good" : "bad",
+  );
+}
+
+document.getElementById("run").addEventListener("click", () => run());
+document.getElementById("steal").addEventListener("click", () => run({ stealCookie: true }));
+</script>
 </body>
 </html>
