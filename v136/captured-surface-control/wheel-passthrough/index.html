@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wheel passthrough — Captured Surface Control — Chrome 136 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .preview-tile {
+      width: 100%;
+      max-width: 640px;
+      aspect-ratio: 16 / 10;
+      border: 3px solid var(--border-black);
+      background: #000;
+      position: relative;
+      cursor: ns-resize;
+      overflow: hidden;
+    }
+    .preview-tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .preview-tile .hud {
+      position: absolute;
+      bottom: 8px; left: 8px; right: 8px;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--bg-ivory);
+      text-shadow: 0 0 2px #000, 0 0 4px #000;
+      pointer-events: none;
+      display: flex;
+      justify-content: space-between;
+    }
+    .preview-tile.idle {
+      background: repeating-linear-gradient(45deg, #1a1a1a 0 10px, #232323 10px 20px);
+      display: grid;
+      place-items: center;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      cursor: default;
+    }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    button {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      padding: 0.5rem 1rem;
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      box-shadow: var(--thin-shadow);
+      cursor: pointer;
+    }
+    button:hover {
+      background: var(--bg-paper);
+      color: var(--text-black);
+      transform: translate(-1px, -1px);
+    }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .reading {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: var(--space-3);
+      align-items: baseline;
+      margin: var(--space-2) 0;
+    }
+    .reading .k {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+    }
+    .reading .v {
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      background: var(--bg-stone);
+      padding: 0.25rem 0.5rem;
+      border: 1px solid var(--border-black);
+    }
+    .warn-block {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      border-left: 8px solid var(--accent-amber);
+      padding: var(--space-4);
+      margin: var(--space-3) 0;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+    }
+    .warn-block strong { color: var(--accent-rose); display: block; margin-bottom: 0.3rem; }
+    .probe {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      padding: 0.4rem 0.6rem;
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      margin: var(--space-3) 0;
+    }
+    .probe.yes { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .probe.no { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .log {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      max-height: 180px;
+      overflow-y: auto;
+      margin: var(--space-3) 0;
+    }
+    .log p { margin: 0.1rem 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Captured Surface Control</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v136</p>
+    <h1>Wheel passthrough</h1>
+    <p class="lede">The video-conferencing pattern that motivated the spec: a live "preview tile" of the captured tab where the user can wheel/scroll inside the tile and have those wheel deltas forwarded to the captured surface &mdash; without having to leave the call to do it.</p>
+  </header>
+
+  <div id="probe" class="probe">Probing&hellip;</div>
+
+  <div class="warn-block">
+    <strong>Permission</strong>
+    On first <code>forwardWheel()</code> call, the captured tab's user must accept Chrome's "control capture" prompt. Self-capturing this tab is disallowed by Chrome &mdash; pick another open tab when the share dialog appears.
+  </div>
+
+  <div class="stage">
+    <div class="controls">
+      <button id="start">Start capture (pick a tab)</button>
+      <button id="stop" disabled>Stop</button>
+    </div>
+
+    <div id="tile" class="preview-tile idle">
+      Tile is idle &mdash; press "Start capture" then wheel here.
+    </div>
+
+    <div class="reading"><span class="k">last wheel deltaY</span><span class="v" id="r-dy">&mdash;</span></div>
+    <div class="reading"><span class="k">forwarded as deltaY</span><span class="v" id="r-fdy">&mdash;</span></div>
+    <div class="reading"><span class="k">cumulative px sent</span><span class="v" id="r-sum">0</span></div>
+
+    <h3>action log</h3>
+    <div class="log" id="log"></div>
+  </div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>const tile = document.getElementById(&quot;tile&quot;);
+const ctrl = new CaptureController();
+const stream = await navigator.mediaDevices.getDisplayMedia({ controller: ctrl });
+tile.querySelector(&quot;video&quot;).srcObject = stream;
+
+tile.addEventListener(&quot;wheel&quot;, async (e) =&gt; {
+  e.preventDefault(); // don't scroll the tile itself
+  try {
+    await ctrl.forwardWheel({ deltaX: e.deltaX, deltaY: e.deltaY });
+  } catch (err) {
+    // Permission denied or surface unsupported.
+  }
+}, { passive: false });</code></pre>
+  </section>
+
+  <section>
+    <h2>why this angle</h2>
+    <p>The sibling concept exposes the API surface &mdash; "press the up/down buttons, they call <code>forwardWheel</code>." Real VC products don't ship those buttons; users scroll the preview tile with their real trackpad or mouse wheel. The DOM event &rarr; CSC translation is what the spec was designed for, and is what makes the difference between "demo" and "shippable feature." This page wires the actual wheel handler.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Captured Surface Control</a> &mdash; feature index</li>
+      <li><a href="../surface-control/">API-surface concept</a></li>
+      <li><a href="https://chromestatus.com/feature/5092615678066688" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://wicg.github.io/captured-surface-control/" target="_blank" rel="noopener">CSC spec draft</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probe = document.getElementById("probe");
+  const supported = typeof CaptureController !== "undefined" && "forwardWheel" in CaptureController.prototype;
+  if (supported) {
+    probe.classList.add("yes");
+    probe.innerHTML = "<code>CaptureController.prototype.forwardWheel</code> &mdash; <strong>supported</strong>";
+  } else {
+    probe.classList.add("no");
+    probe.innerHTML = "<code>CaptureController.forwardWheel</code> not available here. Wheel events will be logged but not forwarded.";
+  }
+
+  const log = document.getElementById("log");
+  function ln(m) {
+    const p = document.createElement("p");
+    p.textContent = `${new Date().toISOString().slice(11,23)}  ${m}`;
+    log.prepend(p);
+    while (log.children.length > 30) log.lastChild.remove();
+  }
+
+  let stream = null;
+  let controller = null;
+  let sum = 0;
+
+  const tile = document.getElementById("tile");
+
+  document.getElementById("start").addEventListener("click", async () => {
+    try {
+      controller = new CaptureController();
+      stream = await navigator.mediaDevices.getDisplayMedia({ controller, video: true, audio: false });
+      tile.classList.remove("idle");
+      tile.innerHTML = "<video autoplay muted playsinline></video><div class='hud'><span id='hud-state'>capturing — wheel here</span><span id='hud-cum'>0 px sent</span></div>";
+      tile.querySelector("video").srcObject = stream;
+      document.getElementById("stop").disabled = false;
+      sum = 0;
+      ln("capture started");
+    } catch (e) {
+      ln("getDisplayMedia rejected: " + e.message);
+    }
+  });
+
+  document.getElementById("stop").addEventListener("click", () => {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    controller = null;
+    tile.classList.add("idle");
+    tile.innerHTML = "Tile is idle &mdash; press \"Start capture\" then wheel here.";
+    document.getElementById("stop").disabled = true;
+    ln("capture stopped");
+  });
+
+  tile.addEventListener("wheel", async (e) => {
+    if (!stream || !controller) return;
+    e.preventDefault();
+    document.getElementById("r-dy").textContent = `dx=${e.deltaX.toFixed(0)}  dy=${e.deltaY.toFixed(0)}`;
+    try {
+      await controller.forwardWheel({ x: 0, y: 0, wheelDeltaX: e.deltaX, wheelDeltaY: e.deltaY });
+      sum += Math.abs(e.deltaY);
+      document.getElementById("r-fdy").textContent = `dx=${e.deltaX.toFixed(0)}  dy=${e.deltaY.toFixed(0)}`;
+      document.getElementById("r-sum").textContent = sum.toFixed(0);
+      const hud = document.getElementById("hud-cum");
+      if (hud) hud.textContent = sum.toFixed(0) + " px sent";
+    } catch (err) {
+      ln("forwardWheel rejected: " + err.message);
+    }
+  }, { passive: false });
+</script>
+</body>
+</html>
