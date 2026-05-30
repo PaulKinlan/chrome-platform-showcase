@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reduction with subgroups vs workgroup memory — WebGPU Subgroups — Chrome 134 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .probe { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
+    .ok { color: var(--accent-emerald); font-weight: 600; }
+    .bad { color: var(--accent-rose); font-weight: 600; }
+    .warn-block { background: var(--bg-stone); border: 2px dashed var(--border-black); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.85rem; margin: var(--space-3) 0; }
+    .controls { display: flex; gap: var(--space-3); margin: var(--space-3) 0; flex-wrap: wrap; align-items: baseline; }
+    .field { display: flex; flex-direction: column; gap: 0.3rem; font-family: var(--font-mono); font-size: 0.82rem; }
+    input[type="range"] { width: 220px; accent-color: var(--text-black); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); }
+    @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+    .col { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-4); }
+    .col h3 { margin-top: 0; font-family: var(--font-mono); font-size: 0.95rem; }
+    pre.snippet { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; overflow-x: auto; }
+    .timing { font-family: var(--font-mono); font-size: 0.85rem; padding: var(--space-2) var(--space-3); background: var(--bg-stone); border: 1px solid var(--border-black); margin-top: var(--space-3); }
+    .badge { font-family: var(--font-mono); font-size: 0.72rem; padding: 0.1rem 0.4rem; background: var(--text-black); color: var(--bg-ivory); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebGPU Subgroups</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v134</p>
+    <h1>Reduction: subgroups vs workgroup memory</h1>
+    <p class="lede">The GPUweb explainer’s headline microbench: a <em>sum-reduction</em> across a workgroup of 256 lanes. The naive implementation needs a workgroup-shared array plus <code>log2(N)</code> rounds of barrier + half-write — that’s 8 barriers on a 256-lane group. With <code>subgroupAdd()</code> the same reduction is a single intrinsic per subgroup (32 lanes on most hardware) then a tiny cross-subgroup combine. Run both kernels below on the same input and compare timing.</p>
+  </header>
+
+  <div class="probe" id="probe">probing WebGPU + chromium-experimental-subgroups…</div>
+
+  <div class="warn-block">Subgroups are still gated behind <code>chrome://flags/#enable-webgpu-developer-features</code> and the <code>"chromium-experimental-subgroups"</code> feature must be requested. Where unavailable, the page reports it and falls back to the workgroup-memory version only.</div>
+
+  <h2>Run a reduction</h2>
+  <div class="controls">
+    <div class="field">
+      <label>elements</label>
+      <input type="range" id="n" min="14" max="22" value="20">
+      <span id="n-val">2^20 = 1,048,576</span>
+    </div>
+    <button id="run">run both kernels</button>
+  </div>
+
+  <div class="grid">
+    <div class="col">
+      <h3>workgroup memory + barriers</h3>
+      <pre class="snippet"><code>var&lt;workgroup&gt; partials: array&lt;f32, 256&gt;;
+
+@compute @workgroup_size(256)
+fn reduce_wg(@builtin(local_invocation_id) lid: vec3&lt;u32&gt;, @builtin(workgroup_id) wid: vec3&lt;u32&gt;) {
+  let g = wid.x * 256u + lid.x;
+  partials[lid.x] = inp[g];
+  workgroupBarrier();
+  var stride: u32 = 128u;
+  while (stride &gt; 0u) {
+    if (lid.x &lt; stride) { partials[lid.x] = partials[lid.x] + partials[lid.x + stride]; }
+    workgroupBarrier();
+    stride = stride / 2u;
+  }
+  if (lid.x == 0u) { out[wid.x] = partials[0]; }
+}</code></pre>
+      <div class="timing" id="t-wg">— ms</div>
+    </div>
+    <div class="col">
+      <h3>subgroups</h3>
+      <pre class="snippet"><code>enable subgroups;
+@compute @workgroup_size(256)
+fn reduce_sg(@builtin(local_invocation_id) lid: vec3&lt;u32&gt;, @builtin(workgroup_id) wid: vec3&lt;u32&gt;) {
+  let g = wid.x * 256u + lid.x;
+  let lane_sum = subgroupAdd(inp[g]);
+  // first lane of each subgroup writes to a small shared array
+  if (subgroupElect()) { partials[lid.x / subgroup_size] = lane_sum; }
+  workgroupBarrier();
+  if (lid.x &lt; 256u / subgroup_size) {
+    let total = subgroupAdd(partials[lid.x]);
+    if (lid.x == 0u) { out[wid.x] = total; }
+  }
+}</code></pre>
+      <div class="timing" id="t-sg">— ms</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../subgroups/">Baseline concept</a></li>
+      <li><a href="https://github.com/gpuweb/gpuweb/blob/main/proposals/subgroups.md" target="_blank" rel="noopener">GPUweb proposal — subgroups</a></li>
+      <li><a href="https://developer.chrome.com/blog/new-in-webgpu-134" target="_blank" rel="noopener">New in WebGPU (Chrome 134)</a></li>
+      <li><a href="https://chromestatus.com/feature/5126409856221184" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  (async () => {
+    const probe = document.getElementById('probe');
+    const tWG = document.getElementById('t-wg');
+    const tSG = document.getElementById('t-sg');
+    const nEl = document.getElementById('n');
+    const nVal = document.getElementById('n-val');
+
+    if (!('gpu' in navigator)) {
+      probe.innerHTML = '<span class="bad">WebGPU not available</span> — page is informational on this engine';
+      return;
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) { probe.innerHTML = '<span class="bad">no GPUAdapter</span>'; return; }
+
+    const features = [...adapter.features];
+    const hasSubgroups = features.includes('chromium-experimental-subgroups');
+    probe.innerHTML = hasSubgroups
+      ? `<span class="ok">subgroups feature available</span> on this adapter — both kernels will run`
+      : `<span class="bad">subgroups feature missing</span> — needs <code>chrome://flags/#enable-webgpu-developer-features</code>; only workgroup-memory kernel will run`;
+
+    const requested = ['timestamp-query'];
+    if (hasSubgroups) requested.push('chromium-experimental-subgroups');
+    let device;
+    try {
+      device = await adapter.requestDevice({ requiredFeatures: requested.filter((f) => features.includes(f)) });
+    } catch (e) {
+      probe.innerHTML += ' — device request failed: ' + e.message;
+      return;
+    }
+
+    nEl.addEventListener('input', () => {
+      const n = 1 << +nEl.value;
+      nVal.textContent = `2^${nEl.value} = ${n.toLocaleString()}`;
+    });
+
+    document.getElementById('run').addEventListener('click', async () => {
+      const N = 1 << +nEl.value;
+      tWG.textContent = 'running…';
+      tSG.textContent = 'running…';
+      const data = new Float32Array(N);
+      for (let i = 0; i < N; i++) data[i] = 1;
+
+      const wgsl_wg = `
+        @group(0) @binding(0) var<storage, read> inp: array<f32>;
+        @group(0) @binding(1) var<storage, read_write> out: array<f32>;
+        var<workgroup> partials: array<f32, 256>;
+        @compute @workgroup_size(256)
+        fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+          let g = wid.x * 256u + lid.x;
+          partials[lid.x] = inp[g];
+          workgroupBarrier();
+          var stride: u32 = 128u;
+          while (stride > 0u) {
+            if (lid.x < stride) { partials[lid.x] = partials[lid.x] + partials[lid.x + stride]; }
+            workgroupBarrier();
+            stride = stride / 2u;
+          }
+          if (lid.x == 0u) { out[wid.x] = partials[0]; }
+        }
+      `;
+
+      tWG.textContent = await runReduction(device, wgsl_wg, data) + ' ms';
+
+      if (hasSubgroups) {
+        const wgsl_sg = `
+          enable chromium_experimental_subgroups;
+          @group(0) @binding(0) var<storage, read> inp: array<f32>;
+          @group(0) @binding(1) var<storage, read_write> out: array<f32>;
+          var<workgroup> partials: array<f32, 64>;
+          @compute @workgroup_size(256)
+          fn main(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>,
+                  @builtin(subgroup_size) sgs: u32, @builtin(subgroup_invocation_id) sii: u32) {
+            let g = wid.x * 256u + lid.x;
+            let lane_sum = subgroupAdd(inp[g]);
+            if (sii == 0u) { partials[lid.x / sgs] = lane_sum; }
+            workgroupBarrier();
+            if (lid.x < 256u / sgs) {
+              let total = subgroupAdd(partials[lid.x]);
+              if (lid.x == 0u) { out[wid.x] = total; }
+            }
+          }
+        `;
+        try {
+          tSG.textContent = await runReduction(device, wgsl_sg, data) + ' ms';
+        } catch (e) {
+          tSG.textContent = 'compile error: ' + e.message;
+        }
+      } else {
+        tSG.textContent = 'skipped — feature not enabled';
+      }
+    });
+
+    async function runReduction(device, wgsl, data) {
+      const N = data.byteLength / 4;
+      const groups = N / 256;
+      const inBuf = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      const outBuf = device.createBuffer({ size: groups * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      device.queue.writeBuffer(inBuf, 0, data);
+      const module = device.createShaderModule({ code: wgsl });
+      const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+      const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: inBuf } },
+        { binding: 1, resource: { buffer: outBuf } },
+      ] });
+      // warm up
+      for (let i = 0; i < 3; i++) {
+        const enc = device.createCommandEncoder();
+        const p = enc.beginComputePass(); p.setPipeline(pipeline); p.setBindGroup(0, bind); p.dispatchWorkgroups(groups); p.end();
+        device.queue.submit([enc.finish()]);
+      }
+      await device.queue.onSubmittedWorkDone();
+      const t0 = performance.now();
+      for (let i = 0; i < 10; i++) {
+        const enc = device.createCommandEncoder();
+        const p = enc.beginComputePass(); p.setPipeline(pipeline); p.setBindGroup(0, bind); p.dispatchWorkgroups(groups); p.end();
+        device.queue.submit([enc.finish()]);
+      }
+      await device.queue.onSubmittedWorkDone();
+      return ((performance.now() - t0) / 10).toFixed(3);
+    }
+  })();
+</script>
+</body>
+</html>
