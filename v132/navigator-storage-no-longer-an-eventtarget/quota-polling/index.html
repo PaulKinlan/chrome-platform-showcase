@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quota polling &mdash; navigator.storage &mdash; Chrome 132</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .controls label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); display: inline-flex; gap: 0.4rem; align-items: center; }
+    .controls input[type=range] { accent-color: var(--text-black); }
+    .bar { background: var(--bg-stone); border: 2px solid var(--border-black); height: 28px; position: relative; overflow: hidden; margin: var(--space-3) 0; }
+    .bar > .fill { background: var(--accent-emerald); height: 100%; transition: width 0.3s, background 0.3s; }
+    .bar.warn > .fill { background: var(--accent-rose); }
+    .info { font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-black); }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; max-height: 180px; overflow-y: auto; margin: var(--space-3) 0; color: var(--text-charcoal); }
+    .log p { margin: 0.1rem 0; }
+    .log p.alert { color: var(--accent-rose); }
+    .probe { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; color: var(--text-black); }
+    .probe.yes { background: #e8f5ed; border-color: var(--accent-emerald); }
+    .probe.no { background: #fde7e9; border-color: var(--accent-rose); }
+    pre.snip { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-size: 0.78rem; overflow-x: auto; margin: var(--space-3) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; navigator.storage no longer an EventTarget</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v132</p>
+    <h1>The replacement: polling estimate() on a schedule</h1>
+    <p class="lede">Removing the EventTarget surface means no <code>storagepressure</code> push notification. The recommended pattern is a periodic poll of <code>navigator.storage.estimate()</code> &mdash; cheap because the value is cached by the browser. Tune the cadence and watch the bar fill as you write IndexedDB rows.</p>
+  </header>
+
+  <div class="probe" id="probe">checking storage.estimate&hellip;</div>
+
+  <section class="stage">
+    <div class="controls">
+      <label>poll interval (s) <input type="range" id="int" min="1" max="30" value="5"> <span id="intOut" style="font-family:var(--font-mono);font-size:0.78rem;">5</span></label>
+      <label>warn threshold (%) <input type="range" id="th" min="40" max="95" value="80"> <span id="thOut" style="font-family:var(--font-mono);font-size:0.78rem;">80</span></label>
+      <button id="alloc">add 5 MB to IDB</button>
+      <button id="clear">clear IDB</button>
+    </div>
+
+    <div class="bar" id="bar"><div class="fill" id="fill" style="width:0%"></div></div>
+    <div class="info" id="info">awaiting first estimate&hellip;</div>
+
+    <div id="log" class="log"></div>
+  </section>
+
+  <section>
+    <h2>recommended pattern</h2>
+<pre class="snip">async function watchStorage(intervalMs, warnPct) {
+  let last = 0;
+  setInterval(async () =&gt; {
+    const { quota, usage } = await navigator.storage.estimate();
+    const pct = usage / quota * 100;
+    if (pct &gt; warnPct &amp;&amp; pct &gt; last + 1) prune();
+    last = pct;
+  }, intervalMs);
+}</pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">navigator.storage no longer EventTarget</a> &mdash; feature index</li>
+      <li><a href="../storage-noet/">surface probe + button rig</a></li>
+      <li><a href="https://storage.spec.whatwg.org/" target="_blank" rel="noopener">Storage spec</a></li>
+      <li><a href="https://chromestatus.com/feature/5111177598992384" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const has = navigator.storage && typeof navigator.storage.estimate === "function";
+  const probe = document.getElementById("probe");
+  probe.className = "probe " + (has ? "yes" : "no");
+  probe.textContent = has ? "navigator.storage.estimate() available" : "estimate() unavailable; demo will simulate values";
+
+  const fill = document.getElementById("fill");
+  const bar = document.getElementById("bar");
+  const info = document.getElementById("info");
+  const log = document.getElementById("log");
+  function write(m, cls) { const p = document.createElement("p"); if (cls) p.className = cls; p.textContent = new Date().toISOString().slice(11, 23) + "  " + m; log.prepend(p); while (log.children.length > 16) log.lastChild.remove(); }
+
+  document.getElementById("int").addEventListener("input", (e) => document.getElementById("intOut").textContent = e.target.value);
+  document.getElementById("th").addEventListener("input", (e) => document.getElementById("thOut").textContent = e.target.value);
+
+  // IDB writer
+  function openDB() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open("v132-quota-demo", 1);
+      r.onupgradeneeded = (e) => e.target.result.createObjectStore("blobs", { autoIncrement: true });
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  }
+  document.getElementById("alloc").addEventListener("click", async () => {
+    try {
+      const db = await openDB();
+      const tx = db.transaction("blobs", "readwrite");
+      const blob = new Uint8Array(5 * 1024 * 1024);
+      crypto.getRandomValues(blob.subarray(0, 1024));
+      tx.objectStore("blobs").add(blob);
+      await new Promise((r) => tx.oncomplete = r);
+      db.close();
+      write("wrote 5 MB to IDB");
+    } catch (e) { write("write failed: " + e.message); }
+  });
+  document.getElementById("clear").addEventListener("click", async () => {
+    try {
+      await new Promise((res, rej) => {
+        const r = indexedDB.deleteDatabase("v132-quota-demo");
+        r.onsuccess = res; r.onerror = () => rej(r.error);
+      });
+      write("cleared IDB");
+    } catch (e) { write("clear failed: " + e.message); }
+  });
+
+  let timer = null;
+  function fmt(n) { return (n / 1024 / 1024).toFixed(1) + " MB"; }
+  async function poll() {
+    if (!has) {
+      info.textContent = "(simulate)";
+      return;
+    }
+    const { quota, usage } = await navigator.storage.estimate();
+    const pct = quota ? (usage / quota * 100) : 0;
+    fill.style.width = pct.toFixed(2) + "%";
+    const th = +document.getElementById("th").value;
+    bar.classList.toggle("warn", pct >= th);
+    info.textContent = "usage " + fmt(usage) + " / quota " + fmt(quota) + "  (" + pct.toFixed(2) + "%)";
+    if (pct >= th) write("threshold crossed " + pct.toFixed(2) + "% - call prune()", "alert");
+  }
+  function restart() {
+    if (timer) clearInterval(timer);
+    timer = setInterval(poll, +document.getElementById("int").value * 1000);
+    poll();
+  }
+  document.getElementById("int").addEventListener("change", restart);
+  restart();
+</script>
+</body>
+</html>
