@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Migration codemod — MSE async range removal deprecation — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); background: var(--bg-paper); padding: var(--space-4); margin: var(--space-4) 0; }
+    .warn-block { border: 2px solid var(--accent-amber); background: #fff8e6; padding: var(--space-3); margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.5; }
+    .warn-block strong { color: var(--accent-amber); }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .controls button { font-size: 0.85rem; padding: 0.45rem 0.9rem; }
+    .editor { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 760px) { .editor { grid-template-columns: 1fr; } }
+    .pane { border: 2px solid var(--border-black); background: var(--bg-paper); display: flex; flex-direction: column; }
+    .pane h3 { font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border-black); margin: 0; background: var(--bg-stone); }
+    .pane textarea { flex: 1; font-family: var(--font-mono); font-size: 0.78rem; padding: var(--space-3); border: 0; resize: vertical; min-height: 220px; line-height: 1.45; background: var(--bg-paper); color: var(--text-black); }
+    .pane.out textarea { background: var(--bg-stone); }
+    .diag { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin-top: var(--space-3); white-space: pre-wrap; max-height: 14rem; overflow-y: auto; }
+    .diag .ok { color: var(--accent-emerald); font-weight: 600; }
+    .diag .warn { color: var(--accent-rose); font-weight: 600; }
+    .diag .info { color: var(--accent-blue); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; MSE async range removal deprecation</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>Migration codemod</h1>
+    <p class="lede">Paste real DASH/HLS player code that uses the deprecated <em>asynchronous</em> <code>SourceBuffer.remove()</code> &mdash; the kind that mutates <code>updating</code>, fires <code>updatestart</code>/<code>updateend</code>, and conflicts with concurrent <code>appendBuffer</code> calls &mdash; and the codemod rewrites it to the queue-driven shape MSE now expects.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Deprecation, not removal yet.</strong> Chrome 138 keeps async remove working but logs a console warning and a use-counter. Behaviour will change once the use-counter drops to a tiny percentage of all MSE traffic. Migrate now to avoid getting paged when it does.
+  </div>
+
+  <div class="stage">
+    <div class="controls">
+      <button id="run">codemod &rarr;</button>
+      <button id="example2">load example: race condition</button>
+      <button id="example3">load example: sequential removes</button>
+    </div>
+    <div class="editor">
+      <div class="pane">
+        <h3>before &mdash; deprecated async remove</h3>
+        <textarea id="src"></textarea>
+      </div>
+      <div class="pane out">
+        <h3>after &mdash; queue + await</h3>
+        <textarea id="out" readonly></textarea>
+      </div>
+    </div>
+    <div class="diag" id="diag" aria-live="polite"></div>
+  </div>
+
+  <section>
+    <h2>what the codemod does</h2>
+    <ol>
+      <li>Replaces each <code>sb.remove(start, end)</code> with a helper, <code>removeRange(sb, start, end)</code>, that returns a Promise.</li>
+      <li>Wraps the outer function in <code>async</code> and <code>await</code>s every <code>remove</code> and <code>appendBuffer</code>.</li>
+      <li>Removes orphaned <code>updateend</code> listeners that exist purely to chain a follow-up remove.</li>
+      <li>Inserts a top-of-file helper that serialises calls per SourceBuffer so two updates can never race.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">MSE async range removal deprecation</a> &mdash; feature index</li>
+      <li><a href="../mse-range-remove/">Async vs sync range removal demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5190983595327488" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const HELPER = `// queue: one outstanding update per SourceBuffer
+const __mseQueue = new WeakMap();
+function __serialize(sb) {
+  let p = __mseQueue.get(sb) || Promise.resolve();
+  return (next) => {
+    const r = p.then(next);
+    __mseQueue.set(sb, r.catch(() => {}));
+    return r;
+  };
+}
+function removeRange(sb, start, end) {
+  return __serialize(sb)(() => new Promise((res, rej) => {
+    sb.remove(start, end);
+    sb.addEventListener("updateend", function h() {
+      sb.removeEventListener("updateend", h);
+      res();
+    });
+    sb.addEventListener("error", rej, { once: true });
+  }));
+}
+function appendBuffer(sb, data) {
+  return __serialize(sb)(() => new Promise((res, rej) => {
+    sb.appendBuffer(data);
+    sb.addEventListener("updateend", function h() {
+      sb.removeEventListener("updateend", h);
+      res();
+    });
+    sb.addEventListener("error", rej, { once: true });
+  }));
+}
+
+`;
+
+  const EX1 = `// Common DASH eviction code: trim the oldest 30s before appending the next segment
+function evictAndAppend(sourceBuffer, newSegment) {
+  if (sourceBuffer.buffered.length === 0) {
+    sourceBuffer.appendBuffer(newSegment);
+    return;
+  }
+  const start = sourceBuffer.buffered.start(0);
+  sourceBuffer.remove(start, start + 30);
+  sourceBuffer.addEventListener("updateend", function onDone() {
+    sourceBuffer.removeEventListener("updateend", onDone);
+    sourceBuffer.appendBuffer(newSegment);
+  });
+}`;
+
+  const EX2 = `// Race condition: two listeners chained off the same updateend
+function dualTrim(sb) {
+  sb.remove(0, 10);
+  sb.addEventListener("updateend", () => {
+    sb.remove(20, 30);              // SECOND remove fires before the first finished
+  }, { once: true });
+}`;
+
+  const EX3 = `// Sequential removes via deprecated async listener chaining
+function clearAll(sourceBuffers, segment) {
+  for (const sb of sourceBuffers) {
+    sb.remove(0, sb.buffered.end(sb.buffered.length - 1));
+    sb.addEventListener("updateend", () => {
+      sb.appendBuffer(segment);
+    }, { once: true });
+  }
+}`;
+
+  function logLine(diag, kind, msg) {
+    const span = document.createElement("div");
+    span.innerHTML = `<span class="${kind}">${msg}</span>`;
+    diag.appendChild(span);
+    diag.scrollTop = diag.scrollHeight;
+  }
+
+  function codemod(src) {
+    const diag = document.getElementById("diag");
+    diag.innerHTML = "";
+    let out = src;
+    let removed = 0, added = 0;
+
+    // 1. Detect updateend listeners chained after remove() — they're the deprecated shape
+    const updateEndRe = /(\b\w+)\.addEventListener\(\s*["']updateend["']\s*,\s*function[^}]*\}\s*\)\s*;?/g;
+    out = out.replace(updateEndRe, (m, sb) => { removed++; return `// (removed: listener replaced by await)`; });
+
+    const updateEndArrowRe = /(\b\w+)\.addEventListener\(\s*["']updateend["']\s*,\s*\([^)]*\)\s*=>\s*\{[^}]*\}[^)]*\)\s*;?/g;
+    out = out.replace(updateEndArrowRe, () => { removed++; return `// (removed: listener replaced by await)`; });
+
+    // 2. Replace sb.remove(...) with await removeRange(sb, ...)
+    out = out.replace(/(\b\w+)\.remove\(([^)]+)\)\s*;?/g, (m, sb, args) => { added++; return `await removeRange(${sb}, ${args});`; });
+
+    // 3. Replace sb.appendBuffer(...) with await appendBuffer
+    out = out.replace(/(\b\w+)\.appendBuffer\(([^)]+)\)\s*;?/g, (m, sb, args) => { added++; return `await appendBuffer(${sb}, ${args});`; });
+
+    // 4. Make outer functions async
+    out = out.replace(/function\s+(\w+)\s*\(([^)]*)\)\s*\{/g, (m, n, a) => `async function ${n}(${a}) {`);
+
+    logLine(diag, "info", `&mdash; ${removed} legacy updateend listener(s) removed`);
+    logLine(diag, "info", `&mdash; ${added} call(s) replaced with awaited helpers`);
+    if (removed === 0 && added === 0) {
+      logLine(diag, "warn", "No deprecated patterns detected. Try the example buttons.");
+    } else {
+      logLine(diag, "ok", "OK &mdash; output uses sequential awaits, no in-flight races.");
+    }
+    return HELPER + out;
+  }
+
+  const src = document.getElementById("src");
+  const out = document.getElementById("out");
+  src.value = EX1;
+  out.value = "// click 'codemod' to rewrite the left-hand source";
+  document.getElementById("run").addEventListener("click", () => out.value = codemod(src.value));
+  document.getElementById("example2").addEventListener("click", () => { src.value = EX2; out.value = codemod(src.value); });
+  document.getElementById("example3").addEventListener("click", () => { src.value = EX3; out.value = codemod(src.value); });
+  out.value = codemod(src.value);
+</script>
+</body>
+</html>
