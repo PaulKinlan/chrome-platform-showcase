@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker fan-out — Transferable RTCDataChannel — Chrome 130 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .topology {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 700px) { .topology { grid-template-columns: 1fr; } }
+    .col {
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .col.old { border-color: var(--accent-rose); }
+    .col.new { border-color: var(--accent-emerald); }
+    .col h3 {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin: 0 0 var(--space-2);
+      padding-bottom: 0.3rem;
+      border-bottom: 1px solid var(--border-black);
+    }
+    .col.old h3 { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .col.new h3 { color: var(--accent-emerald); border-color: var(--accent-emerald); }
+
+    .box {
+      background: var(--bg-stone);
+      border: 1.5px solid var(--border-black);
+      padding: 0.6rem 0.8rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      margin: 0.4rem 0;
+    }
+    .box.main { background: #fff4cc; }
+    .box.worker { background: #d6f0ff; }
+    .arrow {
+      font-family: var(--font-mono);
+      color: var(--accent-blue);
+      font-weight: 700;
+      text-align: center;
+      margin: 0.3rem 0;
+    }
+
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .controls button {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      padding: 0.4rem 0.8rem;
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      cursor: pointer;
+    }
+    .controls label { font-family: var(--font-mono); font-size: 0.78rem; }
+
+    .meters {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 700px) { .meters { grid-template-columns: 1fr; } }
+    .meter {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .meter h4 {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin: 0 0 0.4rem;
+    }
+    .meter dl {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.4rem;
+      margin: 0;
+    }
+    .meter dt { color: var(--text-muted); font-family: var(--font-mono); font-size: 0.72rem; }
+    .meter dd { color: var(--text-black); font-family: var(--font-mono); font-size: 0.85rem; font-weight: 700; margin: 0; }
+
+    .probe {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-charcoal);
+      white-space: pre-wrap;
+      margin: var(--space-3) 0;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Transferable RTCDataChannel to dedicated workers</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>main thread vs worker fan-out</h1>
+    <p class="lede">The chromestatus motivation: "improve the performance of WebRTC applications, by offloading network send/receive operations from the main thread to a worker thread … combine an RTCDataChannel in workers with WebCodecs and OffscreenCanvas, to decode and render directly from a worker." This demo runs a synthetic high-rate data channel and compares main-thread vs dedicated-worker handling, with main-thread responsiveness as the load varies.</p>
+  </header>
+
+  <div class="stage">
+    <div class="topology">
+      <div class="col old">
+        <h3>main-thread handling (legacy)</h3>
+        <div class="box main">main thread</div>
+        <div class="arrow">↕ (ondatachannel + onmessage)</div>
+        <div class="box main">RTCDataChannel</div>
+        <div class="arrow">↕</div>
+        <div class="box main">app render + UI</div>
+        <p style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);margin-top:0.6rem">every datagram payload is parsed/decompressed on the same thread that handles input + paint. UI hitches under load.</p>
+      </div>
+      <div class="col new">
+        <h3>worker-transferred (Chrome 130+)</h3>
+        <div class="box main">main thread</div>
+        <div class="arrow">↓ postMessage(channel, [channel])</div>
+        <div class="box worker">dedicated worker</div>
+        <div class="arrow">↕</div>
+        <div class="box worker">RTCDataChannel (now lives in worker)</div>
+        <div class="arrow">↓ postMessage(decoded)</div>
+        <div class="box main">main thread — render only</div>
+        <p style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);margin-top:0.6rem">channel transferred to the worker. Main thread only sees decoded frames, never raw datagrams.</p>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label for="rate">datagrams/sec:</label>
+      <input type="range" id="rate" min="50" max="5000" step="50" value="800">
+      <span id="rateV" style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted)">800</span>
+      <label><input type="checkbox" id="cpu" checked> simulate per-datagram decode cost (1.4ms)</label>
+      <button id="start">start synthetic stream</button>
+      <button id="stop" style="background:var(--accent-rose);color:var(--bg-ivory)">stop</button>
+    </div>
+
+    <div class="meters">
+      <div class="meter">
+        <h4>main-thread main-loop FPS (simulated)</h4>
+        <dl>
+          <dt>datagrams processed</dt><dd id="mainDg">0</dd>
+          <dt>main-thread fps</dt><dd id="mainFps">– fps</dd>
+          <dt>frame budget used</dt><dd id="mainBudget">0%</dd>
+        </dl>
+      </div>
+      <div class="meter">
+        <h4>worker fan-out (simulated)</h4>
+        <dl>
+          <dt>datagrams processed</dt><dd id="workerDg">0</dd>
+          <dt>main-thread fps</dt><dd id="workerFps">– fps</dd>
+          <dt>main thread budget used</dt><dd id="workerBudget">0%</dd>
+        </dl>
+      </div>
+    </div>
+
+    <div class="probe" id="probe"></div>
+  </div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>// Create the channel on the main thread as before.
+const pc = new RTCPeerConnection(/* … */);
+const channel = pc.createDataChannel("telemetry");
+
+// Spin up a dedicated worker to handle this channel.
+const worker = new Worker("worker.js", { type: "module" });
+
+// New in Chrome 130: RTCDataChannel is transferable to dedicated workers.
+channel.addEventListener("open", () =&gt; {
+  worker.postMessage({ kind: "channel", channel }, [channel]);
+  // From here on, channel is closed on the main thread —
+  // worker.js owns it.
+});
+
+// worker.js
+self.onmessage = (e) =&gt; {
+  if (e.data.kind === "channel") {
+    const ch = e.data.channel;
+    ch.onmessage = (ev) =&gt; {
+      // decode in the worker. Combine with WebCodecs decoder +
+      // OffscreenCanvas if you also want to render here.
+      const decoded = decode(ev.data);
+      // forward minimal data to main for UI only
+      postMessage({ kind: "frame", decoded });
+    };
+  }
+};</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Transferable RTCDataChannel to dedicated workers</a> — feature index</li>
+      <li><a href="../rtc-transfer/">Companion: capability + transfer probe</a></li>
+      <li><a href="https://chromestatus.com/feature/6612726584180736" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://w3c.github.io/webrtc-extensions/#rtcdatachannel-transferable" target="_blank" rel="noopener">WebRTC Extensions spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const rate = document.getElementById("rate");
+  const rateV = document.getElementById("rateV");
+  const cpu = document.getElementById("cpu");
+  const probe = document.getElementById("probe");
+
+  const mainDg = document.getElementById("mainDg");
+  const mainFps = document.getElementById("mainFps");
+  const mainBudget = document.getElementById("mainBudget");
+  const workerDg = document.getElementById("workerDg");
+  const workerFps = document.getElementById("workerFps");
+  const workerBudget = document.getElementById("workerBudget");
+
+  rate.addEventListener("input", () => rateV.textContent = rate.value);
+
+  // Capability probe — does the engine allow transfer of RTCDataChannel?
+  function probeAPI() {
+    let txt = "";
+    const hasPC = "RTCPeerConnection" in window;
+    txt += "RTCPeerConnection: " + hasPC + "\n";
+    if (hasPC) {
+      try {
+        const pc = new RTCPeerConnection();
+        const ch = pc.createDataChannel("probe");
+        // Test by feature-detecting the transfer step (engines that don't
+        // allow it throw on postMessage with the channel in transferList).
+        let ok = false;
+        try {
+          const w = new Worker(URL.createObjectURL(new Blob(["self.onmessage=()=>{};"])));
+          w.postMessage({ ch }, [ch]);
+          w.terminate();
+          ok = true;
+        } catch (e) {
+          txt += "  transfer attempt threw: " + e.message + "\n";
+        }
+        txt += "RTCDataChannel transferable to dedicated worker: " + (ok ? "YES" : "NO (pre-130)") + "\n";
+        ch.close();
+        pc.close();
+      } catch (e) {
+        txt += "probe error: " + e.message;
+      }
+    }
+    probe.textContent = txt + "\n(the meters below are simulations based on the per-datagram cost model)";
+  }
+  probeAPI();
+
+  let running = false;
+  let frame = 0;
+  let mainFrames = 0;
+  let workerFrames = 0;
+  let mainCount = 0;
+  let workerCount = 0;
+  let lastFpsTime = 0;
+  let mainBudgetUsed = 0;
+  let workerBudgetUsed = 0;
+
+  function tick(now) {
+    if (!running) return;
+    const dt = (now - lastFpsTime) / 1000;
+    if (dt >= 0.5) {
+      const dgPerSec = +rate.value;
+      const perDg = cpu.checked ? 1.4 : 0.15; // ms per datagram in main path
+      const datagramsThisInterval = dgPerSec * dt;
+
+      // Main-thread path: process all on main, costing perDg ms each.
+      mainCount += Math.floor(datagramsThisInterval);
+      // Worker path: only forwards ~0.05ms per decoded frame back to main.
+      workerCount += Math.floor(datagramsThisInterval);
+
+      // Simulate budget = ms of main thread per second.
+      const mainCpuMs = datagramsThisInterval * perDg;
+      const mainCpuPct = Math.min(100, (mainCpuMs / 1000) * 100);
+      // Main-thread fps: 60 if budget ok, else scaled down.
+      const mainFpsVal = Math.max(8, Math.round(60 * (1 - Math.min(0.85, mainCpuMs / 1000))));
+      const workerCpuMs = datagramsThisInterval * 0.04; // forwarding only
+      const workerCpuPct = Math.min(100, (workerCpuMs / 1000) * 100);
+      const workerFpsVal = Math.max(50, Math.round(60 * (1 - workerCpuMs / 1000)));
+
+      mainDg.textContent = mainCount.toLocaleString();
+      mainFps.textContent = mainFpsVal + " fps";
+      mainBudget.textContent = Math.round(mainCpuPct) + "%";
+      mainBudget.style.color = mainCpuPct > 50 ? "var(--accent-rose)" : (mainCpuPct > 20 ? "var(--accent-amber)" : "var(--accent-emerald)");
+
+      workerDg.textContent = workerCount.toLocaleString();
+      workerFps.textContent = workerFpsVal + " fps";
+      workerBudget.textContent = Math.round(workerCpuPct) + "%";
+      workerBudget.style.color = workerCpuPct > 50 ? "var(--accent-rose)" : "var(--accent-emerald)";
+
+      lastFpsTime = now;
+    }
+    requestAnimationFrame(tick);
+  }
+  document.getElementById("start").addEventListener("click", () => {
+    running = true;
+    lastFpsTime = performance.now();
+    mainCount = workerCount = 0;
+    requestAnimationFrame(tick);
+  });
+  document.getElementById("stop").addEventListener("click", () => { running = false; });
+</script>
+</body>
+</html>
