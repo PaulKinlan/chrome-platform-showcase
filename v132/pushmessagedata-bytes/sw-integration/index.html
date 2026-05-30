@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Service worker integration &mdash; PushMessageData.bytes &mdash; Chrome 132</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .probes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-3); margin: var(--space-3) 0; }
+    .probe { padding: var(--space-3); border: 2px solid var(--border-black); font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-stone); color: var(--text-black); }
+    .probe.yes { background: #e8f5ed; border-color: var(--accent-emerald); }
+    .probe.no { background: #fde7e9; border-color: var(--accent-rose); }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; max-height: 220px; overflow-y: auto; margin: var(--space-3) 0; color: var(--text-charcoal); }
+    .log p { margin: 0.15rem 0; }
+    pre.sw { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-size: 0.78rem; overflow-x: auto; margin: var(--space-3) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; PushMessageData::bytes()</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v132</p>
+    <h1>Service worker integration &mdash; subscribe, dispatch, decode</h1>
+    <p class="lede">Register a service worker; the SW logs back what <code>PushEvent.data.bytes()</code> would do. The page can&#x27;t actually push a real Web Push message (that requires a server), but it can <code>postMessage</code> the same payload into the SW and call the equivalent decode path. Buttons surface support live.</p>
+  </header>
+
+  <section class="stage">
+    <div class="probes">
+      <div class="probe" id="swReg">serviceWorker: &mdash;</div>
+      <div class="probe" id="pmd">PushMessageData.bytes: &mdash;</div>
+      <div class="probe" id="pm">PushManager: &mdash;</div>
+    </div>
+
+    <div class="controls">
+      <button id="register">register worker</button>
+      <button id="ping" disabled>simulate push (postMessage to SW)</button>
+    </div>
+
+    <h3>service worker log (mirrored back to this page)</h3>
+    <div id="log" class="log"></div>
+
+    <h3>sw.js shape</h3>
+<pre class="sw">self.addEventListener("push", (e) =&gt; {
+  // v132+ ergonomic path
+  const u8 = e.data.bytes();
+  const text = new TextDecoder().decode(u8);
+  e.waitUntil(self.registration.showNotification(text));
+});
+self.addEventListener("message", (e) =&gt; {
+  // demo channel: same code path
+  const u8 = new Response(e.data).bytes
+    ? new Response(e.data).bytes()
+    : new Response(e.data).arrayBuffer().then((ab) =&gt; new Uint8Array(ab));
+  Promise.resolve(u8).then((bytes) =&gt; e.source.postMessage("decoded " + bytes.length + " bytes"));
+});</pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">PushMessageData::bytes()</a> &mdash; feature index</li>
+      <li><a href="../push-bytes/">side-by-side Response.bytes() rig</a></li>
+      <li><a href="https://www.w3.org/TR/push-api/#dom-pushmessagedata-bytes" target="_blank" rel="noopener">Spec</a></li>
+      <li><a href="https://chromestatus.com/feature/5117729756151808" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  function probe(id, ok, label) {
+    const el = document.getElementById(id);
+    el.className = "probe " + (ok ? "yes" : "no");
+    el.textContent = label + ": " + (ok ? "available" : "unavailable");
+  }
+  probe("swReg", "serviceWorker" in navigator, "navigator.serviceWorker");
+  probe("pmd", typeof PushMessageData !== "undefined" && "bytes" in PushMessageData.prototype, "PushMessageData.prototype.bytes");
+  probe("pm", "PushManager" in window, "PushManager");
+
+  const log = document.getElementById("log");
+  const write = (m) => { const p = document.createElement("p"); p.textContent = new Date().toISOString().slice(11, 23) + "  " + m; log.prepend(p); while (log.children.length > 18) log.lastChild.remove(); };
+
+  document.getElementById("register").addEventListener("click", async () => {
+    if (!("serviceWorker" in navigator)) return write("serviceWorker unavailable");
+    const code = `self.addEventListener("message", async (e) => {
+      const r = new Response(e.data);
+      let u8;
+      try { u8 = await (r.bytes ? r.bytes() : (async () => new Uint8Array(await r.arrayBuffer()))()); }
+      catch (err) { e.source.postMessage("error: " + err.message); return; }
+      const txt = new TextDecoder().decode(u8.slice(0, 64));
+      e.source.postMessage("SW decoded " + u8.length + " B; preview=" + JSON.stringify(txt));
+    });`;
+    const url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+    try {
+      const reg = await navigator.serviceWorker.register(url, { scope: "./sw-integration/" });
+      write("SW registered: scope=" + reg.scope);
+      navigator.serviceWorker.addEventListener("message", (e) => write(e.data));
+      document.getElementById("ping").disabled = false;
+    } catch (e) { write("register failed: " + e.message); }
+  });
+
+  document.getElementById("ping").addEventListener("click", async () => {
+    const payload = JSON.stringify({ kind: "chat", from: "alice", body: "see you tomorrow" });
+    const ctrl = await navigator.serviceWorker.ready;
+    if (!ctrl.active) return write("no active SW");
+    ctrl.active.postMessage(payload);
+    write("page postMessage -> SW: " + payload);
+  });
+</script>
+</body>
+</html>
