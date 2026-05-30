@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zero-Byte Row — RTP Stats Timing — Chrome 141</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .demo-stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .feature-line { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.4rem 0.7rem; margin-bottom: var(--space-4); }
+    .ok { color: var(--accent-emerald); font-weight: 700; }
+    .miss { color: var(--accent-rose); font-weight: 700; }
+    .row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    table { width: 100%; border-collapse: collapse; margin-top: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; }
+    th, td { border-bottom: 1px solid var(--border-black); padding: 0.4rem 0.6rem; text-align: left; color: var(--text-black); }
+    th { background: var(--bg-stone); }
+    tr.zero { background: rgba(184, 123, 0, 0.1); }
+    pre.code { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3) var(--space-4); font-size: 0.82rem; overflow-x: auto; }
+    .warn-block { border: 2px solid var(--accent-amber); background: var(--bg-paper); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; box-shadow: var(--thin-shadow); }
+    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--accent-amber); display: block; margin-bottom: 0.4rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebRTC getStats RTP timing</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v141</p>
+    <h1>Zero-Byte Row</h1>
+    <p class="lede">Because Chrome 141 creates the stats object right after SDP, polling code that divides by <code>bytesSent</code> to compute bitrate will see zeroes for the first second or two. Filter on <code>packetsSent &gt; 0</code> or check <code>r.timestamp</code> deltas; otherwise your bitrate UI flashes "0 kbps" before settling.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Heads up</strong>
+    Requires Chrome 141+. The bug isn't in the spec change — it's in apps' assumption that the existence of an outbound-rtp row meant data was already flowing.
+  </div>
+
+  <div class="feature-line" id="probe">checking support…</div>
+
+  <div class="demo-stage">
+    <p>Simulated frame-by-frame polling of an outbound-rtp row, showing the new "exists but empty" rows you have to handle:</p>
+    <table>
+      <thead><tr><th>poll #</th><th>timestamp</th><th>packetsSent</th><th>bytesSent</th><th>bitrate (kbps)</th><th>note</th></tr></thead>
+      <tbody id="poll"></tbody>
+    </table>
+  </div>
+
+  <section>
+    <h2>defensive polling</h2>
+<pre class="code"><code>let prev = null;
+async function poll() {
+  const stats = await pc.getStats();
+  for (const r of stats.values()) {
+    if (r.type !== "outbound-rtp") continue;
+    if (r.packetsSent === 0) {
+      // 141+: row exists, no data yet. Don't divide by zero, don't render 0kbps
+      continue;
+    }
+    if (prev &amp;&amp; prev.ssrc === r.ssrc) {
+      const dt = (r.timestamp - prev.timestamp) / 1000;
+      const dBytes = r.bytesSent - prev.bytesSent;
+      const kbps = (dBytes * 8 / 1000) / dt;
+      renderBitrate(kbps);
+    }
+    prev = r;
+  }
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>why this angle</h2>
+    <p>This is the operational follow-on to the spec-alignment change. The "zero-byte rows" exist in Safari already; Chrome 141 starts emitting them too. Sites that have only ever tested on Chrome will hit this for the first time. The fix is one line — skip rows where <code>packetsSent === 0</code> — but the failure mode (UI flashing "0kbps") is noisy enough to warrant the explicit walk-through.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../rtp-stats/">rtp-stats (first concept)</a></li>
+      <li><a href="../stats-lifecycle/">Stats Lifecycle</a></li>
+      <li><a href="https://w3c.github.io/webrtc-stats/" target="_blank" rel="noopener">webrtc-stats spec</a></li>
+      <li><a href="https://chromestatus.com/feature/4580748730040320" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probe = document.getElementById("probe");
+  const supported = typeof RTCPeerConnection !== "undefined";
+  probe.innerHTML = supported
+    ? 'RTCPeerConnection <span class="ok">available</span>'
+    : 'RTCPeerConnection <span class="miss">missing</span>';
+
+  // Simulate 10 polls — first three are zero-byte rows
+  const polls = [];
+  const start = Date.now();
+  let bytes = 0;
+  for (let i = 0; i < 10; i++) {
+    const ts = start + i * 500;
+    if (i < 3) polls.push({ ts, packets: 0, bytes: 0, bitrate: null, note: "exists, no data" });
+    else {
+      const newBytes = 80000 + Math.round(Math.random() * 20000);
+      bytes += newBytes;
+      const prev = polls[i - 1];
+      const dt = 0.5;
+      const dBytes = (i === 3) ? newBytes : (newBytes);
+      const kbps = (dBytes * 8 / 1000) / dt;
+      polls.push({ ts, packets: 100 + i * 50, bytes, bitrate: kbps, note: "" });
+    }
+  }
+  const body = document.getElementById("poll");
+  polls.forEach((p, i) => {
+    const tr = document.createElement("tr");
+    if (p.packets === 0) tr.classList.add("zero");
+    tr.innerHTML = "<td>" + (i + 1) + "</td><td>+" + (i * 500) + "ms</td><td>" + p.packets + "</td><td>" + p.bytes + "</td><td>" + (p.bitrate ? p.bitrate.toFixed(0) : "—") + "</td><td>" + p.note + "</td>";
+    body.appendChild(tr);
+  });
+</script>
+</body>
+</html>
