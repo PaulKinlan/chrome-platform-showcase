@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DisposableStack — Explicit resource management (sync) — Chrome 134 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .probe { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
+    .ok { color: var(--accent-emerald); font-weight: 600; }
+    .bad { color: var(--accent-rose); font-weight: 600; }
+    .controls { display: flex; gap: var(--space-3); margin: var(--space-3) 0; flex-wrap: wrap; }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; max-height: 280px; overflow-y: auto; margin-top: var(--space-3); }
+    .log p { margin: 0.15rem 0; }
+    .log .open { color: var(--accent-blue); }
+    .log .close { color: var(--accent-emerald); }
+    .log .err { color: var(--accent-rose); }
+    .badge { font-family: var(--font-mono); font-size: 0.72rem; background: var(--text-black); color: var(--bg-ivory); padding: 0.1rem 0.4rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Explicit resource management (sync)</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v134</p>
+    <h1>DisposableStack — many resources, one cleanup</h1>
+    <p class="lede">The explainer’s “factory pattern” motivating case: a function that conditionally acquires several resources and needs to dispose all of them in reverse order, even on early return or error. <code>DisposableStack</code> is the runtime side of the proposal — pair it with <code>using</code> to get LIFO cleanup for free. Open and close any combination of resources, then trigger an error to see the stack unwind.</p>
+  </header>
+
+  <div class="probe" id="probe">probing DisposableStack…</div>
+
+  <h2>Build an operation, observe the unwind</h2>
+  <div class="controls">
+    <button data-add="db">add: db connection</button>
+    <button data-add="file">add: file handle</button>
+    <button data-add="lock">add: web lock</button>
+    <button data-add="timer">add: interval timer</button>
+    <button id="run">run with using</button>
+    <button id="run-throw">run with using + throw</button>
+    <button id="reset">reset</button>
+  </div>
+
+  <div class="stage">
+    <p><span class="badge" id="count">0</span> resources queued for next run.</p>
+    <ul id="queued" style="font-family: var(--font-mono); font-size: 0.85rem; padding-left: 1.2rem;"></ul>
+  </div>
+
+  <div class="log" id="log"></div>
+
+  <h2>The code</h2>
+  <pre><code>function setupOperation(opts) {
+  using stack = new DisposableStack();
+  const db   = stack.use(openDb());
+  const file = opts.writeOutput ? stack.use(openFile()) : null;
+  const lock = opts.requireLock ? stack.use(acquireLock()) : null;
+  return run(db, file, lock);
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Explicit resource management (sync)</a> — feature index</li>
+      <li><a href="../using/">using baseline</a> — sibling concept</li>
+      <li><a href="../../explicit-resource-management-async/">Async resource management</a></li>
+      <li><a href="https://github.com/tc39/proposal-explicit-resource-management#new-disposablestack-and-asyncdisposablestack-container-objects" target="_blank" rel="noopener">TC39 proposal — DisposableStack</a></li>
+      <li><a href="https://chromestatus.com/feature/5071680358842368" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probe = document.getElementById('probe');
+  const supported = typeof DisposableStack === 'function' && typeof Symbol.dispose === 'symbol';
+  probe.innerHTML = supported
+    ? '<span class="ok">DisposableStack + Symbol.dispose supported</span> — the unwind is native'
+    : '<span class="bad">DisposableStack missing</span> — we shim a stack so you can still see LIFO disposal; native order is what Chrome 134+ guarantees';
+
+  const log = document.getElementById('log');
+  const queuedList = document.getElementById('queued');
+  const countEl = document.getElementById('count');
+  function logLine(msg, cls) {
+    const p = document.createElement('p');
+    p.textContent = new Date().toISOString().slice(11, 23) + '  ' + msg;
+    if (cls) p.className = cls;
+    log.prepend(p);
+  }
+
+  const resourceTypes = {
+    db: () => ({ name: 'db', [Symbol.dispose ?? Symbol('dispose')]() { logLine('  close db', 'close'); } }),
+    file: () => ({ name: 'file', [Symbol.dispose ?? Symbol('dispose')]() { logLine('  fsync + close file', 'close'); } }),
+    lock: () => ({ name: 'lock', [Symbol.dispose ?? Symbol('dispose')]() { logLine('  release lock', 'close'); } }),
+    timer: () => ({ name: 'timer', [Symbol.dispose ?? Symbol('dispose')]() { logLine('  clearInterval timer', 'close'); } }),
+  };
+
+  let queue = [];
+  function refreshQueue() {
+    countEl.textContent = queue.length;
+    queuedList.innerHTML = queue.map((k, i) => `<li>${i + 1}. ${k}</li>`).join('');
+  }
+
+  document.querySelectorAll('[data-add]').forEach((b) => {
+    b.addEventListener('click', () => { queue.push(b.dataset.add); refreshQueue(); });
+  });
+
+  function MakeStack() {
+    if (supported) return new DisposableStack();
+    const arr = [];
+    return {
+      use(r) { arr.push(r); return r; },
+      dispose() { while (arr.length) { const r = arr.pop(); const fn = r[Symbol.dispose]; if (fn) fn.call(r); } },
+      [Symbol.dispose ?? Symbol('dispose')]() { this.dispose(); },
+    };
+  }
+
+  function runOperation(shouldThrow) {
+    if (!queue.length) { logLine('queue empty — add resources first', 'err'); return; }
+    logLine(`— RUN (using stack, ${queue.length} resources${shouldThrow ? ', will throw' : ''}) —`);
+    let stack = MakeStack();
+    try {
+      try {
+        queue.forEach((k) => {
+          const r = resourceTypes[k]();
+          stack.use(r);
+          logLine('  open ' + r.name, 'open');
+        });
+        if (shouldThrow) throw new Error('operation failed mid-run');
+        logLine('  body succeeded', 'open');
+      } finally {
+        const fn = stack[Symbol.dispose] || Object.getOwnPropertySymbols(stack).map((s) => stack[s]).find((v) => typeof v === 'function');
+        if (fn) fn.call(stack);
+        logLine('  stack disposed (LIFO)');
+      }
+    } catch (e) {
+      logLine('caught: ' + e.message, 'err');
+    }
+  }
+
+  document.getElementById('run').addEventListener('click', () => runOperation(false));
+  document.getElementById('run-throw').addEventListener('click', () => runOperation(true));
+  document.getElementById('reset').addEventListener('click', () => { queue = []; refreshQueue(); log.innerHTML = ''; });
+
+  refreshQueue();
+</script>
+</body>
+</html>
