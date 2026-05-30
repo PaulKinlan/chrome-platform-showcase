@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cursor vs getAllRecords — IndexedDB — Chrome 133</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; margin-bottom: var(--space-4); }
+    .controls input { width: 7rem; border: 2px solid var(--border-black); padding: 0.3rem; font-family: var(--font-mono); background: var(--bg-paper); }
+    .gauges { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); margin-top: var(--space-3); }
+    .gauge { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); text-align: center; }
+    .gauge .lbl { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+    .gauge .val { font-family: var(--font-display); font-size: 1.6rem; font-variant-numeric: tabular-nums; color: var(--text-black); }
+    .gauge.win .val { color: var(--accent-emerald); }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; max-height: 220px; overflow-y: auto; margin-top: var(--space-3); }
+    .log p { margin: 0.1rem 0; }
+    .warn-block { border: 2px solid var(--accent-rose); background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-4) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; IndexedDB getAllRecords()</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo · v133</p>
+    <h1>Cursor vs getAllRecords &mdash; the 350ms Microsoft benchmark</h1>
+    <p class="lede">Seed an IndexedDB store with N records, then read them back two ways: the classic <code>openCursor()</code> loop (one round-trip per record) and the new <code>getAllRecords()</code> (single round-trip). Reproduce the chromestatus 350ms speedup locally.</p>
+  </header>
+  <div id="support" class="warn-block" hidden>getAllRecords is not supported here. Cursor benchmark will still run. Needs Chrome 133+.</div>
+  <div class="stage">
+    <div class="controls">
+      <label style="font-family:var(--font-mono);font-size:0.78rem">records <input id="n" type="number" value="5000" min="100" max="50000" step="100"></label>
+      <button id="seed">seed store</button>
+      <button id="benchCursor">run cursor</button>
+      <button id="benchGAR">run getAllRecords</button>
+    </div>
+    <div class="gauges">
+      <div class="gauge"><div class="lbl">cursor (ms)</div><div class="val" id="cursorMs">&mdash;</div></div>
+      <div class="gauge win"><div class="lbl">getAllRecords (ms)</div><div class="val" id="garMs">&mdash;</div></div>
+      <div class="gauge"><div class="lbl">speedup</div><div class="val" id="speedup">&mdash;</div></div>
+      <div class="gauge"><div class="lbl">records seeded</div><div class="val" id="seeded">0</div></div>
+    </div>
+    <div class="log" id="log"></div>
+  </div>
+  <section>
+    <h2>why the difference</h2>
+    <p>Each step of an IndexedDB cursor is a separate task on the main thread. <code>getAllRecords()</code> collapses that to one call, returning an array of <code>{ primaryKey, key, value }</code> records &mdash; including the index key for index-based queries.</p>
+<pre><code>const tx = db.transaction("notes", "readonly");
+const records = await tx.objectStore("notes").getAllRecords({
+  query: IDBKeyRange.lowerBound(0),
+  count: 10000,
+  direction: "prev",
+});
+// records[i] = { primaryKey, key, value }</code></pre>
+  </section>
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../all-records/">getAllRecords &mdash; original demo</a></li>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="https://chromestatus.com/feature/5124331450138624" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://w3c.github.io/IndexedDB/#dom-idbobjectstore-getallrecords" target="_blank" rel="noopener">IndexedDB spec</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+const logEl = document.getElementById("log");
+function log(m) { const p = document.createElement("p"); p.textContent = new Date().toISOString().slice(11, 23) + "  " + m; logEl.prepend(p); while (logEl.children.length > 24) logEl.lastChild.remove(); }
+let db;
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("v133-gar-bench", 1);
+    req.onupgradeneeded = () => { const d = req.result; if (!d.objectStoreNames.contains("notes")) d.createObjectStore("notes", { keyPath: "id" }); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+(async () => {
+  db = await openDb();
+  const hasGAR = typeof IDBObjectStore.prototype.getAllRecords === "function";
+  if (!hasGAR) document.getElementById("support").hidden = false;
+  log(`db ready. getAllRecords: ${hasGAR ? "yes" : "no"}`);
+})();
+document.getElementById("seed").addEventListener("click", async () => {
+  const n = Math.max(100, Math.min(50000, +document.getElementById("n").value | 0));
+  const tx = db.transaction("notes", "readwrite");
+  const store = tx.objectStore("notes");
+  store.clear();
+  for (let i = 0; i < n; i++) store.put({ id: i, body: "row " + i + " " + Math.random().toString(36).slice(2, 18), tag: i % 8 });
+  await new Promise((r, j) => { tx.oncomplete = r; tx.onerror = () => j(tx.error); });
+  document.getElementById("seeded").textContent = n;
+  log(`seeded ${n} records`);
+});
+document.getElementById("benchCursor").addEventListener("click", async () => {
+  const t0 = performance.now();
+  const tx = db.transaction("notes", "readonly");
+  const store = tx.objectStore("notes");
+  const out = [];
+  await new Promise((resolve, reject) => {
+    const req = store.openCursor();
+    req.onsuccess = () => { const c = req.result; if (c) { out.push({ pk: c.primaryKey, value: c.value }); c.continue(); } else resolve(); };
+    req.onerror = () => reject(req.error);
+  });
+  const ms = performance.now() - t0;
+  document.getElementById("cursorMs").textContent = ms.toFixed(1);
+  log(`cursor: ${out.length} rows in ${ms.toFixed(1)}ms`);
+  bumpSpeedup();
+});
+document.getElementById("benchGAR").addEventListener("click", async () => {
+  if (typeof IDBObjectStore.prototype.getAllRecords !== "function") { document.getElementById("garMs").textContent = "n/a"; log("getAllRecords unsupported"); return; }
+  const t0 = performance.now();
+  const tx = db.transaction("notes", "readonly");
+  const recs = await new Promise((resolve, reject) => {
+    const req = tx.objectStore("notes").getAllRecords();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  const ms = performance.now() - t0;
+  document.getElementById("garMs").textContent = ms.toFixed(1);
+  log(`getAllRecords: ${recs.length} rows in ${ms.toFixed(1)}ms`);
+  bumpSpeedup();
+});
+function bumpSpeedup() {
+  const c = parseFloat(document.getElementById("cursorMs").textContent);
+  const g = parseFloat(document.getElementById("garMs").textContent);
+  if (c > 0 && g > 0) document.getElementById("speedup").textContent = (c / g).toFixed(2) + "×";
+}
+</script>
+</body>
+</html>
