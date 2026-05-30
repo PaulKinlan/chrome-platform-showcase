@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codemod helper — FedCM params/error rename — Chrome 143</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    textarea {
+      width: 100%;
+      min-height: 200px;
+      padding: var(--space-3);
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      resize: vertical;
+    }
+    .row { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .compare { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 700px) { .compare { grid-template-columns: 1fr; } }
+    .panel h4 { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    .diff-list {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      margin: var(--space-3) 0;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+    .diff-list .item { padding: 0.25rem 0; border-bottom: 1px dashed var(--border-black); }
+    .diff-list .item:last-child { border-bottom: none; }
+    .diff-list .item.add { color: var(--accent-emerald); }
+    .diff-list .item.remove { color: var(--accent-rose); }
+    .diff-list .item.warn { color: var(--accent-amber); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; FedCM params/error rename</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v143</p>
+    <h1>Codemod helper</h1>
+    <p class="lede">Paste a snippet of FedCM client code. The page detects the deprecated <code>nonce</code> top-level field and the old <code>err.code</code> error attribute, suggests a rewrite, and applies it for you.</p>
+  </header>
+
+  <section class="stage">
+    <div class="compare">
+      <div class="panel">
+        <h4>before — paste your code</h4>
+        <textarea id="src">const cred = await navigator.credentials.get({
+  identity: {
+    providers: [{
+      configURL: "https://idp.example/fedcm.json",
+      clientId: "abc123",
+      nonce: "n-0S6_WzA2Mj",
+    }],
+  },
+});
+
+try {
+  // …
+} catch (err) {
+  if (err.name === "IdentityCredentialError") {
+    console.log("code:", err.code);
+  }
+}</textarea>
+      </div>
+      <div class="panel">
+        <h4>after — v143 shape</h4>
+        <textarea id="out" readonly></textarea>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="run-btn">Rewrite</button>
+      <button id="copy-btn">Copy result</button>
+    </div>
+
+    <h4 style="font-family:var(--font-mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin:var(--space-3) 0 var(--space-2);">findings</h4>
+    <div class="diff-list" id="findings"></div>
+  </section>
+
+  <section>
+    <h2>the migration</h2>
+<pre><code>// before (pre-v143)
+navigator.credentials.get({
+  identity: { providers: [{ nonce: "n123", clientId: "..." }] }
+});
+try { /* ... */ } catch (e) { e.code; }
+
+// after (v143+)
+navigator.credentials.get({
+  identity: { providers: [{ params: { nonce: "n123" }, clientId: "..." }] }
+});
+try { /* ... */ } catch (e) { e.error; }
+</code></pre>
+  </section>
+
+  <section>
+    <h2>why this angle</h2>
+    <p>The other concept shows the request shape. This one is the migration tool — what every FedCM-consuming codebase needs on the upgrade. Paste, rewrite, copy. The codemod is intentionally simple regex; that matches how this kind of mechanical rename ships in real codebases.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../params-rename/">params Rename builder demo</a></li>
+      <li><a href="https://github.com/w3c-fedid/FedCM/pull/768" target="_blank" rel="noopener">FedCM PR #768</a></li>
+      <li><a href="https://chromestatus.com/feature/5124072820310016" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const src = document.getElementById("src");
+  const out = document.getElementById("out");
+  const findings = document.getElementById("findings");
+
+  function migrate(code) {
+    const items = [];
+    let result = code;
+    // Detect: `nonce: "..."` inside a providers list, but not already inside params.
+    // Heuristic: if a provider object literal contains `nonce:` and not `params:`, fold the nonce into params.
+    // We rebuild each provider object literal we recognise.
+    const providerRe = /\{([^{}]*?)\}/g;
+    result = result.replace(providerRe, (match, body) => {
+      if (!/\bnonce\s*:/.test(body)) return match;
+      if (/\bparams\s*:/.test(body)) return match;
+      const nonceRe = /(\s*)nonce\s*:\s*([^,\n}]+)\s*,?/;
+      const m = body.match(nonceRe);
+      if (!m) return match;
+      const newBody = body.replace(nonceRe, "$1params: { nonce: $2 },");
+      items.push({ cls: "add", text: "fold `nonce` into `params: { nonce }`" });
+      return "{" + newBody + "}";
+    });
+
+    // Rename err.code → err.error (only when paired with IdentityCredentialError)
+    if (/IdentityCredentialError/.test(result) && /\.code\b/.test(result)) {
+      result = result.replace(/(\w+)\.code\b/g, (m, ident) => {
+        if (/IdentityCredentialError/.test(result.split(ident + ".code")[0].slice(-200))) {
+          items.push({ cls: "add", text: "rename `" + ident + ".code` → `" + ident + ".error`" });
+          return ident + ".error";
+        }
+        return m;
+      });
+    }
+
+    if (items.length === 0) items.push({ cls: "warn", text: "no migrations needed — code already looks v143-compliant (or pattern not detected)." });
+    return { result, items };
+  }
+
+  function run() {
+    const { result, items } = migrate(src.value);
+    out.value = result;
+    findings.innerHTML = items.map((i) => "<div class=\"item " + i.cls + "\">" + (i.cls === "add" ? "+ " : i.cls === "remove" ? "- " : "! ") + i.text + "</div>").join("");
+  }
+  document.getElementById("run-btn").addEventListener("click", run);
+  document.getElementById("copy-btn").addEventListener("click", () => {
+    out.select(); document.execCommand("copy");
+  });
+  run();
+</script>
+</body>
+</html>
