@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live violation harvester — CSP Hash Reporting — Chrome 133</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <meta http-equiv="Content-Security-Policy-Report-Only" content="script-src 'self' 'report-sample'; report-to csp-endpoint">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
+    .row { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; margin: var(--space-3) 0; }
+    .snippet-pick button { font-family: var(--font-mono); font-size: 0.78rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: var(--space-3); }
+    th, td { border: 1px solid var(--border-black); padding: 0.4rem 0.6rem; text-align: left; font-family: var(--font-mono); font-size: 0.78rem; word-break: break-all; vertical-align: top; }
+    th { background: var(--bg-stone); }
+    code.h { color: var(--accent-emerald); }
+    .empty { font-family: var(--font-mono); color: var(--text-muted); font-size: 0.85rem; padding: var(--space-3) 0; }
+    .copy { font-family: var(--font-mono); font-size: 0.72rem; padding: 0.2rem 0.5rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; CSP hash reporting for scripts</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v133</p>
+    <h1>Live violation harvester</h1>
+    <p class="lede">A report-only CSP policy is active on this page. Inject one of the sample inline scripts &mdash; Chrome 133 will surface the SHA hash candidate inside the violation report. Collect them into a clip-and-paste <code>script-src</code> directive.</p>
+  </header>
+
+  <div class="stage">
+    <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted)">step 1 &mdash; inject a sample inline script (each is unique, so each will fire a new violation)</p>
+    <div class="row snippet-pick">
+      <button data-src="console.log('analytics 1')">inject analytics 1</button>
+      <button data-src="console.log('analytics 2')">inject analytics 2</button>
+      <button data-src="window.__abTest = Math.random();">inject A/B init</button>
+      <button data-src="document.title = document.title + ' .'">inject title tweak</button>
+    </div>
+
+    <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted);margin-top:1rem">step 2 &mdash; harvested hashes (paste these into your real <code>script-src</code> to allow these scripts):</p>
+    <table>
+      <thead><tr><th>script (first 40 chars)</th><th>hash candidate</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="empty" id="empty">no violations yet &mdash; click a button above</p>
+
+    <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted);margin-top:1rem">step 3 &mdash; assembled directive:</p>
+    <pre><code id="directive">script-src 'self'</code></pre>
+    <button id="copy" class="copy">copy directive</button>
+  </div>
+
+  <section>
+    <h2>what changed in 133</h2>
+    <p>The CSP <code>SecurityPolicyViolationEvent</code> &mdash; and the report payload sent to <code>report-to</code> endpoints &mdash; gained a <code>hashes</code> field for script-source violations. Before 133, when a third-party SDK injected an inline script that didn't match your <code>script-src</code>, all the report told you was &quot;script blocked, source: inline&quot;. Now the report includes the canonical hash you'd add to your policy to allow it. The motivation: enforcement-mode CSPs for inline-script-heavy apps used to be a years-long migration of running report-only first, manually computing hashes, and updating policy iteratively. Now the browser does step 2.</p>
+<pre><code>document.addEventListener("securitypolicyviolation", (e) =&gt; {
+  console.log(e.violatedDirective);   // "script-src"
+  console.log(e.sample);              // first chars of the inline body
+  console.log(e.hashes);              // ["sha256-…"]  &lt;-- new in 133
+});</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../csp-hash/">CSP Hash &mdash; manual hash calculator</a></li>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="https://chromestatus.com/feature/6337535507431424" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/w3c/webappsec-csp/pull/693" target="_blank" rel="noopener">CSP spec PR &mdash; hash reporting</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+const collected = new Map(); // sample -> hash
+const rows = document.getElementById("rows");
+const empty = document.getElementById("empty");
+const directive = document.getElementById("directive");
+
+async function sha256b64(s) {
+  const buf = new TextEncoder().encode(s);
+  const h = await crypto.subtle.digest("SHA-256", buf);
+  const bin = String.fromCharCode(...new Uint8Array(h));
+  return "sha256-" + btoa(bin);
+}
+
+document.addEventListener("securitypolicyviolation", async (e) => {
+  if (e.violatedDirective !== "script-src" && e.violatedDirective !== "script-src-elem") return;
+  // Some browsers don't expose .hashes yet; fall back to SubtleCrypto from .sample
+  let hash = (e.hashes && e.hashes[0]) || null;
+  if (!hash && e.sample) hash = await sha256b64(e.sample);
+  const key = e.sample || "(unknown)";
+  if (collected.has(key)) return;
+  collected.set(key, hash || "(not computed)");
+  render();
+});
+
+function render() {
+  rows.innerHTML = "";
+  for (const [sample, hash] of collected) {
+    const tr = document.createElement("tr");
+    const td1 = document.createElement("td");
+    td1.textContent = sample.slice(0, 40);
+    const td2 = document.createElement("td");
+    td2.innerHTML = `<code class="h">'${hash}'</code>`;
+    const td3 = document.createElement("td");
+    tr.append(td1, td2, td3);
+    rows.appendChild(tr);
+  }
+  empty.style.display = collected.size ? "none" : "block";
+  const all = [...collected.values()].map((h) => `'${h}'`).join(" ");
+  directive.textContent = `script-src 'self' ${all}`.trim();
+}
+
+for (const b of document.querySelectorAll(".snippet-pick button")) {
+  b.addEventListener("click", () => {
+    const code = b.dataset.src;
+    const s = document.createElement("script");
+    s.textContent = code;
+    document.body.appendChild(s);
+  });
+}
+
+document.getElementById("copy").addEventListener("click", () => {
+  navigator.clipboard?.writeText(directive.textContent).catch(() => {});
+});
+</script>
+</body>
+</html>
