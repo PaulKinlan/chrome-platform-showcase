@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reverse Pagination — IndexedDB getAllRecords — Chrome 141</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .demo-stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .feature-line { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.4rem 0.7rem; margin-bottom: var(--space-4); }
+    .ok { color: var(--accent-emerald); font-weight: 700; }
+    .miss { color: var(--accent-rose); font-weight: 700; }
+    .row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .row select, .row input[type="number"] { border: 2px solid var(--border-black); padding: 0.4rem 0.6rem; font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-ivory); color: var(--text-black); }
+    .feed { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); max-height: 320px; overflow-y: auto; font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-black); }
+    .feed-item { padding: 0.35rem 0.5rem; border-bottom: 1px dashed var(--border-black); }
+    .feed-item:last-child { border-bottom: none; }
+    .feed-id { color: var(--text-muted); margin-right: 0.5rem; }
+    .stats { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.82rem; margin-top: var(--space-3); color: var(--text-black); display: flex; gap: var(--space-5); flex-wrap: wrap; }
+    .stat-num { font-family: var(--font-display); font-size: 1.4rem; }
+    pre.code { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3) var(--space-4); font-size: 0.82rem; overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; IndexedDB getAllRecords</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v141</p>
+    <h1>Reverse Pagination</h1>
+    <p class="lede">Activity feed reads — chat history, email lists, audit logs — almost always need the newest records first. Before 141 that meant orchestrating a "prev" cursor task-by-task. <code>getAllRecords({ direction: "prev", count })</code> returns a whole page descending in a single round trip.</p>
+  </header>
+
+  <div class="feature-line" id="probe">checking support…</div>
+
+  <div class="demo-stage">
+    <p>This page seeds 200 fake activity records into a real IndexedDB store, then runs the same paginated read two ways.</p>
+    <div class="row">
+      <label style="font-family:var(--font-mono);font-size:0.78rem">page size</label>
+      <input type="number" id="pageSize" value="20" min="1" max="200" style="width:5rem">
+      <label style="font-family:var(--font-mono);font-size:0.78rem">direction</label>
+      <select id="dir">
+        <option value="prev" selected>prev — newest first</option>
+        <option value="next">next — oldest first</option>
+      </select>
+      <button id="readFast">read with getAllRecords</button>
+      <button id="readCursor">read with cursor (old way)</button>
+      <button id="reseed">re-seed store</button>
+    </div>
+    <div class="stats" id="stats">no read yet</div>
+    <div class="feed" id="feed" style="margin-top:var(--space-3)">…</div>
+  </div>
+
+  <section>
+    <h2>the call</h2>
+<pre class="code"><code>// new in 141 — one round-trip, no per-record task
+const tx = db.transaction("activity", "readonly");
+const store = tx.objectStore("activity");
+const records = await new Promise((res, rej) =&gt; {
+  const req = store.getAllRecords({ direction: "prev", count: 20 });
+  req.onsuccess = () =&gt; res(req.result);
+  req.onerror = () =&gt; rej(req.error);
+});
+// records: [{ key, primaryKey, value }, …]</code></pre>
+  </section>
+
+  <section>
+    <h2>why this angle</h2>
+    <p>The intent-to-ship explicitly lists "paginated cursors in descending order" as a use case that was previously impossible without the cursor dance. Activity feeds are the canonical workload. The Microsoft case study cited a 350ms improvement on a real production read — every per-record task hop costs real time. This concept times the two approaches side-by-side so you can feel the difference.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../all-records/">getAllRecords (first concept)</a></li>
+      <li><a href="../keys-then-values/">Keys then Values</a></li>
+      <li><a href="https://patrickbrosset.com/articles/2024-11-19-even-faster-indexeddb-reads-with-getallrecords" target="_blank" rel="noopener">Patrick Brosset — Faster IndexedDB reads</a></li>
+      <li><a href="https://chromestatus.com/feature/5124331450138624" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probe = document.getElementById("probe");
+  const DB = "demo-getallrecords";
+  const STORE = "activity";
+  let db = null;
+  let supportsGAR = false;
+
+  function openDb() {
+    return new Promise((res, rej) => {
+      const req = indexedDB.open(DB, 1);
+      req.onupgradeneeded = () => {
+        const d = req.result;
+        if (!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE, { keyPath: "id" });
+      };
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+    });
+  }
+
+  async function seed() {
+    const tx = db.transaction(STORE, "readwrite");
+    const s = tx.objectStore(STORE);
+    await new Promise((r) => { s.clear().onsuccess = r; });
+    for (let i = 1; i <= 200; i++) {
+      s.put({ id: i, kind: ["login", "edit", "comment", "share"][i % 4], msg: "Activity event #" + i, ts: Date.now() - (200 - i) * 60000 });
+    }
+    await new Promise((r) => { tx.oncomplete = r; });
+  }
+
+  function readWithGetAllRecords(direction, count) {
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, "readonly");
+      const s = tx.objectStore(STORE);
+      const req = s.getAllRecords({ direction, count });
+      req.onsuccess = () => res(req.result.map((r) => r.value || r));  // shape: {key,primaryKey,value}
+      req.onerror = () => rej(req.error);
+    });
+  }
+
+  function readWithCursor(direction, count) {
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, "readonly");
+      const s = tx.objectStore(STORE);
+      const out = [];
+      const req = s.openCursor(null, direction);
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c || out.length >= count) return res(out);
+        out.push(c.value);
+        c.continue();
+      };
+      req.onerror = () => rej(req.error);
+    });
+  }
+
+  async function runRead(useFast) {
+    const dir = document.getElementById("dir").value;
+    const size = parseInt(document.getElementById("pageSize").value, 10) || 20;
+    const t0 = performance.now();
+    let records;
+    try {
+      if (useFast) records = await readWithGetAllRecords(dir, size);
+      else records = await readWithCursor(dir, size);
+    } catch (e) {
+      document.getElementById("stats").textContent = "error: " + e.message;
+      return;
+    }
+    const t1 = performance.now();
+    paint(records, t1 - t0, useFast ? "getAllRecords({direction, count})" : "openCursor + continue()");
+  }
+
+  function paint(records, ms, method) {
+    document.getElementById("stats").innerHTML =
+      '<div><div class="stat-num">' + records.length + '</div><div>records</div></div>' +
+      '<div><div class="stat-num">' + ms.toFixed(1) + ' ms</div><div>elapsed</div></div>' +
+      '<div><div class="stat-num">' + method + '</div><div>method</div></div>';
+    const feed = document.getElementById("feed");
+    feed.innerHTML = "";
+    for (const r of records) {
+      const d = document.createElement("div");
+      d.className = "feed-item";
+      d.innerHTML = '<span class="feed-id">#' + r.id + ' ' + r.kind + '</span>' + r.msg;
+      feed.appendChild(d);
+    }
+  }
+
+  (async () => {
+    try {
+      db = await openDb();
+      const tx = db.transaction(STORE, "readonly");
+      const s = tx.objectStore(STORE);
+      supportsGAR = typeof s.getAllRecords === "function";
+      if ((await new Promise((r) => { s.count().onsuccess = (e) => r(e.target.result); })) === 0) {
+        await seed();
+      }
+      probe.innerHTML = supportsGAR
+        ? 'IDBObjectStore.getAllRecords <span class="ok">supported</span> + store seeded with 200 records'
+        : 'IDBObjectStore.getAllRecords <span class="miss">missing</span> — cursor button still works';
+    } catch (e) {
+      probe.innerHTML = '<span class="miss">db error</span> ' + e.message;
+    }
+  })();
+
+  document.getElementById("readFast").addEventListener("click", () => {
+    if (!supportsGAR) {
+      document.getElementById("stats").textContent = "getAllRecords not supported — try the cursor button";
+      return;
+    }
+    runRead(true);
+  });
+  document.getElementById("readCursor").addEventListener("click", () => runRead(false));
+  document.getElementById("reseed").addEventListener("click", async () => {
+    await seed();
+    document.getElementById("stats").textContent = "re-seeded 200 records";
+  });
+</script>
+</body>
+</html>
