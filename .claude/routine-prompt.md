@@ -53,10 +53,10 @@ curl -s https://chromestatus.com/api/v0/channels | tail -c +6 > /tmp/channels.js
 Strip `)]}'\n`. `prev_stable = stable.mstone - 1`. Build order: prev_stable → stable → beta → dev.
 Within each, prefer features with the richest reference material.
 
-## Step 2b: Backfill scope (v140 → prev_stable - 1)
+## Step 2b: Backfill scope (v130 → prev_stable - 1)
 
 After exhausting fresh work in the current channels, do **backfill** for older releases too. Iterate
-milestones from `prev_stable - 1` down to `140`. Within each, list candidates the same way as Step 3
+milestones from `prev_stable - 1` down to `130`. Within each, list candidates the same way as Step 3
 and skip any that already have a folder. No per-run cap on backfill — just do the work until the
 90-minute soft budget is up. The whole point is to clear the gap.
 
