@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reconnect policy — Web Serial RFCOMM events — Chrome 130 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .scenarios { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-2); margin-bottom: var(--space-3); }
+    .scenarios button {
+      padding: 0.6rem;
+      text-align: left;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      cursor: pointer;
+      line-height: 1.4;
+    }
+    .scenarios button.on { background: var(--text-black); color: var(--bg-ivory); }
+    .scenarios small { display: block; opacity: 0.7; font-size: 0.7rem; margin-top: 0.3rem; }
+
+    .tree {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      color: var(--text-charcoal);
+      white-space: pre;
+      overflow-x: auto;
+      margin: var(--space-3) 0;
+    }
+
+    .pair {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 700px) { .pair { grid-template-columns: 1fr; } }
+    .card {
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .card.bad  { border-color: var(--accent-rose); }
+    .card.good { border-color: var(--accent-emerald); }
+    .card h3 {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin: 0 0 0.4rem;
+      padding-bottom: 0.3rem;
+      border-bottom: 1px solid var(--border-black);
+    }
+    .card.bad h3 { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .card.good h3 { color: var(--accent-emerald); border-color: var(--accent-emerald); }
+    .card p, .card li {
+      font-family: var(--font-serif);
+      font-size: 0.92rem;
+      color: var(--text-charcoal);
+      margin: 0.3rem 0;
+    }
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .controls button {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      padding: 0.4rem 0.8rem;
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      cursor: pointer;
+    }
+    .probe {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-charcoal);
+      white-space: pre-wrap;
+      margin: var(--space-3) 0;
+    }
+    .verdict {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      padding: 0.25rem 0.5rem;
+      color: var(--bg-ivory);
+      display: inline-block;
+    }
+    .verdict.retry { background: var(--accent-blue); }
+    .verdict.no    { background: var(--accent-rose); }
+    .verdict.wait  { background: var(--accent-amber); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Web Serial RFCOMM connection events</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>reconnect policy decision tree</h1>
+    <p class="lede">The chromestatus motivation by name: "the application should avoid re-opening the port in order to prevent reconnecting to the device" when the user intentionally disconnected it. Walk a real Bluetooth serial peripheral (a label printer / cash drawer / Arduino over BT-SPP) through six scenarios and see what the right reconnect policy is for each, given the new <code>connected</code> attribute and the <code>connect</code>/<code>disconnect</code> events.</p>
+  </header>
+
+  <div class="stage">
+    <p style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em">pick a scenario</p>
+    <div class="scenarios" id="scenarios"></div>
+
+    <h3 style="font-family:var(--font-mono);font-size:0.72rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);margin-top:1rem">decision tree</h3>
+    <pre class="tree" id="tree"></pre>
+
+    <div class="pair">
+      <div class="card bad">
+        <h3>pre-Chrome 130 (no signal)</h3>
+        <ul id="before"></ul>
+      </div>
+      <div class="card good">
+        <h3>Chrome 130+ (with connected + events)</h3>
+        <ul id="after"></ul>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="requestPort">navigator.serial.requestPort() — pick a Bluetooth serial port</button>
+    </div>
+    <div class="probe" id="probe"></div>
+  </div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>// On port acquisition, register the connect/disconnect handlers
+// and inspect the boolean .connected attribute.
+async function adoptPort(port) {
+  // Open if logically connected — wired or wireless-but-paired.
+  if (port.connected) await port.open({ baudRate: 9600 });
+
+  port.addEventListener("connect", async () =&gt; {
+    // BT device came back into range. We never closed the port from JS,
+    // so respect the user's earlier intent by re-opening only if they
+    // hadn't explicitly disconnected via system UI.
+    if (userIntentionallyDisconnected.has(port)) return;
+    try {
+      await port.open({ baudRate: 9600 });
+    } catch (e) { console.log("reopen failed:", e.message); }
+  });
+
+  port.addEventListener("disconnect", () =&gt; {
+    // Range loss vs system-disconnect both raise this. The connected
+    // attribute is now false either way; the difference shows up via
+    // the next connect: if it fires within ~30s we treat it as range
+    // recovery and re-open. If the user pressed "Forget" or system
+    // disconnected, we never see another connect.
+    scheduleReconnectGuard(port);
+  });
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Web Serial RFCOMM connection events</a> — feature index</li>
+      <li><a href="../serial-rfcomm/">Companion: API probe with a real port</a></li>
+      <li><a href="https://chromestatus.com/feature/5118102654418944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://wicg.github.io/serial/#serialport-interface" target="_blank" rel="noopener">Web Serial spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const SCEN = [
+    {
+      id: "range-loss",
+      title: "BT device walks out of range",
+      blurb: "user took the label printer to another room",
+      tree: `pre-130: port.readable rejects with NetworkError.
+        unable to tell range-loss from user-disconnect.
+        → retry blindly with backoff (may reconnect to a device the user wanted off)
+
+Chrome 130+:
+   disconnect event fires
+   port.connected → false
+   no connect event within 5s → still in range?
+     YES (impossible — we are NOT receiving connect)
+     NO → device is gone
+   when connect fires later → range recovered
+     re-open automatically`,
+      before: [
+        "blind retry every 5s",
+        "may reconnect to a device the user is trying to disconnect from",
+        "no signal that re-open is safe",
+      ],
+      after: [
+        "wait for connect event — guaranteed to fire when device is back in range",
+        "re-open opportunistically with no extra polling",
+        "stops re-opening once user removes the device pairing",
+      ],
+      verdict: "retry on connect event",
+    },
+    {
+      id: "user-disconnect",
+      title: "user disconnects from system Bluetooth panel",
+      blurb: "user clicks 'disconnect' on their OS BT settings",
+      tree: `pre-130: port.readable rejects with NetworkError.
+   indistinguishable from range loss.
+   → retry → reconnect → user gets annoyed
+
+Chrome 130+:
+   disconnect event fires
+   port.connected → false
+   NO connect event will fire until user re-pairs
+   our app gives up gracefully`,
+      before: [
+        "retry forever — looks like a bug to the user",
+        "uses battery, makes noise on the device",
+      ],
+      after: [
+        "disconnect fires; we mark this port as user-disconnected",
+        "we do NOT retry; we display 'device disconnected' UI",
+        "user re-connects from system panel → connect event fires → we re-open",
+      ],
+      verdict: "do not retry",
+    },
+    {
+      id: "battery-flat",
+      title: "device battery dies mid-stream",
+      blurb: "the BT-SPP cash drawer's battery runs out",
+      tree: `pre-130: writes fail; reads stop.
+   no way to know if it was disconnected or just slow.
+
+Chrome 130+:
+   disconnect event fires within ~10s of battery cutoff
+   port.connected → false
+   user plugs in device → BT pairing re-establishes → connect event
+   we re-open the port automatically`,
+      before: ["assume worst case; surface error to user every time"],
+      after: ["transparent reconnect once user plugs the device back in"],
+      verdict: "wait for connect event",
+    },
+    {
+      id: "wired-unplug",
+      title: "wired serial cable unplugged",
+      blurb: "USB-to-serial adapter for a wired printer is removed",
+      tree: `pre-130: disconnect event already worked for wired ports (this was the original API).
+
+Chrome 130+: behaviour is unchanged for wired —
+   disconnect fires immediately on physical unplug
+   port.connected → false
+   when user plugs back in → connect fires
+   re-open if userIntentionallyDisconnected.has(port) === false`,
+      before: ["already worked — wired was the original use case"],
+      after: ["same as wired baseline; behaviour is now symmetric across wired + wireless"],
+      verdict: "retry on connect event",
+    },
+    {
+      id: "permission-revoke",
+      title: "user revokes site permission",
+      blurb: "user removes the site from chrome://settings/content/serialPorts",
+      tree: `Both pre and post 130:
+   port.readable suddenly rejects with PermissionDeniedError.
+   getPorts() will no longer return this port.
+
+Re-opening would throw — and showing the permission prompt
+on every retry is hostile.
+
+→ Catch the error, mark this port as needing fresh requestPort().
+  Show UI inviting the user to opt in again.`,
+      before: ["no change — Web Serial spec already handled this"],
+      after: ["no change — both Chrome 130 events fire normally; the open() call is what rejects"],
+      verdict: "do not retry",
+    },
+    {
+      id: "page-reload",
+      title: "tab is reloaded with paired device active",
+      blurb: "user hits Ctrl-R; device still connected to system",
+      tree: `pre-130: must call open() and wait for it to succeed/fail.
+
+Chrome 130+:
+   getPorts() returns the previously-permissioned port immediately
+   port.connected === true (because BT session still alive)
+   → open() will succeed without re-prompting the user`,
+      before: ["had to attempt open() and recover from failure"],
+      after: [
+        "fast path: read .connected synchronously, skip extra connect event wait",
+        "open() succeeds; resume reading right away",
+      ],
+      verdict: "open immediately",
+    },
+  ];
+
+  const scenariosEl = document.getElementById("scenarios");
+  const treeEl = document.getElementById("tree");
+  const beforeEl = document.getElementById("before");
+  const afterEl = document.getElementById("after");
+  const probe = document.getElementById("probe");
+
+  let active = SCEN[0].id;
+  for (const s of SCEN) {
+    const b = document.createElement("button");
+    b.dataset.id = s.id;
+    b.innerHTML = s.title + "<small>" + s.blurb + "</small>";
+    if (s.id === active) b.classList.add("on");
+    scenariosEl.appendChild(b);
+  }
+  scenariosEl.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    active = b.dataset.id;
+    for (const x of scenariosEl.children) x.classList.toggle("on", x.dataset.id === active);
+    render();
+  });
+
+  function render() {
+    const s = SCEN.find((x) => x.id === active);
+    treeEl.textContent = s.tree;
+    beforeEl.innerHTML = s.before.map((b) => "<li>" + b + "</li>").join("");
+    let verdictClass = "retry";
+    if (s.verdict.startsWith("do not")) verdictClass = "no";
+    else if (s.verdict.includes("wait")) verdictClass = "wait";
+    afterEl.innerHTML = s.after.map((a) => "<li>" + a + "</li>").join("") +
+      `<li style="margin-top: 0.6rem"><span class="verdict ${verdictClass}">${s.verdict}</span></li>`;
+  }
+  render();
+
+  // Live probe using the actual API on the user's machine.
+  document.getElementById("requestPort").addEventListener("click", async () => {
+    if (!("serial" in navigator)) {
+      probe.textContent = "Web Serial: NOT SUPPORTED";
+      return;
+    }
+    try {
+      const port = await navigator.serial.requestPort({ filters: [] });
+      const info = port.getInfo();
+      let txt = "port acquired.\n" +
+        "info: " + JSON.stringify(info) + "\n" +
+        ".connected attribute present: " + ("connected" in port) + "\n" +
+        ".connected value: " + (port.connected ?? "(missing)") + "\n";
+      // Attach event listeners — they will be exercised when the user
+      // wakes/sleeps the device.
+      port.addEventListener("connect", () => {
+        probe.textContent += "\n[event] connect fired";
+      });
+      port.addEventListener("disconnect", () => {
+        probe.textContent += "\n[event] disconnect fired";
+      });
+      probe.textContent = txt;
+    } catch (e) {
+      probe.textContent = "requestPort error: " + e.message;
+    }
+  });
+</script>
+</body>
+</html>
