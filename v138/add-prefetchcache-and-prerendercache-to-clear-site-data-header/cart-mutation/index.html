@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cart mutation invalidation — Clear-Site-Data — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .cart {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: var(--space-2) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      margin: var(--space-3) 0;
+      padding-bottom: var(--space-3);
+      border-bottom: 1px solid var(--border-black);
+    }
+    .cart-line { display: contents; }
+    .cart-name { color: var(--text-black); }
+    .cart-qty { color: var(--text-muted); }
+    .cart-price { color: var(--text-black); font-weight: 600; }
+    .ctrl-row { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .ctrl-row button { padding: 0.4rem 0.8rem; font-size: 0.78rem; }
+    .ctrl-row label {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    .ctrl-row input[type="checkbox"] { accent-color: var(--text-black); }
+    .log {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      margin-top: var(--space-3);
+      height: 12rem;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+    .log .ts { color: var(--text-muted); }
+    .log .ok { color: var(--accent-emerald); font-weight: 600; }
+    .log .warn { color: var(--accent-rose); font-weight: 600; }
+    .log .info { color: var(--accent-blue); }
+    .speculative {
+      display: flex;
+      gap: var(--space-2);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      margin-top: var(--space-2);
+    }
+    .speculative span {
+      padding: 0.2rem 0.5rem;
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+    }
+    .speculative span.fresh { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .speculative span.stale { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .warn-block {
+      border: 2px solid var(--accent-amber);
+      background: #fff8e6;
+      padding: var(--space-3);
+      margin: var(--space-4) 0;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.5;
+    }
+    .warn-block strong { color: var(--accent-amber); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Clear-Site-Data: prefetchCache + prerenderCache</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>Cart mutation invalidation</h1>
+    <p class="lede">A real Shopify-style pattern: every cart mutation endpoint returns <code>Clear-Site-Data: "prefetchCache", "prerenderCache"</code>. Watch what happens to speculative loads of <code>/checkout</code> when the cart changes underneath them.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>What this simulates.</strong> A miniature storefront. The two pills below the cart show whether the browser still holds a <em>prefetched</em> or <em>prerendered</em> copy of the checkout page. Add or remove items: the simulated <code>/cart/add</code> response carries <code>Clear-Site-Data: "prefetchCache", "prerenderCache"</code>, which dumps both speculative caches so the next nav re-fetches a fresh cart total. This is exactly the pattern Shopify shipped to production.
+  </div>
+
+  <div class="stage">
+    <p style="font-family:var(--font-mono); font-size:0.78rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.08em; margin:0 0 0.5rem;">CART · / cart</p>
+    <div class="cart" id="cart"></div>
+    <div class="ctrl-row">
+      <button data-add="hat">+ Add Hat (£12)</button>
+      <button data-add="mug">+ Add Mug (£8)</button>
+      <button data-add="tee">+ Add Tee (£22)</button>
+      <button id="empty">Empty cart</button>
+      <label><input type="checkbox" id="opt-in" checked> server sends Clear-Site-Data</label>
+    </div>
+
+    <p style="font-family:var(--font-mono); font-size:0.78rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.08em; margin: var(--space-4) 0 0.5rem;">SPECULATIVE LOADS · / checkout</p>
+    <div class="speculative">
+      <span id="pf-state">prefetch: idle</span>
+      <span id="pr-state">prerender: idle</span>
+    </div>
+    <div class="ctrl-row">
+      <button id="speculate">Warm prefetch + prerender for /checkout</button>
+      <button id="navigate">Navigate to /checkout</button>
+    </div>
+
+    <div class="log" id="log" aria-live="polite"></div>
+  </div>
+
+  <section>
+    <h2>the response that did the work</h2>
+<pre><code>POST /cart/add HTTP/1.1
+Content-Type: application/x-www-form-urlencoded
+
+id=hat&amp;quantity=1
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+Clear-Site-Data: "prefetchCache", "prerenderCache"
+
+{ "ok": true, "items": 3 }</code></pre>
+    <p>The header is scoped to the response origin. <code>"cache"</code>, <code>"cookies"</code>, and <code>"storage"</code> are deliberately omitted &mdash; we only want to drop the <em>speculative</em> copies of <code>/checkout</code> that were warmed against an out-of-date cart. The user's session cookie, auth, and HTTP cache are preserved.</p>
+  </section>
+
+  <section>
+    <h2>when to clear which</h2>
+    <p>Per the spec discussion: clear <code>"prerenderCache"</code> only when the rendered page has stale state but the prefetched HTML is still good (SPA re-fetches data on display). Clear <code>"prefetchCache"</code> when the HTML itself is stale. Clear both when the document and its derived rendered state are both wrong &mdash; the cart-mutation case.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Clear-Site-Data: prefetchCache + prerenderCache</a> &mdash; feature index</li>
+      <li><a href="../csd-prefetch/">Clear-Site-Data builder</a></li>
+      <li><a href="https://performance.shopify.com/blogs/blog/speculation-rules-at-shopify" target="_blank" rel="noopener">Shopify Performance: Speculation Rules at Shopify</a></li>
+      <li><a href="https://chromestatus.com/feature/4755745652080640" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const PRICES = { hat: 12, mug: 8, tee: 22 };
+  const cart = { hat: 0, mug: 0, tee: 0 };
+  let speculative = { prefetch: null, prerender: null }; // null | snapshot total
+  const $ = (id) => document.getElementById(id);
+  const log = $("log");
+
+  function ts() {
+    const d = new Date();
+    return d.toTimeString().slice(0, 8);
+  }
+  function logLine(kind, msg) {
+    const span = document.createElement("div");
+    span.innerHTML = `<span class="ts">[${ts()}]</span> <span class="${kind}">${msg}</span>`;
+    log.appendChild(span);
+    log.scrollTop = log.scrollHeight;
+  }
+  function total() {
+    return Object.entries(cart).reduce((sum, [k, q]) => sum + q * PRICES[k], 0);
+  }
+  function renderCart() {
+    const lines = [];
+    let any = false;
+    for (const [k, q] of Object.entries(cart)) {
+      if (q > 0) {
+        any = true;
+        lines.push(
+          `<div class="cart-line"><span class="cart-name">${k[0].toUpperCase() + k.slice(1)}</span><span class="cart-qty">x${q}</span><span class="cart-price">£${q * PRICES[k]}</span></div>`,
+        );
+      }
+    }
+    lines.push(`<div class="cart-line"><span class="cart-name"><strong>TOTAL</strong></span><span class="cart-qty"></span><span class="cart-price"><strong>£${total()}</strong></span></div>`);
+    $("cart").innerHTML = any ? lines.join("") : `<div class="cart-line"><span class="cart-name" style="color:var(--text-muted);font-style:italic">empty</span><span></span><span></span></div>` + lines[lines.length - 1];
+  }
+  function renderSpec() {
+    const pf = $("pf-state");
+    const pr = $("pr-state");
+    const cur = total();
+    if (speculative.prefetch === null) {
+      pf.textContent = "prefetch: idle";
+      pf.className = "";
+    } else if (speculative.prefetch === cur) {
+      pf.textContent = `prefetch: fresh (£${speculative.prefetch})`;
+      pf.className = "fresh";
+    } else {
+      pf.textContent = `prefetch: STALE (held £${speculative.prefetch}, cart now £${cur})`;
+      pf.className = "stale";
+    }
+    if (speculative.prerender === null) {
+      pr.textContent = "prerender: idle";
+      pr.className = "";
+    } else if (speculative.prerender === cur) {
+      pr.textContent = `prerender: fresh (£${speculative.prerender})`;
+      pr.className = "fresh";
+    } else {
+      pr.textContent = `prerender: STALE (held £${speculative.prerender}, cart now £${cur})`;
+      pr.className = "stale";
+    }
+  }
+  function mutate(item) {
+    cart[item]++;
+    logLine("info", `POST /cart/add { id: "${item}" }`);
+    logLine("info", `  &larr; HTTP 200 { ok: true, total: £${total()} }`);
+    if ($("opt-in").checked) {
+      logLine("info", `  &larr; Clear-Site-Data: "prefetchCache", "prerenderCache"`);
+      const dropped = [];
+      if (speculative.prefetch !== null) dropped.push("prefetch");
+      if (speculative.prerender !== null) dropped.push("prerender");
+      speculative.prefetch = null;
+      speculative.prerender = null;
+      if (dropped.length) {
+        logLine("ok", `  &uarr; browser dropped: ${dropped.join(", ")}`);
+      } else {
+        logLine("ts", `  &uarr; nothing speculative to drop`);
+      }
+    } else {
+      logLine("warn", `  &times; no Clear-Site-Data &mdash; speculative caches now stale`);
+    }
+    renderCart();
+    renderSpec();
+  }
+  document.querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () => mutate(b.dataset.add)));
+  $("empty").addEventListener("click", () => {
+    for (const k of Object.keys(cart)) cart[k] = 0;
+    logLine("info", `POST /cart/clear`);
+    if ($("opt-in").checked) {
+      logLine("info", `  &larr; Clear-Site-Data: "prefetchCache", "prerenderCache"`);
+      speculative.prefetch = null;
+      speculative.prerender = null;
+      logLine("ok", `  &uarr; speculative caches cleared`);
+    } else {
+      logLine("warn", `  &times; speculative caches now stale`);
+    }
+    renderCart();
+    renderSpec();
+  });
+  $("speculate").addEventListener("click", () => {
+    speculative.prefetch = total();
+    logLine("info", `&lt;script type="speculationrules"&gt; eager prefetch /checkout`);
+    logLine("ok", `  &uarr; prefetch warmed @ £${total()}`);
+    setTimeout(() => {
+      speculative.prerender = total();
+      logLine("ok", `  &uarr; prerender promoted @ £${total()}`);
+      renderSpec();
+    }, 400);
+    renderSpec();
+  });
+  $("navigate").addEventListener("click", () => {
+    const cur = total();
+    if (speculative.prerender !== null && speculative.prerender === cur) {
+      logLine("ok", `nav /checkout &mdash; activated prerender &mdash; 0ms`);
+    } else if (speculative.prefetch !== null && speculative.prefetch === cur) {
+      logLine("ok", `nav /checkout &mdash; reused prefetch &mdash; cold render`);
+    } else if (speculative.prerender !== null || speculative.prefetch !== null) {
+      logLine("warn", `nav /checkout &mdash; speculative copy STALE, would have shown £${speculative.prerender ?? speculative.prefetch} instead of £${cur}`);
+    } else {
+      logLine("info", `nav /checkout &mdash; no speculative cache, normal fetch`);
+    }
+  });
+
+  // Feature detect
+  if (!("HTMLScriptElement" in window) || !document.querySelector) {
+    logLine("warn", "speculation rules: not detectable in this UA");
+  }
+
+  renderCart();
+  renderSpec();
+  logLine("info", "Ready. Add items to the cart, then warm a prefetch.");
+</script>
+</body>
+</html>
