@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Diagnostic Overlay — MediaStreamTrackProcessor frame counters — Chrome 150 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .demo {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .stage { position: relative; max-width: 480px; margin: 0 auto; }
+    video {
+      width: 100%;
+      max-width: 480px;
+      aspect-ratio: 4 / 3;
+      background: var(--text-black);
+      border: 2px solid var(--border-black);
+      display: block;
+    }
+    .hud {
+      position: absolute;
+      top: 0.6rem;
+      left: 0.6rem;
+      background: rgba(0,0,0,0.78);
+      color: var(--bg-ivory);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      line-height: 1.45;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--bg-ivory);
+      min-width: 11rem;
+    }
+    .hud .row { display: flex; justify-content: space-between; gap: 0.6rem; }
+    .hud .label { color: #b9b9b9; }
+    .hud .ok { color: #86e8b7; }
+    .hud .warn { color: #f7b97b; }
+    .hud .bad { color: #ff8e98; }
+    .row { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: var(--space-3) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v150/">&larr; Chrome 150</a> / <a href="../">MediaStreamTrackProcessor frame counters</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v150</p>
+    <h1>Diagnostic Overlay</h1>
+    <p class="lede">The Google Meet motivating use case for these counters: a HUD that surfaces the gap between <em>configured</em> camera fps and <em>actually delivered</em> fps. When a USB hub halves the camera rate or the system is under load, you want to warn the user — not silently degrade.</p>
+  </header>
+
+  <div class="demo">
+    <div class="stage">
+      <video id="video" muted autoplay playsinline></video>
+      <div class="hud" id="hud">camera off.</div>
+    </div>
+
+    <div class="row">
+      <button id="btn-start">start camera</button>
+      <button id="btn-stop">stop camera</button>
+    </div>
+  </div>
+
+  <pre><code>const track = stream.getVideoTracks()[0];
+const processor = new MediaStreamTrackProcessor({ track });
+const reader = processor.readable.getReader();
+
+setInterval(() =&gt; {
+  const settings = track.getSettings();
+  const total = processor.totalFrames ?? 0;
+  const discarded = processor.discardedFrames ?? 0;
+
+  const deliveredFps = (total - lastTotal);
+  if (deliveredFps &lt; settings.frameRate * 0.7) warnUser();
+}, 1000);</code></pre>
+
+  <section>
+    <h2>what this surfaces</h2>
+    <p><code>track.getSettings().frameRate</code> reports what the camera <em>claims</em> to be doing. The new <code>totalFrames</code> / <code>discardedFrames</code> counters tell you what actually made it through the pipeline. The two diverge when: a USB hub negotiates a lower rate; the system is under load; downstream WebCodecs / WebGL stages can't keep up. The gap is the diagnostic, not the absolute numbers.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">MediaStreamTrackProcessor frame counters</a> — feature index</li>
+      <li><a href="../pipeline-meter/">Pipeline Meter</a> — companion demo</li>
+      <li><a href="https://chromestatus.com/feature/6267249280286720" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://www.w3.org/TR/mediacapture-transform/" target="_blank" rel="noopener">MediaStreamTrack Insertable Media Processing spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const video = document.getElementById("video");
+  const hud = document.getElementById("hud");
+  let stream = null;
+  let track = null;
+  let processor = null;
+  let reader = null;
+  let pumping = false;
+  let lastTotal = 0;
+  let lastTick = performance.now();
+  let interval = null;
+
+  function fmt(n) { return Number.isFinite(n) ? n.toFixed(1) : "—"; }
+
+  function renderHud(d) {
+    const ratio = d.declared ? (d.delivered / d.declared) : 0;
+    const cls = ratio >= 0.85 ? "ok" : ratio >= 0.5 ? "warn" : "bad";
+    hud.innerHTML =
+      '<div class="row"><span class="label">declared fps</span><span>' + fmt(d.declared) + '</span></div>' +
+      '<div class="row"><span class="label">delivered fps</span><span class="' + cls + '">' + fmt(d.delivered) + '</span></div>' +
+      '<div class="row"><span class="label">total frames</span><span>' + d.total + '</span></div>' +
+      '<div class="row"><span class="label">discarded</span><span class="' + (d.discarded > 0 ? "warn" : "ok") + '">' + d.discarded + '</span></div>' +
+      '<div class="row"><span class="label">health</span><span class="' + cls + '">' + (cls === "ok" ? "OK" : cls === "warn" ? "DEGRADED" : "POOR") + '</span></div>';
+  }
+
+  async function start() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    } catch (e) {
+      hud.textContent = "getUserMedia failed: " + e.message;
+      return;
+    }
+    video.srcObject = stream;
+    track = stream.getVideoTracks()[0];
+
+    if (typeof MediaStreamTrackProcessor === "undefined") {
+      hud.textContent = "MediaStreamTrackProcessor not supported.";
+      return;
+    }
+    processor = new MediaStreamTrackProcessor({ track });
+    reader = processor.readable.getReader();
+    pumping = true;
+    (async () => {
+      while (pumping) {
+        try {
+          const { value, done } = await reader.read();
+          if (done) break;
+          value?.close?.();
+        } catch (e) { break; }
+      }
+    })();
+
+    lastTotal = 0;
+    lastTick = performance.now();
+    interval = setInterval(() => {
+      const settings = track.getSettings();
+      const total = (processor.totalFrames ?? processor.frameStats?.totalFrames ?? 0);
+      const discarded = (processor.discardedFrames ?? processor.frameStats?.discardedFrames ?? 0);
+      const now = performance.now();
+      const dtSec = (now - lastTick) / 1000;
+      const delivered = (total - lastTotal) / dtSec;
+      lastTotal = total;
+      lastTick = now;
+      renderHud({ declared: settings.frameRate, delivered, total, discarded });
+    }, 1000);
+  }
+
+  function stop() {
+    pumping = false;
+    if (interval) clearInterval(interval); interval = null;
+    if (reader) { try { reader.cancel(); } catch {} reader = null; }
+    if (track) { try { track.stop(); } catch {} }
+    if (stream) { for (const t of stream.getTracks()) t.stop(); stream = null; }
+    video.srcObject = null;
+    hud.textContent = "camera off.";
+  }
+
+  document.getElementById("btn-start").addEventListener("click", start);
+  document.getElementById("btn-stop").addEventListener("click", stop);
+</script>
+</body>
+</html>
