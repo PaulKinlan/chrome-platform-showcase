@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Recovery strategy — IndexedDB error reporting — Chrome 130 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .pick { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-2); margin: var(--space-3) 0; }
+    .pick button {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      padding: 0.6rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      cursor: pointer;
+      text-align: left;
+      line-height: 1.4;
+    }
+    .pick button.on { background: var(--text-black); color: var(--bg-ivory); }
+    .pick small { display: block; opacity: 0.7; margin-top: 0.3rem; font-size: 0.68rem; }
+    .branches {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin: var(--space-4) 0;
+    }
+    @media (max-width: 700px) { .branches { grid-template-columns: 1fr; } }
+    .branch {
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .branch.bad { border-color: var(--accent-rose); }
+    .branch.good { border-color: var(--accent-emerald); }
+    .branch h3 {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin: 0 0 0.4rem;
+      padding-bottom: 0.3rem;
+      border-bottom: 1px solid var(--border-black);
+    }
+    .branch.bad h3  { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .branch.good h3 { color: var(--accent-emerald); border-color: var(--accent-emerald); }
+    .branch ul { list-style: none; padding: 0; margin: 0; }
+    .branch li {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      padding: 0.4rem 0;
+      border-bottom: 1px dashed var(--text-muted);
+    }
+    .branch li:last-child { border-bottom: none; }
+    .branch li.action { font-weight: 700; color: var(--text-black); padding-top: 0.6rem; }
+    .simulate {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-charcoal);
+      margin: var(--space-3) 0;
+      white-space: pre-wrap;
+    }
+    .verdict {
+      padding: 0.3rem 0.6rem;
+      font-weight: 700;
+      display: inline-block;
+      font-size: 0.75rem;
+    }
+    .v-retry  { background: var(--accent-blue); color: var(--bg-ivory); }
+    .v-rebuild { background: var(--accent-amber); color: var(--bg-ivory); }
+    .v-bail    { background: var(--accent-rose); color: var(--bg-ivory); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; IndexedDB: improved error reporting</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>recovery strategy</h1>
+    <p class="lede">The chromestatus motivation: "Without a specific error to distinguish such unrecoverable failures from transient failures, websites are forced to rely on heuristics to determine the appropriate response." Pick an error scenario below; the demo shows what your code would have done pre-Chrome 130 (one heuristic for all) versus what it can do now (a proper branch).</p>
+  </header>
+
+  <div class="stage">
+    <div class="pick" id="picker"></div>
+
+    <div class="branches">
+      <div class="branch bad">
+        <h3>pre-Chrome 130 (generic UnknownError)</h3>
+        <ul id="before"></ul>
+      </div>
+      <div class="branch good">
+        <h3>Chrome 130+ (specific DOMException name)</h3>
+        <ul id="after"></ul>
+      </div>
+    </div>
+
+    <div class="simulate" id="simulate"></div>
+  </div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>store.get("user-photo-2024").onerror = (ev) =&gt; {
+  const err = ev.target.error;
+
+  // pre-Chrome 130: err.name was "UnknownError" for both cases below.
+  // Chrome 130+: the name tells you which recovery to use.
+  switch (err.name) {
+    case "NotReadableError":
+      // Underlying file is gone. Backing store cannot recover. Re-fetch from
+      // network, write a fresh copy, and surface a soft message to the user.
+      log("permanent: file lost. re-downloading…");
+      return refetchAndStore("user-photo-2024");
+
+    case "QuotaExceededError":
+      // Disk pressure. Evict old entries and retry once.
+      log("transient: low disk. evicting cache…");
+      return evictOldest().then(() =&gt; retry("user-photo-2024"));
+
+    case "TimeoutError":
+    case "TransactionInactiveError":
+      // Truly transient. Exponential backoff.
+      return backoffRetry("user-photo-2024");
+
+    case "DataError":
+    case "DataCloneError":
+      // Schema mismatch. The value is there but unreadable in this build.
+      // Migrate the row.
+      return migrateRow("user-photo-2024");
+
+    default:
+      // Genuinely unknown — surface it.
+      throw err;
+  }
+};</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">IndexedDB: improved error reporting</a> — feature index</li>
+      <li><a href="../idb-large-err/">Companion: live IDB error inspector</a></li>
+      <li><a href="https://chromestatus.com/feature/5140210640486400" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://www.w3.org/TR/IndexedDB/#dom-idbrequest-error" target="_blank" rel="noopener">IDBRequest.error spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  // Each scenario has the actual underlying problem, what error name pre-130
+  // reported (always "UnknownError" for large-value reads), and what error
+  // name Chrome 130 reports. The before/after branches show what your code
+  // would do.
+  const SCEN = [
+    {
+      id: "file-missing",
+      title: "OS deleted the blob file",
+      blurb: "user cleared 'large files' in system tools; leveldb refs the blob but it's gone on disk",
+      preName: "UnknownError",
+      preMsg: "Failed to read large IndexedDB value",
+      postName: "NotReadableError",
+      postMsg: "Failed to read large IndexedDB value: backing blob file missing on disk",
+      preActions: [
+        { text: "retry once after 500ms", v: "retry" },
+        { text: "still fails — try again after 2s", v: "retry" },
+        { text: "still fails — escalate to user, but no idea why", v: "bail" },
+        { text: "user sees 'something went wrong' with no guidance" },
+      ],
+      postActions: [
+        { text: "err.name === \"NotReadableError\" → permanent", v: "rebuild" },
+        { text: "re-fetch original from network", v: "rebuild" },
+        { text: "store the fresh copy with put()" },
+        { text: "log telemetry: 'OS-driven blob eviction'" },
+      ],
+      verdict: "rebuild",
+    },
+    {
+      id: "quota-exceeded",
+      title: "disk full mid-read",
+      blurb: "user ran out of disk; IDB cannot allocate temp buffer",
+      preName: "UnknownError",
+      preMsg: "Failed to read large IndexedDB value",
+      postName: "QuotaExceededError",
+      postMsg: "Storage quota exceeded during large value read",
+      preActions: [
+        { text: "retry — same generic error", v: "retry" },
+        { text: "retry again — same error", v: "retry" },
+        { text: "give up; surface generic error to user", v: "bail" },
+      ],
+      postActions: [
+        { text: "err.name === \"QuotaExceededError\" → transient", v: "retry" },
+        { text: "evict oldest cache entries", v: "retry" },
+        { text: "retry the read", v: "retry" },
+        { text: "if still failing, surface specific 'low disk' message to user" },
+      ],
+      verdict: "retry",
+    },
+    {
+      id: "transient",
+      title: "transient transaction timeout",
+      blurb: "another long write held the lock; the read aborted",
+      preName: "UnknownError",
+      preMsg: "Failed to read large IndexedDB value",
+      postName: "TimeoutError",
+      postMsg: "Transaction timed out during large value read",
+      preActions: [
+        { text: "no way to distinguish from permanent failure" },
+        { text: "code probably bails out same as the missing-file case", v: "bail" },
+      ],
+      postActions: [
+        { text: "err.name === \"TimeoutError\" → genuinely transient", v: "retry" },
+        { text: "backoff: 100ms, 250ms, 500ms", v: "retry" },
+        { text: "succeeds on third attempt — user never sees an error" },
+      ],
+      verdict: "retry",
+    },
+    {
+      id: "schema-mismatch",
+      title: "downgrade or build mismatch",
+      blurb: "row was written by a newer build of the app; current build cannot deserialise",
+      preName: "UnknownError",
+      preMsg: "Failed to read large IndexedDB value",
+      postName: "DataCloneError",
+      postMsg: "Stored value is incompatible with current schema",
+      preActions: [
+        { text: "retry — still fails", v: "retry" },
+        { text: "evict — destroys the only copy", v: "rebuild" },
+        { text: "user loses data" },
+      ],
+      postActions: [
+        { text: "err.name === \"DataCloneError\" → migrate", v: "rebuild" },
+        { text: "run migration: read as raw bytes, re-encode" },
+        { text: "or fall back to network copy if migration is impossible" },
+      ],
+      verdict: "rebuild",
+    },
+  ];
+
+  const picker = document.getElementById("picker");
+  const before = document.getElementById("before");
+  const after = document.getElementById("after");
+  const sim = document.getElementById("simulate");
+
+  let active = SCEN[0].id;
+  for (const s of SCEN) {
+    const b = document.createElement("button");
+    b.dataset.id = s.id;
+    if (s.id === active) b.classList.add("on");
+    b.innerHTML = s.title + "<small>" + s.blurb + "</small>";
+    picker.appendChild(b);
+  }
+  picker.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    active = b.dataset.id;
+    for (const x of picker.children) x.classList.toggle("on", x.dataset.id === active);
+    render();
+  });
+
+  function actionList(target, actions, isAfter) {
+    target.innerHTML = "";
+    for (let i = 0; i < actions.length; i++) {
+      const a = actions[i];
+      const li = document.createElement("li");
+      if (i === actions.length - 1 && a.v) li.classList.add("action");
+      let badge = "";
+      if (a.v === "retry") badge = '<span class="verdict v-retry">retry</span> ';
+      else if (a.v === "rebuild") badge = '<span class="verdict v-rebuild">rebuild</span> ';
+      else if (a.v === "bail") badge = '<span class="verdict v-bail">bail</span> ';
+      li.innerHTML = badge + (i + 1) + ". " + a.text;
+      target.appendChild(li);
+    }
+  }
+  function render() {
+    const s = SCEN.find((x) => x.id === active);
+    actionList(before, s.preActions);
+    actionList(after, s.postActions, true);
+    sim.textContent =
+      "scenario: " + s.title + "\n\n" +
+      "pre-Chrome 130:\n" +
+      "  err.name    = \"" + s.preName + "\"\n" +
+      "  err.message = \"" + s.preMsg + "\"\n\n" +
+      "Chrome 130+:\n" +
+      "  err.name    = \"" + s.postName + "\"\n" +
+      "  err.message = \"" + s.postMsg + "\"\n\n" +
+      "→ recommended action: " + s.verdict;
+  }
+  render();
+</script>
+</body>
+</html>
