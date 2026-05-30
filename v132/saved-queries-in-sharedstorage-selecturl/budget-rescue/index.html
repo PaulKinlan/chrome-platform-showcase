@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Budget rescue &mdash; Saved Queries &mdash; Chrome 132</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .meter { background: var(--bg-stone); border: 2px solid var(--border-black); height: 26px; position: relative; margin: var(--space-3) 0; overflow: hidden; display: flex; }
+    .seg { height: 100%; display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 0.7rem; color: var(--bg-ivory); border-right: 1px solid var(--bg-paper); }
+    .seg.saved { background: var(--accent-emerald); }
+    .seg.raw { background: var(--accent-rose); }
+    .seg.empty { background: var(--bg-paper); color: var(--text-muted); border-right: none; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .card { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); }
+    .card h3 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    .stat { font-family: var(--font-display); font-size: 1.8rem; color: var(--text-black); }
+    .stat .unit { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; max-height: 180px; overflow-y: auto; margin: var(--space-3) 0; color: var(--text-charcoal); }
+    .log p { margin: 0.15rem 0; }
+    .log p.charged { color: var(--accent-rose); }
+    .log p.free { color: var(--accent-emerald); }
+    .log p.reject { color: var(--accent-rose); font-weight: 700; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Saved Queries in selectURL</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v132</p>
+    <h1>Budget rescue: 6 ad slots, 4 page-loads, one budget</h1>
+    <p class="lede">A page with 6 ad slots wants to call <code>selectURL</code> for every slot. Without saved queries that&#x27;s 6 &times; 256 = 1,536 budget per page-load &mdash; you run out in 3 reloads. With <code>{ savedQuery: true }</code> reuse, 5 of the 6 slots are free after their first hit. Press the simulation buttons to compare.</p>
+  </header>
+
+  <section class="stage">
+    <div class="controls">
+      <button id="raw">simulate 4 page-loads, raw selectURL</button>
+      <button id="saved">simulate 4 page-loads, savedQuery: true</button>
+      <button id="reset">reset</button>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>raw mode total spend</h3>
+        <div class="stat" id="rawSpend">0 <span class="unit">/ 16,384</span></div>
+        <div style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);">across 4 page-loads (cap 4,096 each)</div>
+      </div>
+      <div class="card">
+        <h3>saved mode total spend</h3>
+        <div class="stat" id="savedSpend">0 <span class="unit">/ 16,384</span></div>
+        <div style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);">first call per slot per page-load charged; rest free</div>
+      </div>
+    </div>
+
+    <div class="meter" id="meter"><div class="seg empty" style="width: 100%">awaiting simulation</div></div>
+    <div id="log" class="log"></div>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Saved Queries in selectURL</a> &mdash; feature index</li>
+      <li><a href="../saved-queries/">single-name budget rig</a></li>
+      <li><a href="https://github.com/WICG/shared-storage/pull/188" target="_blank" rel="noopener">Spec PR</a></li>
+      <li><a href="https://chromestatus.com/feature/5098690386329600" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const CAP = 4096;
+  const COST = 256;
+  const SLOTS = 6;
+  const PAGE_LOADS = 4;
+  const log = document.getElementById("log");
+  const meter = document.getElementById("meter");
+
+  function reset() {
+    log.innerHTML = "";
+    meter.innerHTML = '<div class="seg empty" style="width: 100%">awaiting simulation</div>';
+    document.getElementById("rawSpend").innerHTML = '0 <span class="unit">/ ' + (CAP * PAGE_LOADS).toLocaleString() + '</span>';
+    document.getElementById("savedSpend").innerHTML = '0 <span class="unit">/ ' + (CAP * PAGE_LOADS).toLocaleString() + '</span>';
+  }
+  document.getElementById("reset").addEventListener("click", reset);
+
+  function write(m, cls) { const p = document.createElement("p"); if (cls) p.className = cls; p.textContent = m; log.prepend(p); while (log.children.length > 30) log.lastChild.remove(); }
+
+  function paint(spent) {
+    const totalCap = CAP * PAGE_LOADS;
+    const pct = spent / totalCap * 100;
+    meter.innerHTML = "";
+    const s = document.createElement("div");
+    s.className = "seg " + (pct > 50 ? "raw" : "saved");
+    s.style.width = pct + "%";
+    s.textContent = spent.toLocaleString();
+    meter.appendChild(s);
+    if (pct < 100) {
+      const e = document.createElement("div");
+      e.className = "seg empty";
+      e.style.width = (100 - pct) + "%";
+      e.textContent = (totalCap - spent).toLocaleString() + " free";
+      meter.appendChild(e);
+    }
+  }
+
+  document.getElementById("raw").addEventListener("click", () => {
+    log.innerHTML = "";
+    let total = 0;
+    for (let pl = 1; pl <= PAGE_LOADS; pl++) {
+      write("--- page-load " + pl + " ---");
+      let used = 0;
+      for (let s = 1; s <= SLOTS; s++) {
+        if (used + COST > CAP) {
+          write("  slot-" + s + ": REJECT (page-load budget exhausted)", "reject");
+          continue;
+        }
+        used += COST;
+        total += COST;
+        write("  slot-" + s + ": CHARGED " + COST, "charged");
+      }
+    }
+    document.getElementById("rawSpend").innerHTML = total.toLocaleString() + ' <span class="unit">/ ' + (CAP * PAGE_LOADS).toLocaleString() + '</span>';
+    paint(total);
+  });
+
+  document.getElementById("saved").addEventListener("click", () => {
+    log.innerHTML = "";
+    let total = 0;
+    for (let pl = 1; pl <= PAGE_LOADS; pl++) {
+      write("--- page-load " + pl + " ---");
+      let used = 0;
+      const chargedNames = new Set();
+      for (let s = 1; s <= SLOTS; s++) {
+        const name = "slot-" + s;
+        if (chargedNames.has(name)) {
+          write("  " + name + ": FREE (savedQuery already charged this page-load)", "free");
+          continue;
+        }
+        if (used + COST > CAP) {
+          write("  " + name + ": REJECT (budget exhausted)", "reject");
+          continue;
+        }
+        used += COST;
+        total += COST;
+        chargedNames.add(name);
+        write("  " + name + ": CHARGED " + COST + " (first call this page-load)", "charged");
+      }
+    }
+    document.getElementById("savedSpend").innerHTML = total.toLocaleString() + ' <span class="unit">/ ' + (CAP * PAGE_LOADS).toLocaleString() + '</span>';
+    paint(total);
+  });
+</script>
+</body>
+</html>
