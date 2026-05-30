@@ -3,37 +3,212 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Transferable RTCDataChannel — Transferable RTCDataChannel to dedicated workers — Chrome 130 — chrome platform showcase</title>
+  <title>Transferable RTCDataChannel — RTCDataChannel transfer to workers — Chrome 130 — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    .card { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
-    .card pre { margin: 0; font-size: 0.85rem; padding: var(--space-3); overflow-x: auto; }
-    .card p { font-family: var(--font-serif); color: var(--text-charcoal); margin: 0 0 var(--space-3); }
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .controls { display: flex; gap: var(--space-2); margin: var(--space-3) 0; flex-wrap: wrap; }
+    .log {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-charcoal);
+      max-height: 320px;
+      overflow-y: auto;
+      margin: var(--space-3) 0;
+      white-space: pre-wrap;
+    }
+    .probe {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      color: var(--text-charcoal);
+      margin: var(--space-3) 0;
+    }
+    .ok { color: var(--accent-emerald); font-weight: 700; }
+    .no { color: var(--accent-rose); font-weight: 700; }
   </style>
 </head>
 <body>
 <main>
-  <p class="crumbs"><a href="../">&larr; Transferable RTCDataChannel to dedicated workers</a></p>
+  <p class="crumbs"><a href="../">&larr; Transferable RTCDataChannel to workers</a></p>
 
   <header class="lede-block">
     <p class="eyebrow">demo · v130</p>
-    <h1>Transferable RTCDataChannel</h1>
-    <p class="lede">RTCDataChannel is now transferable to dedicated workers. Real-time messaging can run entirely off the main thread.</p>
+    <h1>Transfer RTCDataChannel to a worker</h1>
+    <p class="lede">The "run" button creates two peers in a single page, opens a data channel between them, then transfers the receiving end to a dedicated worker. The worker reads and echoes back messages — all off the main thread.</p>
   </header>
 
-  <div class="card">
-    <p>The canonical shape of the API:</p>
-<pre><code>worker.postMessage({ ch: dataChannel }, [dataChannel]);</code></pre>
-  </div>
+  <section class="stage">
+    <div class="probe" id="probe"></div>
+    <div class="controls">
+      <button id="run">Run end-to-end demo</button>
+      <button id="stop">Stop</button>
+    </div>
+    <div class="log" id="log"></div>
+  </section>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>const pc1 = new RTCPeerConnection();
+const pc2 = new RTCPeerConnection();
+const ch  = pc1.createDataChannel("chat");
+
+// negotiate pc1 &lt;-&gt; pc2 …
+
+// On the receiving side:
+pc2.ondatachannel = (ev) =&gt; {
+  const worker = new Worker("./chat-worker.js");
+  worker.postMessage({ ch: ev.channel }, [ev.channel]);  // ← v130: transferable
+};
+
+// chat-worker.js
+onmessage = ({ data }) =&gt; {
+  const ch = data.ch;
+  ch.onmessage = (e) =&gt; ch.send("echo: " + e.data);
+};</code></pre>
+  </section>
 
   <section>
     <h2>see also</h2>
     <ul>
-      <li><a href="../">Transferable RTCDataChannel to dedicated workers</a> — feature index</li>
+      <li><a href="../">Transferable RTCDataChannel to workers</a> — feature index</li>
+      <li><a href="https://chromestatus.com/feature/6612726584180736" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script>
+  const logEl = document.getElementById("log");
+  const probe = document.getElementById("probe");
+  function log(msg) {
+    logEl.textContent += `${new Date().toISOString().slice(11, 23)}  ${msg}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function checkSupport() {
+    const rtc = "RTCPeerConnection" in self;
+    const worker = "Worker" in self;
+    // probe: does RTCDataChannel appear transferable?
+    let transferable = false;
+    if (rtc) {
+      try {
+        const test = new RTCPeerConnection();
+        const ch = test.createDataChannel("probe");
+        // attempt structured-clone with transfer
+        const mc = new MessageChannel();
+        try {
+          mc.port1.postMessage({ ch }, [ch]);
+          transferable = true;
+        } catch (_) { transferable = false; }
+        mc.port1.close();
+        mc.port2.close();
+        ch.close();
+        test.close();
+      } catch (_) { /* ignore */ }
+    }
+    let html = "";
+    html += `RTCPeerConnection:                ${rtc ? '<span class="ok">✓</span>' : '<span class="no">✗</span>'}\n`;
+    html += `Worker:                           ${worker ? '<span class="ok">✓</span>' : '<span class="no">✗</span>'}\n`;
+    html += `RTCDataChannel transferable:      ${transferable ? '<span class="ok">✓ (v130+)</span>' : '<span class="no">✗ (pre-v130 or non-Chromium)</span>'}`;
+    probe.innerHTML = html;
+    return { rtc, worker, transferable };
+  }
+  checkSupport();
+
+  let pc1, pc2, worker, timer;
+  function stop() {
+    try { pc1?.close(); } catch (_) { /* ignore */ }
+    try { pc2?.close(); } catch (_) { /* ignore */ }
+    try { worker?.terminate(); } catch (_) { /* ignore */ }
+    clearInterval(timer);
+    log("stopped.");
+  }
+  document.getElementById("stop").addEventListener("click", stop);
+
+  document.getElementById("run").addEventListener("click", async () => {
+    stop();
+    logEl.textContent = "";
+    const s = checkSupport();
+    if (!s.rtc || !s.worker) {
+      log("missing prerequisite APIs — cannot run.");
+      return;
+    }
+    pc1 = new RTCPeerConnection();
+    pc2 = new RTCPeerConnection();
+
+    pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate);
+    pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate);
+
+    const ch = pc1.createDataChannel("chat");
+
+    const workerSource = `
+      onmessage = (ev) => {
+        if (ev.data.kind === "ping") {
+          postMessage({ kind: "log", msg: "[worker] received ping in worker thread" });
+          return;
+        }
+        const ch = ev.data.ch;
+        postMessage({ kind: "log", msg: "[worker] got transferred RTCDataChannel: " + (ch?.constructor?.name || "unknown") });
+        if (!ch || typeof ch.send !== "function") {
+          postMessage({ kind: "log", msg: "[worker] transferred channel is unusable — falling back" });
+          return;
+        }
+        ch.onmessage = (m) => {
+          postMessage({ kind: "log", msg: "[worker] received: " + m.data });
+          ch.send("echo: " + m.data);
+        };
+        ch.onopen = () => postMessage({ kind: "log", msg: "[worker] channel open" });
+      };
+    `;
+    const blob = new Blob([workerSource], { type: "application/javascript" });
+    worker = new Worker(URL.createObjectURL(blob));
+    worker.onmessage = (e) => {
+      if (e.data?.kind === "log") log(e.data.msg);
+    };
+    worker.postMessage({ kind: "ping" });
+
+    pc2.ondatachannel = (ev) => {
+      log("[main] pc2 got datachannel — attempting to transfer to worker");
+      try {
+        worker.postMessage({ ch: ev.channel }, [ev.channel]);
+        log("[main] transferred ✓");
+      } catch (e) {
+        log("[main] transfer failed: " + e.message + " — handling on main thread instead");
+        ev.channel.onmessage = (m) => log("[main-thread fallback] received: " + m.data);
+      }
+    };
+
+    ch.onopen = () => {
+      log("[main] pc1 channel open — sending messages every 1s");
+      let n = 0;
+      timer = setInterval(() => {
+        n++;
+        log(`[main] pc1 -> "hello ${n}"`);
+        try { ch.send("hello " + n); } catch (_) { /* ignore */ }
+      }, 1000);
+    };
+    ch.onmessage = (m) => log("[main] pc1 received reply: " + m.data);
+
+    const o = await pc1.createOffer();
+    await pc1.setLocalDescription(o);
+    await pc2.setRemoteDescription(o);
+    const a = await pc2.createAnswer();
+    await pc2.setLocalDescription(a);
+    await pc1.setRemoteDescription(a);
+    log("[main] SDP negotiation done — waiting for ICE…");
+  });
+</script>
 </body>
 </html>
