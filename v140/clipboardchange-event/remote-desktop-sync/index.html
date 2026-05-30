@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Remote Desktop Sync — Clipboardchange event — Chrome 140</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .demo-stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .panes { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin-top: var(--space-3); }
+    @media (max-width: 580px) { .panes { grid-template-columns: 1fr; } }
+    .pane { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); }
+    .pane h3 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 var(--space-2); color: var(--text-charcoal); }
+    .pane-body { font-family: var(--font-mono); font-size: 0.85rem; min-height: 60px; background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); white-space: pre-wrap; word-break: break-word; color: var(--text-black); }
+    .pane-meta { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); margin-top: var(--space-2); }
+    .strategy { display: flex; gap: var(--space-3); margin-bottom: var(--space-4); flex-wrap: wrap; align-items: center; }
+    .strategy label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); display: inline-flex; align-items: center; gap: 0.4rem; }
+    .controls { display: flex; gap: var(--space-3); margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .metric-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); margin-top: var(--space-4); }
+    @media (max-width: 580px) { .metric-row { grid-template-columns: 1fr; } }
+    .metric { background: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-3); }
+    .metric-label { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+    .metric-value { font-family: var(--font-display); font-size: 1.6rem; color: var(--text-black); }
+    .warn-block { border: 2px solid var(--accent-amber); background: var(--bg-paper); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; box-shadow: var(--thin-shadow); }
+    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--accent-amber); display: block; margin-bottom: 0.4rem; }
+    .warn-block p { margin: 0; font-family: var(--font-serif); font-size: 0.95rem; }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.74rem; max-height: 160px; overflow-y: auto; margin-top: var(--space-4); }
+    .log p { margin: 0; font-family: var(--font-mono); font-size: 0.74rem; }
+    .log .time { color: var(--text-muted); }
+    .log .ev { color: var(--accent-emerald); }
+    .log .poll { color: var(--accent-blue); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Clipboardchange event</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v140</p>
+    <h1>Remote Desktop Sync</h1>
+    <p class="lede">The motivating use case from the chromestatus entry: a remote desktop client mirroring the local clipboard to a remote VM. Compare event-driven sync to the polling-on-focus approach Chrome Remote Desktop used to ship with — same correctness, dramatically less work.</p>
+  </header>
+
+  <div id="unsupported" class="warn-block" hidden>
+    <strong>Behind a flag in pre-140</strong>
+    <p>The <code>clipboardchange</code> event ships unflagged in Chrome 140+. In earlier builds, enable <code>chrome://flags/#clipboard-change-event</code>. This page falls back to polling when the event is absent.</p>
+  </div>
+
+  <div class="demo-stage">
+    <div class="strategy">
+      <span style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);">Sync strategy:</span>
+      <label><input type="radio" name="mode" value="event" checked> clipboardchange event</label>
+      <label><input type="radio" name="mode" value="poll-1s"> poll every 1s</label>
+      <label><input type="radio" name="mode" value="poll-focus"> poll on focus (legacy CRD)</label>
+    </div>
+
+    <div class="controls">
+      <button id="start">Start session</button>
+      <button id="stop" disabled>End session</button>
+      <button id="reset">Reset metrics</button>
+    </div>
+
+    <div class="panes">
+      <div class="pane">
+        <h3>Local (this tab)</h3>
+        <div class="pane-body" id="local">&mdash; nothing copied yet &mdash;</div>
+        <p class="pane-meta" id="local-meta">Copy any text on your system to update.</p>
+      </div>
+      <div class="pane">
+        <h3>Remote VM (simulated)</h3>
+        <div class="pane-body" id="remote">&mdash; not synced &mdash;</div>
+        <p class="pane-meta" id="remote-meta">Last sync: never</p>
+      </div>
+    </div>
+
+    <div class="metric-row">
+      <div class="metric">
+        <div class="metric-label">Clipboard reads</div>
+        <div class="metric-value" id="m-reads">0</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Wasted reads (no change)</div>
+        <div class="metric-value" id="m-waste">0</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Syncs delivered</div>
+        <div class="metric-value" id="m-syncs">0</div>
+      </div>
+    </div>
+
+    <div class="log" id="log"><p class="time">Idle — start a session and copy something.</p></div>
+  </div>
+
+  <p>The <a href="https://chromestatus.com/feature/5085102657503232" target="_blank" rel="noopener">chromestatus motivation</a> calls out remote desktop clients by name: today they read the clipboard on every focus event, even when nothing changed. With the event, the read only happens when there is something new to sync.</p>
+
+  <pre><code>// event-driven (Chrome 140+)
+navigator.clipboard.addEventListener("clipboardchange", async () =&gt; {
+  const text = await navigator.clipboard.readText();
+  await sendToRemote(text); // only fires when there is a real change
+});
+
+// legacy CRD-style polling
+window.addEventListener("focus", async () =&gt; {
+  const text = await navigator.clipboard.readText();
+  if (text !== lastSeen) { lastSeen = text; await sendToRemote(text); }
+});</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Clipboardchange event</a> &mdash; feature index</li>
+      <li><a href="../clipboard-watcher/">Clipboard Watcher</a> &mdash; generic event log</li>
+      <li><a href="https://chromestatus.com/feature/5085102657503232" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/w3c/clipboard-apis/pull/239" target="_blank" rel="noopener">Spec PR</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const hasEvent = typeof navigator !== "undefined"
+    && navigator.clipboard
+    && "onclipboardchange" in navigator.clipboard;
+  if (!hasEvent) document.getElementById("unsupported").hidden = false;
+
+  const localEl = document.getElementById("local");
+  const remoteEl = document.getElementById("remote");
+  const localMeta = document.getElementById("local-meta");
+  const remoteMeta = document.getElementById("remote-meta");
+  const mReads = document.getElementById("m-reads");
+  const mWaste = document.getElementById("m-waste");
+  const mSyncs = document.getElementById("m-syncs");
+  const log = document.getElementById("log");
+  const startBtn = document.getElementById("start");
+  const stopBtn = document.getElementById("stop");
+  const resetBtn = document.getElementById("reset");
+
+  let reads = 0, waste = 0, syncs = 0;
+  let lastSynced = null;
+  let session = null;
+  let mode = "event";
+
+  document.querySelectorAll('input[name="mode"]').forEach(r => {
+    r.addEventListener("change", e => { mode = e.target.value; if (session) restart(); });
+  });
+
+  function fmtTime() { return new Date().toLocaleTimeString(); }
+  function logLine(html, cls = "") {
+    if (log.querySelector(".time")?.textContent?.startsWith("Idle")) log.innerHTML = "";
+    const p = document.createElement("p");
+    p.innerHTML = `<span class="time">[${fmtTime()}]</span> <span class="${cls}">${html}</span>`;
+    log.prepend(p);
+  }
+  function updateMetrics() { mReads.textContent = reads; mWaste.textContent = waste; mSyncs.textContent = syncs; }
+
+  async function readAndMaybeSync(source) {
+    reads++;
+    let text;
+    try { text = await navigator.clipboard.readText(); }
+    catch (e) { logLine(`read denied (${e.name}) — focus the tab and try again`, "poll"); updateMetrics(); return; }
+    const preview = text.length > 120 ? text.slice(0, 120) + "…" : text;
+    localEl.textContent = preview || "(empty)";
+    localMeta.textContent = `length: ${text.length}, last read: ${fmtTime()}, source: ${source}`;
+    if (text === lastSynced) { waste++; logLine(`${source} read — no change, skip`, "poll"); updateMetrics(); return; }
+    lastSynced = text;
+    syncs++;
+    remoteEl.textContent = preview || "(empty)";
+    remoteMeta.textContent = `synced ${fmtTime()} via ${source}`;
+    logLine(`${source} → sync delivered (${text.length} chars)`, source === "event" ? "ev" : "poll");
+    updateMetrics();
+  }
+
+  let pollId = null;
+  function start() {
+    session = mode;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    logLine(`Session started — mode: <code>${mode}</code>`, "ev");
+    if (mode === "event" && hasEvent) {
+      navigator.clipboard.addEventListener("clipboardchange", onEvent);
+    } else if (mode === "poll-1s" || (mode === "event" && !hasEvent)) {
+      if (!hasEvent && mode === "event") logLine("Native event missing — falling back to 1s poll", "poll");
+      pollId = setInterval(() => readAndMaybeSync("poll-1s"), 1000);
+    } else if (mode === "poll-focus") {
+      window.addEventListener("focus", onFocus);
+      logLine("Polling will only happen when this tab regains focus.", "poll");
+    }
+  }
+  function onEvent() { readAndMaybeSync("event"); }
+  function onFocus() { readAndMaybeSync("poll-focus"); }
+
+  function stop() {
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    if (pollId) { clearInterval(pollId); pollId = null; }
+    if (hasEvent) navigator.clipboard.removeEventListener("clipboardchange", onEvent);
+    window.removeEventListener("focus", onFocus);
+    logLine("Session ended.", "ev");
+    session = null;
+  }
+  function restart() { stop(); start(); }
+
+  startBtn.addEventListener("click", start);
+  stopBtn.addEventListener("click", stop);
+  resetBtn.addEventListener("click", () => {
+    reads = 0; waste = 0; syncs = 0; lastSynced = null;
+    updateMetrics();
+    logLine("Metrics reset.");
+  });
+  updateMetrics();
+</script>
+</body>
+</html>
