@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dictionary leak probe — Spellcheck restriction — Chrome 143</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .warn-block {
+      background: #fff7e6;
+      border: 2px solid var(--accent-amber);
+      padding: var(--space-3) var(--space-4);
+      margin: 0 0 var(--space-5);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      color: var(--text-black);
+    }
+    .warn-block strong { color: var(--accent-amber); }
+    textarea {
+      width: 100%;
+      min-height: 80px;
+      padding: var(--space-3);
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      font-family: var(--font-serif);
+      font-size: 1rem;
+    }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .verdict {
+      margin: var(--space-3) 0;
+      padding: var(--space-3) var(--space-4);
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+    }
+    .verdict.fenced { background: #e8f5ed; border-color: var(--accent-emerald); }
+    .verdict.leaked { background: #fde7e9; border-color: var(--accent-rose); }
+    .runs {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+      max-height: 240px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+    }
+    .runs .run { padding: 0.25rem 0; border-bottom: 1px dashed var(--border-black); display: flex; justify-content: space-between; gap: 1rem; }
+    .runs .run:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Spellcheck restriction</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v143</p>
+    <h1>Dictionary leak probe</h1>
+    <p class="lede">The attack this feature blocks: an autofocused textarea cycles through candidate words, and the page measures whether each one took the slow path (highlighted by spellcheck) or the fast path (not in the dictionary, hence unhighlighted). Time differences leak dictionary contents.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>safe demo</strong> &mdash; this page simulates the attack against itself, with the word list visible. It does not exfiltrate. On v143, the textarea is not interacted with so spellcheck stays off — no timing signal to extract.
+  </div>
+
+  <section class="stage">
+    <h3>candidate dictionary (edit if you want)</h3>
+    <textarea id="dict">paulkinlan
+adipisicing
+benevolent
+malevolent
+fauxshizzle
+quokkapalooza</textarea>
+
+    <h3>probe textarea (autofocused, never interacted with)</h3>
+    <textarea id="target" autofocus spellcheck="true"></textarea>
+
+    <div class="controls">
+      <button id="run-btn">Run timing probe</button>
+      <span class="note" id="iters"></span>
+    </div>
+
+    <h4 style="font-family:var(--font-mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin:var(--space-3) 0 var(--space-2);">per-word render times</h4>
+    <div class="runs" id="runs"></div>
+    <div class="verdict" id="verdict">Click <em>Run timing probe</em>.</div>
+  </section>
+
+  <section>
+    <h2>the attack (pre-v143)</h2>
+<pre><code>// 1. Autofocus a hidden textarea with spellcheck on.
+// 2. Programmatically set its value to each candidate word.
+// 3. Measure how long the next frame takes.
+// 4. Words IN the user's dictionary cost more (squiggle render);
+//    words NOT in the dictionary cost less.
+
+// v143 fence: spellcheck highlights are deferred until the user
+// actually interacts with the field. Autofocus alone is not enough.</code></pre>
+  </section>
+
+  <section>
+    <h2>why this angle</h2>
+    <p>The other concept shows side-by-side textareas with the autofocus difference visible. This one reproduces the actual exploit — timing-based dictionary inference — so you can see what v143 blocks. The verdict tells you whether your browser shipped the fence.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../spellcheck-fence/">Side-by-side fence demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5080415048171520" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const dict = document.getElementById("dict");
+  const target = document.getElementById("target");
+  const runs = document.getElementById("runs");
+  const verdict = document.getElementById("verdict");
+  const iters = document.getElementById("iters");
+
+  async function timeOne(word) {
+    return new Promise((resolve) => {
+      target.value = word;
+      // Force layout flush, then measure two frames so the spellcheck pass has a chance to run.
+      const t0 = performance.now();
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const t1 = performance.now();
+          resolve(t1 - t0);
+        });
+      });
+    });
+  }
+
+  document.getElementById("run-btn").addEventListener("click", async () => {
+    runs.innerHTML = "";
+    verdict.className = "verdict";
+    verdict.textContent = "running…";
+    const words = dict.value.split(/\s+/).filter(Boolean);
+    const ITER = 5;
+    iters.textContent = ITER + " iterations × " + words.length + " words";
+    const times = new Map();
+    for (let i = 0; i < ITER; i++) {
+      for (const w of words) {
+        const t = await timeOne(w);
+        if (!times.has(w)) times.set(w, []);
+        times.get(w).push(t);
+      }
+    }
+    const summary = [];
+    for (const [w, arr] of times) {
+      const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+      summary.push({ w, mean });
+      const row = document.createElement("div");
+      row.className = "run";
+      row.innerHTML = "<span>" + w + "</span><span>" + mean.toFixed(2) + " ms</span>";
+      runs.appendChild(row);
+    }
+    const means = summary.map((s) => s.mean);
+    const range = Math.max(...means) - Math.min(...means);
+    if (range < 1.5) {
+      verdict.classList.add("fenced");
+      verdict.textContent = "Spread is " + range.toFixed(2) + " ms — flat. Your browser appears to be fencing autofocus spellcheck (v143 behaviour). No exploitable signal.";
+    } else {
+      verdict.classList.add("leaked");
+      verdict.textContent = "Spread is " + range.toFixed(2) + " ms — variable enough to be a signal. Pre-v143 browsers leak this; v143 closes the gap.";
+    }
+  });
+</script>
+</body>
+</html>
