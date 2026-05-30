@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HDR bloom &mdash; WebGPU float32 blending &mdash; Chrome 132</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .col { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); }
+    .col h4 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    canvas { width: 100%; aspect-ratio: 1; border: 2px solid var(--border-black); background: #0a0a18; display: block; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .controls label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); display: inline-flex; gap: 0.4rem; align-items: center; }
+    .probe { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; color: var(--text-black); }
+    .probe.yes { background: #e8f5ed; border-color: var(--accent-emerald); }
+    .probe.no { background: #fde7e9; border-color: var(--accent-rose); }
+    .note { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; color: var(--text-black); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebGPU 32-bit float blending</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v132</p>
+    <h1>HDR bloom: many bright spots blended into one rgba32float target</h1>
+    <p class="lede">The use case: HDR rendering &mdash; particles, lens flares, post-process bloom. Each particle uses <code>blend: { srcFactor: "one", dstFactor: "one" }</code> additively into an <code>rgba32float</code> color attachment. Pre-132 the only blendable HDR target was <code>rgba16float</code>; v132 unlocks the full 32-bit-per-channel float for sub-pixel-precise HDR accumulation. Click run to render against your GPU.</p>
+  </header>
+
+  <section class="stage">
+    <div class="probes" id="probe">
+      <div class="probe" id="pFeat">float32-blendable: &mdash;</div>
+    </div>
+
+    <div class="controls">
+      <label>particle count <input type="range" id="n" min="20" max="600" value="200"></label>
+      <button id="run">render</button>
+    </div>
+
+    <div class="grid">
+      <div class="col">
+        <h4>rgba32float target (132+)</h4>
+        <canvas id="cv32"></canvas>
+        <div style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);margin-top:var(--space-2);">requires float32-blendable feature; full HDR additive accumulation</div>
+      </div>
+      <div class="col">
+        <h4>rgba16float target (pre-132 fallback)</h4>
+        <canvas id="cv16"></canvas>
+        <div style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);margin-top:var(--space-2);">always blendable; clamps highlights earlier</div>
+      </div>
+    </div>
+
+    <div class="note">Both canvases render the same particle field; on float32 the bright spots accumulate further before clipping. Highlights stay distinguishable at high overdraw &mdash; useful for bloom passes and physical-light rendering.</div>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">WebGPU float32 blending</a> &mdash; feature index</li>
+      <li><a href="../f32-blend/">feature probe + single triangle</a></li>
+      <li><a href="https://www.w3.org/TR/webgpu/#float32-blendable" target="_blank" rel="noopener">Spec</a></li>
+      <li><a href="https://chromestatus.com/feature/5173655901044736" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  async function renderTarget(canvas, format, requiredFeatures) {
+    if (!("gpu" in navigator)) throw new Error("WebGPU unavailable");
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) throw new Error("no adapter");
+    const device = await adapter.requestDevice({ requiredFeatures });
+    canvas.width = canvas.clientWidth * devicePixelRatio;
+    canvas.height = canvas.clientHeight * devicePixelRatio;
+    const ctx = canvas.getContext("webgpu");
+    ctx.configure({ device, format, alphaMode: "premultiplied" });
+    const n = +document.getElementById("n").value;
+    const seeds = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      seeds[i * 4 + 0] = Math.random() * 2 - 1;
+      seeds[i * 4 + 1] = Math.random() * 2 - 1;
+      seeds[i * 4 + 2] = 0.05 + Math.random() * 0.08;
+      seeds[i * 4 + 3] = 0.3 + Math.random() * 1.7;
+    }
+    const buf = device.createBuffer({ size: seeds.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(buf, 0, seeds);
+    const mod = device.createShaderModule({
+      code: `struct Seed { v: array<vec4f, ${n}> };
+@group(0) @binding(0) var<uniform> seeds: Seed;
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> @builtin(position) vec4f {
+  let s = seeds.v[ii];
+  let r = s.z;
+  let pos = array(vec2f(-r, -r), vec2f(r, -r), vec2f(-r, r), vec2f(r, -r), vec2f(r, r), vec2f(-r, r));
+  return vec4f(pos[vi] + s.xy, 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let intensity = 1.4;
+  return vec4f(intensity, 0.6, 1.1, 0.5);
+}`,
+    });
+    const pipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: mod },
+      fragment: { module: mod, targets: [{ format, blend: { color: { srcFactor: "one", dstFactor: "one" }, alpha: { srcFactor: "one", dstFactor: "one" } } }] },
+      primitive: { topology: "triangle-list" },
+    });
+    const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buf } }] });
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), clearValue: { r: 0.02, g: 0.02, b: 0.06, a: 1 }, loadOp: "clear", storeOp: "store" }] });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bg);
+    pass.draw(6, n);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+
+  document.getElementById("run").addEventListener("click", async () => {
+    const pFeat = document.getElementById("pFeat");
+    const cv32 = document.getElementById("cv32");
+    const cv16 = document.getElementById("cv16");
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      const ok = adapter && adapter.features.has("float32-blendable");
+      pFeat.className = "probe " + (ok ? "yes" : "no");
+      pFeat.textContent = "float32-blendable: " + (ok ? "supported on this adapter" : "NOT supported - left canvas will fall back");
+      if (ok) {
+        try { await renderTarget(cv32, "rgba32float", ["float32-blendable"]); }
+        catch (e) { await renderTarget(cv32, "rgba16float", []); }
+      } else {
+        await renderTarget(cv32, "rgba16float", []);
+      }
+      await renderTarget(cv16, "rgba16float", []);
+    } catch (e) {
+      pFeat.className = "probe no"; pFeat.textContent = "render failed: " + e.message;
+    }
+  });
+</script>
+</body>
+</html>
