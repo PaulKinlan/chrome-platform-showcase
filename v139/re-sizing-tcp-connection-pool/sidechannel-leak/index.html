@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sidechannel Leak — TCP Pool Resizing — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; align-items: center; }
+    .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; }
+    .ctl-btn:hover { background: var(--bg-paper); color: var(--text-black); }
+    .panel { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+    .label { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    .meter {
+      height: 22px;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      position: relative;
+      overflow: hidden;
+      margin: var(--space-2) 0;
+    }
+    .meter .fill { height: 100%; background: var(--accent-blue); transition: width 0.2s ease; }
+    .meter .fill.danger { background: var(--accent-rose); }
+    .field { display: flex; align-items: center; gap: var(--space-2); font-family: var(--font-mono); font-size: 0.82rem; }
+    .field input[type="range"] { width: 220px; accent-color: var(--text-black); }
+    .verdict { font-family: var(--font-mono); font-size: 0.9rem; padding: var(--space-3); background: var(--bg-stone); border: 1px solid var(--border-black); }
+    .verdict.logged-in { background: rgba(0,34,255,0.15); border-color: var(--accent-blue); }
+    .verdict.logged-out { background: rgba(10,143,92,0.15); border-color: var(--accent-emerald); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; TCP connection pool resizing</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>Sidechannel Leak</h1>
+    <p class="lede">The xsleaks attack the v139 experiment is exploring: a malicious tab saturates the shared TCP pool, then opens the victim. If the victim makes more requests than free slots allow, those requests stall — observable timing → leaked state. Move the slider and watch the attacker's verdict change.</p>
+  </header>
+
+  <div class="panel">
+    <p class="label">simulation parameters</p>
+    <div class="field">
+      <label for="pool">browser TCP pool size:</label>
+      <input type="range" id="pool" min="64" max="1024" value="256" step="32">
+      <span id="pool-val">256</span>
+    </div>
+    <div class="field">
+      <label for="attacker">attacker holds open:</label>
+      <input type="range" id="attacker" min="0" max="1024" value="250" step="2">
+      <span id="attacker-val">250</span>
+    </div>
+    <div class="field">
+      <label for="victim">victim opens (depending on state):</label>
+      <input type="range" id="victim" min="2" max="30" value="6">
+      <span id="victim-val">6</span> sockets if logged in, half that if logged out
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <p class="label">pool usage</p>
+      <p style="font-family: var(--font-mono); font-size: 0.82rem; margin: 0 0 var(--space-2);">attacker baseline</p>
+      <div class="meter"><div class="fill" id="m-attacker"></div></div>
+      <p style="font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0 var(--space-2);">+ victim (logged in)</p>
+      <div class="meter"><div class="fill" id="m-in"></div></div>
+      <p style="font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0 var(--space-2);">+ victim (logged out)</p>
+      <div class="meter"><div class="fill" id="m-out"></div></div>
+      <p class="label" style="margin-top: var(--space-3);">free slots: <span id="free">—</span></p>
+    </div>
+    <div class="panel">
+      <p class="label">attacker's verdict from timing</p>
+      <p class="verdict" id="verdict">—</p>
+      <p style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); margin-top: var(--space-3);">if the in-state request count overflows the pool, those connections queue and the page renders slower. The attacker measures that latency to guess which branch ran.</p>
+    </div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../pool-note/">Connection Pool Note demo</a></li>
+      <li><a href="https://xsleaks.dev/docs/attacks/timing-attacks/connection-pool/" target="_blank" rel="noopener">xsleaks: connection pool timing attack</a></li>
+      <li><a href="https://chromestatus.com/feature/5182293874049024" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  function update() {
+    const pool = +document.getElementById('pool').value;
+    const attacker = +document.getElementById('attacker').value;
+    const victim = +document.getElementById('victim').value;
+    document.getElementById('pool-val').textContent = pool;
+    document.getElementById('attacker-val').textContent = attacker;
+    document.getElementById('victim-val').textContent = victim;
+
+    const free = Math.max(0, pool - attacker);
+    document.getElementById('free').textContent = free + ' / ' + pool;
+
+    document.getElementById('m-attacker').style.width = Math.min(100, (attacker / pool) * 100) + '%';
+    const inUsage = Math.min(100, ((attacker + victim) / pool) * 100);
+    const outUsage = Math.min(100, ((attacker + Math.floor(victim / 2)) / pool) * 100);
+    document.getElementById('m-in').style.width = inUsage + '%';
+    document.getElementById('m-out').style.width = outUsage + '%';
+
+    document.getElementById('m-in').classList.toggle('danger', attacker + victim > pool);
+    document.getElementById('m-out').classList.toggle('danger', attacker + Math.floor(victim / 2) > pool);
+
+    const v = document.getElementById('verdict');
+    const inOverflow = (attacker + victim) > pool;
+    const outOverflow = (attacker + Math.floor(victim / 2)) > pool;
+    if (inOverflow && !outOverflow) {
+      v.textContent = 'LEAK: attacker can tell the victim is logged in (in-state requests stalled, out-state did not).';
+      v.className = 'verdict logged-in';
+    } else if (!inOverflow && outOverflow) {
+      v.textContent = 'LEAK: attacker can tell the victim is logged out.';
+      v.className = 'verdict logged-out';
+    } else {
+      v.textContent = 'safe: both branches fit (or both overflow). Sidechannel cannot distinguish them.';
+      v.className = 'verdict';
+    }
+  }
+
+  ['pool', 'attacker', 'victim'].forEach(id => {
+    document.getElementById(id).addEventListener('input', update);
+  });
+  update();
+</script>
+</body>
+</html>
