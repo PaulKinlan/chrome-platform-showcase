@@ -4,8 +4,8 @@
 
 let lastNavResult = null;
 
-self.addEventListener('fetch', event => {
-  if (event.request.mode !== 'navigate') return;
+self.addEventListener("fetch", (event) => {
+  if (event.request.mode !== "navigate") return;
 
   // Read isReloadNavigation — the new Chrome 147 boolean.
   // Falls back to false for browsers that don't support it yet.
@@ -21,8 +21,8 @@ self.addEventListener('fetch', event => {
 });
 
 // The page sends a 'get-nav-type' message on load; we reply with the stored result.
-self.addEventListener('message', event => {
-  if (event.data?.type === 'get-nav-type') {
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "get-nav-type") {
     event.ports[0].postMessage({ result: lastNavResult });
   }
 });
