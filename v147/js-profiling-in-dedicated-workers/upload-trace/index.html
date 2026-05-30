@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trace upload — JS Profiling in Workers — Chrome 147</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: var(--space-3) var(--space-4);
+      margin: 0 0 var(--space-5);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.55;
+    }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-4); align-items: center; }
+    .controls label { font-family: var(--font-mono); font-size: 0.8rem; }
+    .controls input[type=number] { font: inherit; font-family: var(--font-mono); width: 80px; padding: 0.4rem 0.6rem; border: 2px solid var(--border-black); background: var(--bg-paper); }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin-bottom: var(--space-5); }
+    .panel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); }
+    @media (max-width: 600px) { .panel-grid { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); }
+    .panel .label { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 0.5rem; }
+    .panel .value { font-family: var(--font-display); font-size: 1.7rem; }
+    table.hot { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.78rem; margin-top: var(--space-3); }
+    table.hot th, table.hot td { padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border-black); text-align: left; }
+    table.hot th { background: var(--bg-stone); }
+    table.hot td.samples { text-align: right; font-weight: 600; }
+    .payload { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.74rem; max-height: 240px; overflow-y: auto; margin-bottom: var(--space-5); white-space: pre; }
+    .upload-status { font-family: var(--font-mono); font-size: 0.85rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-black); background: var(--bg-stone); margin-bottom: var(--space-5); }
+    .upload-status.ok { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v147/js-profiling-in-dedicated-workers/">&larr; JS profiling in workers</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo · v147</p>
+    <h1>Trace upload</h1>
+    <p class="lede">Worker A runs a real CPU-heavy load. A second worker profiles it with the JS Self-Profiling API at a chosen sample rate, aggregates the trace into a hot-functions list <em>off the main thread</em>, and emits a compact payload ready for <code>navigator.sendBeacon</code>.</p>
+  </header>
+  <div class="warn-block">
+    <strong>Behind a flag:</strong> JS Self-Profiling in dedicated workers ships behind the Document
+    Policy <code>js-profiling</code>, gated by <code>chrome://flags/#enable-experimental-web-platform-features</code>
+    in Chrome 147. Without the flag the page falls back to a synthetic sample stream so the pipeline still runs.
+  </div>
+  <div class="controls">
+    <label>sample rate <input id="sample-rate" type="number" value="10" min="1" max="100"> ms</label>
+    <label>duration <input id="duration" type="number" value="2000" min="200" max="10000"> ms</label>
+    <button id="run">run profile</button>
+    <button id="upload" disabled>navigator.sendBeacon(payload)</button>
+  </div>
+  <div class="stage">
+    <div class="panel-grid">
+      <div class="panel"><div class="label">samples collected</div><div class="value" id="m-samples">—</div></div>
+      <div class="panel"><div class="label">distinct functions</div><div class="value" id="m-fns">—</div></div>
+      <div class="panel"><div class="label">trace size (raw)</div><div class="value" id="m-raw">—</div></div>
+      <div class="panel"><div class="label">payload size (aggregated)</div><div class="value" id="m-agg">—</div></div>
+    </div>
+    <table class="hot" id="hot-table">
+      <thead><tr><th>function</th><th class="samples">samples</th></tr></thead>
+      <tbody><tr><td colspan="2"><em style="color: var(--text-muted)">no profile yet</em></td></tr></tbody>
+    </table>
+  </div>
+  <h3>Aggregated payload (what we'd send to a telemetry endpoint)</h3>
+  <div class="payload" id="payload-pre">no payload yet</div>
+  <div class="upload-status" id="upload-status">pipeline idle</div>
+  <h3>What's happening</h3>
+  <ol class="how">
+    <li><strong>Worker A</strong> spins up a <code>Worker</code> that runs naïve <code>fib(28)</code>, a heap-allocating <code>JSON.parse</code>, and an array sort.</li>
+    <li><strong>Worker A</strong> wraps the load in <code>new self.Profiler({ sampleInterval })</code>, calls <code>.stop()</code>, posts the raw trace.</li>
+    <li><strong>Main thread</strong> hands the raw trace to <strong>Worker B</strong>, which aggregates by leaf function — the "process traces in a worker" pattern from the WICG explainer.</li>
+    <li>The compact payload is shown above. The button calls <code>navigator.sendBeacon('/telemetry/profile', payload)</code> for real.</li>
+  </ol>
+  <pre><code>// inside worker A (Chrome 147, Document-Policy: js-profiling)
+const profiler = new self.Profiler({ sampleInterval: 10, maxBufferSize: 10000 });
+doExpensiveWork();
+const trace = await profiler.stop();
+self.postMessage({ kind: 'trace', trace });
+
+// main thread → worker B
+workerB.postMessage({ kind: 'aggregate', trace });</code></pre>
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v147/js-profiling-in-dedicated-workers/">Feature page</a></li>
+      <li><a href="/v147/js-profiling-in-dedicated-workers/worker-profile/">Worker Profile demo</a></li>
+      <li><a href="https://wicg.github.io/js-self-profiling/" target="_blank" rel="noopener">WICG JS Self-Profiling spec</a></li>
+      <li><a href="https://chromestatus.com/feature/5159559872249856" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  function loadWorkerSrc() {
+    return `
+      function fib(n){ if(n<2) return n; return fib(n-1)+fib(n-2); }
+      function parseBigJSON(n){ const obj = {items: Array.from({length:n}, (_,i)=>({i, v: 'x'.repeat(8)}))}; return JSON.parse(JSON.stringify(obj)); }
+      function sortAndDedup(n){ const a = Array.from({length:n}, () => Math.random()); a.sort(); return Array.from(new Set(a)); }
+      function compress(n){ let s=''; for(let i=0;i<n;i++) s += String.fromCharCode(97 + (i%26)); return s.length; }
+      function render(n){ let total=0; for(let i=0;i<n;i++) total += Math.sin(i)*Math.cos(i); return total; }
+
+      self.onmessage = async (ev) => {
+        const { sampleInterval, duration } = ev.data;
+        const hasProfiler = typeof self.Profiler === 'function';
+        let trace, native = false;
+        if (hasProfiler) {
+          try {
+            const p = new self.Profiler({ sampleInterval, maxBufferSize: 50000 });
+            const start = performance.now();
+            while (performance.now() - start < duration) {
+              fib(28); parseBigJSON(50); sortAndDedup(200); compress(2000); render(1500);
+            }
+            trace = await p.stop();
+            native = true;
+          } catch (e) {
+            self.postMessage({ kind: 'error', err: 'Profiler failed: ' + e.message });
+          }
+        }
+        if (!trace) {
+          const start = performance.now();
+          while (performance.now() - start < duration) {
+            fib(28); parseBigJSON(50); sortAndDedup(200); compress(2000); render(1500);
+          }
+          const frames = [{name:'fib'},{name:'parseBigJSON'},{name:'sortAndDedup'},{name:'compress'},{name:'render'}];
+          const samples = [];
+          const count = Math.floor(duration / sampleInterval);
+          for (let i = 0; i < count; i++) {
+            const stackId = Math.random() < 0.55 ? 0 : (i % 5);
+            samples.push({ stackId, timestamp: i * sampleInterval });
+          }
+          trace = { samples, stacks: frames.map((f, i) => ({ frameId: i })), frames, resources: ['<inline>'] };
+        }
+        self.postMessage({ kind: 'trace', trace, native });
+      };
+    `;
+  }
+  function aggWorkerSrc() {
+    return `
+      self.onmessage = (ev) => {
+        const { trace } = ev.data;
+        const counts = new Map();
+        for (const s of trace.samples) {
+          const stack = trace.stacks[s.stackId];
+          if (!stack) continue;
+          const frame = trace.frames[stack.frameId] || { name: 'unknown' };
+          counts.set(frame.name, (counts.get(frame.name) || 0) + 1);
+        }
+        const hot = [...counts.entries()].sort((a,b) => b[1]-a[1]).map(([name, samples]) => ({ name, samples }));
+        const payload = JSON.stringify({ version: 1, totalSamples: trace.samples.length, hot });
+        self.postMessage({ kind: 'agg', hot, payload, distinctFns: counts.size });
+      };
+    `;
+  }
+  function makeWorker(src) {
+    return new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+  }
+  const workerA = makeWorker(loadWorkerSrc());
+  const workerB = makeWorker(aggWorkerSrc());
+  const mSamples = document.getElementById('m-samples');
+  const mFns = document.getElementById('m-fns');
+  const mRaw = document.getElementById('m-raw');
+  const mAgg = document.getElementById('m-agg');
+  const hotTbody = document.querySelector('#hot-table tbody');
+  const payloadPre = document.getElementById('payload-pre');
+  const uploadStatus = document.getElementById('upload-status');
+  const uploadBtn = document.getElementById('upload');
+  let lastPayload = null;
+
+  workerA.addEventListener('message', (ev) => {
+    if (ev.data.kind === 'trace') {
+      uploadStatus.textContent = 'worker A → main: trace (' + ev.data.trace.samples.length + ' samples, ' + (ev.data.native ? 'real Profiler' : 'synthetic fallback') + ')';
+      mRaw.textContent = (JSON.stringify(ev.data.trace).length / 1024).toFixed(1) + ' KB';
+      workerB.postMessage({ kind: 'aggregate', trace: ev.data.trace });
+    } else if (ev.data.kind === 'error') {
+      uploadStatus.textContent = ev.data.err;
+    }
+  });
+
+  workerB.addEventListener('message', (ev) => {
+    const { hot, payload, distinctFns } = ev.data;
+    mSamples.textContent = hot.reduce((a, b) => a + b.samples, 0);
+    mFns.textContent = distinctFns;
+    mAgg.textContent = (payload.length / 1024).toFixed(2) + ' KB';
+    hotTbody.innerHTML = '';
+    for (const row of hot) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + row.name + '</td><td class="samples">' + row.samples + '</td>';
+      hotTbody.appendChild(tr);
+    }
+    payloadPre.textContent = JSON.stringify(JSON.parse(payload), null, 2);
+    lastPayload = payload;
+    uploadBtn.disabled = false;
+    uploadStatus.textContent = 'aggregated payload ready · ' + mAgg.textContent;
+    uploadStatus.classList.add('ok');
+    setTimeout(() => uploadStatus.classList.remove('ok'), 1500);
+  });
+
+  document.getElementById('run').addEventListener('click', () => {
+    const sampleInterval = +document.getElementById('sample-rate').value;
+    const duration = +document.getElementById('duration').value;
+    uploadStatus.textContent = 'worker A profiling (' + duration + 'ms @ ' + sampleInterval + 'ms)…';
+    workerA.postMessage({ sampleInterval, duration });
+  });
+
+  document.getElementById('upload').addEventListener('click', () => {
+    if (!lastPayload) return;
+    try {
+      const ok = navigator.sendBeacon('/telemetry/profile', new Blob([lastPayload], { type: 'application/json' }));
+      uploadStatus.textContent = 'navigator.sendBeacon → ' + (ok ? 'queued' : 'rejected');
+    } catch (e) {
+      uploadStatus.textContent = 'sendBeacon threw: ' + e.message;
+    }
+  });
+</script>
+</body>
+</html>
