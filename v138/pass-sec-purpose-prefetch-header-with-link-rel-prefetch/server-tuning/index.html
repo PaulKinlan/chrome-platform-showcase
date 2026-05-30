@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Server tuning — Sec-Purpose header — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); background: var(--bg-paper); padding: var(--space-4); margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .controls button { font-size: 0.78rem; padding: 0.4rem 0.8rem; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0; }
+    @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+    .pane { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); }
+    .pane h4 { font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em; margin-bottom: var(--space-2); }
+    .pane pre { background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.76rem; margin: 0; box-shadow: none; border: 1px solid var(--border-black); white-space: pre-wrap; }
+    .req-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.78rem; margin-top: var(--space-3); }
+    .req-table th, .req-table td { padding: 0.5rem; text-align: left; border-bottom: 1px solid var(--border-black); vertical-align: top; }
+    .req-table th { background: var(--text-black); color: var(--bg-ivory); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; }
+    .req-table tr.spec { background: rgba(0, 34, 255, 0.06); }
+    .req-table .behave { font-weight: 600; }
+    .behave.cheap { color: var(--accent-emerald); }
+    .behave.skip { color: var(--accent-amber); }
+    .behave.full { color: var(--text-black); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Sec-Purpose: prefetch header</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>Server-side tuning by Sec-Purpose</h1>
+    <p class="lede">The point of the header is so the server can <em>do different things</em> on a speculative request. Watch a simulated origin route each request: skip A/B test bucketing, skip analytics, return a slimmer body for speculative GETs &mdash; and run the full path on the eventual real navigation.</p>
+  </header>
+
+  <div class="stage">
+    <div class="controls">
+      <button data-act="user">User clicks a link &rarr; real navigation</button>
+      <button data-act="prefetch">Browser fires &lt;link rel=prefetch&gt;</button>
+      <button data-act="prerender">Speculation rules: prerender</button>
+      <button data-act="reset">reset table</button>
+    </div>
+
+    <div class="grid">
+      <div class="pane">
+        <h4>request as the server sees it</h4>
+<pre id="req">GET /article/138-features HTTP/2
+Host: example.com
+User-Agent: Chrome/138
+Accept: text/html
+Sec-Fetch-Dest: document</pre>
+      </div>
+      <div class="pane">
+        <h4>server&rsquo;s decision tree</h4>
+<pre id="dec">awaiting a request&hellip;</pre>
+      </div>
+    </div>
+
+    <table class="req-table">
+      <thead><tr><th>time</th><th>request</th><th>Sec-Purpose</th><th>server behaviour</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <section>
+    <h2>the routing logic</h2>
+<pre><code>app.get("/article/:slug", (req, res) =&gt; {
+  const sp = req.headers["sec-purpose"];
+  const isSpec = sp?.includes("prefetch") || sp?.includes("prerender");
+
+  // A/B test bucket assignment: only for real navigations
+  if (!isSpec) assignBucket(req);
+
+  // Analytics: don't fire on speculative
+  if (!isSpec) trackPageview(req);
+
+  // Cache-Control: speculative responses should be revalidated cheap
+  res.set("Cache-Control", isSpec ? "private, max-age=30" : "private, max-age=300");
+
+  // Body: speculative may return a "warming" payload that excludes
+  // personalised recommendations; promote runs the full path.
+  res.send(renderPage(req, { skipPersonalised: isSpec }));
+});</code></pre>
+    <p>Before 138, <code>&lt;link rel=prefetch&gt;</code> arrived as a normal GET. Servers had to either treat every page-fetch as speculative (costly) or run all the side effects on every prefetch (corrupting A/B tests and analytics). With <code>Sec-Purpose</code>, the server can branch precisely.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Sec-Purpose: prefetch header</a> &mdash; feature index</li>
+      <li><a href="../sec-purpose/">Sec-Purpose basics</a></li>
+      <li><a href="https://chromestatus.com/feature/6247959677108224" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const req = document.getElementById("req");
+  const dec = document.getElementById("dec");
+  const rows = document.getElementById("rows");
+  function row(label, sp, behave, cls) {
+    const tr = document.createElement("tr");
+    tr.className = cls;
+    const t = new Date().toLocaleTimeString();
+    tr.innerHTML = `<td>${t}</td><td>${label}</td><td>${sp || "(absent)"}</td><td class="behave ${cls}">${behave}</td>`;
+    rows.prepend(tr);
+    while (rows.children.length > 14) rows.lastChild.remove();
+  }
+  function show(act) {
+    if (act === "user") {
+      req.textContent = `GET /article/138-features HTTP/2
+Host: example.com
+Sec-Fetch-Dest: document
+Sec-Fetch-Mode: navigate
+Sec-Fetch-Site: same-origin`;
+      dec.textContent = `Sec-Purpose absent → real navigation
+  ✓ assign A/B bucket
+  ✓ fire pageview analytics
+  ✓ render personalised recommendations
+  ✓ Cache-Control: 300s`;
+      row("/article/138-features", "(absent)", "full path: A/B + analytics + personalisation", "full");
+    } else if (act === "prefetch") {
+      req.textContent = `GET /article/138-features HTTP/2
+Host: example.com
+Sec-Fetch-Dest: empty
+Sec-Fetch-Mode: no-cors
+Sec-Purpose: prefetch`;
+      dec.textContent = `Sec-Purpose: prefetch → speculative warmup
+  ✗ skip A/B bucket
+  ✗ skip analytics
+  ✗ skip personalisation block
+  ✓ Cache-Control: 30s (cheap re-validation on promote)`;
+      row("/article/138-features", "prefetch", "warm cache only, skip side-effects", "cheap");
+    } else if (act === "prerender") {
+      req.textContent = `GET /article/138-features HTTP/2
+Host: example.com
+Sec-Fetch-Dest: document
+Sec-Fetch-Mode: navigate
+Sec-Purpose: prefetch;prerender`;
+      dec.textContent = `Sec-Purpose: prefetch;prerender → speculative render
+  ✗ skip A/B bucket (defer until promote)
+  ✗ skip analytics
+  ✓ render full DOM (so prerender has something to display)
+  ✓ Cache-Control: 30s`;
+      row("/article/138-features", "prefetch;prerender", "render full body, skip A/B + analytics", "skip");
+    } else if (act === "reset") {
+      rows.innerHTML = "";
+      dec.textContent = "awaiting a request…";
+    }
+  }
+  document.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => show(b.dataset.act)));
+</script>
+</body>
+</html>
