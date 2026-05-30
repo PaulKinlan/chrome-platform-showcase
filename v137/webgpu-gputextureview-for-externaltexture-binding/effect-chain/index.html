@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Effect Chain — WebGPU externalTexture/textureView — Chrome 137</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .probe { font-family: var(--font-mono); font-size: 0.8rem; padding: var(--space-2) var(--space-3); background: var(--bg-stone); border: 1px solid var(--border-black); margin: var(--space-3) 0; }
+    .probe.ok { color: var(--accent-emerald); }
+    .probe.fail { color: var(--accent-rose); }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-5); }
+    @media (max-width: 640px) { .stage { grid-template-columns: 1fr; } }
+    video, canvas { width: 100%; height: auto; border: 2px solid var(--border-black); background: #000; }
+    .col h3 { font-family: var(--font-mono); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-3); }
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-4) 0; align-items: center; }
+    .alt { background: var(--bg-paper); color: var(--text-black); }
+    .alt.active { background: var(--text-black); color: var(--bg-ivory); }
+    .field { display: flex; align-items: center; gap: var(--space-2); font-family: var(--font-mono); font-size: 0.85rem; }
+    input[type="range"] { accent-color: var(--text-black); flex: 1; }
+    .out { font-family: var(--font-mono); font-size: 0.78rem; padding: var(--space-3); background: var(--bg-stone); border: 1px solid var(--border-black); margin: var(--space-3) 0; white-space: pre-wrap; }
+    .chain { font-family: var(--font-mono); font-size: 0.85rem; padding: var(--space-3); background: var(--bg-stone); border: 2px solid var(--border-black); margin: var(--space-3) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebGPU GPUTextureView for externalTexture</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo · v137</p>
+    <h1>Effect Chain</h1>
+    <p class="lede">The specific shape the feature was requested for: a video-effects pipeline where pass 0 samples a live camera (<code>texture_external</code>) and pass 1 samples pass-0's output (<code>texture_2d</code>). Pre-v137 those required <em>different</em> shaders. Post-v137, you can write one shader that uses a regular texture binding for both — which is what the chain below does.</p>
+  </header>
+
+  <div class="probe" id="probe">probing&hellip;</div>
+
+  <div class="controls">
+    <button id="start">Start camera</button>
+    <div class="field"><label>passes <span id="passLbl">2</span></label><input type="range" id="passes" min="1" max="6" value="2"></div>
+    <div class="field"><label>blur radius <span id="blurLbl">2</span></label><input type="range" id="blur" min="1" max="8" value="2"></div>
+  </div>
+
+  <div class="stage">
+    <div class="col"><h3>source video</h3><video id="video" autoplay playsinline muted></video></div>
+    <div class="col"><h3>chained output</h3><canvas id="canvas" width="640" height="360"></canvas></div>
+  </div>
+
+  <div class="chain" id="chain">chain: (not started)</div>
+  <div class="out" id="out">click start camera</div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>// pre-v137: two shaders needed, because pass 0 used texture_external
+//           and pass 1 used texture_2d.
+// post-v137: one shader, same texture binding type works for both.
+
+@group(0) @binding(0) var s : sampler;
+@group(0) @binding(1) var t : texture_2d&lt;f32&gt;;   // same binding type
+@fragment fn fmain(in: VOut) -&gt; @location(0) vec4f { ... }
+
+// Pass 0: external texture, view-able now.
+const view = device.importExternalTexture({ source: video });
+// Pass N: intermediate render target.
+const view = intermediateTexture.createView();
+// Both are bound at the same slot, no shader specialisation.</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">WebGPU GPUTextureView for externalTexture binding</a> — feature index</li>
+      <li><a href="../external-view/">External Texture View demo</a></li>
+      <li><a href="https://github.com/gpuweb/gpuweb/pull/5079" target="_blank" rel="noopener">PR #5079</a></li>
+      <li><a href="https://chromestatus.com/feature/5106732252266496" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const probe = document.getElementById("probe");
+  const out = document.getElementById("out");
+  const chainEl = document.getElementById("chain");
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("canvas");
+  let device = null, ctx = null, fmt = null;
+  let pipeline = null, sampler = null;
+
+  (async () => {
+    if (!navigator.gpu) { probe.classList.add("fail"); probe.textContent = "navigator.gpu missing"; return; }
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      device = await adapter.requestDevice();
+      probe.classList.add("ok"); probe.textContent = "WebGPU device acquired";
+    } catch (e) { probe.classList.add("fail"); probe.textContent = "WebGPU init: " + e.message; }
+  })();
+
+  ["passes", "blur"].forEach((id, i) => {
+    const el = document.getElementById(id);
+    const lbl = document.getElementById(["passLbl", "blurLbl"][i]);
+    el.addEventListener("input", () => { lbl.textContent = el.value; });
+  });
+
+  function shader() {
+    return /* wgsl */ `
+      @group(0) @binding(0) var s  : sampler;
+      @group(0) @binding(1) var tx : texture_2d<f32>;
+      @group(0) @binding(2) var<uniform> params: vec4f; // x=radius
+      struct VOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+      @vertex fn vmain(@builtin(vertex_index) i: u32) -> VOut {
+        var p = array(vec2f(-1,-1), vec2f(3,-1), vec2f(-1,3));
+        var u = array(vec2f(0,1), vec2f(2,1), vec2f(0,-1));
+        var o: VOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+      }
+      @fragment fn fmain(in: VOut) -> @location(0) vec4f {
+        let dims = vec2f(textureDimensions(tx, 0));
+        let px = 1.0 / dims;
+        let r = i32(params.x);
+        var acc: vec4f = vec4f(0);
+        var n: f32 = 0;
+        for (var dy = -r; dy <= r; dy = dy + 1) {
+          for (var dx = -r; dx <= r; dx = dx + 1) {
+            acc = acc + textureSample(tx, s, in.uv + px * vec2f(f32(dx), f32(dy)));
+            n = n + 1;
+          }
+        }
+        return acc / n;
+      }`;
+  }
+
+  function buildPipeline() {
+    const mod = device.createShaderModule({ code: shader() });
+    pipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: mod, entryPoint: "vmain" },
+      fragment: { module: mod, entryPoint: "fmain", targets: [{ format: fmt }] },
+    });
+    sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
+  }
+
+  let extPipeline = null;
+  function buildExtPipeline() {
+    // For the external texture pass we need a separate pipeline because the WGSL
+    // binding type differs (texture_external). The pay-off of v137 is everything
+    // *after* pass 0 reuses one shader/binding layout.
+    const src = `
+      @group(0) @binding(0) var s : sampler;
+      @group(0) @binding(1) var tx : texture_external;
+      struct VOut { @builtin(position) pos : vec4f, @location(0) uv : vec2f };
+      @vertex fn vmain(@builtin(vertex_index) i: u32) -> VOut {
+        var p = array(vec2f(-1,-1), vec2f(3,-1), vec2f(-1,3));
+        var u = array(vec2f(0,1), vec2f(2,1), vec2f(0,-1));
+        var o: VOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+      }
+      @fragment fn fmain(in: VOut) -> @location(0) vec4f { return textureSampleBaseClampToEdge(tx, s, in.uv); }
+    `;
+    const mod = device.createShaderModule({ code: src });
+    extPipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: mod, entryPoint: "vmain" },
+      fragment: { module: mod, entryPoint: "fmain", targets: [{ format: fmt }] },
+    });
+  }
+
+  document.getElementById("start").addEventListener("click", async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360 }, audio: false });
+      video.srcObject = stream; await video.play();
+      out.textContent = "camera up - video " + video.videoWidth + "x" + video.videoHeight;
+      if (!device) return;
+      ctx = canvas.getContext("webgpu");
+      fmt = navigator.gpu.getPreferredCanvasFormat();
+      ctx.configure({ device, format: fmt, alphaMode: "premultiplied" });
+      buildExtPipeline();
+      buildPipeline();
+
+      const W = canvas.width, H = canvas.height;
+      function makeTarget() {
+        return device.createTexture({ size: [W, H], format: fmt, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
+      }
+
+      const ping = makeTarget();
+      const pong = makeTarget();
+      const paramsBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+      function frame() {
+        if (!video.videoWidth) { requestAnimationFrame(frame); return; }
+        const passes = +document.getElementById("passes").value;
+        const radius = +document.getElementById("blur").value;
+        device.queue.writeBuffer(paramsBuf, 0, new Float32Array([radius, 0, 0, 0]));
+
+        const enc = device.createCommandEncoder();
+
+        // pass 0: external -> ping
+        const ext = device.importExternalTexture({ source: video });
+        const extBG = device.createBindGroup({ layout: extPipeline.getBindGroupLayout(0), entries: [
+          { binding: 0, resource: sampler },
+          { binding: 1, resource: ext },
+        ]});
+        const pass0 = enc.beginRenderPass({ colorAttachments: [{ view: ping.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }] });
+        pass0.setPipeline(extPipeline); pass0.setBindGroup(0, extBG); pass0.draw(3); pass0.end();
+
+        // passes 1..passes-1: ping -> pong, swap.
+        let a = ping, b = pong;
+        for (let i = 1; i < passes; i++) {
+          const last = i === passes - 1;
+          const targetView = last ? ctx.getCurrentTexture().createView() : b.createView();
+          const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: sampler },
+            { binding: 1, resource: a.createView() },        // texture_2d view, was the v137 unlock
+            { binding: 2, resource: { buffer: paramsBuf } },
+          ]});
+          const p = enc.beginRenderPass({ colorAttachments: [{ view: targetView, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }] });
+          p.setPipeline(pipeline); p.setBindGroup(0, bg); p.draw(3); p.end();
+          [a, b] = [b, a];
+        }
+
+        // if 1 pass requested, copy ping -> canvas directly via the 2d pipeline once
+        if (passes === 1) {
+          const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: sampler },
+            { binding: 1, resource: ping.createView() },
+            { binding: 2, resource: { buffer: paramsBuf } },
+          ]});
+          const p = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }] });
+          p.setPipeline(pipeline); p.setBindGroup(0, bg); p.draw(3); p.end();
+        }
+
+        device.queue.submit([enc.finish()]);
+        chainEl.textContent = "chain: external -> " + Array.from({ length: passes }, (_, i) => "blur(r=" + radius + ")").join(" -> ") + " -> canvas";
+        requestAnimationFrame(frame);
+      }
+      frame();
+    } catch (e) { out.textContent = "error: " + e.message; }
+  });
+</script>
+</body>
+</html>
