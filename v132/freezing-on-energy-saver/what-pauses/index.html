@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What pauses &mdash; Freezing on Energy Saver &mdash; Chrome 132</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .ticks { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); margin: var(--space-3) 0; }
+    .tick { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); }
+    .tick h4 { font-family: var(--font-mono); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    .tick .val { font-family: var(--font-display); font-size: 1.7rem; color: var(--text-black); }
+    .tick .delta { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+    .tick.frozen { background: #fde7e9; border-color: var(--accent-rose); }
+    .tick.frozen .val { color: var(--accent-rose); }
+    .legend { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); margin: var(--space-2) 0; }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; max-height: 200px; overflow-y: auto; margin: var(--space-3) 0; color: var(--text-charcoal); }
+    .log p { margin: 0.1rem 0; }
+    .log p.freeze { color: var(--accent-rose); }
+    .log p.resume { color: var(--accent-emerald); }
+    .probe { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; color: var(--text-black); }
+    .probe.yes { background: #e8f5ed; border-color: var(--accent-emerald); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Freezing on Energy Saver</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v132</p>
+    <h1>What actually stops when Chrome freezes a tab?</h1>
+    <p class="lede">Energy Saver freeze pauses the entire JS event loop: <code>setTimeout</code>, <code>setInterval</code>, <code>requestAnimationFrame</code>, and microtasks queued from network responses all stop. Four counters run side-by-side &mdash; flip the simulated freeze toggle (or hide this tab + wait) and watch every column go cold together.</p>
+  </header>
+
+  <div class="probe" id="probe">listening for real freeze/resume events&hellip;</div>
+
+  <section class="stage">
+    <div class="controls">
+      <button id="simFreeze">simulate freeze (stops timers locally)</button>
+      <button id="simResume" disabled>resume</button>
+      <span class="legend">or: hide the tab + wait on a real Energy Saver machine</span>
+    </div>
+
+    <div class="ticks">
+      <div class="tick" id="t-timeout"><h4>setTimeout chain</h4><div class="val" id="v-timeout">0</div><div class="delta" id="d-timeout">last tick: never</div></div>
+      <div class="tick" id="t-interval"><h4>setInterval(250ms)</h4><div class="val" id="v-interval">0</div><div class="delta" id="d-interval">last tick: never</div></div>
+      <div class="tick" id="t-raf"><h4>requestAnimationFrame</h4><div class="val" id="v-raf">0</div><div class="delta" id="d-raf">last frame: never</div></div>
+      <div class="tick" id="t-fetch"><h4>fetch microtask</h4><div class="val" id="v-fetch">0</div><div class="delta" id="d-fetch">last resolve: never</div></div>
+    </div>
+
+    <div id="log" class="log"></div>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Freezing on Energy Saver</a> &mdash; feature index</li>
+      <li><a href="../energy-freeze/">freeze rule simulator</a></li>
+      <li><a href="https://wicg.github.io/page-lifecycle/" target="_blank" rel="noopener">Page Lifecycle spec</a></li>
+      <li><a href="https://chromestatus.com/feature/5158599457767424" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const has = "onfreeze" in document;
+  document.getElementById("probe").className = "probe " + (has ? "yes" : "");
+  document.getElementById("probe").textContent = has ? "listening for real freeze + resume events on document" : "Page Lifecycle freeze/resume events not exposed in this browser";
+
+  const log = document.getElementById("log");
+  const write = (m, cls) => { const p = document.createElement("p"); if (cls) p.className = cls; p.textContent = new Date().toISOString().slice(11, 23) + "  " + m; log.prepend(p); while (log.children.length > 20) log.lastChild.remove(); };
+
+  let frozen = false;
+  const last = { timeout: 0, interval: 0, raf: 0, fetch: 0 };
+  function setVal(k, n) {
+    document.getElementById("v-" + k).textContent = n;
+    document.getElementById("d-" + k).textContent = "last tick: " + new Date(last[k]).toISOString().slice(11, 23);
+    document.getElementById("t-" + k).classList.toggle("frozen", frozen);
+  }
+
+  // Simulate-style chains: increment counters when allowed.
+  let tc = 0, ic = 0, rc = 0, fc = 0;
+  function timeoutChain() {
+    if (!frozen) { tc++; last.timeout = Date.now(); setVal("timeout", tc); }
+    setTimeout(timeoutChain, 220);
+  }
+  timeoutChain();
+  setInterval(() => { if (!frozen) { ic++; last.interval = Date.now(); setVal("interval", ic); } }, 250);
+  function rafLoop() { if (!frozen) { rc++; last.raf = Date.now(); setVal("raf", rc); } requestAnimationFrame(rafLoop); }
+  requestAnimationFrame(rafLoop);
+  async function fetchLoop() {
+    while (true) {
+      if (!frozen) {
+        try {
+          await fetch(location.href + "?p=" + Date.now(), { method: "HEAD", cache: "no-store" });
+          fc++; last.fetch = Date.now(); setVal("fetch", fc);
+        } catch { /* offline */ }
+      }
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  }
+  fetchLoop();
+
+  document.getElementById("simFreeze").addEventListener("click", () => {
+    frozen = true;
+    write("simulated freeze - all counters paused", "freeze");
+    document.querySelectorAll(".tick").forEach((t) => t.classList.add("frozen"));
+    document.getElementById("simFreeze").disabled = true;
+    document.getElementById("simResume").disabled = false;
+  });
+  document.getElementById("simResume").addEventListener("click", () => {
+    frozen = false;
+    write("simulated resume - counters running again", "resume");
+    document.querySelectorAll(".tick").forEach((t) => t.classList.remove("frozen"));
+    document.getElementById("simFreeze").disabled = false;
+    document.getElementById("simResume").disabled = true;
+  });
+
+  document.addEventListener("freeze", () => { frozen = true; write("REAL freeze event fired", "freeze"); document.querySelectorAll(".tick").forEach((t) => t.classList.add("frozen")); });
+  document.addEventListener("resume", () => { frozen = false; write("REAL resume event fired", "resume"); document.querySelectorAll(".tick").forEach((t) => t.classList.remove("frozen")); });
+</script>
+</body>
+</html>
