@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Memory Benefit — WebGPU transient attachments — Chrome 146</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .arch-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      border: 1px solid var(--border-black);
+      margin-bottom: 1.5rem;
+    }
+    @media (max-width: 560px) { .arch-grid { grid-template-columns: 1fr; } }
+    .arch-col { padding: 1rem; background: var(--bg-paper); }
+    .arch-col + .arch-col { border-left: 1px solid var(--border-black); }
+    @media (max-width: 560px) { .arch-col + .arch-col { border-left: none; border-top: 1px solid var(--border-black); } }
+    .arch-col h3 { font-size: 0.78rem; font-family: monospace; margin: 0 0 0.5rem; color: var(--text-muted); }
+    .arch-col ul { font-size: 0.78rem; color: var(--text-charcoal); padding-left: 1rem; margin: 0; line-height: 1.8; }
+
+    .benefit-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.78rem;
+      margin-bottom: 1.5rem;
+    }
+    .benefit-table th {
+      text-align: left;
+      padding: 0.4rem 0.6rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      font-family: monospace;
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+    }
+    .benefit-table td {
+      padding: 0.4rem 0.6rem;
+      border: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+      vertical-align: top;
+    }
+    .benefit { color: var(--accent-emerald); font-weight: 700; }
+    .no-benefit { color: var(--text-muted); }
+
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.875rem;
+      color: var(--text-charcoal);
+    }
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs">
+    <a href="/v146/">&larr; Chrome 146</a> /
+    <a href="/v146/webgpu-transient-attachments/">WebGPU transient attachments</a>
+  </p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v146 · Web APIs · Memory Benefit</p>
+    <h1>Memory Benefit</h1>
+    <p class="lede">Why <code>TRANSIENT_ATTACHMENT</code> saves memory bandwidth on tile-based GPUs, which GPU architectures benefit, and when to apply the flag in your WebGPU render pipeline.</p>
+  </header>
+
+  <section>
+    <h2>GPU architecture comparison</h2>
+    <div class="arch-grid">
+      <div class="arch-col">
+        <h3>Immediate mode GPU (desktop, discrete)</h3>
+        <ul>
+          <li>Renders each primitive as it's submitted</li>
+          <li>Render targets stored in VRAM</li>
+          <li>All writes/reads go through VRAM bus</li>
+          <li>TRANSIENT_ATTACHMENT accepted but no bandwidth saving</li>
+          <li>Examples: NVIDIA, AMD discrete GPUs</li>
+        </ul>
+      </div>
+      <div class="arch-col">
+        <h3>Tile-based GPU (mobile, Apple Silicon)</h3>
+        <ul>
+          <li>Divides frame into tiles, renders each tile in fast on-chip RAM</li>
+          <li>Flush tile to main memory only when needed</li>
+          <li>TRANSIENT_ATTACHMENT → tile buffer never flushed to RAM</li>
+          <li>Saves memory bandwidth proportional to texture size</li>
+          <li>Examples: Apple A/M chips, Mali, Adreno, PowerVR</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>bandwidth saving estimate</h2>
+    <table class="benefit-table">
+      <thead>
+        <tr>
+          <th>Texture</th>
+          <th>Size (1920×1080)</th>
+          <th>Tile-based benefit</th>
+          <th>Immediate GPU benefit</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Depth buffer (depth24plus)</td>
+          <td>~8 MB per frame</td>
+          <td class="benefit">Eliminated (tile-local)</td>
+          <td class="no-benefit">None</td>
+        </tr>
+        <tr>
+          <td>MSAA resolve target</td>
+          <td>~32 MB per frame (4× MSAA)</td>
+          <td class="benefit">Eliminated if not read back</td>
+          <td class="no-benefit">None</td>
+        </tr>
+        <tr>
+          <td>Intermediate render target</td>
+          <td>~8 MB per frame</td>
+          <td class="benefit">Eliminated if used only within pass</td>
+          <td class="no-benefit">None</td>
+        </tr>
+        <tr>
+          <td>Colour attachment (final output)</td>
+          <td>~8 MB per frame</td>
+          <td class="no-benefit">Not transient — must be presented</td>
+          <td class="no-benefit">Not transient</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>when to use TRANSIENT_ATTACHMENT</h2>
+    <pre><code>// Use TRANSIENT_ATTACHMENT when ALL of these are true:
+// 1. The texture is used only as a render target (not sampled)
+// 2. You don't need to read the texture after the render pass
+// 3. The store op is 'discard'
+
+// ✓ Depth buffer for a single-pass render
+const depth = device.createTexture({
+  format: 'depth24plus',
+  usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TRANSIENT_ATTACHMENT,
+  size: [w, h],
+});
+
+// ✓ MSAA intermediate buffer (discarded after resolve)
+const msaa = device.createTexture({
+  format,
+  sampleCount: 4,
+  usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TRANSIENT_ATTACHMENT,
+  size: [w, h],
+});
+
+// ✗ Colour output read as a texture in the next pass
+// — cannot use TRANSIENT_ATTACHMENT
+const pingPong = device.createTexture({
+  usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+  // TRANSIENT_ATTACHMENT incompatible with TEXTURE_BINDING
+  size: [w, h],
+});</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../transient-demo/">Transient Demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5562829589577728" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://www.w3.org/TR/webgpu/#transient-attachments" target="_blank" rel="noopener">WebGPU spec — transient attachments</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
