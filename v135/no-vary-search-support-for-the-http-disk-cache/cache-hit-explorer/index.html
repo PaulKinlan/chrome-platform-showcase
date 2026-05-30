@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cache-hit explorer — No-Vary-Search disk cache — Chrome 135</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .pill { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; padding: 0.2rem 0.55rem; border: 1px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); }
+    .pill.ok { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
+    .panel h4 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0; }
+    .panel input { padding: 0.4rem 0.6rem; border: 2px solid var(--border-black); font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-paper); width: 100%; box-sizing: border-box; }
+    .panel pre { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-2); margin: 0; white-space: pre-wrap; }
+    .hits-list { display: flex; flex-direction: column; gap: 0.3rem; max-height: 240px; overflow-y: auto; }
+    .hit { font-family: var(--font-mono); font-size: 0.78rem; padding: 0.3rem 0.5rem; background: var(--bg-paper); border: 1px solid var(--border-black); }
+    .hit.hit { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; No-Vary-Search disk cache</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v135</p>
+    <h1>One cache entry, many query strings</h1>
+    <p class="lede">The use case from the explainer: tracking parameters (<code>utm_source</code>, <code>fbclid</code>) and reorder-tolerant pagination (<code>?page=2&amp;sort=desc</code> vs <code>?sort=desc&amp;page=2</code>) used to bust the cache, even though the response was identical. <code>No-Vary-Search</code> tells the disk cache which params to ignore. Define a header on the left, hit URLs on the right, watch the same cache entry serve them all.</p>
+  </header>
+
+  <div class="stage">
+    <div class="row"><span class="pill ok">simulated disk cache</span></div>
+    <div class="grid">
+      <div class="panel">
+        <h4>server response header</h4>
+        <input id="nvs" type="text" value='params=("utm_source" "utm_medium" "fbclid"), key-order'>
+        <pre>HTTP/1.1 200 OK
+No-Vary-Search: <span id="nvs-echo"></span></pre>
+      </div>
+      <div class="panel">
+        <h4>requested URLs</h4>
+        <input id="url" type="text" value="/article?id=42&utm_source=newsletter">
+        <button id="hit">request</button>
+        <div class="hits-list" id="hits"></div>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">No-Vary-Search disk cache</a></li>
+      <li><a href="../nvs-cache/">Original demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5808599110254592" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+const nvs = document.getElementById("nvs");
+const nvsEcho = document.getElementById("nvs-echo");
+function echo() { nvsEcho.textContent = nvs.value; }
+nvs.addEventListener("input", echo);
+echo();
+function parseNVS(header) {
+  const out = { params: [], keyOrder: false, exceptParams: [], all: false };
+  const m = header.match(/params\s*=\s*\(([^)]*)\)/);
+  if (m) out.params = [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+  if (/key-order/.test(header)) out.keyOrder = true;
+  if (/params\s*=\s*\*/.test(header)) out.all = true;
+  return out;
+}
+function canonical(url, rule) {
+  const u = new URL(url, location.href);
+  const params = [...u.searchParams.entries()];
+  const kept = params.filter(([k]) => { if (rule.all) return false; return !rule.params.includes(k); });
+  if (rule.keyOrder) kept.sort((a, b) => a[0].localeCompare(b[0]));
+  const sp = new URLSearchParams(kept).toString();
+  return u.pathname + (sp ? "?" + sp : "");
+}
+const seen = new Map();
+document.getElementById("hit").addEventListener("click", () => {
+  const url = document.getElementById("url").value.trim();
+  if (!url) return;
+  const rule = parseNVS(nvs.value);
+  const canon = canonical(url, rule);
+  const hits = document.getElementById("hits");
+  const row = document.createElement("div");
+  row.className = "hit";
+  if (seen.has(canon)) { row.classList.add("hit"); row.textContent = `HIT  ${url} → cache: ${canon}`; }
+  else { row.textContent = `MISS ${url} → store as: ${canon}`; seen.set(canon, url); }
+  hits.prepend(row);
+});
+</script>
+</body>
+</html>
