@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Async transaction — Explicit resource management (async) — Chrome 134 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .probe { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
+    .ok { color: var(--accent-emerald); font-weight: 600; }
+    .bad { color: var(--accent-rose); font-weight: 600; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+    .col { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-4); }
+    .col h3 { margin-top: 0; }
+    pre.snippet { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.55; overflow-x: auto; margin: 0; }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; max-height: 240px; overflow-y: auto; margin-top: var(--space-3); }
+    .log p { margin: 0.15rem 0; }
+    .log .err { color: var(--accent-rose); }
+    .log .ok { color: var(--accent-emerald); }
+    .controls { display: flex; gap: var(--space-3); margin: var(--space-3) 0; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Explicit resource management (async)</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v134</p>
+    <h1>Async transaction commit / rollback</h1>
+    <p class="lede">The TC39 proposal’s top motivating case for the <em>async</em> half wasn’t about file handles — it was about database transactions, lock acquisitions, and async streams whose <code>close</code> / <code>dispose</code> is itself async. With <code>await using</code>, a transaction commits on the happy path and rolls back on throw, automatically, with no <code>try / finally</code>. Run both columns and watch the disposal logs.</p>
+  </header>
+
+  <div class="probe" id="probe">probing await using / Symbol.asyncDispose…</div>
+
+  <h2>Happy path vs error path</h2>
+  <div class="controls">
+    <button id="run-happy">run: happy path</button>
+    <button id="run-error">run: throw in middle</button>
+    <button id="clear">clear log</button>
+  </div>
+
+  <div class="grid">
+    <div class="col">
+      <h3>The transaction class</h3>
+<pre class="snippet"><code>function openTx(name) {
+  let committed = false;
+  return {
+    name,
+    set(k, v) { … },
+    commit() { committed = true; … },
+    async [Symbol.asyncDispose]() {
+      if (!committed) await this.rollback();
+    },
+    async rollback() { … },
+  };
+}</code></pre>
+    </div>
+    <div class="col">
+      <h3>The caller</h3>
+<pre class="snippet"><code>async function update(id, patch) {
+  await using tx = openTx(`row-${id}`);
+  await tx.set('name', patch.name);
+  await tx.set('balance', patch.balance);
+  await tx.commit();
+} // if anything threw before commit(),
+  // Symbol.asyncDispose runs rollback().</code></pre>
+    </div>
+  </div>
+
+  <div class="log" id="log"></div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Explicit resource management (async)</a> — feature index</li>
+      <li><a href="../await-using/">await using baseline</a> — sibling concept</li>
+      <li><a href="../../explicit-resource-management-sync/">Explicit resource management (sync)</a></li>
+      <li><a href="https://github.com/tc39/proposal-explicit-resource-management#asynchronous-resource-management" target="_blank" rel="noopener">TC39 proposal — async resource management</a></li>
+      <li><a href="https://chromestatus.com/feature/5087324181102592" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probe = document.getElementById('probe');
+  const supported = typeof Symbol.asyncDispose === 'symbol';
+  probe.innerHTML = supported
+    ? '<span class="ok">Symbol.asyncDispose supported</span> — await using executes natively'
+    : '<span class="bad">await using not available</span> — we fall back to manual try/finally so you can see the same trace; native syntax is what Chrome 134+ honours';
+
+  const log = document.getElementById('log');
+  function logLine(msg, cls) {
+    const p = document.createElement('p');
+    p.textContent = new Date().toISOString().slice(11, 23) + '  ' + msg;
+    if (cls) p.className = cls;
+    log.prepend(p);
+  }
+
+  function openTx(name) {
+    let committed = false;
+    let aborted = false;
+    return {
+      name,
+      async set(k, v) {
+        if (aborted) throw new Error('write on aborted tx');
+        logLine(`tx[${name}]  SET ${k} = ${JSON.stringify(v)}`);
+        await new Promise((r) => setTimeout(r, 80));
+      },
+      async commit() {
+        committed = true;
+        logLine(`tx[${name}]  COMMIT`, 'ok');
+        await new Promise((r) => setTimeout(r, 60));
+      },
+      async rollback() {
+        aborted = true;
+        logLine(`tx[${name}]  ROLLBACK`, 'err');
+        await new Promise((r) => setTimeout(r, 60));
+      },
+      [Symbol.asyncDispose ?? Symbol('asyncDispose')]: async function () {
+        if (!committed) await this.rollback();
+        logLine(`tx[${name}]  disposed`);
+      },
+    };
+  }
+
+  async function withTx(name, body) {
+    const tx = openTx(name);
+    try {
+      await body(tx);
+    } finally {
+      const dispose = tx[Symbol.asyncDispose] || Object.getOwnPropertySymbols(tx).map((s) => tx[s]).find((v) => typeof v === 'function');
+      if (dispose) await dispose.call(tx);
+    }
+  }
+
+  document.getElementById('run-happy').addEventListener('click', async () => {
+    logLine('— RUN happy path —');
+    await withTx('user-42', async (tx) => {
+      await tx.set('name', 'Ada');
+      await tx.set('balance', 100);
+      await tx.commit();
+    });
+  });
+
+  document.getElementById('run-error').addEventListener('click', async () => {
+    logLine('— RUN error path (throws after first set) —');
+    try {
+      await withTx('user-42', async (tx) => {
+        await tx.set('name', 'Ada');
+        throw new Error('bank validation failed');
+      });
+    } catch (e) {
+      logLine('caught: ' + e.message, 'err');
+    }
+  });
+
+  document.getElementById('clear').addEventListener('click', () => { log.innerHTML = ''; });
+</script>
+</body>
+</html>
