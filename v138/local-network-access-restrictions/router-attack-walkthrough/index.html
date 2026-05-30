@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Router-attack walkthrough — Local Network Access — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); background: var(--bg-paper); padding: var(--space-4); margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .controls button { font-size: 0.85rem; padding: 0.45rem 0.9rem; }
+    .scene { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0; align-items: stretch; }
+    @media (max-width: 760px) { .scene { grid-template-columns: 1fr; } }
+    .actor { border: 2px solid var(--border-black); padding: var(--space-3); background: var(--bg-stone); display: flex; flex-direction: column; gap: var(--space-2); }
+    .actor h3 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: var(--space-2); padding-bottom: var(--space-2); border-bottom: 1px solid var(--border-black); }
+    .actor.attacker { background: #ffeaea; }
+    .actor.browser { background: var(--bg-stone); }
+    .actor.router { background: #eaffea; }
+    .ip { font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-muted); margin-bottom: var(--space-2); }
+    .log { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin-top: var(--space-3); white-space: pre-wrap; max-height: 14rem; overflow-y: auto; }
+    .log .ok { color: var(--accent-emerald); font-weight: 600; }
+    .log .warn { color: var(--accent-rose); font-weight: 600; }
+    .log .info { color: var(--accent-blue); }
+    .log .blk { color: var(--accent-rose); font-weight: 700; text-transform: uppercase; }
+    .toggle { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; font-family: var(--font-mono); font-size: 0.85rem; }
+    .toggle input { accent-color: var(--text-black); }
+    .router-state { padding: var(--space-2); background: var(--bg-paper); border: 1px solid var(--border-black); font-family: var(--font-mono); font-size: 0.85rem; margin-top: var(--space-2); }
+    .router-state.altered { background: #ffeaea; border-color: var(--accent-rose); color: var(--accent-rose); }
+    .warn-block { border: 2px solid var(--accent-amber); background: #fff8e6; padding: var(--space-3); margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.5; }
+    .warn-block strong { color: var(--accent-amber); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Local Network Access restrictions</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>Router-attack walkthrough</h1>
+    <p class="lede">The CVE class this feature kills: a public web page silently posting to <code>http://192.168.1.1/admin/dns</code> to switch the user&rsquo;s DNS to attacker.example. Walk through what pre-138 Chrome did and what 138 does instead.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Threat model.</strong> The user visits <code>attacker.example</code>. Their router&rsquo;s admin page is on the same LAN, accessible from a browser on the LAN, but typically <em>not</em> behind auth (or behind default <code>admin/admin</code>). Pre-138, the attacker page could fire a <code>fetch()</code> against the router&rsquo;s IP. Same-origin policy doesn&rsquo;t apply because the attacker doesn&rsquo;t need to read the response &mdash; the side-effect (changing DNS) is the goal.
+  </div>
+
+  <div class="stage">
+    <div class="controls">
+      <label class="toggle"><input type="radio" name="mode" value="legacy"> pre-138 (no LNA gate)</label>
+      <label class="toggle"><input type="radio" name="mode" value="lna" checked> 138 (LNA enforcing)</label>
+      <button id="attack">User visits attacker.example &rarr; attack fires</button>
+      <button id="reset">reset state</button>
+    </div>
+
+    <div class="scene">
+      <div class="actor attacker">
+        <h3>attacker.example</h3>
+        <div class="ip">a.b.c.d (public)</div>
+        <p style="font-family:var(--font-mono); font-size:0.78rem;">malicious page running <code>fetch("http://192.168.1.1/admin/dns?set=attacker.dns")</code> on load</p>
+      </div>
+      <div class="actor browser">
+        <h3>Chrome on the user&rsquo;s LAN</h3>
+        <div class="ip">10.0.0.34 (private)</div>
+        <p style="font-family:var(--font-mono); font-size:0.78rem;">in 138, requests from a public origin to a private destination are subject to LNA: must be preceded by a successful preflight + (where applicable) user permission.</p>
+      </div>
+      <div class="actor router">
+        <h3>Router admin</h3>
+        <div class="ip">192.168.1.1 (loopback/private)</div>
+        <div class="router-state" id="rs">DNS = 1.1.1.1 (default)</div>
+      </div>
+    </div>
+
+    <div class="log" id="log" aria-live="polite"></div>
+  </div>
+
+  <section>
+    <h2>what 138 actually does</h2>
+    <ol>
+      <li>The browser classifies the destination IP (public &rarr; private &rarr; loopback) using the same ladder as the PNA spec.</li>
+      <li>If the request crosses <em>down</em> the ladder &mdash; e.g. public-origin &rarr; private-IP &mdash; it issues an <code>OPTIONS</code> preflight with <code>Access-Control-Request-Local-Network: true</code> first.</li>
+      <li>If the preflight fails (most routers don&rsquo;t answer it) the request is blocked. No silent side-effect possible.</li>
+      <li>If the destination is a <em>secure</em> private context, Chrome also prompts the user before allowing the request.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Local Network Access restrictions</a> &mdash; feature index</li>
+      <li><a href="../lna-prompt/">LNA permission prompt demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5152728072060928" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const log = document.getElementById("log");
+  function logLine(kind, msg) {
+    const span = document.createElement("div");
+    span.innerHTML = `<span class="${kind}">${msg}</span>`;
+    log.appendChild(span);
+    log.scrollTop = log.scrollHeight;
+  }
+  function mode() { return document.querySelector("input[name=mode]:checked").value; }
+  const rs = document.getElementById("rs");
+  function setRouter(state) {
+    rs.textContent = state === "altered" ? "DNS = attacker.dns (HIJACKED)" : "DNS = 1.1.1.1 (default)";
+    rs.className = "router-state" + (state === "altered" ? " altered" : "");
+  }
+
+  document.getElementById("attack").addEventListener("click", () => {
+    log.innerHTML = "";
+    logLine("info", "1. User loads https://attacker.example/");
+    logLine("info", "2. attacker.example runs:");
+    logLine("info", "     fetch('http://192.168.1.1/admin/dns?set=attacker.dns', {");
+    logLine("info", "       method: 'POST',");
+    logLine("info", "       mode: 'no-cors',");
+    logLine("info", "     });");
+    logLine("info", "3. Chrome classifies: public origin &rarr; private destination (192.168/16)");
+    if (mode() === "legacy") {
+      logLine("info", "4. pre-138: no LNA gate. Request goes out.");
+      logLine("info", "5. Router accepts the GET because the user is already authed (or no auth).");
+      setRouter("altered");
+      logLine("warn", "6. DNS for the whole LAN is now hijacked. The user notices nothing.");
+      logLine("blk", "OUTCOME: ATTACK SUCCEEDED");
+    } else {
+      logLine("info", "4. 138 LNA: issues preflight OPTIONS to 192.168.1.1 with Access-Control-Request-Local-Network: true");
+      logLine("warn", "5. Router doesn't recognise the preflight header. Preflight fails.");
+      setRouter("default");
+      logLine("ok", "6. Browser blocks the fetch. Router state unchanged. User never sees a prompt because the preflight already gated.");
+      logLine("blk", "OUTCOME: ATTACK BLOCKED");
+    }
+  });
+  document.getElementById("reset").addEventListener("click", () => {
+    setRouter("default");
+    log.innerHTML = "";
+    logLine("info", "Ready. Pick a mode and click 'attack fires'.");
+  });
+  logLine("info", "Ready. Pick a mode and click 'attack fires'.");
+</script>
+</body>
+</html>
