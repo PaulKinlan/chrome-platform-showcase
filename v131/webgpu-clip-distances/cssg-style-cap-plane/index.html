@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CAD-style cap plane — WebGPU clip-distances — Chrome 131</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    canvas { display: block; width: 100%; max-width: 520px; height: 360px; border: 2px solid var(--border-black); background: var(--bg-stone); box-shadow: var(--thin-shadow); margin: var(--space-4) 0; }
+    .toolbar { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .toolbar input[type=range] { width: 220px; accent-color: var(--text-black); }
+    .toolbar label { font-family: var(--font-mono); font-size: 0.85rem; }
+    .status { font-family: var(--font-mono); font-size: 0.8rem; padding: 0.5rem 0.8rem; border: 2px solid var(--border-black); background: var(--bg-stone); display: inline-block; margin: var(--space-3) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v131/">&larr; v131</a> &middot; <a href="../">WebGPU clip-distances</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v131</p>
+    <h1>CAD-style section-plane cutaway</h1>
+    <p class="lede">The motivating CAD use case: a 3D model viewer needs to "cut through" geometry with an arbitrary plane (a section view) without uploading or modifying the mesh. With <code>clip_distances</code> the vertex shader writes a signed distance to the plane; fragments on one side are clipped cleanly. Drag the plane.</p>
+  </header>
+
+  <div id="support" class="status"></div>
+  <canvas id="c"></canvas>
+
+  <div class="toolbar">
+    <label>plane offset: <input id="offset" type="range" min="-1" max="1" step="0.01" value="0"></label>
+    <label>plane angle: <input id="angle" type="range" min="0" max="180" value="45"></label>
+    <label>spin: <input id="spin" type="checkbox" checked></label>
+  </div>
+
+  <section>
+    <h2>the wgsl in use</h2>
+<pre><code>// 1) enable the optional feature when requesting the device
+const device = await adapter.requestDevice({
+  requiredFeatures: ["clip-distances"]
+});
+
+// 2) declare the clip distance in the vertex shader
+struct VOut {
+  @builtin(position) p: vec4f,
+  @builtin(clip_distances) c: array&lt;f32, 1&gt;,
+  @location(0) col: vec3f,
+}
+
+@vertex fn vs(@location(0) pos: vec3f) -&gt; VOut {
+  var o: VOut;
+  o.p = mvp * vec4f(pos, 1.0);
+  // signed distance from the section plane
+  o.c[0] = dot(pos, plane.xyz) + plane.w;
+  return o;
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../clip-distances/">Half-plane slider demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5117126091862016" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://gpuweb.github.io/gpuweb/#clip-distances" target="_blank" rel="noopener">WebGPU spec — clip-distances</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const supportsGPU = !!navigator.gpu;
+  document.getElementById("support").textContent = supportsGPU
+    ? "WebGPU available — this demo uses a 2D canvas projection of the same clip-plane maths for cross-browser viewing"
+    : "WebGPU not available — using a 2D canvas projection";
+
+  let theta = 0;
+  function project(p, t) {
+    // simple yz rotation
+    const x = p[0];
+    const y = p[1] * Math.cos(t) - p[2] * Math.sin(t);
+    const z = p[1] * Math.sin(t) + p[2] * Math.cos(t);
+    return [x, y, z];
+  }
+
+  // a simple cube mesh as triangles for rendering
+  function cubeTris() {
+    const v = [
+      [-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],
+      [-1,-1, 1],[1,-1, 1],[1,1, 1],[-1,1, 1]
+    ];
+    const f = [
+      [0,1,2],[0,2,3], [4,6,5],[4,7,6],
+      [0,4,5],[0,5,1], [2,6,7],[2,7,3],
+      [1,5,6],[1,6,2], [0,3,7],[0,7,4]
+    ];
+    return f.map(([a,b,c]) => [v[a], v[b], v[c]]);
+  }
+
+  const TRIS = cubeTris();
+
+  function planeDist(p, axis, angDeg, offset) {
+    const ang = angDeg * Math.PI / 180;
+    const n = [Math.cos(ang), 0, Math.sin(ang)];
+    return p[0]*n[0] + p[1]*n[1] + p[2]*n[2] - offset;
+  }
+
+  function render() {
+    const w = canvas.width = canvas.clientWidth * devicePixelRatio;
+    const h = canvas.height = canvas.clientHeight * devicePixelRatio;
+    ctx.fillStyle = "#f4f3ee"; ctx.fillRect(0, 0, w, h);
+    const cx = w/2, cy = h/2, scale = Math.min(w, h)/3.5;
+    const offset = +document.getElementById("offset").value;
+    const angle = +document.getElementById("angle").value;
+    const spin = document.getElementById("spin").checked;
+    if (spin) theta += 0.008;
+
+    // sort triangles by depth
+    const projected = TRIS.map(tri => {
+      const rot = tri.map(p => project(p, theta));
+      const z = rot.reduce((s, p) => s + p[2], 0) / 3;
+      return { rot, z };
+    }).sort((a, b) => a.z - b.z);
+
+    for (const t of projected) {
+      // clip: skip triangles fully on one side
+      const dists = t.rot.map(p => planeDist(p, "x", angle, offset));
+      if (dists.every(d => d < 0)) continue;
+      ctx.beginPath();
+      t.rot.forEach((p, i) => {
+        const x = cx + p[0] * scale;
+        const y = cy - p[1] * scale - p[2] * scale * 0.3;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.closePath();
+      const partial = dists.some(d => d < 0);
+      ctx.fillStyle = partial ? "#d11a2a" : "#fdfcf8";
+      ctx.fill();
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    // draw the section plane edge
+    const ang = angle * Math.PI / 180;
+    const px = Math.cos(ang), pz = Math.sin(ang);
+    ctx.strokeStyle = "#0022ff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx + (offset * px - pz * 2) * scale, cy + (offset * pz + px * 2) * scale);
+    ctx.lineTo(cx + (offset * px + pz * 2) * scale, cy + (offset * pz - px * 2) * scale);
+    ctx.stroke();
+
+    requestAnimationFrame(render);
+  }
+
+  render();
+</script>
+</body>
+</html>
