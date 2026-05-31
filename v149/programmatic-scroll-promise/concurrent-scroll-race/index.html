@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Concurrent Scroll Race — Programmatic scroll promise — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .scroller {
+      overflow-x: scroll;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      height: 150px;
+      display: flex;
+      scroll-behavior: smooth;
+    }
+    .dest {
+      min-width: 220px;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      border-right: 2px solid var(--border-black);
+      flex-shrink: 0;
+      background: var(--bg-paper);
+      transition: background 0.25s;
+      user-select: none;
+      font-family: var(--font-mono);
+      color: var(--text-charcoal);
+    }
+    .dest:last-child { border-right: none; }
+    .dest-num { font-size: 2rem; font-weight: 700; color: var(--text-black); line-height: 1; }
+    .dest-label { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.3rem; }
+    .dest.winning { background: var(--accent-blue); }
+    .dest.winning .dest-num,
+    .dest.winning .dest-label { color: var(--bg-ivory); }
+
+    .race-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin: 1rem 0 0.5rem;
+    }
+    .race-btn {
+      padding: 0.4rem 0.85rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .race-btn:hover { background: var(--bg-ivory); }
+    .dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: var(--text-muted);
+      flex-shrink: 0;
+      transition: background 0.15s;
+    }
+    .race-btn.pending .dot { background: var(--accent-blue); }
+    .race-btn.won .dot { background: var(--accent-emerald); }
+    .race-btn.interrupted .dot { background: var(--accent-rose); }
+
+    .footer-row {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+    }
+    .btn-primary {
+      padding: 0.4rem 0.9rem;
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      cursor: pointer;
+    }
+    .btn-primary:hover { background: var(--text-charcoal); }
+    .btn-secondary {
+      padding: 0.4rem 0.9rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      cursor: pointer;
+    }
+    .btn-secondary:hover { background: var(--bg-ivory); }
+    .hint { font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono); }
+
+    .board {
+      border: 2px solid var(--border-black);
+      overflow: hidden;
+    }
+    .board-head {
+      display: grid;
+      grid-template-columns: 56px 1fr 1fr 72px;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      padding: 0.35rem 0.75rem;
+      gap: 0.5rem;
+    }
+    .board-row {
+      display: grid;
+      grid-template-columns: 56px 1fr 1fr 72px;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      padding: 0.35rem 0.75rem;
+      border-top: 1px solid var(--border-black);
+      gap: 0.5rem;
+      align-items: center;
+      background: var(--bg-paper);
+    }
+    .board-row .r-id { color: var(--text-muted); }
+    .board-row .r-target { color: var(--text-black); }
+    .r-pending { color: var(--accent-blue); }
+    .r-won { color: var(--accent-emerald); }
+    .r-interrupted { color: var(--accent-rose); }
+    .r-time { color: var(--text-muted); text-align: right; }
+
+    .tally {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      border-top: none;
+      padding: 0.45rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-charcoal);
+    }
+    .tally .won-count { color: var(--accent-emerald); font-weight: 600; }
+    .tally .int-count { color: var(--accent-rose); }
+
+    pre code {
+      display: block;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      line-height: 1.6;
+      overflow-x: auto;
+      border: 2px solid var(--border-black);
+      margin: 1.5rem 0;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v149/programmatic-scroll-promise/">&larr; Programmatic scroll promise</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v149 · scroll promise · concurrency</p>
+    <h1>Concurrent Scroll Race</h1>
+    <p class="lede">Click multiple destination buttons rapidly to trigger overlapping <code>scrollTo()</code> calls. Each returns a promise — only the last scroll wins. Earlier ones resolve with <code>{ interrupted: true }</code>. The scoreboard captures every outcome.</p>
+  </header>
+
+  <div class="scroller" id="scroller">
+    <div class="dest" id="dest-0"><span class="dest-num">1</span><span class="dest-label">Destination A</span></div>
+    <div class="dest" id="dest-1"><span class="dest-num">2</span><span class="dest-label">Destination B</span></div>
+    <div class="dest" id="dest-2"><span class="dest-num">3</span><span class="dest-label">Destination C</span></div>
+    <div class="dest" id="dest-3"><span class="dest-num">4</span><span class="dest-label">Destination D</span></div>
+    <div class="dest" id="dest-4"><span class="dest-num">5</span><span class="dest-label">Destination E</span></div>
+    <div class="dest" id="dest-5"><span class="dest-num">6</span><span class="dest-label">Destination F</span></div>
+  </div>
+
+  <div class="race-controls">
+    <button class="race-btn" id="rb-0"><span class="dot"></span>→ A</button>
+    <button class="race-btn" id="rb-1"><span class="dot"></span>→ B</button>
+    <button class="race-btn" id="rb-2"><span class="dot"></span>→ C</button>
+    <button class="race-btn" id="rb-3"><span class="dot"></span>→ D</button>
+    <button class="race-btn" id="rb-4"><span class="dot"></span>→ E</button>
+    <button class="race-btn" id="rb-5"><span class="dot"></span>→ F</button>
+  </div>
+  <div class="footer-row">
+    <button class="btn-primary" id="autoBtn">▶ Auto-race demo</button>
+    <button class="btn-secondary" id="resetBtn">↺ Reset</button>
+    <span class="hint">Click buttons rapidly to trigger interruptions</span>
+  </div>
+
+  <div class="board" id="board">
+    <div class="board-head"><span>Race #</span><span>Target</span><span>Result</span><span>Time</span></div>
+  </div>
+  <div class="tally" id="tally">No races yet — click a destination button above.</div>
+
+  <pre><code>// Each scrollTo() returns Promise&lt;{ interrupted: boolean }&gt;
+async function raceToDestination(container, dest) {
+  const result = await container.scrollTo({
+    left: dest.offsetLeft,
+    behavior: 'smooth',
+  });
+  if (result.interrupted) {
+    // Lost: another scrollTo() call took over mid-scroll
+    console.log('interrupted');
+  } else {
+    // Won: reached the destination cleanly
+    console.log('done', dest.textContent);
+  }
+}
+
+// Fire two in quick succession — first loses, second wins:
+raceToDestination(scroller, destA); // → { interrupted: true }
+raceToDestination(scroller, destF); // → { interrupted: false } ✓</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../scroll-monitor/">Scroll Monitor</a> — observe every promise resolve/reject live</li>
+      <li><a href="../animation-sequencer/">Animation Sequencer</a> — chain animations with awaited scrolls</li>
+      <li><a href="../scroll-sequencing-with-recovery/">Scroll Sequencing with Recovery</a> — handle interruptions with retry logic</li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const scroller = document.getElementById('scroller');
+  const dests = [0,1,2,3,4,5].map(i => document.getElementById('dest-'+i));
+  const rbtns = [0,1,2,3,4,5].map(i => document.getElementById('rb-'+i));
+  const board = document.getElementById('board');
+  const tally = document.getElementById('tally');
+  const labels = ['A','B','C','D','E','F'];
+
+  let raceId = 0, wonCount = 0, intCount = 0;
+
+  // Feature detect promise support
+  function hasPromise() {
+    try {
+      const r = scroller.scrollTo({ left: scroller.scrollLeft, behavior: 'instant' });
+      return !!(r && typeof r.then === 'function');
+    } catch(e) { return false; }
+  }
+  const supported = hasPromise();
+
+  async function scrollToDest(idx) {
+    const dest = dests[idx];
+    const btn = rbtns[idx];
+    const id = ++raceId;
+    const t0 = performance.now();
+
+    dests.forEach(d => d.classList.remove('winning'));
+    dest.classList.add('winning');
+    btn.classList.remove('won','interrupted');
+    btn.classList.add('pending');
+
+    addRow(id, labels[idx], 'pending', null);
+
+    let result;
+    const p = scroller.scrollTo({ left: dest.offsetLeft, behavior: 'smooth' });
+    if (supported && p && typeof p.then === 'function') {
+      result = await p;
+    } else {
+      await new Promise(r => setTimeout(r, 700));
+      result = { interrupted: false };
+    }
+
+    const ms = Math.round(performance.now() - t0);
+    const won = !(result && result.interrupted);
+
+    btn.classList.remove('pending');
+    btn.classList.add(won ? 'won' : 'interrupted');
+    if (!won) dest.classList.remove('winning');
+
+    won ? wonCount++ : intCount++;
+    updateRow(id, won ? 'won' : 'interrupted', ms);
+    refreshTally();
+  }
+
+  function addRow(id, target, state, ms) {
+    const r = document.createElement('div');
+    r.className = 'board-row';
+    r.id = 'brow-'+id;
+    r.innerHTML = `<span class="r-id">#${id}</span><span class="r-target">→ ${target}</span><span class="r-${state}">${state==='pending'?'⏳ pending…':state}</span><span class="r-time">${ms!==null?ms+'ms':'—'}</span>`;
+    board.appendChild(r);
+    board.scrollTop = board.scrollHeight;
+  }
+
+  function updateRow(id, state, ms) {
+    const r = document.getElementById('brow-'+id);
+    if (!r) return;
+    const spans = r.querySelectorAll('span');
+    spans[2].className = 'r-'+state;
+    spans[2].textContent = state === 'won' ? '✓ won' : '✕ interrupted';
+    spans[3].textContent = ms+'ms';
+  }
+
+  function refreshTally() {
+    const total = wonCount + intCount;
+    tally.innerHTML = `${total} scrolls · <span class="won-count">${wonCount} won</span> · <span class="int-count">${intCount} interrupted</span>${!supported ? ' · <em>Promise API not detected — Chrome 149+ required for live results</em>' : ''}`;
+  }
+
+  rbtns.forEach((btn, idx) => btn.addEventListener('click', () => scrollToDest(idx)));
+
+  document.getElementById('autoBtn').addEventListener('click', async () => {
+    document.getElementById('resetBtn').click();
+    await new Promise(r => setTimeout(r, 200));
+    const seq = [0, 4, 2, 5, 1, 3];
+    for (let i = 0; i < seq.length - 1; i++) {
+      scrollToDest(seq[i]);
+      await new Promise(r => setTimeout(r, 75));
+    }
+    scrollToDest(seq[seq.length - 1]);
+  });
+
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    raceId = wonCount = intCount = 0;
+    dests.forEach(d => d.classList.remove('winning'));
+    rbtns.forEach(b => b.classList.remove('pending','won','interrupted'));
+    board.querySelectorAll('.board-row').forEach(r => r.remove());
+    tally.textContent = 'No races yet — click a destination button above.';
+  });
+})();
+</script>
+</body>
+</html>
