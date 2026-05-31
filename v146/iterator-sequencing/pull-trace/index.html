@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pull trace — Iterator sequencing — Chrome 146</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-5);
+      margin-bottom: var(--space-5);
+    }
+    .controls {
+      display: flex;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+      margin-bottom: var(--space-4);
+      align-items: center;
+    }
+    label.range {
+      display: inline-flex;
+      gap: var(--space-2);
+      align-items: center;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+    }
+    input[type=range] { width: 9rem; }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: 8rem 1fr;
+      gap: var(--space-3);
+      align-items: center;
+      margin-bottom: var(--space-2);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+    }
+    .timeline .label { color: var(--text-charcoal); }
+    .timeline .cells {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: 1.8rem;
+      gap: 3px;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: 3px;
+    }
+    .timeline .cells span {
+      width: 1.8rem;
+      height: 1.4rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.7rem;
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+    }
+    .timeline .cells span.pull { background: var(--accent-blue); color: var(--bg-ivory); }
+    .timeline .cells span.consumed { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .timeline .cells span.skipped { background: var(--bg-stone); color: var(--text-muted); text-decoration: line-through; }
+
+    .legend-row {
+      display: flex;
+      gap: var(--space-3);
+      flex-wrap: wrap;
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      margin: var(--space-3) 0 var(--space-4);
+      color: var(--text-muted);
+    }
+    .swatch {
+      display: inline-block;
+      width: 0.9rem;
+      height: 0.9rem;
+      border: 1px solid var(--border-black);
+      vertical-align: middle;
+      margin-right: 0.25rem;
+    }
+    .swatch.pull { background: var(--accent-blue); }
+    .swatch.consumed { background: var(--accent-emerald); }
+    .swatch.skipped { background: var(--bg-stone); }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: var(--space-3);
+      margin-top: var(--space-4);
+    }
+    @media (max-width: 540px) { .summary { grid-template-columns: 1fr; } }
+    .summary .cell {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      text-align: center;
+    }
+    .summary .cell strong {
+      display: block;
+      font-family: var(--font-display);
+      font-size: 1.6rem;
+      color: var(--text-black);
+    }
+    .summary .cell span {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v146/iterator-sequencing/">&larr; Iterator sequencing</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v146</p>
+    <h1>Pull trace</h1>
+    <p class="lede">Visualises every <code>next()</code> call as it travels through a concatenated chain. Source A holds 6 values, source B holds 6, source C holds infinitely many. As you slide the <code>take(n)</code> dial, watch which cells light up — blue is "pulled", green is "delivered to caller", grey is "never touched". Eager spread would pull every finite source dry; lazy stops the instant the consumer is satisfied.</p>
+  </header>
+
+  <div class="stage">
+    <div class="controls">
+      <label class="range">take(<span id="take-val">5</span>): <input type="range" id="take" min="0" max="14" value="5"></label>
+      <label class="range"><input type="checkbox" id="drop" checked> include <code>.drop(1)</code></label>
+      <label class="range"><input type="checkbox" id="filter"> include <code>.filter(x =&gt; x &gt; 0)</code></label>
+      <button id="run">re-run</button>
+    </div>
+
+    <div class="legend-row">
+      <span><i class="swatch pull"></i> pulled</span>
+      <span><i class="swatch consumed"></i> delivered</span>
+      <span><i class="swatch skipped"></i> never touched</span>
+    </div>
+
+    <div class="timeline">
+      <div class="label">source A (size 6)</div>
+      <div class="cells" id="a"></div>
+    </div>
+    <div class="timeline">
+      <div class="label">source B (size 6)</div>
+      <div class="cells" id="b"></div>
+    </div>
+    <div class="timeline">
+      <div class="label">source C (&infin;)</div>
+      <div class="cells" id="c"></div>
+    </div>
+
+    <div class="summary">
+      <div class="cell"><strong id="m-pulled">0</strong><span>total pulls</span></div>
+      <div class="cell"><strong id="m-delivered">0</strong><span>delivered</span></div>
+      <div class="cell"><strong id="m-saved">0</strong><span>cells untouched</span></div>
+    </div>
+  </div>
+
+  <pre><code>const a = [1, 2, 3, 4, 5, 6];
+const b = [-1, 7, 8, 9, 10, 11];
+function* c() { let i = 100; while (true) yield i++; }
+
+const result = Iterator.concat(a, b, c())
+  .drop(1)
+  .filter(x =&gt; x &gt; 0)
+  .take(N)
+  .toArray();
+// concat is lazy → c() is only entered if a + b ran dry first</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v146/iterator-sequencing/">Feature page</a></li>
+      <li><a href="/v146/iterator-sequencing/concat-demo/">Iterator.concat() demo</a></li>
+      <li><a href="/v146/iterator-sequencing/practical-patterns/">Practical patterns</a></li>
+      <li><a href="/v146/iterator-sequencing/lazy-pipeline-builder/">Lazy pipeline builder</a></li>
+      <li><a href="https://github.com/tc39/proposal-iterator-sequencing" target="_blank" rel="noopener">TC39 proposal</a></li>
+      <li><a href="https://chromestatus.com/feature/5193275975794688" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const A_SIZE = 6, B_SIZE = 6, C_RENDER = 8;
+  const cellsA = document.getElementById("a");
+  const cellsB = document.getElementById("b");
+  const cellsC = document.getElementById("c");
+
+  function build() {
+    cellsA.innerHTML = "";
+    cellsB.innerHTML = "";
+    cellsC.innerHTML = "";
+    for (let i = 0; i < A_SIZE; i++) {
+      const s = document.createElement("span");
+      s.textContent = [1, 2, 3, 4, 5, 6][i];
+      s.dataset.src = "a"; s.dataset.i = i;
+      cellsA.appendChild(s);
+    }
+    for (let i = 0; i < B_SIZE; i++) {
+      const s = document.createElement("span");
+      s.textContent = [-1, 7, 8, 9, 10, 11][i];
+      s.dataset.src = "b"; s.dataset.i = i;
+      cellsB.appendChild(s);
+    }
+    for (let i = 0; i < C_RENDER; i++) {
+      const s = document.createElement("span");
+      s.textContent = 100 + i;
+      s.dataset.src = "c"; s.dataset.i = i;
+      cellsC.appendChild(s);
+    }
+  }
+
+  function clearStates() {
+    document.querySelectorAll(".cells span").forEach((s) => {
+      s.classList.remove("pull", "consumed", "skipped");
+    });
+  }
+
+  function trapped(name, base, log) {
+    return function* () {
+      let i = 0;
+      for (const v of base) {
+        log.push({ src: name, i, action: "pull", value: v });
+        yield v;
+        i++;
+      }
+    };
+  }
+
+  function run() {
+    build();
+    clearStates();
+    const log = [];
+    const A = trapped("a", [1, 2, 3, 4, 5, 6], log);
+    const B = trapped("b", [-1, 7, 8, 9, 10, 11], log);
+    const C = trapped("c", (function* () { let i = 100; while (true) yield i++; })(), log);
+    const useDrop = document.getElementById("drop").checked;
+    const useFilter = document.getElementById("filter").checked;
+    const takeN = +document.getElementById("take").value;
+    document.getElementById("take-val").textContent = takeN;
+
+    let it = (typeof Iterator !== "undefined" && Iterator.concat)
+      ? Iterator.concat(A(), B(), C())
+      : (function* () { yield* A(); yield* B(); yield* C(); })();
+    it = Iterator.from(it);
+    if (useDrop) it = it.drop(1);
+    if (useFilter) it = it.filter((x) => x > 0);
+    const out = it.take(takeN).toArray();
+
+    // Mark delivered values: the LAST occurrence of each delivered value in the pull log.
+    const delivered = [...out];
+    for (const entry of [...log].reverse()) {
+      if (entry.src === "c" && entry.i >= C_RENDER) continue;
+      const idx = delivered.indexOf(entry.value);
+      if (idx >= 0 && !entry._taken) {
+        entry._taken = true;
+        delivered.splice(idx, 1);
+      }
+    }
+
+    for (const entry of log) {
+      const sel = `.cells span[data-src='${entry.src}'][data-i='${entry.i}']`;
+      const cell = document.querySelector(sel);
+      if (!cell) continue;
+      cell.classList.add("pull");
+      if (entry._taken) cell.classList.add("consumed");
+    }
+
+    let untouched = 0;
+    document.querySelectorAll(".cells span").forEach((s) => {
+      if (!s.classList.contains("pull")) {
+        s.classList.add("skipped");
+        untouched++;
+      }
+    });
+
+    document.getElementById("m-pulled").textContent = log.length;
+    document.getElementById("m-delivered").textContent = out.length;
+    document.getElementById("m-saved").textContent = untouched;
+  }
+
+  document.getElementById("take").addEventListener("input", run);
+  document.getElementById("drop").addEventListener("change", run);
+  document.getElementById("filter").addEventListener("change", run);
+  document.getElementById("run").addEventListener("click", run);
+  run();
+</script>
+</body>
+</html>

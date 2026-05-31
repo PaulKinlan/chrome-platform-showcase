@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bimodal histogram explorer — confidence flag — Chrome 135</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; }
+    .pill { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; padding: 0.2rem 0.55rem; border: 1px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); }
+    .pill.ok { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .pill.bad { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    canvas { width: 100%; height: 220px; background: var(--bg-paper); border: 2px solid var(--border-black); display: block; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-3); margin: var(--space-3) 0; font-family: var(--font-mono); font-size: 0.85rem; }
+    .stats div { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); }
+    .stats strong { display: block; font-size: 1.2rem; color: var(--text-black); margin-bottom: 0.2rem; }
+    @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Bimodal performance timings</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v135</p>
+    <h1>Bimodal histogram explorer</h1>
+    <p class="lede">Drag the slider to mix cold-start and warm-start samples in any ratio. The histogram redraws, the median tightens, and the new <code>confidence</code> flag on Performance Timing entries lights up red when the distribution is bimodal &mdash; mirroring exactly how Chrome will mark suspect samples on real traffic from 135.</p>
+  </header>
+
+  <div class="stage">
+    <div class="row">
+      <span class="pill" id="cap">Performance API: ?</span>
+      <span class="pill" id="cap-conf">confidence flag: ?</span>
+    </div>
+    <div class="row" style="margin-top:var(--space-3);">
+      <label style="font-family:var(--font-mono);font-size:0.85rem;display:flex;align-items:center;gap:0.6rem;">
+        % cold samples
+        <input type="range" id="ratio" min="0" max="100" value="0" style="width:200px;">
+        <span id="ratioVal">0%</span>
+      </label>
+    </div>
+    <canvas id="hist" width="600" height="220"></canvas>
+    <div class="stats">
+      <div><strong id="med">&mdash;</strong> median (ms)</div>
+      <div><strong id="p95">&mdash;</strong> p95 (ms)</div>
+      <div><strong id="modes">1</strong> mode count</div>
+      <div><strong id="confVal">high</strong> confidence flag</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../bimodal/">Bimodal capture</a></li>
+      <li><a href="../cold-start-banner/">Cold-start banner</a></li>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="https://chromestatus.com/feature/5128792779030528" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+const cap = document.getElementById("cap");
+const capConf = document.getElementById("cap-conf");
+cap.textContent = "Performance API: " + ("performance" in window ? "yes" : "no");
+cap.classList.add("performance" in window ? "ok" : "bad");
+const entry = performance.getEntriesByType("navigation")[0];
+const hasConf = entry && "confidence" in entry;
+capConf.textContent = "confidence flag: " + (hasConf ? "yes" : "polyfill");
+capConf.classList.add(hasConf ? "ok" : "bad");
+
+const ratio = document.getElementById("ratio");
+const ratioVal = document.getElementById("ratioVal");
+const canvas = document.getElementById("hist");
+const ctx = canvas.getContext("2d");
+const med = document.getElementById("med");
+const p95 = document.getElementById("p95");
+const modes = document.getElementById("modes");
+const confVal = document.getElementById("confVal");
+
+function sample(coldPct) {
+  const N = 800, out = [];
+  for (let i = 0; i < N; i++) {
+    if (Math.random() * 100 < coldPct) {
+      out.push(900 + Math.random() * 600); // cold cluster
+    } else {
+      out.push(120 + Math.random() * 200); // warm cluster
+    }
+  }
+  return out.sort((a, b) => a - b);
+}
+
+function pct(s, p) { return s[Math.floor((s.length - 1) * p)]; }
+
+function render() {
+  const c = +ratio.value;
+  ratioVal.textContent = c + "%";
+  const data = sample(c);
+  // bin
+  const max = 1600, bins = 40, step = max / bins;
+  const buckets = new Array(bins).fill(0);
+  for (const v of data) {
+    const i = Math.min(bins - 1, Math.floor(v / step));
+    buckets[i]++;
+  }
+  // draw
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#fdfcf8";
+  ctx.fillRect(0, 0, W, H);
+  const peak = Math.max(...buckets);
+  buckets.forEach((b, i) => {
+    const x = (i / bins) * W;
+    const w = W / bins;
+    const h = (b / peak) * (H - 40);
+    ctx.fillStyle = i * step > 500 ? "#d11a2a" : "#0022ff";
+    ctx.fillRect(x + 1, H - 20 - h, w - 2, h);
+  });
+  ctx.fillStyle = "#000";
+  ctx.font = "11px JetBrains Mono, monospace";
+  ctx.fillText("0", 2, H - 4);
+  ctx.fillText("1600ms", W - 50, H - 4);
+
+  med.textContent = pct(data, 0.5).toFixed(0);
+  p95.textContent = pct(data, 0.95).toFixed(0);
+  const isBimodal = c > 10 && c < 90;
+  modes.textContent = isBimodal ? "2" : "1";
+  modes.style.color = isBimodal ? "var(--accent-rose)" : "var(--text-black)";
+  confVal.textContent = isBimodal ? "LOW" : "high";
+  confVal.style.color = isBimodal ? "var(--accent-rose)" : "var(--accent-emerald)";
+}
+ratio.addEventListener("input", render);
+render();
+</script>
+</body>
+</html>
