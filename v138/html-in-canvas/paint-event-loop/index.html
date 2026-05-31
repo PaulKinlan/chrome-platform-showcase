@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>paintsubtree event loop — HTML in canvas — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3) var(--space-4); margin: 0 0 var(--space-5); font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: 0 0 var(--space-5); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+    .pane { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); }
+    .pane h4 { font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 var(--space-3); }
+    .live-host { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3); min-height: 220px; }
+    .live-host h3 { font-family: var(--font-display); font-size: 1.4rem; margin-bottom: var(--space-3); }
+    .live-host .bar { height: 14px; border: 2px solid var(--border-black); background: var(--bg-stone); margin-bottom: var(--space-2); overflow: hidden; }
+    .live-host .bar > i { display: block; height: 100%; background: var(--text-black); transition: width 0.2s ease; }
+    .live-host .stat { font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-charcoal); margin-bottom: var(--space-1); }
+
+    canvas { width: 100%; height: 240px; display: block; background: var(--bg-paper); border: 2px solid var(--border-black); }
+    .event-log {
+      max-height: 230px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: var(--space-2);
+    }
+    .event-log .row { padding: 0.18rem 0; border-bottom: 1px dashed var(--bg-stone); }
+    .event-log .row b { color: var(--accent-blue); }
+    .event-log .row em { color: var(--text-muted); font-style: normal; }
+    .event-log .row.repaint { color: var(--accent-emerald); }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .support { font-family: var(--font-mono); font-size: 0.78rem; padding: 0.3rem 0.6rem; border: 1px solid var(--border-black); display: inline-block; margin-bottom: var(--space-3); }
+    .support.yes { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .support.no { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; HTML-in-canvas</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>paintsubtree event loop</h1>
+    <p class="lede">The third new primitive of HTML-in-canvas is the <code>paintsubtree</code> event. It fires when the engine has re-laid-out the captured subtree — the signal you need to schedule a re-upload to the canvas / texture without polling. This is what makes the pipeline live.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Behind a flag:</strong> ships in Chrome 138 with <code>chrome://flags/#enable-experimental-web-platform-features</code>. Fallback: a polling loop at 30Hz mirrors the event so the demo is meaningful without the flag.
+  </div>
+
+  <div id="support" class="support">probing paintsubtree event&hellip;</div>
+
+  <div class="stage">
+    <div class="controls">
+      <button id="start">start dashboard ticking</button>
+      <button id="stop">stop</button>
+      <button id="manual">trigger manual update</button>
+      <label style="font-family: var(--font-mono); font-size: 0.76rem;">tick rate
+        <input type="range" id="rate" min="50" max="2000" value="500"> ms
+      </label>
+    </div>
+
+    <div class="grid">
+      <div class="pane">
+        <h4>Source DOM — a live dashboard</h4>
+        <div class="live-host" id="src">
+          <h3 id="src-title">Production status</h3>
+          <p class="stat">CPU <span id="cpu">0</span>%</p>
+          <div class="bar"><i id="cpu-bar" style="width: 0%"></i></div>
+          <p class="stat">Memory <span id="mem">0</span>%</p>
+          <div class="bar"><i id="mem-bar" style="width: 0%"></i></div>
+          <p class="stat">Network <span id="net">0</span> req/s</p>
+          <div class="bar"><i id="net-bar" style="width: 0%"></i></div>
+          <p class="stat" id="ts">last tick: never</p>
+        </div>
+      </div>
+
+      <div class="pane">
+        <h4>2D canvas — re-uploaded on paintsubtree</h4>
+        <canvas id="canvas" width="400" height="260"></canvas>
+        <p style="font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); margin-top: 0.5rem;">paintsubtree fires <b id="event-rate">0</b>×/s</p>
+      </div>
+    </div>
+
+    <h3 style="margin-top: var(--space-5)">Event log</h3>
+    <div class="event-log" id="log"></div>
+  </div>
+
+  <h3>The shape of the loop</h3>
+  <pre><code>const canvas = document.getElementById('canvas');
+canvas.layoutSubtree = true;
+const ctx = canvas.getContext('2d');
+
+const src = document.getElementById('src');
+
+canvas.addEventListener('paintsubtree', () =&gt; {
+  // engine just re-laid-out the subtree
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawElement(src, 0, 0);   // re-rasterise into the canvas
+});
+
+// Updates to src — text content, css, style — implicitly schedule
+// a paintsubtree event on the next frame. No polling needed.
+setInterval(() =&gt; {
+  document.getElementById('cpu').textContent = Math.random() * 100 | 0;
+}, 500);</code></pre>
+
+  <h3>What's happening</h3>
+  <ol class="how">
+    <li>The dashboard's numbers, bars, and timestamp update every <em>tick rate</em> ms via setInterval.</li>
+    <li>Each mutation invalidates the captured subtree. The engine waits until the next frame, lays it out, then fires <code>paintsubtree</code> on the canvas.</li>
+    <li>The event handler re-rasterises (via <code>ctx.drawElement</code>) — exactly once per frame even if multiple mutations happened. No double-rendering, no missed updates.</li>
+    <li>The event-rate counter shows the actual fire rate matches the mutation rate up to vsync (~60Hz).</li>
+    <li>This is the "loop" that lets canvas-based apps composite live data — game HUDs, chart annotations, AR overlays — without the choice between "JS polyfill" and "static screenshot".</li>
+  </ol>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">HTML-in-canvas feature page</a></li>
+      <li><a href="../html-in-canvas/">HTML in Canvas demo</a></li>
+      <li><a href="../screenshot-export/">Screenshot export demo</a></li>
+      <li><a href="../webgl-texture-feed/">WebGL texture feed demo</a></li>
+      <li><a href="https://github.com/whatwg/html/pull/11588" target="_blank" rel="noopener">Spec PR</a></li>
+      <li><a href="https://chromestatus.com/feature/5172548013916160" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const supportEl = document.getElementById('support');
+  const canvas = document.getElementById('canvas');
+  const supportsLayoutSubtree = 'layoutSubtree' in canvas;
+  const ctx = canvas.getContext('2d');
+  const supportsDrawElement = typeof ctx.drawElement === 'function';
+  const supported = supportsLayoutSubtree && supportsDrawElement;
+  supportEl.className = 'support ' + (supported ? 'yes' : 'no');
+  supportEl.textContent = supported
+    ? 'paintsubtree available · canvas re-uploads automatically on subtree changes'
+    : 'API not detected — using 30Hz polling fallback to mirror the event';
+
+  if (supportsLayoutSubtree) canvas.layoutSubtree = true;
+  const src = document.getElementById('src');
+  const log = document.getElementById('log');
+  const eventRateEl = document.getElementById('event-rate');
+
+  function paintFallback() {
+    // Draw a quick representation of the dashboard
+    ctx.fillStyle = '#fdfcf8';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
+    ctx.fillStyle = '#000';
+    ctx.font = '600 16px sans-serif';
+    ctx.fillText(document.getElementById('src-title').textContent, 12, 28);
+    ctx.font = '12px monospace';
+    const stats = [
+      ['CPU', document.getElementById('cpu').textContent + '%', +document.getElementById('cpu').textContent / 100],
+      ['Mem', document.getElementById('mem').textContent + '%', +document.getElementById('mem').textContent / 100],
+      ['Net', document.getElementById('net').textContent + ' rq', +document.getElementById('net').textContent / 200],
+    ];
+    let y = 60;
+    for (const [k, v, frac] of stats) {
+      ctx.fillStyle = '#444';
+      ctx.fillText(k + '  ' + v, 12, y);
+      ctx.strokeStyle = '#000';
+      ctx.strokeRect(12, y + 6, 360, 10);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(12, y + 6, 360 * Math.min(1, frac), 10);
+      y += 40;
+    }
+    ctx.fillStyle = '#666';
+    ctx.fillText(document.getElementById('ts').textContent, 12, canvas.height - 14);
+  }
+
+  function paint() {
+    if (supportsDrawElement) {
+      try {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawElement(src, 0, 0);
+        return;
+      } catch (e) {/* fall through */}
+    }
+    paintFallback();
+  }
+
+  let counter = 0;
+  function rowLog(kind, msg) {
+    const r = document.createElement('div');
+    r.className = 'row ' + kind;
+    r.innerHTML = '<em>' + (performance.now() / 1000).toFixed(2) + 's</em> ' + msg;
+    log.prepend(r);
+    while (log.children.length > 60) log.lastChild.remove();
+  }
+
+  let eventCount = 0;
+  setInterval(() => { eventRateEl.textContent = eventCount.toFixed(1); eventCount = 0; }, 1000);
+
+  if (supported) {
+    canvas.addEventListener('paintsubtree', () => {
+      eventCount += 1;
+      rowLog('repaint', '<b>paintsubtree</b> fired → ctx.drawElement(src)');
+      paint();
+    });
+  } else {
+    setInterval(() => {
+      eventCount += 1;
+      rowLog('repaint', '<b>poll</b> tick (fallback) → drawElement');
+      paint();
+    }, 33);
+  }
+
+  paint();
+
+  let interval = null;
+  const rate = document.getElementById('rate');
+  function startTicking() {
+    if (interval) clearInterval(interval);
+    interval = setInterval(() => {
+      const cpu = (40 + Math.sin(performance.now() / 700) * 30 + Math.random() * 10) | 0;
+      const mem = (60 + Math.cos(performance.now() / 1200) * 20 + Math.random() * 5) | 0;
+      const net = (80 + Math.sin(performance.now() / 400) * 60 + Math.random() * 30) | 0;
+      document.getElementById('cpu').textContent = cpu;
+      document.getElementById('mem').textContent = mem;
+      document.getElementById('net').textContent = net;
+      document.getElementById('cpu-bar').style.width = cpu + '%';
+      document.getElementById('mem-bar').style.width = mem + '%';
+      document.getElementById('net-bar').style.width = Math.min(100, net / 2) + '%';
+      document.getElementById('ts').textContent = 'last tick: ' + new Date().toISOString().slice(11, 23);
+      rowLog('', 'mutation #' + (++counter) + ' — DOM updated');
+    }, +rate.value);
+  }
+  document.getElementById('start').addEventListener('click', startTicking);
+  document.getElementById('stop').addEventListener('click', () => { if (interval) clearInterval(interval); interval = null; rowLog('', 'mutations stopped'); });
+  document.getElementById('manual').addEventListener('click', () => {
+    document.getElementById('src-title').textContent = 'Production status — pinged ' + new Date().toISOString().slice(11, 19);
+    rowLog('', 'manual mutation');
+  });
+  rate.addEventListener('input', () => { if (interval) startTicking(); });
+
+  startTicking();
+</script>
+</body>
+</html>
