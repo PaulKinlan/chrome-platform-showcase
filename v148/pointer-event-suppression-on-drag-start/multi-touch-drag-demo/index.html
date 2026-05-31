@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multi-touch Drag Demo — Pointer event suppression — Chrome 148</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0; }
+    @media (max-width: 640px) { .tool-grid { grid-template-columns: 1fr; } }
+
+    .panel { background: var(--bg-paper); border: 2px solid var(--border-black); padding: 1rem; }
+    .panel h3 { margin: 0 0 0.75rem; font-size: 0.85rem; font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; }
+
+    button { padding: 0.4rem 0.75rem; font-size: 0.8rem; cursor: pointer; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); font-family: var(--font-mono); transition: var(--transition); }
+    button:hover { background: var(--bg-stone); }
+    button.primary { background: var(--text-black); color: var(--bg-ivory); }
+    button.primary:hover { opacity: 0.85; }
+    button.small { padding: 0.25rem 0.5rem; font-size: 0.72rem; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .ctrl-row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin: 0.75rem 0; }
+
+    /* Tile grid */
+    .tile-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.5rem;
+      padding: 1rem;
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      user-select: none;
+    }
+    .tile {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: 0.85rem;
+      text-align: center;
+      cursor: grab;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: var(--text-black);
+      box-shadow: var(--thin-shadow);
+      transition: background 0.15s, box-shadow 0.15s;
+      touch-action: none;
+    }
+    .tile:hover { background: var(--bg-stone); }
+    .tile.dragging {
+      cursor: grabbing;
+      background: var(--accent-blue);
+      color: var(--bg-ivory);
+      box-shadow: var(--flat-shadow);
+      border-color: var(--accent-blue);
+    }
+    .tile.pointer-suppressed {
+      background: var(--accent-amber);
+      color: var(--bg-paper);
+      border-color: var(--accent-amber);
+    }
+    .tile.pointer-active {
+      background: var(--accent-emerald);
+      color: var(--bg-paper);
+      border-color: var(--accent-emerald);
+    }
+    .tile .tile-label { font-size: 0.7rem; font-weight: 400; color: inherit; opacity: 0.8; margin-top: 0.2rem; }
+
+    /* Event log */
+    .log-box {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: 0.75rem;
+      height: 260px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 0.73rem;
+      line-height: 1.6;
+      color: var(--text-charcoal);
+    }
+    .log-entry { margin: 0; display: flex; gap: 0.5rem; }
+    .log-time { color: var(--text-muted); min-width: 60px; flex-shrink: 0; }
+    .log-pid { min-width: 56px; flex-shrink: 0; }
+    .log-type { min-width: 100px; flex-shrink: 0; font-weight: 700; }
+    .log-type.pointerdown { color: var(--accent-blue); }
+    .log-type.pointermove { color: var(--text-muted); }
+    .log-type.pointercancel { color: var(--accent-rose); font-weight: 900; }
+    .log-type.pointerup { color: var(--accent-emerald); }
+    .log-type.dragstart { color: var(--accent-amber); }
+    .log-type.drag { color: var(--text-muted); }
+
+    /* State diagram */
+    .state-diagram {
+      display: flex;
+      gap: 0;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: 1rem;
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      justify-content: center;
+    }
+    .state-node {
+      border: 2px solid var(--border-black);
+      padding: 0.4rem 0.75rem;
+      background: var(--bg-paper);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      text-align: center;
+      min-width: 80px;
+      transition: background 0.2s, color 0.2s;
+    }
+    .state-node.active { background: var(--accent-blue); color: var(--bg-ivory); border-color: var(--accent-blue); }
+    .state-node.suppressed { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .state-node.done { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .state-arrow { font-family: var(--font-mono); font-size: 0.8rem; padding: 0 0.25rem; color: var(--text-muted); }
+    .state-label { font-size: 0.62rem; color: var(--text-muted); margin-top: 0.2rem; font-family: var(--font-mono); }
+
+    /* Pointer ID tracker */
+    .pointer-tracker { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.5rem 0; min-height: 32px; }
+    .pointer-badge {
+      padding: 0.2rem 0.5rem;
+      border: 1px solid;
+      font-size: 0.68rem;
+      font-family: var(--font-mono);
+      display: flex;
+      gap: 0.3rem;
+      align-items: center;
+    }
+    .pointer-badge.active { background: rgba(10,143,92,0.12); border-color: var(--accent-emerald); color: var(--accent-emerald); }
+    .pointer-badge.suppressed { background: rgba(209,26,42,0.1); border-color: var(--accent-rose); color: var(--accent-rose); }
+
+    .stat-row { display: flex; justify-content: space-between; font-size: 0.78rem; padding: 0.2rem 0; border-bottom: 1px solid var(--bg-stone); }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label { color: var(--text-charcoal); font-family: var(--font-mono); }
+    .stat-val { font-family: var(--font-mono); font-weight: 700; }
+
+    .support-note { background: var(--bg-stone); border-left: 3px solid var(--accent-blue); padding: 0.6rem 0.9rem; font-size: 0.82rem; color: var(--text-charcoal); margin: 1rem 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v148/">&larr; Chrome 148</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v148 · Web APIs · Drag &amp; Drop</p>
+    <h1>Multi-touch Drag Demo</h1>
+    <p class="lede">Tests pointer event suppression with multi-touch scenarios. Drag a tile and observe <code>pointercancel</code> firing for that pointer ID while other active pointers continue receiving events — the Chrome 148 spec fix made visible.</p>
+  </header>
+
+  <div class="support-note" id="support-note">Checking pointer event + drag event support…</div>
+
+  <section>
+    <h2>tile grid</h2>
+    <p style="font-size:0.85rem;color:var(--text-charcoal);">Drag any tile. Watch the event log — <code>pointercancel</code> fires as soon as the drag starts, suppressing further <code>pointermove</code> events for that pointer ID. The tile turns amber when its pointer stream is suppressed.</p>
+
+    <div class="tile-grid" id="tile-grid">
+      <!-- Tiles populated by JS -->
+    </div>
+
+    <div class="ctrl-row">
+      <button class="primary" id="btn-simulate-second">Simulate second touch</button>
+      <button id="btn-clear-log">Clear log</button>
+      <button id="btn-reset-tiles">Reset tiles</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>pointer state</h2>
+    <div class="tool-grid">
+      <div class="panel">
+        <h3>Active pointer IDs</h3>
+        <div class="pointer-tracker" id="pointer-tracker">
+          <span style="font-size:0.75rem;color:var(--text-muted);">No active pointers.</span>
+        </div>
+        <div style="margin-top:0.75rem;">
+          <div class="stat-row"><span class="stat-label">pointerdown count</span><span class="stat-val" id="stat-down">0</span></div>
+          <div class="stat-row"><span class="stat-label">pointermove count</span><span class="stat-val" id="stat-move">0</span></div>
+          <div class="stat-row"><span class="stat-label">pointercancel count</span><span class="stat-val" id="stat-cancel" style="color:var(--accent-rose);">0</span></div>
+          <div class="stat-row"><span class="stat-label">dragstart count</span><span class="stat-val" id="stat-dragstart" style="color:var(--accent-amber);">0</span></div>
+          <div class="stat-row"><span class="stat-label">suppressed pointers</span><span class="stat-val" id="stat-suppressed" style="color:var(--accent-rose);">0</span></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>State diagram</h3>
+        <div class="state-diagram" id="state-diagram">
+          <div>
+            <div class="state-node" id="state-idle">Idle</div>
+            <div class="state-label">waiting</div>
+          </div>
+          <div class="state-arrow">→</div>
+          <div>
+            <div class="state-node" id="state-pointer">Pointer</div>
+            <div class="state-label">pointerdown</div>
+          </div>
+          <div class="state-arrow">→</div>
+          <div>
+            <div class="state-node" id="state-drag">Drag</div>
+            <div class="state-label">dragstart</div>
+          </div>
+          <div class="state-arrow">→</div>
+          <div>
+            <div class="state-node" id="state-done">Done</div>
+            <div class="state-label">drop/dragend</div>
+          </div>
+        </div>
+        <div style="margin-top:1rem;font-size:0.75rem;color:var(--text-charcoal);">
+          When transitioning Pointer → Drag, Chrome 148 fires <code>pointercancel</code> on the drag source.
+          This suppresses further pointer events for that pointer ID — the drag API takes exclusive control.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>event log</h2>
+    <div class="log-box" id="log-box">
+      <p class="log-entry"><span class="log-time">—</span><span class="log-pid">—</span><span class="log-type">ready</span><span>Start dragging a tile to see events.</span></p>
+    </div>
+  </section>
+
+  <section>
+    <h2>the event sequence</h2>
+    <pre style="background:var(--bg-stone);border:1px solid var(--border-black);padding:1rem;overflow-x:auto;font-size:0.78rem;line-height:1.65;"><code>// Chrome 148+ event sequence for a drag gesture:
+// 1. pointerdown    → drag source receives pointer, pointer ID assigned
+// 2. pointermove    → one or more moves before drag threshold is met
+// 3. pointercancel  → ← NEW in Chrome 148: drag took over the pointer stream
+//                      This pointer ID is now SUPPRESSED — no more pointer events
+// 4. dragstart      → HTML Drag and Drop API takes exclusive control
+// 5. drag           → fires repeatedly while dragging
+// 6. dragend        → drag complete; pointer ID released
+//
+// Multi-touch scenario:
+// - Pointer A: pointerdown → pointermove → [drag starts] → pointercancel (suppressed)
+// - Pointer B: pointerdown → pointermove → pointermove → ... → pointerup (still active!)
+//   Pointer B is unaffected by Pointer A's suppression</code></pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5143905142849536" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.chrome.com/release-notes/148" target="_blank" rel="noopener">Chrome 148 release notes</a></li>
+      <li><a href="https://www.w3.org/TR/pointerevents3/#the-pointercancel-event" target="_blank" rel="noopener">Pointer Events Level 3 — pointercancel</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/dnd.html#drag-and-drop-processing-model" target="_blank" rel="noopener">HTML spec — drag and drop processing model</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── Support detection ──────────────────────────────────────────────────────
+  const note = document.getElementById('support-note');
+  const hasPointerEvents = typeof PointerEvent !== 'undefined';
+  const hasDragEvents = 'ondragstart' in document.createElement('div');
+  if (hasPointerEvents && hasDragEvents) {
+    note.textContent = 'Pointer Events and Drag API both supported. In Chrome 148+, dragging fires pointercancel to suppress the pointer stream.';
+    note.style.borderLeftColor = 'var(--accent-emerald)';
+  } else {
+    note.textContent = 'Some APIs missing. Basic drag behaviour simulated.';
+    note.style.borderLeftColor = 'var(--accent-amber)';
+  }
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  const pointerStates = new Map(); // pointerId → 'active' | 'suppressed'
+  const stats = { down: 0, move: 0, cancel: 0, dragstart: 0, suppressed: 0 };
+  let activeDragTile = null;
+  let simPointerCount = 0;
+  let moveCooldown = false; // throttle pointermove logging
+
+  // ── Build tiles ───────────────────────────────────────────────────────────
+  const grid = document.getElementById('tile-grid');
+  const TILE_LABELS = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota'];
+
+  TILE_LABELS.forEach((label, i) => {
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+    tile.draggable = true;
+    tile.dataset.tile = label;
+    tile.innerHTML = label + '<div class="tile-label">drag me</div>';
+    tile.id = 'tile-' + label;
+    attachTileEvents(tile);
+    grid.appendChild(tile);
+  });
+
+  function resetTileStyles() {
+    document.querySelectorAll('.tile').forEach(t => {
+      t.className = 'tile';
+    });
+  }
+
+  document.getElementById('btn-reset-tiles').addEventListener('click', () => {
+    resetTileStyles();
+    pointerStates.clear();
+    updatePointerTracker();
+    setState('idle');
+  });
+
+  // ── Attach events to each tile ────────────────────────────────────────────
+  function attachTileEvents(tile) {
+    // Pointer events
+    tile.addEventListener('pointerdown', e => {
+      pointerStates.set(e.pointerId, 'active');
+      stats.down++;
+      logEvent(e.pointerId, 'pointerdown', tile.dataset.tile, 'down');
+      updateStats();
+      updatePointerTracker();
+      setState('pointer');
+      tile.classList.add('dragging');
+      activeDragTile = tile;
+    });
+
+    tile.addEventListener('pointermove', e => {
+      if (moveCooldown) return;
+      moveCooldown = true;
+      setTimeout(() => { moveCooldown = false; }, 80);
+      if (pointerStates.has(e.pointerId)) {
+        const state = pointerStates.get(e.pointerId);
+        stats.move++;
+        logEvent(e.pointerId, 'pointermove', 'state:' + state, 'move');
+        updateStats();
+      }
+    });
+
+    tile.addEventListener('pointercancel', e => {
+      pointerStates.set(e.pointerId, 'suppressed');
+      stats.cancel++;
+      stats.suppressed = [...pointerStates.values()].filter(v => v === 'suppressed').length;
+      logEvent(e.pointerId, 'pointercancel', 'SUPPRESSED by drag', 'cancel');
+      updateStats();
+      updatePointerTracker();
+      tile.classList.remove('dragging');
+      tile.classList.add('pointer-suppressed');
+    });
+
+    tile.addEventListener('pointerup', e => {
+      pointerStates.delete(e.pointerId);
+      logEvent(e.pointerId, 'pointerup', tile.dataset.tile, 'up');
+      updatePointerTracker();
+      tile.classList.remove('pointer-active');
+      tile.classList.remove('dragging');
+    });
+
+    // Drag events
+    tile.addEventListener('dragstart', e => {
+      stats.dragstart++;
+      logEvent('drag', 'dragstart', tile.dataset.tile, 'drag');
+      updateStats();
+      setState('drag');
+      tile.classList.add('dragging');
+      // Some browsers need a data transfer payload
+      e.dataTransfer.setData('text/plain', tile.dataset.tile);
+    });
+
+    tile.addEventListener('dragend', e => {
+      logEvent('drag', 'dragend', tile.dataset.tile, 'drag');
+      tile.classList.remove('dragging');
+      tile.classList.remove('pointer-suppressed');
+      pointerStates.clear();
+      updatePointerTracker();
+      setState('done');
+      activeDragTile = null;
+      setTimeout(() => setState('idle'), 1500);
+    });
+
+    tile.addEventListener('drag', e => {
+      // Don't log every drag event, too noisy
+    });
+  }
+
+  // ── Event log ─────────────────────────────────────────────────────────────
+  function logEvent(pointerId, type, detail, cls) {
+    const box = document.getElementById('log-box');
+    const entry = document.createElement('p');
+    entry.className = 'log-entry';
+    const now = performance.now();
+    entry.innerHTML = `
+      <span class="log-time">${now.toFixed(0)}ms</span>
+      <span class="log-pid">ptr:${pointerId}</span>
+      <span class="log-type ${type}">${type}</span>
+      <span>${detail}</span>
+    `;
+    box.appendChild(entry);
+    box.scrollTop = box.scrollHeight;
+    // Trim log to 100 entries
+    while (box.children.length > 100) box.removeChild(box.firstChild);
+  }
+
+  document.getElementById('btn-clear-log').addEventListener('click', () => {
+    document.getElementById('log-box').innerHTML = '<p class="log-entry"><span class="log-time">—</span><span class="log-pid">—</span><span class="log-type">ready</span><span>Log cleared.</span></p>';
+  });
+
+  // ── Stats ─────────────────────────────────────────────────────────────────
+  function updateStats() {
+    document.getElementById('stat-down').textContent = stats.down;
+    document.getElementById('stat-move').textContent = stats.move;
+    document.getElementById('stat-cancel').textContent = stats.cancel;
+    document.getElementById('stat-dragstart').textContent = stats.dragstart;
+    document.getElementById('stat-suppressed').textContent = stats.suppressed;
+  }
+
+  // ── Pointer tracker ───────────────────────────────────────────────────────
+  function updatePointerTracker() {
+    const tracker = document.getElementById('pointer-tracker');
+    if (pointerStates.size === 0) {
+      tracker.innerHTML = '<span style="font-size:0.75rem;color:var(--text-muted);">No active pointers.</span>';
+      return;
+    }
+    tracker.innerHTML = '';
+    pointerStates.forEach((state, id) => {
+      const badge = document.createElement('div');
+      badge.className = 'pointer-badge ' + state;
+      badge.textContent = 'ptr #' + id + ' — ' + state;
+      tracker.appendChild(badge);
+    });
+  }
+
+  // ── State diagram ─────────────────────────────────────────────────────────
+  function setState(stateName) {
+    ['idle', 'pointer', 'drag', 'done'].forEach(s => {
+      const el = document.getElementById('state-' + s);
+      if (!el) return;
+      el.classList.remove('active', 'suppressed', 'done');
+    });
+    const target = document.getElementById('state-' + stateName);
+    if (target) {
+      if (stateName === 'done') target.classList.add('done');
+      else if (stateName === 'drag') target.classList.add('suppressed');
+      else target.classList.add('active');
+    }
+  }
+
+  // ── Simulate second touch ─────────────────────────────────────────────────
+  document.getElementById('btn-simulate-second').addEventListener('click', () => {
+    const fakeId = 9000 + (++simPointerCount);
+    // Simulate second touch: active pointer, independent of any dragging tile
+    pointerStates.set(fakeId, 'active');
+    logEvent(fakeId, 'pointerdown', 'simulated second touch', 'down');
+    stats.down++;
+    updateStats();
+    updatePointerTracker();
+
+    // Show it as active on a random non-dragging tile
+    const tiles = Array.from(document.querySelectorAll('.tile')).filter(t => !t.classList.contains('dragging') && !t.classList.contains('pointer-suppressed'));
+    if (tiles.length > 0) {
+      const t = tiles[Math.floor(Math.random() * tiles.length)];
+      t.classList.add('pointer-active');
+      // Simulate some moves
+      let moveCount = 0;
+      const interval = setInterval(() => {
+        if (moveCount >= 3) {
+          clearInterval(interval);
+          // Simulate pointerup
+          pointerStates.delete(fakeId);
+          t.classList.remove('pointer-active');
+          logEvent(fakeId, 'pointerup', 'simulated second touch ended', 'up');
+          updatePointerTracker();
+          return;
+        }
+        stats.move++;
+        logEvent(fakeId, 'pointermove', 'ptr #' + fakeId + ' unaffected by drag suppression', 'move');
+        updateStats();
+        moveCount++;
+      }, 300);
+    } else {
+      // Just simulate the up right away
+      setTimeout(() => {
+        pointerStates.delete(fakeId);
+        logEvent(fakeId, 'pointerup', 'simulated second touch ended', 'up');
+        updatePointerTracker();
+      }, 800);
+    }
+  });
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  setState('idle');
+})();
+</script>
+</body>
+</html>

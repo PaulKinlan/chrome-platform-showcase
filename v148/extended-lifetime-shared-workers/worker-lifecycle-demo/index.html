@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker Lifecycle Demo — Extended Lifetime Shared Workers — Chrome 148</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .section-head {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+      margin: 2.5rem 0 0.75rem;
+      border-bottom: 1px solid var(--border-black);
+      padding-bottom: 0.4rem;
+    }
+
+    /* ── State machine ── */
+    .state-machine {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0;
+      margin: 1.5rem 0;
+      border: 2px solid var(--border-black);
+      overflow-x: auto;
+    }
+
+    .state-node {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0.8rem 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      border-right: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-muted);
+      min-width: 6rem;
+      text-align: center;
+      transition: background 0.25s, color 0.25s;
+    }
+    .state-node:last-child { border-right: none; }
+    .state-node.active {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+    }
+    .state-node.past { background: var(--bg-stone); color: var(--text-charcoal); }
+    .state-icon { font-size: 1.1rem; margin-bottom: 0.3rem; }
+    .state-arrow {
+      padding: 0 0.25rem;
+      color: var(--text-muted);
+      font-size: 1rem;
+      border-right: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      align-self: stretch;
+      display: flex;
+      align-items: center;
+    }
+
+    /* ── Dashboard ── */
+    .dashboard {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 1rem;
+      margin: 1rem 0;
+    }
+    @media (max-width: 640px) { .dashboard { grid-template-columns: 1fr; } }
+
+    .dash-card {
+      border: 2px solid var(--border-black);
+      padding: 0.85rem;
+    }
+    .dash-label {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.35rem;
+    }
+    .dash-val {
+      font-family: var(--font-mono);
+      font-size: 1.4rem;
+      font-weight: 600;
+      color: var(--text-black);
+      line-height: 1;
+    }
+    .dash-val.green { color: var(--accent-emerald); }
+    .dash-val.red   { color: var(--accent-rose); }
+    .dash-val.blue  { color: var(--accent-blue); }
+
+    /* ── Controls ── */
+    .ctrl-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin: 1rem 0;
+    }
+    .ctrl-btn {
+      padding: 0.45rem 0.9rem;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      cursor: pointer;
+    }
+    .ctrl-btn:hover { background: var(--bg-stone); color: var(--text-black); }
+    .ctrl-btn.danger {
+      background: var(--accent-rose);
+      color: var(--bg-paper);
+      border-color: var(--accent-rose);
+    }
+    .ctrl-btn.danger:hover { background: var(--text-black); color: var(--bg-paper); border-color: var(--text-black); }
+    .ctrl-btn.success {
+      background: var(--accent-emerald);
+      color: var(--bg-paper);
+      border-color: var(--accent-emerald);
+    }
+    .ctrl-btn.success:hover { background: var(--text-black); color: var(--bg-paper); border-color: var(--text-black); }
+    .ctrl-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    /* ── Timeline ── */
+    .timeline {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      height: 120px;
+      position: relative;
+      overflow: hidden;
+      margin: 1rem 0;
+    }
+    .timeline-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+    .timeline-label {
+      position: absolute;
+      top: 4px;
+      left: 8px;
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: var(--text-muted);
+      pointer-events: none;
+    }
+
+    /* ── Event log ── */
+    .event-log {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      line-height: 1.7;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .log-entry { display: flex; gap: 0.75rem; }
+    .log-time { color: var(--text-muted); flex-shrink: 0; }
+    .log-msg  { color: var(--text-black); }
+    .log-msg.green { color: var(--accent-emerald); }
+    .log-msg.red   { color: var(--accent-rose); }
+    .log-msg.blue  { color: var(--accent-blue); }
+
+    /* ── Triggers table ── */
+    .triggers-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+      margin: 0.75rem 0;
+    }
+    .triggers-table th {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: 0.45rem 0.75rem;
+      text-align: left;
+      border: 1px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+    }
+    .triggers-table td {
+      padding: 0.4rem 0.75rem;
+      border: 1px solid var(--border-black);
+    }
+    .triggers-table tr:nth-child(even) td { background: var(--bg-stone); }
+    .triggers-table tr:nth-child(odd)  td { background: var(--bg-paper); }
+    .badge-active   { color: var(--accent-emerald); font-weight: 600; font-family: var(--font-mono); font-size: 0.7rem; }
+    .badge-inactive { color: var(--text-muted); font-family: var(--font-mono); font-size: 0.7rem; }
+
+    .support-note {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      line-height: 1.6;
+      margin-bottom: 1.5rem;
+    }
+    .support-note .flag { color: var(--accent-rose); font-weight: 600; }
+    .support-note .ok   { color: var(--accent-emerald); font-weight: 600; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v148/extended-lifetime-shared-workers/">&larr; Extended Lifetime Shared Workers</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v148 · JavaScript · Web Workers</p>
+    <h1>Worker Lifecycle Demo</h1>
+    <p class="lede">A visual state machine for the Shared Worker lifecycle — from <code>starting</code> to <code>keepalive</code> to <code>terminated</code>. Simulate clients connecting and disconnecting, trigger keepalive events, and watch the timeline.</p>
+  </header>
+
+  <div class="support-note" id="support-note">
+    <span id="sw-support-label">Checking SharedWorker support…</span>
+  </div>
+
+  <!-- ── State machine diagram ── -->
+  <p class="section-head">Worker state machine</p>
+  <div class="state-machine" id="state-machine">
+    <div class="state-node" id="state-starting">
+      <div class="state-icon">○</div>
+      <div>starting</div>
+    </div>
+    <div class="state-arrow">→</div>
+    <div class="state-node" id="state-running">
+      <div class="state-icon">▶</div>
+      <div>running</div>
+    </div>
+    <div class="state-arrow">→</div>
+    <div class="state-node" id="state-keepalive">
+      <div class="state-icon">⏳</div>
+      <div>keepalive</div>
+    </div>
+    <div class="state-arrow">→</div>
+    <div class="state-node" id="state-terminating">
+      <div class="state-icon">⚠</div>
+      <div>terminating</div>
+    </div>
+    <div class="state-arrow">→</div>
+    <div class="state-node" id="state-terminated">
+      <div class="state-icon">■</div>
+      <div>terminated</div>
+    </div>
+  </div>
+
+  <!-- ── Dashboard ── -->
+  <div class="dashboard">
+    <div class="dash-card">
+      <div class="dash-label">Worker state</div>
+      <div class="dash-val" id="dash-state">—</div>
+    </div>
+    <div class="dash-card">
+      <div class="dash-label">Connected clients</div>
+      <div class="dash-val green" id="dash-clients">0</div>
+    </div>
+    <div class="dash-card">
+      <div class="dash-label">Worker uptime</div>
+      <div class="dash-val blue" id="dash-uptime">0s</div>
+    </div>
+  </div>
+
+  <!-- ── Controls ── -->
+  <p class="section-head">Simulation controls</p>
+  <div class="ctrl-bar">
+    <button class="ctrl-btn success" id="btn-spawn">Spawn worker</button>
+    <button class="ctrl-btn" id="btn-add-client" disabled>Add client tab</button>
+    <button class="ctrl-btn danger" id="btn-remove-client" disabled>Remove client tab</button>
+    <button class="ctrl-btn" id="btn-keepalive" disabled>Trigger keepalive fetch</button>
+    <button class="ctrl-btn danger" id="btn-terminate" disabled>Force terminate</button>
+    <button class="ctrl-btn" id="btn-reset">Reset simulation</button>
+  </div>
+
+  <!-- ── Timeline canvas ── -->
+  <p class="section-head">Worker uptime vs. client count timeline</p>
+  <div class="timeline">
+    <canvas class="timeline-canvas" id="timeline-canvas"></canvas>
+    <div class="timeline-label" id="timeline-label">Worker not started</div>
+  </div>
+
+  <!-- ── Keepalive triggers ── -->
+  <p class="section-head">Lifetime extension triggers</p>
+  <table class="triggers-table">
+    <thead>
+      <tr>
+        <th>Trigger</th>
+        <th>Description</th>
+        <th>Status in simulation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>event.waitUntil(fetch(…))</code></td>
+        <td>A pending <code>fetch()</code> inside the worker keeps it alive</td>
+        <td><span id="t-fetch" class="badge-inactive">inactive</span></td>
+      </tr>
+      <tr>
+        <td><code>extendedLifetime: true</code></td>
+        <td>Constructor option to request extended lifetime support</td>
+        <td><span id="t-extended" class="badge-inactive">inactive</span></td>
+      </tr>
+      <tr>
+        <td>Notification pending</td>
+        <td>Worker requested to show a notification that hasn't been dismissed</td>
+        <td><span id="t-notif" class="badge-inactive">inactive</span></td>
+      </tr>
+      <tr>
+        <td>Push message in-flight</td>
+        <td>Worker processing a push message from the Push API</td>
+        <td><span id="t-push" class="badge-inactive">inactive</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ── Event log ── -->
+  <p class="section-head">Event log</p>
+  <div class="event-log" id="event-log">
+    <div class="log-entry"><span class="log-time">--:--:--</span><span class="log-msg">Simulation ready. Click "Spawn worker" to start.</span></div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v148/extended-lifetime-shared-workers/">Feature page</a></li>
+      <li><a href="/v148/extended-lifetime-shared-workers/persistent-counter/">Persistent Counter</a></li>
+      <li><a href="/v148/extended-lifetime-shared-workers/background-channel/">Background Channel</a></li>
+      <li><a href="/v148/extended-lifetime-shared-workers/offline-queue/">Offline Queue</a></li>
+      <li><a href="https://chromestatus.com/feature/5138641357373440" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  /* ── Feature detection ── */
+  const supportNote = document.getElementById('sw-support-label');
+  const swSupported = typeof SharedWorker !== 'undefined';
+  if (swSupported) {
+    supportNote.innerHTML = '<span class="ok">✓ SharedWorker supported in this browser.</span> extendedLifetime option is a Chrome 148 origin trial feature — this demo simulates the lifecycle visually.';
+  } else {
+    supportNote.innerHTML = '<span class="flag">✗ SharedWorker not available</span> (possibly a private browsing or restricted context). Lifecycle simulation still runs — API probes will show unavailable.';
+  }
+
+  /* ── Simulation state ── */
+  const SIM = {
+    state: 'idle',   // idle | starting | running | keepalive | terminating | terminated
+    clients: 0,
+    startTime: null,
+    uptime: 0,
+    keepaliveFetch: false,
+    extendedLifetime: true,
+    timeline: [],    // [{t, clients, state}]
+    uptimeTimer: null,
+    terminateTimer: null
+  };
+
+  const STATES = ['starting', 'running', 'keepalive', 'terminating', 'terminated'];
+
+  /* ── DOM refs ── */
+  const dashState   = document.getElementById('dash-state');
+  const dashClients = document.getElementById('dash-clients');
+  const dashUptime  = document.getElementById('dash-uptime');
+  const logEl       = document.getElementById('event-log');
+  const canvas      = document.getElementById('timeline-canvas');
+  const tLabel      = document.getElementById('timeline-label');
+  const ctx2d       = canvas.getContext('2d');
+
+  const btnSpawn    = document.getElementById('btn-spawn');
+  const btnAdd      = document.getElementById('btn-add-client');
+  const btnRemove   = document.getElementById('btn-remove-client');
+  const btnKeepalive= document.getElementById('btn-keepalive');
+  const btnTerminate= document.getElementById('btn-terminate');
+  const btnReset    = document.getElementById('btn-reset');
+
+  const tFetch    = document.getElementById('t-fetch');
+  const tExtended = document.getElementById('t-extended');
+  const tNotif    = document.getElementById('t-notif');
+  const tPush     = document.getElementById('t-push');
+
+  /* ── Logging ── */
+  function log(msg, cls = '') {
+    const now = new Date();
+    const ts = now.toTimeString().slice(0, 8);
+    const div = document.createElement('div');
+    div.className = 'log-entry';
+    div.innerHTML = `<span class="log-time">${ts}</span><span class="log-msg ${cls}">${msg}</span>`;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  /* ── State update ── */
+  function setState(s) {
+    SIM.state = s;
+    STATES.forEach(name => {
+      const el = document.getElementById('state-' + name);
+      if (!el) return;
+      el.classList.remove('active', 'past');
+    });
+    const idx = STATES.indexOf(s);
+    STATES.forEach((name, i) => {
+      const el = document.getElementById('state-' + name);
+      if (!el) return;
+      if (i < idx) el.classList.add('past');
+      else if (i === idx) el.classList.add('active');
+    });
+
+    dashState.textContent = s;
+    dashState.className = 'dash-val';
+    if (s === 'running' || s === 'keepalive') dashState.classList.add('green');
+    if (s === 'terminating' || s === 'terminated') dashState.classList.add('red');
+  }
+
+  function updateTriggers() {
+    tFetch.textContent   = SIM.keepaliveFetch ? 'active' : 'inactive';
+    tFetch.className     = SIM.keepaliveFetch ? 'badge-active' : 'badge-inactive';
+    tExtended.textContent = SIM.extendedLifetime ? 'active' : 'inactive';
+    tExtended.className   = SIM.extendedLifetime ? 'badge-active' : 'badge-inactive';
+  }
+
+  function updateButtons() {
+    const idle = SIM.state === 'idle' || SIM.state === 'terminated';
+    const alive = SIM.state === 'running' || SIM.state === 'keepalive';
+    btnSpawn.disabled     = !idle;
+    btnAdd.disabled       = !alive;
+    btnRemove.disabled    = !(alive && SIM.clients > 0);
+    btnKeepalive.disabled = !alive;
+    btnTerminate.disabled = idle;
+  }
+
+  /* ── Timeline drawing ── */
+  function recordTimeline() {
+    const t = SIM.uptime;
+    SIM.timeline.push({ t, clients: SIM.clients, state: SIM.state });
+    if (SIM.timeline.length > 300) SIM.timeline.shift();
+    drawTimeline();
+  }
+
+  function drawTimeline() {
+    const W = canvas.offsetWidth;
+    const H = canvas.offsetHeight;
+    canvas.width  = W;
+    canvas.height = H;
+
+    ctx2d.clearRect(0, 0, W, H);
+
+    // Resolve CSS variables for canvas (canvas 2D API requires resolved color strings)
+    const style = getComputedStyle(document.documentElement);
+    const C_BG_STONE  = style.getPropertyValue('--bg-stone').trim();
+    const C_EMERALD   = style.getPropertyValue('--accent-emerald').trim();
+    const C_BLUE      = style.getPropertyValue('--accent-blue').trim();
+    const C_PAPER     = style.getPropertyValue('--bg-paper').trim();
+    const C_IVORY     = style.getPropertyValue('--bg-ivory').trim();
+    const C_MUTED_D   = 'rgba(0,0,0,0.15)';
+
+    // Background
+    ctx2d.fillStyle = C_BG_STONE;
+    ctx2d.fillRect(0, 0, W, H);
+
+    if (SIM.timeline.length < 2) return;
+
+    const maxT = SIM.timeline[SIM.timeline.length - 1].t || 1;
+    const maxC = Math.max(5, ...SIM.timeline.map(p => p.clients));
+
+    // Grid lines
+    ctx2d.strokeStyle = C_MUTED_D;
+    ctx2d.lineWidth = 1;
+    [0.25, 0.5, 0.75].forEach(f => {
+      ctx2d.beginPath();
+      ctx2d.moveTo(0, H * f);
+      ctx2d.lineTo(W, H * f);
+      ctx2d.stroke();
+    });
+
+    // State band (background color — light tints using rgba)
+    const stateColors = {
+      starting:    C_IVORY,
+      running:     'rgba(10,143,92,0.12)',
+      keepalive:   'rgba(184,123,0,0.10)',
+      terminating: 'rgba(209,26,42,0.10)',
+      terminated:  C_BG_STONE
+    };
+
+    for (let i = 1; i < SIM.timeline.length; i++) {
+      const p0 = SIM.timeline[i - 1];
+      const p1 = SIM.timeline[i];
+      const x0 = (p0.t / maxT) * W;
+      const x1 = (p1.t / maxT) * W;
+      ctx2d.fillStyle = stateColors[p1.state] || C_PAPER;
+      ctx2d.fillRect(x0, 0, x1 - x0, H);
+    }
+
+    // Uptime line (top half)
+    ctx2d.strokeStyle = C_EMERALD;
+    ctx2d.lineWidth   = 2;
+    ctx2d.beginPath();
+    SIM.timeline.forEach((p, i) => {
+      const x = (p.t / maxT) * W;
+      const alive = (p.state === 'running' || p.state === 'keepalive') ? 1 : 0;
+      const y = H * 0.15 + (1 - alive) * H * 0.3;
+      if (i === 0) ctx2d.moveTo(x, y); else ctx2d.lineTo(x, y);
+    });
+    ctx2d.stroke();
+
+    // Client count line (bottom half)
+    ctx2d.strokeStyle = C_BLUE;
+    ctx2d.lineWidth   = 2;
+    ctx2d.beginPath();
+    SIM.timeline.forEach((p, i) => {
+      const x = (p.t / maxT) * W;
+      const y = H * 0.6 + (1 - p.clients / maxC) * H * 0.35;
+      if (i === 0) ctx2d.moveTo(x, y); else ctx2d.lineTo(x, y);
+    });
+    ctx2d.stroke();
+
+    // Labels
+    ctx2d.fillStyle = C_EMERALD;
+    ctx2d.font = '10px monospace';
+    ctx2d.fillText('worker alive', 4, H * 0.13);
+    ctx2d.fillStyle = C_BLUE;
+    ctx2d.fillText('clients', 4, H * 0.58);
+  }
+
+  /* ── Uptime ticker ── */
+  function startUptimeTicker() {
+    if (SIM.uptimeTimer) clearInterval(SIM.uptimeTimer);
+    SIM.uptimeTimer = setInterval(() => {
+      if (SIM.state === 'running' || SIM.state === 'keepalive') {
+        SIM.uptime++;
+        dashUptime.textContent = SIM.uptime + 's';
+        recordTimeline();
+      }
+    }, 1000);
+  }
+
+  function stopUptimeTicker() {
+    if (SIM.uptimeTimer) { clearInterval(SIM.uptimeTimer); SIM.uptimeTimer = null; }
+  }
+
+  /* ── Simulate termination countdown ── */
+  function scheduleTerminate(delaySec) {
+    if (SIM.terminateTimer) clearTimeout(SIM.terminateTimer);
+    SIM.terminateTimer = setTimeout(() => {
+      if (SIM.clients === 0 && !SIM.keepaliveFetch && SIM.state !== 'terminated') {
+        setState('terminating');
+        log('No clients, no keepalive — worker entering terminating state…', 'red');
+        tLabel.textContent = 'Terminating…';
+        setTimeout(() => {
+          setState('terminated');
+          stopUptimeTicker();
+          log('Worker terminated.', 'red');
+          tLabel.textContent = 'Worker terminated';
+          updateButtons();
+          tExtended.textContent = 'inactive';
+          tExtended.className = 'badge-inactive';
+        }, 2000);
+      }
+    }, delaySec * 1000);
+  }
+
+  /* ── Actions ── */
+  btnSpawn.addEventListener('click', () => {
+    setState('starting');
+    SIM.clients = 0;
+    SIM.uptime = 0;
+    SIM.keepaliveFetch = false;
+    SIM.extendedLifetime = true;
+    SIM.timeline = [];
+    dashClients.textContent = '0';
+    dashUptime.textContent  = '0s';
+    tLabel.textContent = 'Worker starting…';
+    log('SharedWorker created with extendedLifetime: true', 'green');
+    updateTriggers();
+    updateButtons();
+
+    setTimeout(() => {
+      setState('running');
+      SIM.clients = 1;
+      dashClients.textContent = '1';
+      log('Worker running. 1 client connected (this page).', 'green');
+      tLabel.textContent = 'Worker running — uptime (green) / clients (blue)';
+      startUptimeTicker();
+      updateButtons();
+    }, 800);
+  });
+
+  btnAdd.addEventListener('click', () => {
+    SIM.clients++;
+    dashClients.textContent = String(SIM.clients);
+    log(`Client tab added. Total clients: ${SIM.clients}`);
+    updateButtons();
+  });
+
+  btnRemove.addEventListener('click', () => {
+    if (SIM.clients > 0) SIM.clients--;
+    dashClients.textContent = String(SIM.clients);
+    log(`Client tab removed. Total clients: ${SIM.clients}`, SIM.clients === 0 ? 'red' : '');
+
+    if (SIM.clients === 0) {
+      if (SIM.extendedLifetime || SIM.keepaliveFetch) {
+        setState('keepalive');
+        log('All clients disconnected — worker entering keepalive (extendedLifetime: true).', 'blue');
+        tLabel.textContent = 'Keepalive active — worker stays alive with no clients';
+        scheduleTerminate(8);
+      } else {
+        log('All clients disconnected — worker will terminate (no extendedLifetime).', 'red');
+        scheduleTerminate(1);
+      }
+    }
+    updateButtons();
+  });
+
+  btnKeepalive.addEventListener('click', () => {
+    SIM.keepaliveFetch = true;
+    tFetch.textContent = 'active';
+    tFetch.className   = 'badge-active';
+    log('Keepalive fetch() triggered inside worker — lifetime extended.', 'blue');
+    if (SIM.terminateTimer) { clearTimeout(SIM.terminateTimer); SIM.terminateTimer = null; }
+    setTimeout(() => {
+      SIM.keepaliveFetch = false;
+      tFetch.textContent = 'inactive';
+      tFetch.className   = 'badge-inactive';
+      log('Keepalive fetch() resolved.');
+      if (SIM.clients === 0) scheduleTerminate(4);
+    }, 5000);
+  });
+
+  btnTerminate.addEventListener('click', () => {
+    setState('terminating');
+    stopUptimeTicker();
+    log('Worker force-terminated.', 'red');
+    setTimeout(() => {
+      setState('terminated');
+      tLabel.textContent = 'Worker terminated';
+      updateButtons();
+    }, 500);
+  });
+
+  btnReset.addEventListener('click', () => {
+    stopUptimeTicker();
+    if (SIM.terminateTimer) clearTimeout(SIM.terminateTimer);
+    SIM.state = 'idle';
+    SIM.clients = 0;
+    SIM.uptime = 0;
+    SIM.timeline = [];
+    SIM.keepaliveFetch = false;
+    setState('starting');
+    STATES.forEach(name => {
+      const el = document.getElementById('state-' + name);
+      if (el) { el.classList.remove('active', 'past'); }
+    });
+    dashState.textContent   = '—';
+    dashClients.textContent = '0';
+    dashUptime.textContent  = '0s';
+    dashState.className = 'dash-val';
+    tLabel.textContent = 'Worker not started';
+    tFetch.textContent = 'inactive'; tFetch.className = 'badge-inactive';
+    tExtended.textContent = 'inactive'; tExtended.className = 'badge-inactive';
+    drawTimeline();
+    logEl.innerHTML = '<div class="log-entry"><span class="log-time">--:--:--</span><span class="log-msg">Simulation reset. Click "Spawn worker" to start.</span></div>';
+    updateButtons();
+  });
+
+  /* ── Init ── */
+  setState('starting');
+  STATES.forEach(name => {
+    const el = document.getElementById('state-' + name);
+    if (el) el.classList.remove('active', 'past');
+  });
+  dashState.className = 'dash-val';
+  dashState.textContent = '—';
+  updateButtons();
+
+  // Resize canvas
+  window.addEventListener('resize', drawTimeline);
+  setTimeout(drawTimeline, 100);
+</script>
+</body>
+</html>
