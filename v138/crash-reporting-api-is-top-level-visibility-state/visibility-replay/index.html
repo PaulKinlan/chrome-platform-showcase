@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Visibility timeline replay — Crash Reporting visibility — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3) var(--space-4); margin: 0 0 var(--space-5); font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: 0 0 var(--space-5); }
+    .timeline {
+      position: relative;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: var(--space-3);
+      height: 100px;
+      overflow: hidden;
+    }
+    .timeline .axis {
+      position: absolute;
+      bottom: 8px;
+      left: 8px;
+      right: 8px;
+      top: 30px;
+      border: 1px solid var(--text-muted);
+      background: var(--bg-paper);
+    }
+    .timeline .band {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      opacity: 0.85;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--bg-ivory);
+      padding: 0.2rem 0.4rem;
+    }
+    .timeline .band.visible { background: var(--accent-emerald); }
+    .timeline .band.hidden { background: var(--accent-rose); }
+    .timeline .marker {
+      position: absolute;
+      top: -10px;
+      bottom: -10px;
+      width: 3px;
+      background: var(--text-black);
+    }
+    .timeline .marker::after {
+      content: "✕ CRASH";
+      position: absolute;
+      top: -22px;
+      left: 6px;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--accent-rose);
+      background: var(--bg-ivory);
+      padding: 0 0.3rem;
+      border: 2px solid var(--accent-rose);
+      white-space: nowrap;
+    }
+    .timeline .legend { position: absolute; top: 4px; left: 10px; font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-muted); }
+
+    .report-json {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      margin: var(--space-3) 0;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .report-json .new { background: var(--accent-amber); color: var(--bg-ivory); padding: 0 0.2rem; }
+
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin-bottom: var(--space-3); }
+    .stat-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0; }
+    @media (max-width: 600px) { .stat-row { grid-template-columns: 1fr; } }
+    .stat { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); }
+    .stat .v { font-family: var(--font-display); font-size: 1.4rem; }
+    .stat .l { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em; }
+    .support { font-family: var(--font-mono); font-size: 0.78rem; padding: 0.3rem 0.6rem; border: 1px solid var(--border-black); display: inline-block; margin-bottom: var(--space-3); }
+    .support.yes { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .support.no { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Crash Reporting top-level visibility</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>Visibility timeline replay</h1>
+    <p class="lede">Pre-v138 crash reports said "the page died". v138 adds <code>is_top_level_visibility_state</code>: the actual visibility of the top-level page at the moment of death. This page simulates 60s of page life with visibility transitions, drops a crash at any moment, and shows the resulting report JSON.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Unflagged in Chrome 138.</strong> Reports posted to <code>Reporting-Endpoints</code> now include the top-level visibility (<code>visible</code> / <code>hidden</code>). Lets triage filter out backgrounded-tab OOMs from foreground UX impact, by orders of magnitude.
+  </div>
+
+  <div id="support" class="support">crash reporting visibility field — v138</div>
+
+  <div class="stage">
+    <div class="controls">
+      <button id="play">replay 60s · with random hides</button>
+      <button id="crash">crash now</button>
+      <button id="reset">reset</button>
+    </div>
+
+    <div class="timeline" id="tl">
+      <div class="legend">page lifetime · drag to pick crash moment</div>
+      <div class="axis" id="axis"></div>
+    </div>
+
+    <div class="stat-row">
+      <div class="stat"><div class="l">crash at t=</div><div class="v" id="s-t">—</div></div>
+      <div class="stat"><div class="l">visibility</div><div class="v" id="s-vis">—</div></div>
+      <div class="stat"><div class="l">background ratio (so far)</div><div class="v" id="s-ratio">—</div></div>
+    </div>
+
+    <h3>Generated report</h3>
+    <div class="report-json" id="report">—</div>
+  </div>
+
+  <h3>What the field unlocks</h3>
+  <ol class="how">
+    <li>Crash + backgrounded tab = browser proactively killed it for memory. Not a bug — expected lifecycle.</li>
+    <li>Crash + visible tab = real user-impact event. This is what your on-call should be paged for.</li>
+    <li>Pre-v138, the two were lumped together in your dashboard. Many teams' crash dashboards were 80% background events drowning out the 20% real ones.</li>
+    <li>The new field lets your reporting endpoint filter at ingest time — and finally compute "crashes per user-visible session", the metric you actually want.</li>
+  </ol>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../crash-context/">Crash context demo</a></li>
+      <li><a href="../triage-dashboard/">Triage dashboard demo</a></li>
+      <li><a href="https://w3c.github.io/reporting/" target="_blank" rel="noopener">Reporting API spec</a></li>
+      <li><a href="https://chromestatus.com/feature/5141259568054272" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  // Build a 60s timeline with random visibility transitions.
+  const axis = document.getElementById('axis');
+  let segments = [];
+  function generate() {
+    axis.innerHTML = '';
+    segments = [];
+    let t = 0;
+    let vis = 'visible';
+    while (t < 60) {
+      const dur = 4 + Math.random() * 10;
+      segments.push({start: t, end: Math.min(60, t + dur), vis});
+      t += dur;
+      vis = vis === 'visible' ? 'hidden' : 'visible';
+    }
+    for (const s of segments) {
+      const b = document.createElement('div');
+      b.className = 'band ' + s.vis;
+      b.style.left = (s.start / 60 * 100) + '%';
+      b.style.width = ((s.end - s.start) / 60 * 100) + '%';
+      b.textContent = s.vis;
+      axis.appendChild(b);
+    }
+  }
+
+  function visAtT(t) {
+    for (const s of segments) if (t >= s.start && t <= s.end) return s.vis;
+    return 'visible';
+  }
+  function ratioAtT(t) {
+    let bg = 0, total = 0;
+    for (const s of segments) {
+      if (s.start > t) break;
+      const end = Math.min(s.end, t);
+      total += end - s.start;
+      if (s.vis === 'hidden') bg += end - s.start;
+    }
+    return total ? bg / total : 0;
+  }
+
+  function pickCrash(t) {
+    // Add a marker
+    Array.from(axis.querySelectorAll('.marker')).forEach((m) => m.remove());
+    const m = document.createElement('div');
+    m.className = 'marker';
+    m.style.left = (t / 60 * 100) + '%';
+    axis.appendChild(m);
+    const vis = visAtT(t);
+    document.getElementById('s-t').textContent = t.toFixed(1) + 's';
+    document.getElementById('s-vis').textContent = vis;
+    const ratio = ratioAtT(t);
+    document.getElementById('s-ratio').textContent = (ratio * 100).toFixed(0) + '%';
+    const json = {
+      type: 'crash',
+      body: {
+        reason: 'oom',
+        // v138 NEW
+        is_top_level_visibility_state: vis,
+      },
+      age: 12,
+      url: location.href,
+      user_agent: navigator.userAgent.slice(0, 60) + '…',
+    };
+    const txt = JSON.stringify(json, null, 2);
+    const highlighted = txt.replace(/(is_top_level_visibility_state.*)/, '<span class="new">$1</span>');
+    document.getElementById('report').innerHTML = highlighted;
+  }
+
+  document.getElementById('tl').addEventListener('click', (e) => {
+    const rect = axis.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const t = Math.max(0, Math.min(60, x / rect.width * 60));
+    pickCrash(t);
+  });
+  document.getElementById('crash').addEventListener('click', () => pickCrash(Math.random() * 60));
+  document.getElementById('reset').addEventListener('click', () => { generate(); document.getElementById('report').textContent = '—'; });
+  document.getElementById('play').addEventListener('click', () => generate());
+
+  generate();
+  pickCrash(42);
+</script>
+</body>
+</html>
