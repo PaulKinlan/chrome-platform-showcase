@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multi-source Captions — MediaStreamTrack + Web Speech — Chrome 135</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .section-title { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: var(--space-3) 0 var(--space-2); }
+    .probe-row { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .probe { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border-black); font-size: 0.8rem; }
+    .probe.fail { background: var(--accent-rose); color: var(--bg-ivory); }
+    .probe.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .probe.warn { background: #b45309; color: var(--bg-ivory); }
+    .info-box { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-size: 0.82rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+
+    /* Source panels */
+    .sources-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+    }
+    @media (max-width: 600px) { .sources-grid { grid-template-columns: 1fr; } }
+    .source-panel {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+    }
+    .source-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: var(--space-2);
+    }
+    .source-header h3 { font-size: 0.88rem; margin: 0; }
+    .source-tag {
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-muted);
+    }
+    .source-tag.live { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .source-controls { display: flex; gap: var(--space-1); flex-wrap: wrap; margin-bottom: var(--space-2); }
+    select, input[type="text"] {
+      padding: 5px 8px;
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      font-size: 0.8rem;
+      font-family: inherit;
+    }
+    .caption-box {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      min-height: 80px;
+      padding: var(--space-2);
+      font-size: 0.82rem;
+      line-height: 1.6;
+      color: var(--text-charcoal);
+    }
+    .interim { color: var(--text-muted); font-style: italic; }
+    .final { color: var(--text-black); }
+
+    .btn-row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    button.action-btn {
+      padding: 8px 16px;
+      border: 1px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      font-size: 0.82rem;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    button.action-btn.secondary { background: var(--bg-stone); color: var(--text-charcoal); }
+    button.action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Combined transcript */
+    .transcript-log {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      max-height: 200px;
+      overflow-y: auto;
+      font-size: 0.8rem;
+      line-height: 1.6;
+      margin-bottom: var(--space-3);
+    }
+    .tx-entry { display: flex; gap: var(--space-2); margin-bottom: 2px; }
+    .tx-src { font-weight: 700; flex-shrink: 0; font-size: 0.74rem; padding: 1px 5px; border: 1px solid var(--border-black); }
+    .src-a { background: #dbeafe; color: #1e40af; }
+    .src-b { background: #d1fae5; color: #065f46; }
+    .tx-text { flex: 1; }
+
+    .output-block {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      white-space: pre;
+      overflow-x: auto;
+      line-height: 1.5;
+      margin-bottom: var(--space-3);
+    }
+    code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-stone); padding: 1px 4px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v135/add-mediastreamtrack-support-to-the-web-speech-api/">&larr; MediaStreamTrack + Web Speech API</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v135 · miscellaneous</p>
+    <h1>Multi-source Captions</h1>
+    <p class="lede">Run two independent <code>SpeechRecognition</code> instances — each fed a different <code>MediaStreamTrack</code> — and see captions from both appear in a shared transcript. This is the core pattern for captioning multiple participants or audio sources simultaneously from a single tab.</p>
+  </header>
+
+  <section>
+    <div class="probe-row">
+      <span class="probe fail" id="probeSR">checking SpeechRecognition…</span>
+      <span class="probe fail" id="probeTrack">checking MediaStreamTrack input…</span>
+    </div>
+
+    <div class="info-box">
+      Before Chrome 135, <code>SpeechRecognition</code> always used the default microphone. Now you can pass a <code>MediaStreamTrack</code> as the audio source, allowing multiple recognizers to run in parallel — one per participant track. The <code>audioTrack</code> property on <code>SpeechRecognitionEvent</code> tells you which track fired the result.
+    </div>
+
+    <p class="section-title">Two recognition sources</p>
+    <div class="sources-grid">
+      <!-- Source A -->
+      <div class="source-panel" id="panelA">
+        <div class="source-header">
+          <h3>Source A — Microphone</h3>
+          <span class="source-tag" id="tagA">idle</span>
+        </div>
+        <div class="source-controls">
+          <div>
+            <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:2px">Language</label>
+            <select id="langA">
+              <option value="en-US">English (US)</option>
+              <option value="en-GB">English (UK)</option>
+              <option value="fr-FR">French</option>
+              <option value="de-DE">German</option>
+              <option value="es-ES">Spanish</option>
+              <option value="ja-JP">Japanese</option>
+            </select>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button class="action-btn" id="startA">Start A</button>
+          <button class="action-btn secondary" id="stopA" disabled>Stop A</button>
+        </div>
+        <div class="caption-box" id="captionA">Captions will appear here…</div>
+      </div>
+
+      <!-- Source B -->
+      <div class="source-panel" id="panelB">
+        <div class="source-header">
+          <h3>Source B — Microphone (clone)</h3>
+          <span class="source-tag" id="tagB">idle</span>
+        </div>
+        <div class="source-controls">
+          <div>
+            <label style="font-size:0.74rem;color:var(--text-muted);display:block;margin-bottom:2px">Language</label>
+            <select id="langB">
+              <option value="en-US">English (US)</option>
+              <option value="en-GB">English (UK)</option>
+              <option value="fr-FR">French</option>
+              <option value="de-DE">German</option>
+              <option value="es-ES" selected>Spanish</option>
+              <option value="ja-JP">Japanese</option>
+            </select>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button class="action-btn" id="startB">Start B</button>
+          <button class="action-btn secondary" id="stopB" disabled>Stop B</button>
+        </div>
+        <div class="caption-box" id="captionB">Captions will appear here…</div>
+      </div>
+    </div>
+
+    <p class="section-title">Shared transcript (both sources)</p>
+    <div class="transcript-log" id="transcriptLog">
+      <div style="color:var(--text-muted);font-size:0.78rem">Start either source to see its transcripts appear here, labelled by source.</div>
+    </div>
+
+    <p class="section-title">Code pattern</p>
+    <div class="output-block">// Chrome 135 — pass a MediaStreamTrack to SpeechRecognition
+const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+// Source A — clone the track so two recognizers share the mic
+const trackA = stream.getAudioTracks()[0];
+const trackB = trackA.clone();
+
+// Each recognizer gets its own track + language
+const srA = new SpeechRecognition();
+srA.audioTrack = trackA;   // ← Chrome 135
+srA.lang = 'en-US';
+srA.interimResults = true;
+
+const srB = new SpeechRecognition();
+srB.audioTrack = trackB;   // ← Chrome 135
+srB.lang = 'es-ES';
+srB.interimResults = true;
+
+srA.onresult = e => updateCaptions('A', e);
+srB.onresult = e => updateCaptions('B', e);
+
+srA.start();
+srB.start();</div>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const probeSR = document.getElementById('probeSR');
+  const probeTrack = document.getElementById('probeTrack');
+
+  const hasSR = ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+  if (hasSR) {
+    probeSR.textContent = 'SpeechRecognition available';
+    probeSR.className = 'probe ok';
+  } else {
+    probeSR.textContent = 'SpeechRecognition not available — Chrome required';
+    probeSR.className = 'probe fail';
+  }
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let hasTrack = false;
+  if (SR) {
+    const testSR = new SR();
+    hasTrack = 'audioTrack' in testSR;
+  }
+  if (hasTrack) {
+    probeTrack.textContent = 'audioTrack property supported (Chrome 135+)';
+    probeTrack.className = 'probe ok';
+  } else if (hasSR) {
+    probeTrack.textContent = 'audioTrack not in SpeechRecognition — Chrome 135+ needed; using default mic fallback';
+    probeTrack.className = 'probe warn';
+  } else {
+    probeTrack.textContent = 'SpeechRecognition not available';
+    probeTrack.className = 'probe fail';
+  }
+
+  let streamCache = null;
+  let srA = null, srB = null;
+
+  async function getStream() {
+    if (streamCache) return streamCache;
+    streamCache = await navigator.mediaDevices.getUserMedia({ audio: true });
+    return streamCache;
+  }
+
+  function appendTranscript(src, text, isFinal) {
+    const log = document.getElementById('transcriptLog');
+    const firstMsg = log.querySelector('[style]');
+    if (firstMsg) firstMsg.remove();
+    if (!isFinal) return;
+    const entry = document.createElement('div');
+    entry.className = 'tx-entry';
+    entry.innerHTML = `<span class="tx-src src-${src.toLowerCase()}">${src}</span><span class="tx-text">${text}</span>`;
+    log.appendChild(entry);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function makeRecognizer(lang, captionEl, tagEl) {
+    if (!SR) return null;
+    const sr = new SR();
+    sr.lang = lang;
+    sr.interimResults = true;
+    sr.continuous = true;
+
+    sr.onresult = e => {
+      let interim = '', final = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) { final += t; } else { interim += t; }
+      }
+      captionEl.innerHTML =
+        (final ? `<span class="final">${final}</span>` : '') +
+        (interim ? `<span class="interim">${interim}</span>` : '');
+      if (final) appendTranscript(captionEl.id.slice(-1).toUpperCase(), final, true);
+    };
+    sr.onerror = e => {
+      tagEl.textContent = 'error: ' + e.error;
+      tagEl.className = 'source-tag';
+    };
+    sr.onstart = () => { tagEl.textContent = 'listening'; tagEl.className = 'source-tag live'; };
+    sr.onend = () => { tagEl.textContent = 'stopped'; tagEl.className = 'source-tag'; };
+    return sr;
+  }
+
+  async function startSource(which) {
+    const lang = document.getElementById('lang' + which).value;
+    const captionEl = document.getElementById('caption' + which);
+    const tagEl = document.getElementById('tag' + which);
+    const startBtn = document.getElementById('start' + which);
+    const stopBtn = document.getElementById('stop' + which);
+
+    captionEl.innerHTML = '<span class="interim">Requesting microphone access…</span>';
+    try {
+      const stream = await getStream();
+      const track = stream.getAudioTracks()[0];
+
+      const sr = makeRecognizer(lang, captionEl, tagEl);
+      if (!sr) { captionEl.textContent = 'SpeechRecognition not available.'; return; }
+
+      if (hasTrack) {
+        sr.audioTrack = which === 'A' ? track : track.clone();
+      }
+
+      if (which === 'A') srA = sr; else srB = sr;
+      sr.start();
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+    } catch (err) {
+      captionEl.textContent = 'Mic access denied: ' + err.message;
+      tagEl.textContent = 'denied';
+    }
+  }
+
+  function stopSource(which) {
+    const sr = which === 'A' ? srA : srB;
+    if (sr) { try { sr.stop(); } catch (_) {} }
+    document.getElementById('start' + which).disabled = false;
+    document.getElementById('stop' + which).disabled = true;
+  }
+
+  document.getElementById('startA').addEventListener('click', () => startSource('A'));
+  document.getElementById('stopA').addEventListener('click', () => stopSource('A'));
+  document.getElementById('startB').addEventListener('click', () => startSource('B'));
+  document.getElementById('stopB').addEventListener('click', () => stopSource('B'));
+})();
+</script>
+</body>
+</html>

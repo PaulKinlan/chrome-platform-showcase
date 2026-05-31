@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Token Lifecycle — Device Bound Session Credentials — Chrome 135</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .section-title { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: var(--space-3) 0 var(--space-2); }
+    .probe-row { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .probe { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border-black); font-size: 0.8rem; }
+    .probe.fail { background: var(--accent-rose); color: var(--bg-ivory); }
+    .probe.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .probe.warn { background: #b45309; color: var(--bg-ivory); }
+    .info-box { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-size: 0.82rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+
+    /* Controls */
+    .controls-row { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: flex-end; margin-bottom: var(--space-3); }
+    .ctrl-group { display: flex; flex-direction: column; gap: 4px; }
+    .ctrl-group label { font-size: 0.78rem; color: var(--text-muted); }
+    select, input[type="range"] { font-family: inherit; }
+    select {
+      padding: 6px 8px;
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      font-size: 0.82rem;
+    }
+    button.action-btn {
+      padding: 8px 16px;
+      border: 1px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      font-size: 0.82rem;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    button.action-btn.secondary { background: var(--bg-stone); color: var(--text-charcoal); }
+    button.action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Timeline */
+    .timeline-wrap {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+      margin-bottom: var(--space-3);
+      overflow-x: auto;
+    }
+    .timeline-track {
+      position: relative;
+      height: 32px;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      margin-bottom: var(--space-2);
+    }
+    .timeline-label {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      margin-bottom: 3px;
+    }
+    .tl-segment {
+      position: absolute;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.66rem;
+      font-weight: 700;
+      color: var(--bg-ivory);
+      overflow: hidden;
+      white-space: nowrap;
+      box-sizing: border-box;
+    }
+    .tl-valid { background: var(--accent-emerald); }
+    .tl-refresh { background: var(--accent-blue); }
+    .tl-expired { background: var(--accent-rose); }
+    .tl-stolen { background: #7c3aed; }
+    .tl-playhead {
+      position: absolute;
+      top: 0;
+      width: 2px;
+      height: 100%;
+      background: var(--text-black);
+      pointer-events: none;
+      transition: left 0.3s linear;
+    }
+
+    /* Status cards */
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+    }
+    .status-card {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2);
+    }
+    .status-card .sc-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
+    .status-card .sc-value { font-size: 0.92rem; font-weight: 700; font-family: var(--font-mono); color: var(--text-black); }
+    .status-card .sc-value.green { color: #059669; }
+    .status-card .sc-value.blue { color: #2563eb; }
+    .status-card .sc-value.rose { color: #e11d48; }
+
+    /* Event log */
+    .event-log {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      max-height: 180px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      line-height: 1.7;
+      margin-bottom: var(--space-3);
+    }
+    .ev-line { display: flex; gap: var(--space-1); }
+    .ev-t { color: var(--text-muted); flex-shrink: 0; }
+    .ev-ok { color: #059669; }
+    .ev-warn { color: #b45309; }
+    .ev-info { color: #2563eb; }
+    .ev-bad { color: #e11d48; }
+
+    .output-block {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      white-space: pre;
+      overflow-x: auto;
+      line-height: 1.5;
+      margin-bottom: var(--space-3);
+    }
+    code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-stone); padding: 1px 4px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v135/device-bound-session-credentials/">&larr; Device Bound Session Credentials</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v135 · security</p>
+    <h1>Token Lifecycle Tracker</h1>
+    <p class="lede">Step through the full DBSC session lifecycle: initial registration, short-lived token issuance, automatic token rotation before expiry, and what happens when a token is stolen and replayed from another device. Configurable rotation interval and theft scenario.</p>
+  </header>
+
+  <section>
+    <div class="probe-row">
+      <span class="probe warn" id="probeDBSC">checking DBSC availability…</span>
+    </div>
+
+    <div class="info-box">
+      DBSC works by binding a short-lived session token to a device-local private key. The browser automatically refreshes the token before it expires by signing a challenge with that key. A stolen token is worthless: the attacker can't sign the next refresh challenge because they don't have the private key. This demo simulates the timeline so you can see exactly when rotation fires and why replay fails.
+    </div>
+
+    <p class="section-title">Lifecycle configuration</p>
+    <div class="controls-row">
+      <div class="ctrl-group">
+        <label>Token TTL (simulated seconds)</label>
+        <select id="tokenTTL">
+          <option value="20">20 s (fast demo)</option>
+          <option value="40" selected>40 s</option>
+          <option value="60">60 s</option>
+        </select>
+      </div>
+      <div class="ctrl-group">
+        <label>Rotation threshold</label>
+        <select id="rotThreshold">
+          <option value="0.5">50% of TTL</option>
+          <option value="0.25" selected>25% of TTL</option>
+          <option value="0.1">10% of TTL</option>
+        </select>
+      </div>
+      <div class="ctrl-group">
+        <label>Theft scenario</label>
+        <select id="theftAt">
+          <option value="none">No theft</option>
+          <option value="early">Steal at 30%</option>
+          <option value="mid">Steal at 60%</option>
+          <option value="late">Steal at 85%</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:var(--space-1)">
+        <button class="action-btn" id="runBtn">Run simulation</button>
+        <button class="action-btn secondary" id="resetBtn">Reset</button>
+      </div>
+    </div>
+
+    <p class="section-title">Token timeline</p>
+    <div class="timeline-wrap">
+      <div class="timeline-label">Legitimate token validity</div>
+      <div class="timeline-track" id="tlLegit"><div class="tl-playhead" id="playhead" style="left:0"></div></div>
+      <div class="timeline-label" id="stolenLabel" style="display:none;color:#7c3aed">Stolen token replay attempts</div>
+      <div class="timeline-track" id="tlStolen" style="display:none"></div>
+    </div>
+
+    <p class="section-title">Session state</p>
+    <div class="status-grid">
+      <div class="status-card"><div class="sc-label">Token generation</div><div class="sc-value blue" id="scGen">—</div></div>
+      <div class="status-card"><div class="sc-label">Token age</div><div class="sc-value" id="scAge">—</div></div>
+      <div class="status-card"><div class="sc-label">Next rotation in</div><div class="sc-value green" id="scRot">—</div></div>
+      <div class="status-card"><div class="sc-label">Rotations so far</div><div class="sc-value blue" id="scCount">0</div></div>
+      <div class="status-card"><div class="sc-label">Stolen token status</div><div class="sc-value rose" id="scStolen">—</div></div>
+      <div class="status-card"><div class="sc-label">Session bound?</div><div class="sc-value green" id="scBound">—</div></div>
+    </div>
+
+    <p class="section-title">Event log</p>
+    <div class="event-log" id="eventLog">
+      <div class="ev-line"><span class="ev-t">00.0s</span><span class="ev-info">Ready — press Run simulation to start.</span></div>
+    </div>
+
+    <p class="section-title">What the server checks on each request</p>
+    <div class="output-block">// Server-side token verification (simplified)
+function verifyRequest(req) {
+  const token = req.cookies['session'];
+  const proof = req.headers['Sec-Session-Response'];
+
+  // 1. Token bound to a registered public key
+  const binding = db.getBinding(token.sessionId);
+  if (!binding) return 401; // Unknown session
+
+  // 2. Short-lived — reject if expired
+  if (token.exp < Date.now()) return 401; // ← stolen stale token fails here
+
+  // 3. Proof-of-possession: browser signed challenge with device key
+  if (!verify(proof, challenge, binding.publicKey)) return 401; // ← stolen token on
+                                                                 //   another device fails here
+  return 200; // ✓ Bound to this device, not expired
+}</div>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const probe = document.getElementById('probeDBSC');
+  const hasDBSC = 'IdentityProvider' in window || document.hasStorageAccess !== undefined;
+  probe.textContent = 'DBSC is a browser/server protocol — no direct JS API to detect. Running simulation.';
+  probe.className = 'probe warn';
+
+  const TOTAL_WIDTH = 100;
+  let simTimer = null;
+  let simStart = null;
+  let tokenGen = 0;
+  let rotations = 0;
+  let stolenAt = null;
+  let simTTL, simThresh;
+
+  const log = document.getElementById('eventLog');
+
+  function addLog(t, msg, cls = 'ev-info') {
+    const first = log.querySelector('[style]');
+    if (first) first.remove();
+    const line = document.createElement('div');
+    line.className = 'ev-line';
+    line.innerHTML = `<span class="ev-t">${t.toFixed(1)}s</span><span class="${cls}">${msg}</span>`;
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function renderSegment(trackEl, left, width, cls, label) {
+    const seg = document.createElement('div');
+    seg.className = 'tl-segment ' + cls;
+    seg.style.left = left + '%';
+    seg.style.width = width + '%';
+    seg.textContent = label;
+    trackEl.appendChild(seg);
+  }
+
+  function startSim() {
+    clearInterval(simTimer);
+    simTTL = parseInt(document.getElementById('tokenTTL').value);
+    simThresh = parseFloat(document.getElementById('rotThreshold').value);
+    const theftOpt = document.getElementById('theftAt').value;
+
+    const tlLegit = document.getElementById('tlLegit');
+    const tlStolen = document.getElementById('tlStolen');
+    const ph = document.getElementById('playhead');
+
+    tlLegit.innerHTML = '';
+    tlLegit.appendChild(ph);
+    tlStolen.innerHTML = '';
+    tlStolen.style.display = 'none';
+    document.getElementById('stolenLabel').style.display = 'none';
+    log.innerHTML = '';
+
+    tokenGen = 0;
+    rotations = 0;
+    stolenAt = theftOpt === 'none' ? null : { early: 0.3, mid: 0.6, late: 0.85 }[theftOpt];
+    let stolenReported = false;
+    let tokenStart = 0;
+    let totalTime = simTTL * 4;
+
+    simStart = performance.now();
+
+    document.getElementById('scGen').textContent = '1';
+    document.getElementById('scCount').textContent = '0';
+    document.getElementById('scStolen').textContent = stolenAt ? 'pending theft' : 'n/a';
+    document.getElementById('scBound').textContent = 'yes — device key';
+
+    addLog(0, 'Session registered. Token gen=1 issued. Bound to device key.', 'ev-ok');
+
+    function tick() {
+      const elapsed = (performance.now() - simStart) / 1000;
+      const pct = Math.min(elapsed / totalTime * 100, 100);
+      ph.style.left = pct + '%';
+
+      const tokenAge = elapsed - tokenStart;
+      const rotTrigger = simTTL * (1 - simThresh);
+      const rotIn = Math.max(0, rotTrigger - tokenAge);
+
+      document.getElementById('scAge').textContent = tokenAge.toFixed(1) + 's';
+      document.getElementById('scRot').textContent = rotIn.toFixed(1) + 's';
+
+      if (stolenAt && !stolenReported && elapsed / totalTime >= stolenAt) {
+        stolenReported = true;
+        const stolenPct = pct;
+        addLog(elapsed, `Token stolen! Attacker attempts replay from another device.`, 'ev-bad');
+        document.getElementById('scStolen').textContent = 'stolen';
+        tlStolen.style.display = 'block';
+        document.getElementById('stolenLabel').style.display = 'block';
+        renderSegment(tlStolen, stolenPct, 8, 'tl-stolen', 'replay → 401');
+        setTimeout(() => {
+          addLog(elapsed + 0.5, 'Replay rejected: expired token + missing device key proof.', 'ev-bad');
+          document.getElementById('scStolen').textContent = '✗ blocked (no key)';
+        }, 500);
+      }
+
+      if (tokenAge >= rotTrigger && tokenAge < simTTL) {
+        if (rotIn < 0.2) {
+          rotations++;
+          tokenStart = elapsed;
+          tokenGen++;
+          document.getElementById('scGen').textContent = tokenGen;
+          document.getElementById('scCount').textContent = rotations;
+          const segLeft = pct - 1;
+          renderSegment(tlLegit, Math.max(0, segLeft - 0.5), 1.5, 'tl-refresh', 'rotate');
+          addLog(elapsed, `Token rotated → gen=${tokenGen}. Old token invalidated.`, 'ev-ok');
+        }
+      }
+
+      if (tokenAge < rotTrigger) {
+        const segW = Math.min(1, (elapsed - tokenStart) / totalTime * 100);
+        // draw valid segment
+      }
+
+      if (elapsed >= totalTime) {
+        clearInterval(simTimer);
+        addLog(elapsed, 'Simulation ended.', 'ev-info');
+        document.getElementById('runBtn').disabled = false;
+      }
+    }
+
+    simTimer = setInterval(tick, 200);
+    document.getElementById('runBtn').disabled = true;
+  }
+
+  document.getElementById('runBtn').addEventListener('click', startSim);
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    clearInterval(simTimer);
+    document.getElementById('runBtn').disabled = false;
+    const ph = document.getElementById('playhead');
+    document.getElementById('tlLegit').innerHTML = '';
+    document.getElementById('tlLegit').appendChild(ph);
+    ph.style.left = '0';
+    document.getElementById('tlStolen').innerHTML = '';
+    document.getElementById('tlStolen').style.display = 'none';
+    document.getElementById('stolenLabel').style.display = 'none';
+    log.innerHTML = '';
+    ['scGen','scAge','scRot','scStolen','scBound'].forEach(id => document.getElementById(id).textContent = '—');
+    document.getElementById('scCount').textContent = '0';
+  });
+})();
+</script>
+</body>
+</html>

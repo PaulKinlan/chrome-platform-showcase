@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Timer Distribution Lab — Bimodal Timings — Chrome 135</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .section-title { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: var(--space-3) 0 var(--space-2); }
+    .probe-row { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .probe { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border-black); font-size: 0.8rem; }
+    .probe.fail { background: var(--accent-rose); color: var(--bg-ivory); }
+    .probe.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .probe.warn { background: #b45309; color: var(--bg-ivory); }
+    .info-box { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-size: 0.82rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+
+    .controls-row { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: flex-end; margin-bottom: var(--space-3); }
+    .ctrl-group { display: flex; flex-direction: column; gap: 4px; }
+    .ctrl-group label { font-size: 0.78rem; color: var(--text-muted); }
+    select { padding: 6px 8px; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); font-size: 0.82rem; font-family: inherit; }
+    button.action-btn {
+      padding: 8px 16px;
+      border: 1px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      font-size: 0.82rem;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    button.action-btn.secondary { background: var(--bg-stone); color: var(--text-charcoal); }
+    button.action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Histogram canvas */
+    .hist-wrap {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2);
+      margin-bottom: var(--space-3);
+      overflow-x: auto;
+    }
+    canvas { display: block; width: 100%; max-width: 700px; height: 200px; }
+
+    /* Stats grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+    }
+    .stat-card {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2);
+    }
+    .stat-card .sc-lbl { font-size: 0.68rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+    .stat-card .sc-val { font-size: 0.9rem; font-weight: 700; font-family: var(--font-mono); }
+    .stat-card .sc-val.green { color: #059669; }
+    .stat-card .sc-val.blue { color: #2563eb; }
+    .stat-card .sc-val.rose { color: #e11d48; }
+    .stat-card .sc-val.amber { color: #b45309; }
+
+    .verdict-box {
+      border: 2px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      margin-bottom: var(--space-3);
+      font-size: 0.84rem;
+    }
+    .verdict-box.bimodal { border-color: var(--accent-rose); background: #fff1f2; }
+    .verdict-box.unimodal { border-color: var(--accent-emerald); background: #f0fdf4; }
+    .verdict-box strong { display: block; font-size: 0.9rem; margin-bottom: 3px; }
+
+    .output-block {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      white-space: pre;
+      overflow-x: auto;
+      line-height: 1.5;
+      margin-bottom: var(--space-3);
+    }
+    code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-stone); padding: 1px 4px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v135/enabling-web-applications-to-understand-bimodal-performance-timings/">&larr; Bimodal performance timings</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v135 · performance</p>
+    <h1>Timer Distribution Lab</h1>
+    <p class="lede">Collect real <code>requestAnimationFrame</code> frame-time samples in your browser and plot the distribution. Cold starts, GC pauses, and first-load JIT compilation create a second peak in the histogram — the bimodal signature Chrome 135 lets you detect programmatically.</p>
+  </header>
+
+  <section>
+    <div class="probe-row">
+      <span class="probe fail" id="probeBI">checking bimodal timing API…</span>
+    </div>
+
+    <div class="info-box">
+      Chrome 135 adds the ability to detect when a performance timing is part of a bimodal distribution (fast warm path vs slow cold path). A single P95 metric can look fine while hiding a large cold-start tail. This lab collects real frame timings from <code>requestAnimationFrame</code> and shows you whether the distribution looks unimodal (healthy) or bimodal (cold-start problem present).
+    </div>
+
+    <p class="section-title">Collection settings</p>
+    <div class="controls-row">
+      <div class="ctrl-group">
+        <label>Samples to collect</label>
+        <select id="sampleCount">
+          <option value="100">100 frames</option>
+          <option value="200" selected>200 frames</option>
+          <option value="500">500 frames</option>
+        </select>
+      </div>
+      <div class="ctrl-group">
+        <label>Workload between frames</label>
+        <select id="workload">
+          <option value="none">None (idle)</option>
+          <option value="light" selected>Light (JSON parse)</option>
+          <option value="heavy">Heavy (DOM mutations)</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:var(--space-1);align-items:flex-end">
+        <button class="action-btn" id="collectBtn">Collect samples</button>
+        <button class="action-btn secondary" id="clearBtn">Clear</button>
+      </div>
+    </div>
+
+    <div class="verdict-box" id="verdictBox" style="display:none"></div>
+
+    <p class="section-title">Frame-time histogram</p>
+    <div class="hist-wrap">
+      <canvas id="histCanvas" width="700" height="200"></canvas>
+      <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">X-axis: frame duration (ms). Y-axis: sample count. Blue line = median, orange line = P95.</div>
+    </div>
+
+    <p class="section-title">Distribution statistics</p>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="sc-lbl">Samples</div><div class="sc-val blue" id="stN">—</div></div>
+      <div class="stat-card"><div class="sc-lbl">Median (P50)</div><div class="sc-val green" id="stP50">—</div></div>
+      <div class="stat-card"><div class="sc-lbl">P75</div><div class="sc-val" id="stP75">—</div></div>
+      <div class="stat-card"><div class="sc-lbl">P95</div><div class="sc-val rose" id="stP95">—</div></div>
+      <div class="stat-card"><div class="sc-lbl">P99</div><div class="sc-val rose" id="stP99">—</div></div>
+      <div class="stat-card"><div class="sc-lbl">Std deviation</div><div class="sc-val" id="stStd">—</div></div>
+      <div class="stat-card"><div class="sc-lbl">Bimodal score</div><div class="sc-val amber" id="stBI">—</div></div>
+      <div class="stat-card"><div class="sc-lbl">Classification</div><div class="sc-val" id="stClass">—</div></div>
+    </div>
+
+    <p class="section-title">How Chrome 135 uses this</p>
+    <div class="output-block">// Chrome 135 PerformanceEntry — bimodal annotation
+const observer = new PerformanceObserver(list => {
+  for (const entry of list.getEntries()) {
+    // Chrome 135 adds isBimodal + warmStartDuration
+    if ('isBimodal' in entry) {
+      if (entry.isBimodal) {
+        console.log('Cold start detected — duration:', entry.duration);
+        console.log('Warm path baseline:', entry.warmStartDuration);
+        showColdStartBanner(); // tell the user "first load is slower"
+      } else {
+        console.log('Warm start — duration:', entry.duration);
+      }
+    }
+  }
+});
+observer.observe({ type: 'navigation', buffered: true });</div>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kimlan</a></footer>
+</main>
+<script>
+(function () {
+  const probe = document.getElementById('probeBI');
+
+  let testEntry = null;
+  try { testEntry = performance.getEntriesByType('navigation')[0]; } catch (_) {}
+  const hasBimodal = testEntry && 'isBimodal' in testEntry;
+
+  if (hasBimodal) {
+    probe.textContent = 'isBimodal property found in PerformanceNavigationTiming (Chrome 135+)';
+    probe.className = 'probe ok';
+  } else {
+    probe.textContent = 'isBimodal not in PerformanceNavigationTiming — Chrome 135+ needed; collecting rAF samples for bimodal detection';
+    probe.className = 'probe warn';
+  }
+
+  let samples = [];
+  let collecting = false;
+
+  function doWork(level) {
+    if (level === 'none') return;
+    if (level === 'light') {
+      JSON.parse(JSON.stringify({ a: 1, b: [1, 2, 3, 4, 5], c: 'hello world test string' }));
+    } else {
+      const el = document.createElement('div');
+      for (let i = 0; i < 20; i++) el.appendChild(document.createElement('span'));
+      document.body.appendChild(el);
+      document.body.removeChild(el);
+    }
+  }
+
+  function collect() {
+    const target = parseInt(document.getElementById('sampleCount').value);
+    const workload = document.getElementById('workload').value;
+    samples = [];
+    collecting = true;
+    document.getElementById('collectBtn').disabled = true;
+
+    let last = performance.now();
+    function frame(now) {
+      const dt = now - last;
+      last = now;
+      if (dt > 0 && dt < 500) samples.push(dt);
+      doWork(workload);
+      if (samples.length < target) {
+        requestAnimationFrame(frame);
+      } else {
+        collecting = false;
+        document.getElementById('collectBtn').disabled = false;
+        analyzeAndDraw();
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function percentile(sorted, p) {
+    const idx = Math.ceil(p / 100 * sorted.length) - 1;
+    return sorted[Math.max(0, Math.min(sorted.length - 1, idx))];
+  }
+
+  function mean(arr) { return arr.reduce((a, b) => a + b, 0) / arr.length; }
+
+  function stdDev(arr) {
+    const m = mean(arr);
+    return Math.sqrt(arr.reduce((s, v) => s + (v - m) ** 2, 0) / arr.length);
+  }
+
+  function bimodalScore(arr) {
+    const sorted = [...arr].sort((a, b) => a - b);
+    const m = mean(arr);
+    const sd = stdDev(arr);
+    if (sd === 0) return 0;
+    const skew = arr.reduce((s, v) => s + ((v - m) / sd) ** 3, 0) / arr.length;
+    const kurt = arr.reduce((s, v) => s + ((v - m) / sd) ** 4, 0) / arr.length - 3;
+    return (skew ** 2 + 1) / (kurt + 3);
+  }
+
+  function analyzeAndDraw() {
+    const sorted = [...samples].sort((a, b) => a - b);
+    const n = sorted.length;
+    const p50 = percentile(sorted, 50);
+    const p75 = percentile(sorted, 75);
+    const p95 = percentile(sorted, 95);
+    const p99 = percentile(sorted, 99);
+    const sd = stdDev(sorted);
+    const bs = bimodalScore(sorted);
+
+    document.getElementById('stN').textContent = n;
+    document.getElementById('stP50').textContent = p50.toFixed(2) + ' ms';
+    document.getElementById('stP75').textContent = p75.toFixed(2) + ' ms';
+    document.getElementById('stP95').textContent = p95.toFixed(2) + ' ms';
+    document.getElementById('stP99').textContent = p99.toFixed(2) + ' ms';
+    document.getElementById('stStd').textContent = sd.toFixed(2) + ' ms';
+    document.getElementById('stBI').textContent = bs.toFixed(3);
+
+    const isBimodal = bs < 0.555 || (p95 > p50 * 3);
+    document.getElementById('stClass').textContent = isBimodal ? 'BIMODAL' : 'unimodal';
+    document.getElementById('stClass').className = 'sc-val ' + (isBimodal ? 'rose' : 'green');
+
+    const vb = document.getElementById('verdictBox');
+    vb.style.display = 'block';
+    if (isBimodal) {
+      vb.className = 'verdict-box bimodal';
+      vb.innerHTML = `<strong>Bimodal distribution detected</strong>Two distinct timing clusters found — likely a cold-start or GC pause tail. P95 (${p95.toFixed(1)} ms) is ${(p95 / p50).toFixed(1)}× the median (${p50.toFixed(1)} ms). Chrome 135 lets your app detect this at runtime and show a "loading…" state during the cold path.`;
+    } else {
+      vb.className = 'verdict-box unimodal';
+      vb.innerHTML = `<strong>Unimodal (healthy) distribution</strong>Frame times cluster around a single peak. P95 (${p95.toFixed(1)} ms) is ${(p95 / p50).toFixed(1)}× median — within expected range for this workload.`;
+    }
+
+    drawHistogram(sorted, p50, p95);
+  }
+
+  function drawHistogram(sorted, p50, p95) {
+    const canvas = document.getElementById('histCanvas');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    const maxVal = Math.min(sorted[sorted.length - 1], p95 * 2);
+    const BINS = 50;
+    const binW = maxVal / BINS;
+    const counts = new Array(BINS).fill(0);
+    sorted.forEach(v => {
+      const b = Math.min(BINS - 1, Math.floor(v / binW));
+      counts[b]++;
+    });
+    const maxCount = Math.max(...counts);
+
+    const padL = 30, padR = 10, padT = 10, padB = 20;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+
+    ctx.fillStyle = '#f5f0eb';
+    ctx.fillRect(0, 0, W, H);
+
+    counts.forEach((c, i) => {
+      const x = padL + i / BINS * plotW;
+      const barH = c / maxCount * plotH;
+      ctx.fillStyle = '#2563eb';
+      ctx.fillRect(x, padT + plotH - barH, plotW / BINS - 1, barH);
+    });
+
+    function valToX(v) { return padL + Math.min(v / maxVal, 1) * plotW; }
+
+    ctx.strokeStyle = '#2563eb';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    const x50 = valToX(p50);
+    ctx.moveTo(x50, padT);
+    ctx.lineTo(x50, padT + plotH);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#f97316';
+    ctx.beginPath();
+    const x95 = valToX(p95);
+    ctx.moveTo(x95, padT);
+    ctx.lineTo(x95, padT + plotH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = '#2563eb';
+    ctx.font = '10px monospace';
+    ctx.fillText('P50', x50 + 3, padT + 12);
+    ctx.fillStyle = '#f97316';
+    ctx.fillText('P95', x95 + 3, padT + 12);
+
+    ctx.fillStyle = '#999';
+    ctx.font = '9px monospace';
+    ctx.fillText('0', padL, padT + plotH + 12);
+    ctx.fillText(maxVal.toFixed(0) + 'ms', W - padR - 30, padT + plotH + 12);
+  }
+
+  document.getElementById('collectBtn').addEventListener('click', collect);
+  document.getElementById('clearBtn').addEventListener('click', () => {
+    samples = [];
+    const ctx = document.getElementById('histCanvas').getContext('2d');
+    const canvas = document.getElementById('histCanvas');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    document.getElementById('verdictBox').style.display = 'none';
+    ['stN','stP50','stP75','stP95','stP99','stStd','stBI','stClass'].forEach(id => {
+      document.getElementById(id).textContent = '—';
+      document.getElementById(id).className = 'sc-val';
+    });
+  });
+})();
+</script>
+</body>
+</html>
