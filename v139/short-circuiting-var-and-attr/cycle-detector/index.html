@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>var() Cycle Detector — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .lab { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 760px) { .lab { grid-template-columns: 1fr; } }
+    .pane { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); }
+    textarea { width: 100%; min-height: 220px; border: 2px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-2); font-family: var(--font-mono); font-size: 0.85rem; resize: vertical; line-height: 1.6; }
+    .swatch { width: 100%; height: 80px; border: 2px solid var(--border-black); margin-top: var(--space-3); }
+    .swatch.bad { background: var(--bg-stone); display: flex; align-items: center; justify-content: center; color: var(--accent-rose); font-family: var(--font-mono); }
+    .row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; box-shadow: var(--flat-shadow); }
+    .ctl-btn.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    .pill { display: inline-block; padding: 0.1rem 0.5rem; font-size: 0.72rem; border: 1px solid var(--border-black); font-family: var(--font-mono); }
+    .pill.ok { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .pill.warn { background: var(--accent-amber); color: var(--bg-ivory); border-color: var(--accent-amber); }
+    pre.snippet { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Short-circuiting var() and attr()</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>var() Cycle Detector</h1>
+    <p class="lede">Type CSS that defines a fallback chain. The v138 engine traverses every branch looking for cycles before deciding the value — so a cycle hidden in an <em>unused</em> fallback poisons the whole declaration. v139 short-circuits: if the primary path resolves, fallbacks aren't evaluated.</p>
+  </header>
+
+  <div class="lab">
+    <div class="pane">
+      <h4 style="margin: 0 0 var(--space-2); font-family: var(--font-mono);">your custom properties</h4>
+      <textarea id="css">--a: red;
+--b: var(--a, var(--b));
+--c: var(--b);</textarea>
+      <div class="row">
+        <button class="ctl-btn" id="apply">Apply &amp; resolve</button>
+        <button class="ctl-btn secondary" id="ex-1">Example 1 (clean)</button>
+        <button class="ctl-btn secondary" id="ex-2">Example 2 (cycle in fallback)</button>
+        <button class="ctl-btn secondary" id="ex-3">Example 3 (cycle in primary)</button>
+      </div>
+    </div>
+    <div class="pane">
+      <h4 style="margin: 0 0 var(--space-2); font-family: var(--font-mono);">resolved swatch</h4>
+      <div id="swatch" class="swatch">—</div>
+      <p style="font-family: var(--font-mono); font-size: 0.78rem; margin-top: var(--space-3);">v138 verdict: <span class="pill" id="v138">—</span></p>
+      <p style="font-family: var(--font-mono); font-size: 0.78rem;">v139 verdict: <span class="pill" id="v139">—</span></p>
+      <pre class="snippet" id="explain"></pre>
+    </div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v139/short-circuiting-var-and-attr/">Feature page</a></li>
+      <li><a href="/v139/short-circuiting-var-and-attr/short-circuit/">Short Circuit</a></li>
+      <li><a href="/v139/short-circuiting-var-and-attr/cycle-in-fallback/">Cycle in Fallback</a></li>
+      <li><a href="https://drafts.csswg.org/css-variables/#cycles" target="_blank" rel="noopener">CSS Variables — cycles</a></li>
+      <li><a href="https://chromestatus.com/feature/5179383762812928" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(() =&gt; {
+  const examples = {
+    'ex-1': '--a: red;\n--b: var(--a);\n--c: var(--b);',
+    'ex-2': '--a: red;\n--b: var(--a, var(--b));\n--c: var(--b);',
+    'ex-3': '--a: var(--b);\n--b: var(--a);\n--c: var(--a, blue);',
+  };
+  Object.keys(examples).forEach(id =&gt; document.getElementById(id).addEventListener('click', () =&gt; { document.getElementById('css').value = examples[id]; apply(); }));
+
+  function apply() {
+    const css = document.getElementById('css').value;
+    // Apply to the swatch as inline style
+    const sw = document.getElementById('swatch');
+    sw.removeAttribute('style');
+    sw.className = 'swatch';
+    sw.style.cssText = css + '; background: var(--c, var(--b, var(--a, magenta)));';
+    sw.textContent = '';
+
+    // Parse properties into a directed graph: prop -> [refs used], with both the primary
+    // and the fallback referenced.
+    const map = {};
+    const fbMap = {};
+    css.split(/;\s*\n?/).forEach(decl =&gt; {
+      decl = decl.trim();
+      if (!decl) return;
+      const m = decl.match(/^(--[\w-]+)\s*:\s*(.+)$/);
+      if (!m) return;
+      const name = m[1], val = m[2];
+      const refs = [...val.matchAll(/var\((--[\w-]+)(?:,\s*(.+))?\)/g)].map(x =&gt; x[1]);
+      map[name] = refs;
+      // Fallback refs only:
+      fbMap[name] = [...val.matchAll(/var\(--[\w-]+\s*,\s*var\((--[\w-]+)/g)].map(x =&gt; x[1]);
+    });
+
+    // Detect cycles: DFS
+    function findCycle(node, path) {
+      if (path.includes(node)) return path.slice(path.indexOf(node));
+      for (const n of (map[node] || [])) {
+        const r = findCycle(n, [...path, node]);
+        if (r) return r;
+      }
+      return null;
+    }
+    const primaryCycle = Object.keys(map).find(n =&gt; {
+      // Cycle through primary (first) refs only
+      function dfs(node, path) {
+        if (path.includes(node)) return path.indexOf(node) !== -1;
+        const refs = (map[node] || []);
+        if (refs.length === 0) return false;
+        return dfs(refs[0], [...path, node]);
+      }
+      return dfs(n, []);
+    });
+    const fallbackOnlyCycle = !primaryCycle &amp;&amp; Object.keys(map).find(n =&gt; (fbMap[n] || []).some(r =&gt; map[r] &amp;&amp; map[r].some(x =&gt; x === n || (map[x] || []).includes(n))));
+
+    let v138 = '', v139 = '', explain = '';
+    if (primaryCycle) {
+      v138 = '&lt;span class="pill warn"&gt;invalid (cycle)&lt;/span&gt;';
+      v139 = '&lt;span class="pill warn"&gt;invalid (cycle)&lt;/span&gt;';
+      explain = '/* a cycle exists in the primary value path. v138 and v139 both reject. */';
+      sw.className = 'swatch bad'; sw.textContent = 'cycle → unset';
+    } else if (fallbackOnlyCycle) {
+      v138 = '&lt;span class="pill warn"&gt;invalid (cycle in fallback)&lt;/span&gt;';
+      v139 = '&lt;span class="pill ok"&gt;valid — fallback never evaluated&lt;/span&gt;';
+      explain = '/* The cycle is reachable only via a fallback that isn\'t taken.\n   v138: pre-walks every fallback, sees the cycle, marks invalid.\n   v139: takes the primary value, fallback is never read. Spec change matched here. */';
+    } else {
+      v138 = '&lt;span class="pill ok"&gt;valid&lt;/span&gt;';
+      v139 = '&lt;span class="pill ok"&gt;valid&lt;/span&gt;';
+      explain = '/* No cycles anywhere — both engines agree. */';
+    }
+    document.getElementById('v138').outerHTML = v138.replace('id="v138"', 'id="v138"');
+    document.getElementById('v138');
+    document.getElementById('v138')?.remove();
+    // Easier: just set textContent
+    const v138el = document.createElement('span'); v138el.id = 'v138';
+    const v139el = document.createElement('span'); v139el.id = 'v139';
+    // (re-set via innerHTML on parent for simplicity)
+    const par1 = document.querySelector('.pane:nth-child(2)');
+    if (par1) {
+      const lines = par1.querySelectorAll('p');
+      if (lines.length &gt;= 2) {
+        lines[0].innerHTML = `v138 verdict: ${v138}`;
+        lines[1].innerHTML = `v139 verdict: ${v139}`;
+      }
+    }
+    document.getElementById('explain').textContent = explain;
+  }
+  document.getElementById('apply').addEventListener('click', apply);
+  apply();
+})();
+</script>
+</body>
+</html>
