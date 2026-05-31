@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blob Lifecycle Tracer — Chrome 137 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    button {
+      padding: 8px 16px; border: 1px solid var(--border-black);
+      background: var(--text-black); color: var(--bg-ivory); cursor: pointer; font-size: 0.85rem;
+    }
+    button.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .url-box {
+      background: var(--bg-stone); border: 1px solid var(--border-black);
+      padding: var(--space-2); font-family: var(--font-mono); font-size: 0.8rem;
+      word-break: break-all; color: var(--text-charcoal); margin-bottom: var(--space-3);
+      min-height: 36px; line-height: 1.6;
+    }
+    .url-box .label { color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: .06em; display: block; margin-bottom: 2px; }
+
+    .timeline { display: flex; flex-direction: column; gap: 0; }
+    .event {
+      display: grid; grid-template-columns: 80px 16px 1fr;
+      gap: var(--space-1); align-items: flex-start;
+      padding: 8px 0; border-bottom: 1px solid var(--border-black);
+    }
+    .event:last-child { border-bottom: none; }
+    .event .ts { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); }
+    .event .dot { width: 14px; height: 14px; border-radius: 50%; margin-top: 2px; flex-shrink: 0; }
+    .dot.create  { background: var(--accent-blue); }
+    .dot.access  { background: var(--accent-emerald); }
+    .dot.blocked { background: var(--accent-rose); }
+    .dot.revoke  { background: var(--bg-stone); border: 2px solid var(--border-black); }
+    .event .msg { font-size: 0.85rem; color: var(--text-charcoal); }
+    .event .sub { font-size: 0.75rem; font-family: var(--font-mono); color: var(--text-muted); }
+
+    .partition-diagram {
+      display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0;
+    }
+    @media (max-width: 640px) { .partition-diagram { grid-template-columns: 1fr; } }
+
+    .partition-box {
+      background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-2);
+    }
+    .partition-box h4 { margin: 0 0 var(--space-1); font-size: 0.82rem; font-family: var(--font-mono); }
+    .partition-box .key-pill {
+      display: inline-block; padding: 2px 8px; background: var(--bg-stone);
+      border: 1px solid var(--border-black); font-family: var(--font-mono); font-size: 0.72rem;
+      margin-bottom: 6px;
+    }
+    .partition-box p { font-size: 0.82rem; color: var(--text-charcoal); margin: 0; }
+    .partition-box.owned { border-color: var(--accent-blue); }
+    .partition-box.foreign { border-color: var(--accent-rose); }
+
+    .badge {
+      display: inline-block; padding: 2px 8px; font-size: 0.72rem; font-family: var(--font-mono);
+    }
+    .badge.ok     { background: #d4f5e2; color: #1a6640; }
+    .badge.denied { background: #fde8e8; color: #8b2020; }
+
+    .info-box {
+      background: var(--bg-paper); border-left: 3px solid var(--accent-blue);
+      padding: var(--space-2) var(--space-3); margin-top: var(--space-3);
+      font-size: 0.85rem; color: var(--text-charcoal);
+    }
+    h3 { margin: var(--space-3) 0 var(--space-2); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v137/blob-url-partitioning-fetching-navigation/">&larr; Blob URL partitioning</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v137 · security · storage</p>
+    <h1>Blob Lifecycle Tracer</h1>
+    <p class="lede">Create blob URLs in this page, attempt to access them from different simulated partition contexts, and watch each event traced on a timeline. Blob URL partitioning means a blob URL is only accessible from the partition (top-level site + frame origin) that created it.</p>
+  </header>
+
+  <section>
+    <h2>Create &amp; probe blobs</h2>
+
+    <div class="controls">
+      <button id="btn-create">Create Blob URL</button>
+      <button class="secondary" id="btn-fetch-same">Fetch (same partition)</button>
+      <button class="secondary" id="btn-fetch-cross">Fetch (cross-partition sim)</button>
+      <button class="secondary" id="btn-revoke">Revoke</button>
+      <button class="secondary" id="btn-clear">Clear trace</button>
+    </div>
+
+    <span class="label" style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted)">Current blob URL</span>
+    <div class="url-box" id="url-display">None created yet.</div>
+
+    <h3>Event trace</h3>
+    <div class="timeline" id="timeline">
+      <p style="color:var(--text-muted);font-size:.85rem">Events will appear here.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Partition model</h2>
+    <div class="partition-diagram">
+      <div class="partition-box owned">
+        <h4>This page's partition</h4>
+        <div class="key-pill" id="this-key">loading…</div>
+        <p>Blob URLs created here are <em>owned</em> by this partition. Only this partition can fetch or navigate to them.</p>
+        <br><span class="badge ok" id="same-result">fetch: ✓ allowed</span>
+      </div>
+      <div class="partition-box foreign">
+        <h4>Foreign partition (simulated)</h4>
+        <div class="key-pill">top=attacker.example / frame=attacker.example</div>
+        <p>A different top-level site attempting to access a blob URL created in the owned partition.</p>
+        <br><span class="badge denied">fetch: ✗ blocked</span>
+      </div>
+    </div>
+
+    <div class="info-box">
+      <strong>Partition key</strong> = (top-level site, frame origin). A blob URL created in partition
+      <code>A</code> cannot be fetched or navigated to by code in partition <code>B</code>, even if the
+      blob URL is somehow leaked (e.g. via <code>postMessage</code>). This prevents cross-site
+      blob-URL side-channel attacks without requiring per-URL access control lists.
+    </div>
+  </section>
+</main>
+
+<script>
+let currentBlob = null;
+let currentURL  = null;
+const t0 = Date.now();
+
+function ts() { return '+' + ((Date.now() - t0) / 1000).toFixed(2) + 's'; }
+
+function addEvent(kind, msg, sub) {
+  const tl = document.getElementById('timeline');
+  if (tl.querySelector('p')) tl.innerHTML = '';
+  const row = document.createElement('div');
+  row.className = 'event';
+  row.innerHTML = `
+    <span class="ts">${ts()}</span>
+    <span class="dot ${kind}"></span>
+    <div><div class="msg">${msg}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+  tl.appendChild(row);
+  row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function updateDisplay() {
+  const el = document.getElementById('url-display');
+  el.textContent = currentURL || 'None created yet.';
+}
+
+// Show this partition's key
+const origin = location.origin;
+const topSite = (() => {
+  try { return new URL(origin).hostname.split('.').slice(-2).join('.'); } catch { return origin; }
+})();
+document.getElementById('this-key').textContent = `top=${topSite} / frame=${origin}`;
+
+document.getElementById('btn-create').addEventListener('click', () => {
+  if (currentURL) URL.revokeObjectURL(currentURL);
+  const content = `<html><body style="font-family:sans-serif;padding:20px"><h1>Blob document</h1><p>Created at ${new Date().toISOString()}</p></body></html>`;
+  currentBlob = new Blob([content], { type: 'text/html' });
+  currentURL  = URL.createObjectURL(currentBlob);
+  updateDisplay();
+  addEvent('create', 'Blob URL created', currentURL.slice(0, 60) + '…');
+  document.getElementById('same-result').textContent = 'fetch: ✓ allowed';
+  document.getElementById('same-result').className = 'badge ok';
+});
+
+document.getElementById('btn-fetch-same').addEventListener('click', async () => {
+  if (!currentURL) { addEvent('blocked', 'No blob URL exists yet', 'Create one first'); return; }
+  try {
+    const res = await fetch(currentURL);
+    const text = await res.text();
+    addEvent('access', 'Same-partition fetch: ✓ success',
+      `status=${res.status}, bytes=${text.length}`);
+    document.getElementById('same-result').textContent = 'fetch: ✓ allowed';
+    document.getElementById('same-result').className = 'badge ok';
+  } catch (e) {
+    addEvent('blocked', 'Fetch failed: ' + e.message, currentURL);
+  }
+});
+
+document.getElementById('btn-fetch-cross').addEventListener('click', () => {
+  if (!currentURL) { addEvent('blocked', 'No blob URL exists yet', 'Create one first'); return; }
+  // Simulate a cross-partition access attempt.
+  // In real Chrome 137+ partitioning, a blob URL accessed from a different
+  // top-level site is blocked. Here we demonstrate the partition mismatch
+  // by showing what would happen.
+  addEvent('blocked',
+    'Cross-partition fetch: ✗ blocked (simulated)',
+    'Partition key mismatch — top=attacker.example ≠ top=' + topSite +
+    '. In Chrome 137+ this fetch returns an opaque network error.');
+});
+
+document.getElementById('btn-revoke').addEventListener('click', async () => {
+  if (!currentURL) { addEvent('blocked', 'Nothing to revoke'); return; }
+  URL.revokeObjectURL(currentURL);
+  addEvent('revoke', 'URL.revokeObjectURL() called', currentURL.slice(0, 60) + '…');
+  // Verify it's gone
+  try {
+    await fetch(currentURL);
+    addEvent('blocked', 'Unexpected: fetch succeeded after revoke!');
+  } catch {
+    addEvent('blocked', 'Post-revoke fetch: ✗ failed (expected)', 'Blob no longer accessible from any partition');
+  }
+  currentURL = null;
+  currentBlob = null;
+  updateDisplay();
+});
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  document.getElementById('timeline').innerHTML =
+    '<p style="color:var(--text-muted);font-size:.85rem">Events will appear here.</p>';
+});
+</script>
+</body>
+</html>
