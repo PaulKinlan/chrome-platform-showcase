@@ -87,12 +87,24 @@
 
 <script>
   const probe = document.getElementById('probe');
-  const supported = typeof Symbol.asyncDispose === 'symbol';
+  let supported = false;
+  try {
+    const AsyncFunction = (async () => {}).constructor;
+    new AsyncFunction('await using tx = { async [Symbol.asyncDispose]() {} };');
+    supported = typeof Symbol.asyncDispose === 'symbol';
+  } catch {}
   probe.innerHTML = supported
     ? '<span class="ok">Symbol.asyncDispose supported</span> — await using executes natively'
-    : '<span class="bad">await using not available</span> — we fall back to manual try/finally so you can see the same trace; native syntax is what Chrome 134+ honours';
+    : '<span class="bad">await using not available</span> — this browser cannot run the transaction demo';
 
   const log = document.getElementById('log');
+  ['run-happy', 'run-error'].forEach((id) => {
+    document.getElementById(id).disabled = !supported;
+  });
+  if (!supported) {
+    log.textContent = 'This browser cannot parse await using yet, so the transaction scenario is unavailable.';
+  }
+
   function logLine(msg, cls) {
     const p = document.createElement('p');
     p.textContent = new Date().toISOString().slice(11, 23) + '  ' + msg;
@@ -120,39 +132,39 @@
         logLine(`tx[${name}]  ROLLBACK`, 'err');
         await new Promise((r) => setTimeout(r, 60));
       },
-      [Symbol.asyncDispose ?? Symbol('asyncDispose')]: async function () {
+      [Symbol.asyncDispose]: async function () {
         if (!committed) await this.rollback();
         logLine(`tx[${name}]  disposed`);
       },
     };
   }
 
-  async function withTx(name, body) {
-    const tx = openTx(name);
-    try {
-      await body(tx);
-    } finally {
-      const dispose = tx[Symbol.asyncDispose] || Object.getOwnPropertySymbols(tx).map((s) => tx[s]).find((v) => typeof v === 'function');
-      if (dispose) await dispose.call(tx);
-    }
+  async function runTransactionSource(source) {
+    const AsyncFunction = (async () => {}).constructor;
+    const fn = new AsyncFunction('openTx', source);
+    await fn(openTx);
   }
 
   document.getElementById('run-happy').addEventListener('click', async () => {
+    if (!supported) return;
     logLine('— RUN happy path —');
-    await withTx('user-42', async (tx) => {
+    await runTransactionSource(`
+      await using tx = openTx('user-42');
       await tx.set('name', 'Ada');
       await tx.set('balance', 100);
       await tx.commit();
-    });
+    `);
   });
 
   document.getElementById('run-error').addEventListener('click', async () => {
+    if (!supported) return;
     logLine('— RUN error path (throws after first set) —');
     try {
-      await withTx('user-42', async (tx) => {
+      await runTransactionSource(`
+        await using tx = openTx('user-42');
         await tx.set('name', 'Ada');
         throw new Error('bank validation failed');
-      });
+      `);
     } catch (e) {
       logLine('caught: ' + e.message, 'err');
     }

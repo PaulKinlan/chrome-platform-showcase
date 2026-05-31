@@ -33,13 +33,13 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v134 · javascript</p>
     <h1>AsyncDisposableStack</h1>
-    <p class="lede">Acquire N async resources conditionally, get LIFO async cleanup on success or throw. Simulate a real pipeline: open a temp file, fetch a token, lock a db row, push a message — make any step fail and watch the cleanup unwind in reverse.</p>
+    <p class="lede">Acquire N async resources conditionally, get LIFO async cleanup on success or throw. Run an instrumented async pipeline — temp file, auth token, row lock, queue message — make any step fail and watch the real <code>AsyncDisposableStack</code> unwind in reverse.</p>
   </header>
 
   <div class="probe" id="probe"></div>
 
   <div class="lab">
-    <p class="note" style="margin: 0 0 var(--space-2);">Each resource is async-acquired and async-disposed (with simulated latency). Pick which step should fail.</p>
+    <p class="note" style="margin: 0 0 var(--space-2);">Each resource is async-acquired, registered with <code>stack.use()</code>, and async-disposed by the runtime. Pick which step should fail.</p>
     <ul class="resource-list" id="rlist">
       <li class="resource" data-r="tmp"><span class="name">temp file</span><span class="state" id="s-tmp">pending</span></li>
       <li class="resource" data-r="token"><span class="name">auth token</span><span class="state" id="s-token">pending</span></li>
@@ -98,10 +98,16 @@
 <script>
   const log = document.getElementById("log");
   const probe = document.getElementById("probe");
-  const supported = typeof AsyncDisposableStack === "function" && typeof Symbol.asyncDispose !== "undefined";
+  let supported = false;
+  try {
+    const AsyncFunction = (async () => {}).constructor;
+    new AsyncFunction('await using stack = new AsyncDisposableStack();');
+    supported = typeof AsyncDisposableStack === "function" && typeof Symbol.asyncDispose !== "undefined";
+  } catch {}
   probe.innerHTML = supported
     ? '<span class="ok">[ok]</span> AsyncDisposableStack present — happy path and failure paths will run.'
-    : '<span class="no">[no]</span> AsyncDisposableStack missing — demo will fall back to a simulated stack.';
+    : '<span class="no">[no]</span> AsyncDisposableStack missing — this browser cannot run the stack scenario.';
+  document.getElementById("runBtn").disabled = !supported;
 
   const lines = [];
   function note(s) {
@@ -141,42 +147,25 @@
 
   document.getElementById("runBtn").addEventListener("click", async () => {
     reset();
+    if (!supported) {
+      note("AsyncDisposableStack is not available in this browser.");
+      return;
+    }
     const fail = document.getElementById("fail").value;
     note("starting pipeline (fail=" + (fail || "none") + ")");
     try {
-      if (supported) {
-        // We need to use 'await using' which requires async function via new AsyncFunction
-        const AsyncFunction = (async () => {}).constructor;
-        const body = `
-          await using stack = new AsyncDisposableStack();
-          const tmp   = stack.use(await mk("tmp").acquire());
-          const token = stack.use(await mk("token").acquire());
-          const lock  = stack.use(await mk("lock").acquire());
-          const msg   = stack.use(await mk("msg").acquire());
-          return "ok";
-        `;
-        const fn = new AsyncFunction("mk", body);
-        await fn((n) => makeResource(n, fail));
-        note("pipeline ok");
-      } else {
-        // fallback simulation
-        const r = ["tmp","token","lock","msg"];
-        const acquired = [];
-        try {
-          for (const n of r) {
-            const res = makeResource(n, fail);
-            await res.acquire();
-            acquired.push(res);
-          }
-          note("pipeline ok");
-        } catch (e) {
-          throw e;
-        } finally {
-          for (let i = acquired.length - 1; i >= 0; i--) {
-            await acquired[i][Symbol.asyncDispose]?.();
-          }
-        }
-      }
+      const AsyncFunction = (async () => {}).constructor;
+      const body = `
+        await using stack = new AsyncDisposableStack();
+        const tmp   = stack.use(await mk("tmp").acquire());
+        const token = stack.use(await mk("token").acquire());
+        const lock  = stack.use(await mk("lock").acquire());
+        const msg   = stack.use(await mk("msg").acquire());
+        return "ok";
+      `;
+      const fn = new AsyncFunction("mk", body);
+      await fn((n) => makeResource(n, fail));
+      note("pipeline ok");
     } catch (e) {
       note("ERROR: " + e.message);
       // mark step that failed in red

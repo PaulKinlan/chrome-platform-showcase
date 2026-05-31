@@ -94,7 +94,7 @@
   <header class="lede-block">
     <p class="eyebrow">v134 · javascript</p>
     <h1>Async Resource Monitor</h1>
-    <p class="lede">Track the full lifecycle of simulated async resources — DB connections, file handles, HTTP clients, cache buckets — opened with <code>await using</code> and automatically disposed. See which resources are open, when they close, and what happens when a scope throws mid-flight.</p>
+    <p class="lede">Track the full lifecycle of async resources — DB connections, file handles, HTTP clients, cache buckets — opened with <code>await using</code> and automatically disposed. See which resources are open, when they close, and what happens when a scope throws mid-flight.</p>
   </header>
 
   <section>
@@ -166,13 +166,20 @@ async function processOrder(orderId) {
 <script>
 (function () {
   const probe = document.getElementById('probeAsyncDispose');
-  const hasAsyncDispose = typeof Symbol.asyncDispose === 'symbol';
-  if (hasAsyncDispose) {
+  let hasAwaitUsing = false;
+  try {
+    const AsyncFunction = (async () => {}).constructor;
+    new AsyncFunction('await using r = { async [Symbol.asyncDispose]() {} };');
+    hasAwaitUsing = typeof Symbol.asyncDispose === 'symbol';
+  } catch {}
+  if (hasAwaitUsing) {
     probe.textContent = 'Symbol.asyncDispose available (Chrome 134+)';
     probe.classList.replace('fail', 'ok');
   } else {
-    probe.textContent = 'Symbol.asyncDispose not available — simulation only';
+    probe.textContent = 'await using not available in this browser';
     probe.classList.replace('fail', 'warn');
+    document.getElementById('runBtn').disabled = true;
+    document.getElementById('timeline').textContent = 'This browser cannot parse await using yet, so the async resource-management scenario is unavailable.';
   }
 
   const RESOURCE_TYPES = [
@@ -256,78 +263,99 @@ async function processOrder(orderId) {
 
   function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  async function acquireResource(name, options = {}) {
+    await delay(options.openDelay ?? 60);
+    if (options.failOpen) {
+      log(`✗ Failed to open: ${name}`, 'tl-error');
+      throw new Error(`${name} failed to open`);
+    }
+    const tracked = addResource(name);
+    log(`✓ Opened: ${name}`, 'tl-open');
+    return {
+      name,
+      async [Symbol.asyncDispose]() {
+        log(`↳ Symbol.asyncDispose: ${name}`, 'tl-close');
+        await delay(options.closeDelay ?? 40);
+        disposeResource(tracked);
+        log(`✓ Disposed: ${name}`, 'tl-close');
+      },
+    };
+  }
+
+  async function runSource(source) {
+    const AsyncFunction = (async () => {}).constructor;
+    const fn = new AsyncFunction('acquireResource', 'delay', 'log', source);
+    return await fn(acquireResource, delay, log);
+  }
+
   async function runHappy() {
-    log('→ Entering async scope (await using)', 'tl-info');
-    await delay(80);
-    const db = addResource('DB connection'); log('✓ Opened: DB connection', 'tl-open');
-    await delay(60);
-    const fh = addResource('File handle'); log('✓ Opened: File handle', 'tl-open');
-    await delay(50);
-    const http = addResource('HTTP client'); log('✓ Opened: HTTP client', 'tl-open');
-    await delay(70);
-    const cache = addResource('Cache bucket'); log('✓ Opened: Cache bucket', 'tl-open');
-    log('  … doing work …', 'tl-info');
-    await delay(200);
-    log('← Exiting scope normally — disposing LIFO', 'tl-info');
-    await delay(40); disposeResource(cache); log('✓ Disposed: Cache bucket (Symbol.asyncDispose)', 'tl-close');
-    await delay(40); disposeResource(http); log('✓ Disposed: HTTP client (Symbol.asyncDispose)', 'tl-close');
-    await delay(40); disposeResource(fh); log('✓ Disposed: File handle (Symbol.asyncDispose)', 'tl-close');
-    await delay(40); disposeResource(db); log('✓ Disposed: DB connection (Symbol.asyncDispose)', 'tl-close');
+    await runSource(`
+      log('→ Entering async scope (await using)', 'tl-info');
+      await using db = await acquireResource('DB connection');
+      await using fh = await acquireResource('File handle');
+      await using http = await acquireResource('HTTP client');
+      await using cache = await acquireResource('Cache bucket');
+      log('  … doing work …', 'tl-info');
+      await delay(200);
+      log('← Leaving scope normally — runtime disposes LIFO', 'tl-info');
+    `);
     log('✓ Scope exited — all resources clean', 'tl-info');
   }
 
   async function runThrow() {
-    log('→ Entering async scope (await using)', 'tl-info');
-    await delay(80);
-    const db = addResource('DB connection'); log('✓ Opened: DB connection', 'tl-open');
-    await delay(60);
-    const fh = addResource('File handle'); log('✓ Opened: File handle', 'tl-open');
-    log('✗ THROW inside scope — "Query timeout"', 'tl-error');
-    await delay(40);
-    log('← Scope thrown — runtime disposes in LIFO order', 'tl-info');
-    await delay(40); disposeResource(fh); log('✓ Disposed: File handle (via throw path)', 'tl-close');
-    await delay(40); disposeResource(db); log('✓ Disposed: DB connection (via throw path)', 'tl-close');
-    log('✓ No resource leak despite unhandled throw', 'tl-info');
-    log('  (without await using, both resources would leak)', 'tl-error');
+    try {
+      await runSource(`
+        log('→ Entering async scope (await using)', 'tl-info');
+        await using db = await acquireResource('DB connection');
+        await using fh = await acquireResource('File handle');
+        log('✗ THROW inside scope — "Query timeout"', 'tl-error');
+        throw new Error('Query timeout');
+      `);
+    } catch (e) {
+      log(`✓ Caught after runtime disposal: ${e.message}`, 'tl-info');
+    }
   }
 
   async function runStack() {
-    log('→ new AsyncDisposableStack()', 'tl-info');
-    const names = ['DB connection', 'File handle', 'HTTP client', 'Cache bucket', 'Message queue'];
-    const opened = [];
-    for (let i = 0; i < 5; i++) {
-      await delay(50);
-      const r = addResource(names[i]);
-      opened.push(r);
-      log(`✓ stack.use(): ${names[i]}`, 'tl-open');
+    if (typeof AsyncDisposableStack !== 'function') {
+      log('AsyncDisposableStack is not available in this browser.', 'tl-error');
+      return;
     }
-    log('← stack.disposeAsync() — LIFO unwind', 'tl-info');
-    for (let i = opened.length - 1; i >= 0; i--) {
-      await delay(40);
-      disposeResource(opened[i]);
-      log(`✓ Disposed: ${names[i]}`, 'tl-close');
-    }
+    await runSource(`
+      log('→ await using stack = new AsyncDisposableStack()', 'tl-info');
+      await using stack = new AsyncDisposableStack();
+      stack.use(await acquireResource('DB connection'));
+      stack.use(await acquireResource('File handle'));
+      stack.use(await acquireResource('HTTP client'));
+      stack.use(await acquireResource('Cache bucket'));
+      stack.use(await acquireResource('Message queue'));
+      log('← Leaving stack scope — AsyncDisposableStack disposes LIFO', 'tl-info');
+    `);
     log('✓ AsyncDisposableStack fully unwound', 'tl-info');
   }
 
   async function runPartial() {
-    log('→ Entering async scope (await using)', 'tl-info');
-    await delay(80);
-    const db = addResource('DB connection'); log('✓ Opened: DB connection', 'tl-open');
-    await delay(60);
-    const fh = addResource('File handle'); log('✓ Opened: File handle', 'tl-open');
-    log('✗ 3rd resource (HTTP client) FAILED to open — throws', 'tl-error');
-    await delay(40);
-    log('← Partial scope throws — disposing already-opened resources', 'tl-info');
-    await delay(40); disposeResource(fh); log('✓ Disposed: File handle', 'tl-close');
-    await delay(40); disposeResource(db); log('✓ Disposed: DB connection', 'tl-close');
-    log('✓ Partial acquisition — no leaks on open failure', 'tl-info');
+    try {
+      await runSource(`
+        log('→ Entering async scope (await using)', 'tl-info');
+        await using db = await acquireResource('DB connection');
+        await using fh = await acquireResource('File handle');
+        await using http = await acquireResource('HTTP client', { failOpen: true });
+        log('This line is unreachable when HTTP client fails', 'tl-info');
+      `);
+    } catch (e) {
+      log(`✓ Open failure caught after already-opened resources were disposed: ${e.message}`, 'tl-info');
+    }
   }
 
   document.getElementById('runBtn').addEventListener('click', async () => {
     const sel = document.getElementById('scenarioSel').value;
     clearLog();
     resetResources();
+    if (!hasAwaitUsing) {
+      log('This browser cannot parse await using yet.', 'tl-error');
+      return;
+    }
     document.getElementById('runBtn').disabled = true;
     try {
       if (sel === 'happy') await runHappy();

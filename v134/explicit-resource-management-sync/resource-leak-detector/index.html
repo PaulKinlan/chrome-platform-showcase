@@ -173,8 +173,10 @@ function processFile(path) {
     probe.textContent = 'using keyword supported (Chrome 134+)';
     probe.classList.replace('fail', 'ok');
   } else {
-    probe.textContent = 'using keyword not supported — simulation mode';
+    probe.textContent = 'using keyword not supported in this browser';
     probe.classList.replace('fail', 'warn');
+    document.getElementById('runBtn').disabled = true;
+    document.getElementById('execLog').textContent = 'This browser cannot parse the using keyword yet, so the resource-management scenario is unavailable.';
   }
 
   const RESOURCES = [
@@ -213,107 +215,172 @@ function processFile(path) {
     });
   }
 
-  function run() {
-    clearLog();
-    const mode = document.getElementById('failSel').value;
-    addLog('━━ Manual try/finally approach ━━', 'log-info');
+  function newStates() {
+    return RESOURCES.map(() => 'idle');
+  }
 
-    let manualStates = ['idle', 'idle', 'idle', 'idle'];
-    let usingStates = ['idle', 'idle', 'idle', 'idle'];
-    let manualLeaked = 0;
-    let usingLeaked = 0;
+  function finalize(states) {
+    for (let i = 0; i < states.length; i++) {
+      if (states[i] === 'open') states[i] = 'leaked';
+    }
+    return states.filter((s) => s === 'leaked').length;
+  }
 
-    if (mode === 'clean') {
-      RESOURCES.forEach((r, i) => {
-        addLog(`  open: ${r.name}`, 'log-open');
-        manualStates[i] = 'open';
-      });
-      addLog('  … doing work …', 'log-info');
-      addLog('  finally: closing all resources', 'log-info');
-      RESOURCES.forEach((r, i) => {
-        addLog(`  close: ${r.name}`, 'log-close');
-        manualStates[i] = 'clean';
-      });
-      addLog('  ✓ All closed (no failure)', 'log-info');
-    } else if (mode === 'mid') {
-      addLog('  open: File handle', 'log-open'); manualStates[0] = 'open';
-      addLog('  open: DB lock', 'log-open'); manualStates[1] = 'open';
-      addLog('  ✗ THROW — "lock acquisition failed"', 'log-leak');
-      addLog('  finally: closing File handle (only one in scope)', 'log-close');
-      addLog('  ✗ DB lock LEAKED (not yet in finally scope)', 'log-leak');
-      addLog('  ✗ Logger never opened — but correctly absent', 'log-info');
-      manualStates[0] = 'clean';
-      manualStates[1] = 'leaked';
-      manualLeaked = 1;
-    } else if (mode === 'early') {
-      addLog('  open: File handle', 'log-open'); manualStates[0] = 'open';
-      addLog('  ✗ THROW — "file not found"', 'log-leak');
-      addLog('  finally: closing File handle ✓', 'log-close');
-      addLog('  DB lock, Logger, Cache: never opened', 'log-info');
-      manualStates[0] = 'clean';
-    } else if (mode === 'dispose-throw') {
-      RESOURCES.forEach((r, i) => {
-        addLog(`  open: ${r.name}`, 'log-open');
-        manualStates[i] = 'open';
-      });
-      addLog('  ✗ THROW in body — "work failed"', 'log-leak');
-      addLog('  finally: closing File handle ✓', 'log-close'); manualStates[0] = 'clean';
-      addLog('  ✗ THROW in DB lock close — "release failed"', 'log-leak');
-      addLog('  ✗ Logger and Cache LEAKED (finally aborted by second throw)', 'log-leak');
-      manualStates[1] = 'leaked'; manualStates[2] = 'leaked'; manualStates[3] = 'leaked';
-      manualLeaked = 3;
+  function runManualScenario(mode) {
+    const states = newStates();
+    const handles = [];
+
+    function openResource(index) {
+      const resource = RESOURCES[index];
+      states[index] = 'open';
+      addLog(`  open: ${resource.name}`, 'log-open');
+      const handle = {
+        close() {
+          if (mode === 'dispose-throw' && index === 1) {
+            states[index] = 'leaked';
+            addLog(`  close: ${resource.name} ✗ throws "release failed"`, 'log-leak');
+            throw new Error('release failed');
+          }
+          states[index] = 'clean';
+          addLog(`  close: ${resource.name}`, 'log-close');
+        },
+      };
+      handles[index] = handle;
+      return handle;
     }
 
-    document.getElementById('manualLeaks').textContent = manualLeaked;
-    renderList('manualList', manualStates);
+    try {
+      if (mode === 'clean') {
+        RESOURCES.forEach((_, i) => openResource(i));
+        addLog('  … doing work …', 'log-info');
+      } else if (mode === 'mid') {
+        openResource(0);
+        openResource(1);
+        throw new Error('lock acquisition failed');
+      } else if (mode === 'early') {
+        openResource(0);
+        throw new Error('file not found');
+      } else if (mode === 'dispose-throw') {
+        RESOURCES.forEach((_, i) => openResource(i));
+        throw new Error('work failed');
+      }
+    } catch (e) {
+      addLog(`  caught body error: ${e.message}`, 'log-leak');
+    } finally {
+      addLog('  finally: manual cleanup block runs', 'log-info');
+      try {
+        if (mode === 'clean') {
+          handles.forEach((handle) => handle?.close());
+        } else if (mode === 'mid') {
+          handles[0]?.close();
+          addLog('  DB lock was opened but not referenced by this finally block', 'log-leak');
+        } else if (mode === 'early') {
+          handles[0]?.close();
+        } else if (mode === 'dispose-throw') {
+          handles[0]?.close();
+          handles[1]?.close();
+          handles[2]?.close();
+          handles[3]?.close();
+        }
+      } catch (e) {
+        addLog(`  finally aborted by cleanup error: ${e.message}`, 'log-leak');
+      }
+    }
+
+    return { states, leaked: finalize(states) };
+  }
+
+  function runUsingScenario(mode) {
+    const states = newStates();
+    const disposeThrows = mode === 'dispose-throw' ? new Set([1]) : new Set();
+
+    function openUsing(index) {
+      const resource = RESOURCES[index];
+      states[index] = 'open';
+      addLog(`  using ${resource.name} (registered for disposal)`, 'log-open');
+      return {
+        [Symbol.dispose]() {
+          if (disposeThrows.has(index)) {
+            states[index] = 'leaked';
+            addLog(`  [Symbol.dispose]: ${resource.name} ✗ throws "release failed"`, 'log-leak');
+            throw new Error('release failed');
+          }
+          states[index] = 'clean';
+          addLog(`  [Symbol.dispose]: ${resource.name}`, 'log-close');
+        },
+      };
+    }
+
+    function bodyLog(message, cls = 'log-info') {
+      addLog(`  ${message}`, cls);
+    }
+
+    const sources = {
+      clean: `
+        {
+          using file = openUsing(0);
+          using lock = openUsing(1);
+          using logger = openUsing(2);
+          using cache = openUsing(3);
+          bodyLog('… doing work …');
+          bodyLog('leaving scope — runtime disposes LIFO');
+        }
+      `,
+      mid: `
+        {
+          using file = openUsing(0);
+          using lock = openUsing(1);
+          bodyLog('throwing "lock acquisition failed"', 'log-leak');
+          throw new Error('lock acquisition failed');
+        }
+      `,
+      early: `
+        {
+          using file = openUsing(0);
+          bodyLog('throwing "file not found"', 'log-leak');
+          throw new Error('file not found');
+        }
+      `,
+      'dispose-throw': `
+        {
+          using file = openUsing(0);
+          using lock = openUsing(1);
+          using logger = openUsing(2);
+          using cache = openUsing(3);
+          bodyLog('throwing "work failed"', 'log-leak');
+          throw new Error('work failed');
+        }
+      `,
+    };
+
+    try {
+      new Function('openUsing', 'bodyLog', '"use strict";\n' + sources[mode])(openUsing, bodyLog);
+      addLog('  scope exited cleanly', 'log-info');
+    } catch (e) {
+      addLog(`  caught at top after disposal: ${e.name}: ${e.message}`, 'log-info');
+    }
+
+    return { states, leaked: finalize(states) };
+  }
+
+  function run() {
+    clearLog();
+    if (!hasUsing) {
+      addLog('This browser cannot parse the using keyword yet.', 'log-leak');
+      return;
+    }
+
+    const mode = document.getElementById('failSel').value;
+    addLog('━━ Manual try/finally approach ━━', 'log-info');
+    const manual = runManualScenario(mode);
+    document.getElementById('manualLeaks').textContent = manual.leaked;
+    renderList('manualList', manual.states);
 
     addLog('', '');
     addLog('━━ using keyword approach ━━', 'log-info');
-
-    if (mode === 'clean') {
-      RESOURCES.forEach((r, i) => {
-        addLog(`  using ${r.name} (registered for disposal)`, 'log-open');
-        usingStates[i] = 'open';
-      });
-      addLog('  … doing work …', 'log-info');
-      addLog('  ← scope exit — runtime disposes LIFO', 'log-info');
-      for (let i = RESOURCES.length - 1; i >= 0; i--) {
-        addLog(`  [Symbol.dispose]: ${RESOURCES[i].name} ✓`, 'log-close');
-        usingStates[i] = 'clean';
-      }
-      addLog('  ✓ All disposed', 'log-info');
-    } else if (mode === 'mid') {
-      addLog('  using File handle (registered)', 'log-open'); usingStates[0] = 'open';
-      addLog('  using DB lock (registered)', 'log-open'); usingStates[1] = 'open';
-      addLog('  ✗ THROW — "lock acquisition failed"', 'log-leak');
-      addLog('  ← scope throw — runtime disposes LIFO', 'log-info');
-      addLog('  [Symbol.dispose]: DB lock ✓', 'log-close'); usingStates[1] = 'clean';
-      addLog('  [Symbol.dispose]: File handle ✓', 'log-close'); usingStates[0] = 'clean';
-      addLog('  ✓ No leaks', 'log-info');
-    } else if (mode === 'early') {
-      addLog('  using File handle (registered)', 'log-open'); usingStates[0] = 'open';
-      addLog('  ✗ THROW — "file not found"', 'log-leak');
-      addLog('  [Symbol.dispose]: File handle ✓', 'log-close'); usingStates[0] = 'clean';
-      addLog('  ✓ No leaks', 'log-info');
-    } else if (mode === 'dispose-throw') {
-      RESOURCES.forEach((r, i) => {
-        addLog(`  using ${r.name} (registered)`, 'log-open');
-        usingStates[i] = 'open';
-      });
-      addLog('  ✗ THROW in body — "work failed"', 'log-leak');
-      addLog('  ← scope throw — runtime disposes LIFO (even if disposers throw)', 'log-info');
-      for (let i = RESOURCES.length - 1; i >= 0; i--) {
-        if (i === 1) addLog(`  [Symbol.dispose]: ${RESOURCES[i].name} ✗ throws — but disposal continues`, 'log-leak');
-        else addLog(`  [Symbol.dispose]: ${RESOURCES[i].name} ✓`, 'log-close');
-        usingStates[i] = i === 1 ? 'leaked' : 'clean';
-      }
-      usingLeaked = 1;
-      addLog('  SuppressedError: body error + disposer error preserved', 'log-info');
-      addLog('  ✓ Only 1 leaked (the throwing disposer itself — not the others)', 'log-info');
-    }
-
-    document.getElementById('usingLeaks').textContent = usingLeaked;
-    renderList('usingList', usingStates);
+    const usingResult = runUsingScenario(mode);
+    document.getElementById('usingLeaks').textContent = usingResult.leaked;
+    renderList('usingList', usingResult.states);
   }
 
   document.getElementById('runBtn').addEventListener('click', run);
