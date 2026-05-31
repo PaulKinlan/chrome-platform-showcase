@@ -26,12 +26,12 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v135</p>
     <h1>Two signatures, one click</h1>
-    <p class="lede">Secure Payment Confirmation in Chrome 135 adds a second signature — a per-device, non-syncing key the browser holds. The simulator below generates one with WebCrypto and shows how it stacks on top of the WebAuthn assertion.</p>
+    <p class="lede">Secure Payment Confirmation in Chrome 135 adds a second signature — a per-device, non-syncing key the browser holds. This backend-backed lab enrolls a passkey-style public key and a browser-bound public key, issues a payment challenge, then verifies both signatures on the server.</p>
   </header>
 
   <div class="warn-block">
-    <strong>Flag</strong>
-    Browser-bound keys are gated on <code>chrome://flags/#spc-browser-bound-keys</code>. The demo synthesises both signatures in-page so you can inspect the shape regardless.
+    <strong>Backend verifier</strong>
+    The browser-bound key store itself is internal to SPC. This page uses WebCrypto key pairs to drive the same dual-signature verification shape through a real Deno endpoint, so the server accepts or rejects the assertion instead of the page inventing the result.
   </div>
 
   <div class="stage">
@@ -54,34 +54,42 @@
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 
+<script src="/public/spc-bbk-live.js"></script>
 <script>
 const cap = document.getElementById("cap");
 const flow = document.getElementById("flow");
-const has = !!crypto.subtle;
+const has = spcBbkLive.supported();
 cap.textContent = has ? "subtle.generateKey: yes" : "subtle.generateKey: no";
 cap.classList.add(has ? "ok" : "bad");
 
 function step(t, body) { const d = document.createElement("div"); d.className = "step"; d.innerHTML = `<h4>${t}</h4><pre class="raw"></pre>`; d.querySelector(".raw").textContent = body; flow.appendChild(d); }
-function b64(b) { let s = ""; for (const x of new Uint8Array(b)) s += String.fromCharCode(x); return btoa(s).replace(/=+$/, ""); }
 
 document.getElementById("run").addEventListener("click", async () => {
   flow.innerHTML = "";
   if (!has) { step("error", "WebCrypto unavailable"); return; }
 
-  const challenge = crypto.getRandomValues(new Uint8Array(32));
-  step("1. merchant generates SPC challenge", "nonce: " + b64(challenge));
+  const enrolled = await spcBbkLive.enroll("Primary checkout browser");
+  const enrollmentId = enrolled.result.enrollmentId;
+  step("1. server enrolls public keys", JSON.stringify(enrolled.result, null, 2));
 
-  // WebAuthn-style passkey (synced)
-  const k1 = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
-  const sig1 = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, k1.privateKey, challenge);
-  step("2. WebAuthn passkey signs (this key syncs across devices)", "sig1 (SPC assertion): " + b64(sig1).slice(0, 44) + "…");
+  const issued = await spcBbkLive.challenge(enrollmentId, {
+    amount: "49.99",
+    currency: "GBP",
+    payeeName: "Chrome Platform Store",
+  });
+  step("2. server issues SPC payment challenge", issued.payload);
 
-  // Browser-bound key (per-device, never leaves)
-  const k2 = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
-  const sig2 = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, k2.privateKey, challenge);
-  step("3. Browser-bound key signs (NEW in Chrome 135 — per device, never syncs)", "sig2 (BB key): " + b64(sig2).slice(0, 44) + "…");
+  const passkeySignature = await spcBbkLive.signPayload(enrolled.passkey.privateKey, issued.payload);
+  const browserBoundSignature = await spcBbkLive.signPayload(enrolled.browserBound.privateKey, issued.payload);
+  step("3. browser signs with both private keys", `passkeySignature: ${passkeySignature.slice(0, 48)}...\nbrowserBoundSignature: ${browserBoundSignature.slice(0, 48)}...`);
 
-  step("4. server verifies both", "passkey verification: " + (await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, k1.publicKey, sig1, challenge) ? "ok" : "fail") + "\n" + "BB key verification: " + (await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, k2.publicKey, sig2, challenge) ? "ok" : "fail") + "\nresult: payment auth granted on THIS device only");
+  const verified = await spcBbkLive.verifyWithSignatures(
+    enrollmentId,
+    issued.payload,
+    passkeySignature,
+    browserBoundSignature,
+  );
+  step("4. server verifies both", JSON.stringify(verified, null, 2));
 });
 </script>
 </body>

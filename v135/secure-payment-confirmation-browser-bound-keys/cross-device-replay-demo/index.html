@@ -102,7 +102,7 @@
   <header class="lede-block">
     <p class="eyebrow">v135 · payments</p>
     <h1>Cross-Device Replay Demo</h1>
-    <p class="lede">Browser-bound keys are non-syncing: they live on the device that created them. This demo generates two separate key pairs simulating two different devices, creates a payment assertion on Device A, then attempts to replay that assertion using Device B's key — demonstrating exactly why the verification fails.</p>
+    <p class="lede">Browser-bound keys are non-syncing: they live on the device that created them. This demo enrolls Device A with the backend, creates a payment assertion, then sends a replay attempt signed by Device B's browser-bound key so the server can reject it.</p>
   </header>
 
   <section>
@@ -114,7 +114,7 @@
       Secure Payment Confirmation browser-bound keys bind the payment assertion to the specific device hardware. Even if an attacker steals the raw assertion bytes, they cannot forge a valid signature from a different device — the server rejects it because the public key on file is from Device A, not Device B.
     </div>
 
-    <button class="action-btn" id="runBtn">Run cross-device replay attack simulation</button>
+    <button class="action-btn" id="runBtn">Run backend replay check</button>
 
     <p class="section-title">Device keys</p>
     <div class="devices">
@@ -162,10 +162,11 @@ async function verifyPaymentAssertion(assertion, storedPublicKey) {
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script src="/public/spc-bbk-live.js"></script>
 <script>
 (function () {
   const probe = document.getElementById('probeWC');
-  const hasWC = typeof crypto !== 'undefined' && crypto.subtle;
+  const hasWC = spcBbkLive.supported();
   if (hasWC) {
     probe.textContent = 'WebCrypto available';
     probe.className = 'probe ok';
@@ -203,61 +204,72 @@ async function verifyPaymentAssertion(assertion, storedPublicKey) {
     document.getElementById('deviceAKey').textContent = '—';
     document.getElementById('deviceBKey').textContent = '—';
 
-    const alg = { name: 'ECDSA', namedCurve: 'P-256' };
-    const sigAlg = { name: 'ECDSA', hash: 'SHA-256' };
-
     // Step 1: Generate Device A key pair
     const b1 = addStep('Device A', 'Generate ECDSA P-256 browser-bound key pair', 'pending');
-    const kpA = await crypto.subtle.generateKey(alg, true, ['sign', 'verify']);
-    const pubARaw = await crypto.subtle.exportKey('raw', kpA.publicKey);
-    const pubAB64 = b64url(pubARaw);
-    document.getElementById('deviceAKey').textContent = pubAB64.substring(0, 64) + '…';
+    const passkeyA = await spcBbkLive.generateKeyPair();
+    const kpA = await spcBbkLive.generateKeyPair();
+    const pubAJwk = await spcBbkLive.exportPublicJwk(kpA);
+    document.getElementById('deviceAKey').textContent = `${pubAJwk.x}.${pubAJwk.y}`.substring(0, 72) + '…';
     b1.textContent = 'done'; b1.className = 'step-badge ok';
 
     // Step 2: Bank registers Device A's public key
     const b2 = addStep('Bank server', 'Registers Device A public key for user account', 'pending');
-    await new Promise(r => setTimeout(r, 80));
+    const enrolled = await spcBbkLive.enroll('Device A', { passkey: passkeyA, browserBound: kpA });
     b2.textContent = 'registered'; b2.className = 'step-badge ok';
 
     // Step 3: Generate Device B key pair (attacker)
     const b3 = addStep('Device B (attacker)', 'Generate separate ECDSA key pair — different device', 'pending');
-    const kpB = await crypto.subtle.generateKey(alg, true, ['sign', 'verify']);
-    const pubBRaw = await crypto.subtle.exportKey('raw', kpB.publicKey);
-    const pubBB64 = b64url(pubBRaw);
-    document.getElementById('deviceBKey').textContent = pubBB64.substring(0, 64) + '…';
+    const kpB = await spcBbkLive.generateKeyPair();
+    const pubBJwk = await spcBbkLive.exportPublicJwk(kpB);
+    document.getElementById('deviceBKey').textContent = `${pubBJwk.x}.${pubBJwk.y}`.substring(0, 72) + '…';
     b3.textContent = 'done'; b3.className = 'step-badge ok';
 
     // Step 4: Device A creates a payment assertion
     const b4 = addStep('Device A', 'User pays — browser signs payment challenge with Device A key', 'pending');
-    const challenge = crypto.getRandomValues(new Uint8Array(32));
-    const paymentData = new TextEncoder().encode(JSON.stringify({
-      challenge: b64url(challenge.buffer),
+    const issued = await spcBbkLive.challenge(enrolled.result.enrollmentId, {
       amount: '49.99',
       currency: 'USD',
-      merchantId: 'shop.example.com'
-    }));
-    const sigA = await crypto.subtle.sign(sigAlg, kpA.privateKey, paymentData);
+      payeeName: 'shop.example.com',
+    });
+    const passkeySigA = await spcBbkLive.signPayload(passkeyA.privateKey, issued.payload);
+    const sigA = await spcBbkLive.signPayload(kpA.privateKey, issued.payload);
     b4.textContent = 'signed ✓'; b4.className = 'step-badge ok';
 
     // Step 5: Attacker intercepts the assertion bytes
     const b5 = addStep('Attacker', 'Intercepts the raw assertion bytes (network sniff or XSS)', 'pending');
-    await new Promise(r => setTimeout(r, 60));
     b5.textContent = 'stolen!'; b5.className = 'step-badge fail';
 
     // Step 6: Attacker tries to replay using Device B's key
     const b6 = addStep('Device B (replay)', 'Signs same payment data with Device B private key', 'pending');
-    const sigB = await crypto.subtle.sign(sigAlg, kpB.privateKey, paymentData);
+    const sigB = await spcBbkLive.signPayload(kpB.privateKey, issued.payload);
     b6.textContent = 'signed'; b6.className = 'step-badge info';
 
     // Step 7: Server verifies with Device A's registered public key
     const b7 = addStep('Bank server', 'Verifies Device B signature against Device A registered public key', 'pending');
-    const validReplay = await crypto.subtle.verify(sigAlg, kpA.publicKey, sigB, paymentData);
+    let replayResult;
+    try {
+      replayResult = await spcBbkLive.verifyWithSignatures(
+        enrolled.result.enrollmentId,
+        issued.payload,
+        passkeySigA,
+        sigB,
+      );
+    } catch (error) {
+      replayResult = error.response;
+    }
+    const validReplay = Boolean(replayResult?.accepted);
     b7.textContent = validReplay ? 'ACCEPTED (should not happen)' : 'REJECTED ✓';
     b7.className = 'step-badge ' + (validReplay ? 'fail' : 'ok');
 
     // Step 8: Verify original Device A signature succeeds
     const b8 = addStep('Bank server', 'Verifies original Device A signature (baseline)', 'pending');
-    const validOriginal = await crypto.subtle.verify(sigAlg, kpA.publicKey, sigA, paymentData);
+    const originalResult = await spcBbkLive.verifyWithSignatures(
+      enrolled.result.enrollmentId,
+      issued.payload,
+      passkeySigA,
+      sigA,
+    );
+    const validOriginal = Boolean(originalResult.accepted);
     b8.textContent = validOriginal ? 'ACCEPTED ✓' : 'unexpected failure';
     b8.className = 'step-badge ' + (validOriginal ? 'ok' : 'fail');
 

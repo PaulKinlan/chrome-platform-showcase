@@ -26,11 +26,11 @@
   <header class="lede-block">
     <p class="eyebrow">v145 · Payments · Key Rotation Walkthrough</p>
     <h1>Key rotation walkthrough</h1>
-    <p class="lede">Step through the lifecycle of a browser-bound SPC key — enrolment, first payment, browser profile sync, key rotation, and revocation. The simulator runs entirely in JavaScript so you can see every state transition.</p>
+    <p class="lede">Step through the lifecycle of a browser-bound SPC key — enrolment, first payment, browser profile sync, key rotation, and revocation. Each step calls the backend verifier so you can see server-side state transitions and signature checks.</p>
   </header>
-  <div class="warn-block"><strong>Flag required.</strong> Real browser-bound key ceremonies need <code>chrome://flags/#secure-payment-confirmation-browser-bound-keys</code>. The walkthrough below models the protocol without invoking the real API.</div>
+  <div class="warn-block"><strong>Backend verifier.</strong> Real browser-bound key ceremonies need <code>chrome://flags/#secure-payment-confirmation-browser-bound-keys</code>. This walkthrough uses WebCrypto keys plus the Deno verifier to exercise the same enrollment, payment, replay rejection, rotation, and reset flow.</div>
   <section>
-    <h2>simulate</h2>
+    <h2>live lifecycle</h2>
     <div class="ctl-row">
       <button id="b1">1. First enrolment</button>
       <button id="b2">2. Pay with bound key</button>
@@ -57,15 +57,95 @@ const cred = await navigator.credentials.create({
   <section><h2>see also</h2><ul><li><a href="../browser-bound-demo/">Browser Bound Demo</a></li><li><a href="../key-management/">Key Management</a></li></ul></section>
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script src="/public/spc-bbk-live.js"></script>
 <script>
-  const tl=document.getElementById('tl');let n=0;
-  function add(time,msg,pill){if(n===0)tl.innerHTML='';n++;const d=document.createElement('div');d.className='step';d.innerHTML=`<span class="when">${time}</span><span class="what"></span><span class="pill ${pill||''}">${pill||'step'}</span>`;d.querySelector('.what').innerHTML=msg;tl.appendChild(d);}
-  document.getElementById('b1').onclick=()=>{add('00:00','Browser generates device-bound ES256 keypair in TPM/secure enclave.','new');add('00:01','Relying party receives public key, stores it as the canonical credential.','new');};
-  document.getElementById('b2').onclick=()=>{add('05:14','User triggers SPC. Browser signs challenge with bound private key.','rot');add('05:15','Relying party verifies against stored public key → payment authorised.','rot');};
-  document.getElementById('b3').onclick=()=>{add('+1d','User signs into Chrome on second device. Browser-bound key does NOT sync (security boundary).','rot');add('+1d','Second device proves credential ownership and is enrolled with a fresh browser-bound key.','new');};
-  document.getElementById('b4').onclick=()=>{add('+7d','Relying party sends rotation challenge with old + new key proof.','rot');add('+7d','Browser generates new keypair, signs proof-of-possession with old key.','rot');add('+7d','Relying party retires old public key, stores new.','rot');};
-  document.getElementById('b5').onclick=()=>{add('+30d','User clears Chrome profile. Private key zeroised from TPM.','del');add('+30d','Relying party sees future signatures fail → must re-enrol the user.','del');};
-  document.getElementById('reset').onclick=()=>{n=0;tl.innerHTML='<div class="step"><span class="when">—</span><span class="what">Click "First enrolment" to begin.</span><span class="pill">idle</span></div>';};
+  const tl = document.getElementById('tl');
+  let n = 0;
+  let enrollmentId = null;
+  let passkey = null;
+  let browserBound = null;
+
+  function add(time, msg, pill) {
+    if (n === 0) tl.innerHTML = '';
+    n++;
+    const d = document.createElement('div');
+    d.className = 'step';
+    d.innerHTML = `<span class="when">${time}</span><span class="what"></span><span class="pill ${pill || ''}">${pill || 'step'}</span>`;
+    d.querySelector('.what').textContent = msg;
+    tl.appendChild(d);
+  }
+
+  function requireEnrollment() {
+    if (enrollmentId) return true;
+    add('blocked', 'Run first enrolment before this step.', 'del');
+    return false;
+  }
+
+  document.getElementById('b1').onclick = async () => {
+    const enrolled = await spcBbkLive.enroll('Primary SPC browser');
+    enrollmentId = enrolled.result.enrollmentId;
+    passkey = enrolled.passkey;
+    browserBound = enrolled.browserBound;
+    add('00:00', 'Browser generated passkey-style and browser-bound ES256 key pairs.', 'new');
+    add('00:01', `Relying party stored public keys: ${JSON.stringify(enrolled.result)}`, 'new');
+  };
+
+  document.getElementById('b2').onclick = async () => {
+    if (!requireEnrollment()) return;
+    const issued = await spcBbkLive.challenge(enrollmentId, { amount: '79.00', currency: 'GBP' });
+    const verified = await spcBbkLive.verify(enrollmentId, issued.payload, passkey, browserBound);
+    add('05:14', 'User triggered SPC and browser signed the backend challenge with both keys.', 'rot');
+    add('05:15', `Relying party verification result: ${JSON.stringify(verified)}`, 'rot');
+  };
+
+  document.getElementById('b3').onclick = async () => {
+    if (!requireEnrollment()) return;
+    const secondDeviceBound = await spcBbkLive.generateKeyPair();
+    const issued = await spcBbkLive.challenge(enrollmentId, { amount: '79.00', currency: 'GBP' });
+    const passkeySignature = await spcBbkLive.signPayload(passkey.privateKey, issued.payload);
+    const secondDeviceSignature = await spcBbkLive.signPayload(secondDeviceBound.privateKey, issued.payload);
+    let result;
+    try {
+      result = await spcBbkLive.verifyWithSignatures(enrollmentId, issued.payload, passkeySignature, secondDeviceSignature);
+    } catch (error) {
+      result = error.response;
+    }
+    add('+1d', 'User signed in on a second browser. The passkey can sign, but the browser-bound key is different.', 'rot');
+    add('+1d', `Server rejected second-device browser-bound proof: ${JSON.stringify(result)}`, 'del');
+  };
+
+  document.getElementById('b4').onclick = async () => {
+    if (!requireEnrollment()) return;
+    const payload = JSON.stringify({
+      type: 'browser-bound-key.rotate',
+      enrollmentId,
+      nonce: crypto.randomUUID(),
+      issuedAt: new Date().toISOString(),
+    });
+    const nextBrowserBound = await spcBbkLive.generateKeyPair();
+    const rotated = await spcBbkLive.rotate(enrollmentId, browserBound, nextBrowserBound, payload);
+    browserBound = nextBrowserBound;
+    add('+7d', 'Browser generated a new browser-bound key and signed the rotation payload with the old key.', 'rot');
+    add('+7d', `Relying party retired old public key and stored new key: ${JSON.stringify(rotated)}`, 'rot');
+  };
+
+  document.getElementById('b5').onclick = async () => {
+    if (!requireEnrollment()) return;
+    const reset = await spcBbkLive.reset();
+    enrollmentId = null;
+    passkey = null;
+    browserBound = null;
+    add('+30d', 'User cleared Chrome profile; demo enrollment was removed from the relying party.', 'del');
+    add('+30d', `Server reset response: ${JSON.stringify(reset)}`, 'del');
+  };
+
+  document.getElementById('reset').onclick = () => {
+    n = 0;
+    enrollmentId = null;
+    passkey = null;
+    browserBound = null;
+    tl.innerHTML = '<div class="step"><span class="when">—</span><span class="what">Click "First enrolment" to begin.</span><span class="pill">idle</span></div>';
+  };
 </script>
 </body>
 </html>
