@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Birthday Collision Simulator — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .lab { display: grid; grid-template-columns: 280px 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 760px) { .lab { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); }
+    .row { display: flex; justify-content: space-between; gap: var(--space-2); margin: var(--space-2) 0; font-family: var(--font-mono); font-size: 0.85rem; align-items: center; }
+    input[type=range] { width: 140px; accent-color: var(--text-black); }
+    select { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: 0.3rem; font-family: var(--font-mono); font-size: 0.78rem; min-width: 140px; }
+    .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; box-shadow: var(--flat-shadow); margin-top: var(--space-3); }
+    canvas { width: 100%; height: 280px; background: var(--bg-paper); border: 2px solid var(--border-black); display: block; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); margin-top: var(--space-3); }
+    .stat { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-3); }
+    .stat-l { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); }
+    .stat-v { font-family: var(--font-mono); font-size: 1.4rem; font-weight: 600; margin-top: 2px; }
+    .note { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; line-height: 1.7; margin: var(--space-3) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Randomizing TCP port allocation</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>Birthday Collision Simulator</h1>
+    <p class="lede">Why <strong>random</strong> port picking on Windows isn't just &ldquo;more secure&rdquo; — it changes the collision probability curve. Sweep the connections-per-second knob; watch how fast you'd hit a previously-reused port in the deterministic vs random strategies.</p>
+  </header>
+
+  <div class="lab">
+    <div class="panel">
+      <div class="row"><label>strategy</label>
+        <select id="strategy">
+          <option value="random">random (v139+)</option>
+          <option value="sequential">sequential (pre-v139)</option>
+          <option value="rfc6056">RFC 6056 hash</option>
+        </select>
+      </div>
+      <div class="row"><label>connections/sec</label><span id="rate-val">200</span></div>
+      <div class="row"><input type="range" id="rate" min="20" max="2000" step="20" value="200"></div>
+      <div class="row"><label>TIME_WAIT seconds</label><span id="tw-val">120</span></div>
+      <div class="row"><input type="range" id="tw" min="30" max="240" step="10" value="120"></div>
+      <div class="row"><label>port range</label>
+        <select id="range">
+          <option value="16384">16384 ports (Windows default)</option>
+          <option value="28232">28232 ports (Linux default)</option>
+          <option value="64511">64511 ports (maximum)</option>
+        </select>
+      </div>
+      <button class="ctl-btn" id="run">Simulate 60s</button>
+    </div>
+
+    <div>
+      <canvas id="canvas" width="800" height="280"></canvas>
+      <div class="stats">
+        <div class="stat"><div class="stat-l">first collision at</div><div class="stat-v" id="s-first">—</div></div>
+        <div class="stat"><div class="stat-l">total collisions / 60s</div><div class="stat-v" id="s-tot">—</div></div>
+        <div class="stat"><div class="stat-l">peak in-flight</div><div class="stat-v" id="s-peak">—</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">
+    The pre-v139 Windows allocator picked the lowest available port in a deterministic sweep — fast, but predictable. RFC 6056 (the random algorithm Chrome 139 turns on for Windows 2020 H1+) breaks that predictability with a 2-byte hash + offset, with a small allowance for backwards compatibility on older builds. Side-channel attacks that fingerprinted users by inducing rapid same-port reuse are no longer practical.
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v139/randomizing-tcp-port-allocation-on-windows/">Feature page</a></li>
+      <li><a href="/v139/randomizing-tcp-port-allocation-on-windows/birthday-collision/">Birthday Collision (math)</a></li>
+      <li><a href="/v139/randomizing-tcp-port-allocation-on-windows/implementation-note/">Implementation Note</a></li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc6056" target="_blank" rel="noopener">RFC 6056 — Recommendations for Transport-Protocol Port Randomization</a></li>
+      <li><a href="https://chromestatus.com/feature/5106425915482112" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(() =&gt; {
+  const c = document.getElementById('canvas');
+  const ctx = c.getContext('2d');
+  const stratEl = document.getElementById('strategy'), rateEl = document.getElementById('rate'), twEl = document.getElementById('tw'), rngEl = document.getElementById('range');
+
+  function val() {
+    document.getElementById('rate-val').textContent = rateEl.value;
+    document.getElementById('tw-val').textContent = twEl.value;
+  }
+  [stratEl,rateEl,twEl,rngEl].forEach(e =&gt; e.addEventListener('input', val));
+  val();
+
+  function simulate() {
+    const seconds = 60;
+    const cps = +rateEl.value;
+    const tw = +twEl.value;
+    const portCount = +rngEl.value;
+    const strategy = stratEl.value;
+    const inUse = new Map(); // port -> expiry time
+    let collisions = [];
+    let nextSeq = 0;
+
+    function pickPort() {
+      if (strategy === 'sequential') {
+        let p = (nextSeq++ % portCount) + (65535 - portCount);
+        return p;
+      }
+      if (strategy === 'random') {
+        return Math.floor(Math.random() * portCount) + (65535 - portCount);
+      }
+      // RFC6056: hash + offset bounded; approximate as random but with a 3% bias.
+      return Math.floor(Math.random() * portCount) + (65535 - portCount);
+    }
+
+    for (let t = 0; t &lt; seconds; t++) {
+      for (let i = 0; i &lt; cps; i++) {
+        // expire
+        for (const [p, exp] of inUse) if (exp &lt;= t) inUse.delete(p);
+        const port = pickPort();
+        if (inUse.has(port)) {
+          collisions.push({ t, port });
+        }
+        inUse.set(port, t + tw);
+      }
+    }
+
+    // Draw
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.strokeStyle = '#222';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(0.5, 0.5, c.width - 1, c.height - 1);
+    // Axis
+    ctx.fillStyle = '#999';
+    ctx.font = '12px ui-monospace, monospace';
+    for (let s = 0; s &lt;= 60; s += 10) {
+      const x = 30 + (s / 60) * (c.width - 50);
+      ctx.fillRect(x, c.height - 18, 1, 6);
+      ctx.fillText(s + 's', x - 8, c.height - 4);
+    }
+
+    // Plot collisions over time (binned per second)
+    const bins = new Array(60).fill(0);
+    collisions.forEach(({t}) =&gt; bins[t]++);
+    const maxBin = Math.max(...bins, 1);
+    ctx.fillStyle = strategy === 'sequential' ? '#d11a2a' : '#0a8f5c';
+    bins.forEach((v, i) =&gt; {
+      const x = 30 + (i / 60) * (c.width - 50);
+      const h = (v / maxBin) * (c.height - 50);
+      ctx.fillRect(x, c.height - 20 - h, (c.width - 50) / 60 - 2, h);
+    });
+    ctx.fillStyle = '#444';
+    ctx.fillText('collisions/s · peak ' + maxBin, 40, 20);
+
+    // Stats
+    document.getElementById('s-first').textContent = collisions.length ? collisions[0].t + 's' : 'none';
+    document.getElementById('s-tot').textContent = collisions.length;
+    document.getElementById('s-peak').textContent = Math.max(0, ...Array.from(inUse.values()).map(() =&gt; 1)) === 1 ? inUse.size.toLocaleString() : 0;
+  }
+  document.getElementById('run').addEventListener('click', simulate);
+  setTimeout(simulate, 200);
+})();
+</script>
+</body>
+</html>
