@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WGSL Playground — WebGPU Subgroups — Chrome 134</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .lab { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .preset-row { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0; }
+    .preset { font-family: var(--font-mono); font-size: 0.74rem; padding: 0.3rem 0.5rem; background: var(--bg-paper); color: var(--text-black); border: 1px solid var(--border-black); cursor: pointer; box-shadow: none; }
+    .preset.on { background: var(--text-black); color: var(--bg-ivory); }
+
+    textarea.shader {
+      width: 100%; min-height: 14rem; font-family: var(--font-mono); font-size: 0.84rem;
+      padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone);
+      color: var(--text-black); box-sizing: border-box; line-height: 1.5;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: var(--space-3) 0; align-items: center; }
+    .out { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; min-height: 8rem; max-height: 16rem; overflow: auto; white-space: pre-wrap; }
+    .probe { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
+    .ok { color: var(--accent-emerald); } .no { color: var(--accent-rose); }
+    .stat { display: inline-block; background: var(--bg-paper); border: 1px solid var(--border-black); padding: 0.2rem 0.6rem; font-family: var(--font-mono); font-size: 0.78rem; margin: 0.2rem 0.4rem 0.2rem 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v134/">&larr; Chrome 134</a> / <a href="../">WebGPU Subgroups</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v134 · graphics</p>
+    <h1>WGSL Playground</h1>
+    <p class="lede">Edit a WGSL compute shader that uses subgroup intrinsics — <code>subgroupAdd</code>, <code>subgroupMax</code>, <code>subgroupBroadcast</code>, <code>subgroupShuffle</code> — pick a preset, run it on this adapter, and read back the result buffer. Adapter limits exposed at top.</p>
+  </header>
+
+  <div class="probe" id="probe"></div>
+
+  <div class="lab">
+    <p class="note" id="adapterInfo">no adapter yet</p>
+    <div class="preset-row">
+      <button class="preset on" data-preset="add">subgroupAdd (sum)</button>
+      <button class="preset" data-preset="max">subgroupMax</button>
+      <button class="preset" data-preset="bcast">subgroupBroadcast</button>
+      <button class="preset" data-preset="shuffle">subgroupShuffle</button>
+    </div>
+    <textarea class="shader" id="src"></textarea>
+    <div class="row">
+      <button id="run">run compute</button>
+      <span class="note" id="status"></span>
+    </div>
+    <div class="out" id="out">— run to see output —</div>
+  </div>
+
+  <section>
+    <h2>what each preset does</h2>
+    <ul>
+      <li><strong>subgroupAdd</strong> — every lane votes its <code>local_index</code>, the intrinsic returns the sum across the subgroup. Workgroup of 64 → first 32 lanes sum to (0+1+…+31)=496, next 32 to 1488.</li>
+      <li><strong>subgroupMax</strong> — every lane votes <code>(local_index * 7) % 41</code>, intrinsic returns the max within the subgroup. Different per subgroup based on the modulus pattern.</li>
+      <li><strong>subgroupBroadcast</strong> — lane 0 of each subgroup pushes <code>local_index * 100</code> to every lane.</li>
+      <li><strong>subgroupShuffle</strong> — lane <em>i</em> reads from lane <em>(i+3) % subgroupSize</em>.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">WebGPU Subgroups</a> — feature index</li>
+      <li><a href="../subgroups/">Subgroups basics</a></li>
+      <li><a href="../reduction-vs-shared/">Reduction comparison</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probe = document.getElementById("probe");
+  const hasGPU = "gpu" in navigator;
+  probe.innerHTML = hasGPU
+    ? '<span class="ok">[ok]</span> navigator.gpu present.'
+    : '<span class="no">[no]</span> WebGPU unavailable — shader editor still works.';
+
+  const presets = {
+    add: `enable subgroups;
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(local_invocation_index) li: u32,
+        @builtin(global_invocation_id) gid: vec3<u32>) {
+  let v = li;
+  let sum = subgroupAdd(v);
+  data[gid.x] = sum;
+}`,
+    max: `enable subgroups;
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(local_invocation_index) li: u32,
+        @builtin(global_invocation_id) gid: vec3<u32>) {
+  let v: u32 = (li * 7u) % 41u;
+  let m = subgroupMax(v);
+  data[gid.x] = m;
+}`,
+    bcast: `enable subgroups;
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(local_invocation_index) li: u32,
+        @builtin(global_invocation_id) gid: vec3<u32>) {
+  // Each subgroup's lane 0 broadcasts li*100 to all lanes.
+  let v: u32 = li * 100u;
+  let b = subgroupBroadcast(v, 0u);
+  data[gid.x] = b;
+}`,
+    shuffle: `enable subgroups;
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(local_invocation_index) li: u32,
+        @builtin(global_invocation_id) gid: vec3<u32>) {
+  let src = (li + 3u) % subgroupSize();
+  let v = subgroupShuffle(li, src);
+  data[gid.x] = v;
+}`,
+  };
+
+  function setPreset(p) {
+    document.getElementById("src").value = presets[p];
+    document.querySelectorAll(".preset").forEach(b => b.classList.toggle("on", b.dataset.preset === p));
+  }
+  document.querySelectorAll(".preset").forEach(b => b.addEventListener("click", () => setPreset(b.dataset.preset)));
+  setPreset("add");
+
+  let adapter, device;
+  if (hasGPU) {
+    navigator.gpu.requestAdapter().then(a => {
+      adapter = a;
+      if (!a) { document.getElementById("adapterInfo").textContent = "no adapter available"; return; }
+      const subgroupSize = a.limits?.minSubgroupSize ? `${a.limits.minSubgroupSize}–${a.limits.maxSubgroupSize}` : "n/a";
+      document.getElementById("adapterInfo").innerHTML = `<span class="stat">adapter: ${a.info?.vendor || "?"}</span><span class="stat">subgroup size: ${subgroupSize}</span><span class="stat">maxComputeWorkgroupSizeX: ${a.limits.maxComputeWorkgroupSizeX}</span>`;
+    });
+  } else {
+    document.getElementById("adapterInfo").textContent = "WebGPU unavailable — cannot run.";
+  }
+
+  document.getElementById("run").addEventListener("click", async () => {
+    if (!hasGPU) { document.getElementById("out").textContent = "WebGPU unavailable"; return; }
+    document.getElementById("status").textContent = "running…";
+    try {
+      const a = await navigator.gpu.requestAdapter();
+      const features = [];
+      if (a.features.has("subgroups")) features.push("subgroups");
+      const d = await a.requestDevice({ requiredFeatures: features });
+      const shaderModule = d.createShaderModule({ code: document.getElementById("src").value });
+
+      const buf = d.createBuffer({ size: 256, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const readback = d.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const bgl = d.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }] });
+      const pipeline = d.createComputePipeline({ layout: d.createPipelineLayout({ bindGroupLayouts: [bgl] }), compute: { module: shaderModule, entryPoint: "main" } });
+      const bg = d.createBindGroup({ layout: bgl, entries: [{ binding: 0, resource: { buffer: buf } }] });
+      const enc = d.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(1);
+      pass.end();
+      enc.copyBufferToBuffer(buf, 0, readback, 0, 256);
+      d.queue.submit([enc.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const arr = new Uint32Array(readback.getMappedRange().slice(0));
+      readback.unmap();
+      document.getElementById("out").textContent = "[" + Array.from(arr.slice(0, 64)).join(", ") + "]";
+      document.getElementById("status").textContent = "done";
+    } catch (e) {
+      document.getElementById("out").textContent = "ERROR: " + e.message;
+      document.getElementById("status").textContent = "failed";
+    }
+  });
+</script>
+</body>
+</html>
