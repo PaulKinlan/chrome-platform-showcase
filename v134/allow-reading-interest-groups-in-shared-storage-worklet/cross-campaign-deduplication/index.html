@@ -62,7 +62,7 @@
   <header class="lede-block">
     <p class="eyebrow">v134 · privacy sandbox</p>
     <h1>Cross-campaign Deduplication</h1>
-    <p class="lede">A Shared Storage worklet that reads <code>interestGroups()</code> can deduplicate reach across campaigns — avoiding double-counting users who saw multiple campaigns. Simulate a worklet run across a mock user population.</p>
+    <p class="lede">A Shared Storage worklet that reads <code>interestGroups()</code> can deduplicate reach across campaigns — avoiding double-counting users who saw multiple campaigns. Use the page to inspect the worklet logic and, where available, run the real Shared Storage worklet registration path.</p>
   </header>
 
   <section>
@@ -74,7 +74,7 @@
       Without <code>interestGroups()</code> in the worklet, you can't tell which users are in multiple campaigns — so your reach count overcounts. The worklet can now read all IGs for the origin, deduplicate across campaigns, and contribute a single aggregate count.
     </div>
 
-    <p class="section-title">Mock user population (10 simulated users)</p>
+    <p class="section-title">Example audience table</p>
     <div class="user-grid" id="userGrid"></div>
 
     <p class="section-title">Run worklet deduplication</p>
@@ -97,7 +97,7 @@
     </table>
     <div class="summary-row" id="summaryRow" style="display:none"></div>
 
-    <p class="section-title">Simulated worklet code</p>
+    <p class="section-title">Worklet code</p>
     <div class="code-block">// Shared Storage worklet (Chrome 134+)
 class ReachMeasurementOperation {
   async run(data, { sharedStorage }) {
@@ -132,9 +132,14 @@ register('reach-measurement', ReachMeasurementOperation);</div>
 <script>
 (function () {
   const probe = document.getElementById('probeSharedStorage');
-  if (typeof window.sharedStorage !== 'undefined') {
-    probe.textContent = 'Shared Storage supported'; probe.classList.replace('fail', 'ok');
-  } else { probe.textContent = 'Shared Storage not available — simulation only'; probe.classList.replace('fail', 'warn'); }
+  const hasWorklet = typeof window.sharedStorage?.worklet?.addModule === 'function';
+  if (hasWorklet) {
+    probe.textContent = 'Shared Storage worklet supported'; probe.classList.replace('fail', 'ok');
+  } else {
+    probe.textContent = 'Shared Storage worklet not available in this browser';
+    probe.classList.replace('fail', 'warn');
+    document.getElementById('runBtn').disabled = true;
+  }
 
   const IG_COLORS = { sport: 'sport', tech: 'tech', travel: 'travel', fashion: 'fashion' };
 
@@ -168,41 +173,50 @@ register('reach-measurement', ReachMeasurementOperation);</div>
     'tech-laptop': 'tech',
   };
 
-  document.getElementById('runBtn').addEventListener('click', () => {
+  document.getElementById('runBtn').addEventListener('click', async () => {
+    if (!hasWorklet) return;
     const campaign = document.getElementById('campaignSel').value;
     const prefix = CAMPAIGN_PREFIXES[campaign];
-    const seen = new Set();
-    let reached = 0, deduped = 0;
-
-    const tbody = document.getElementById('resultBody');
-    tbody.innerHTML = '';
-    USERS.forEach(u => {
-      const matching = u.igs.filter(ig => ig.startsWith(prefix));
-      if (matching.length === 0) return;
-
-      const alreadySeen = seen.has(u.id);
-      if (!alreadySeen) { seen.add(u.id); reached++; }
-      else { deduped++; }
-
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${u.id}</td>
-        <td>${matching.map(ig => `<span class="ig-pill ${prefix}">${ig}</span>`).join('')}</td>
-        <td class="${alreadySeen ? 'deduped' : 'counted'}">${alreadySeen ? '✗ duplicate' : '✓ first time'}</td>
-        <td class="${alreadySeen ? 'deduped' : 'counted'}">${alreadySeen ? 'skip (no double-count)' : 'contribute to histogram'}</td>
-      `;
-      tbody.appendChild(tr);
-    });
-
-    const summaryRow = document.getElementById('summaryRow');
-    summaryRow.innerHTML = `
-      <div class="metric-card"><div class="metric-val">${reached + deduped}</div><div class="metric-label">Raw impressions</div></div>
-      <div class="metric-card"><div class="metric-val">${reached}</div><div class="metric-label">Deduplicated reach</div></div>
-      <div class="metric-card"><div class="metric-val">${deduped}</div><div class="metric-label">Duplicates removed</div></div>
-      <div class="metric-card"><div class="metric-val">${reached > 0 ? ((deduped/(reached+deduped))*100).toFixed(0)+'%' : '0%'}</div><div class="metric-label">Overcount avoided</div></div>
+    const moduleCode = `
+      class ReachMeasurementOperation {
+        async run(data) {
+          const igs = await sharedStorage.interestGroups();
+          const inAudience = Array.from(igs || []).some((ig) =>
+            String(ig.name || '').startsWith(data.prefix)
+          );
+          if (!inAudience) return;
+          const seen = await sharedStorage.get('seen_' + data.campaign);
+          if (seen) return;
+          await sharedStorage.set('seen_' + data.campaign, '1');
+          privateAggregation.contributeToHistogram({
+            bucket: BigInt(data.bucketOffset),
+            value: 1,
+          });
+        }
+      }
+      register('reach-measurement', ReachMeasurementOperation);
     `;
-    document.getElementById('resultTable').style.display = '';
+    const summaryRow = document.getElementById('summaryRow');
+    summaryRow.innerHTML = '<div class="metric-card"><div class="metric-val">…</div><div class="metric-label">Running sharedStorage.run</div></div>';
+    document.getElementById('resultTable').style.display = 'none';
     summaryRow.style.display = 'flex';
+    const url = URL.createObjectURL(new Blob([moduleCode], { type: 'application/javascript' }));
+    try {
+      await sharedStorage.worklet.addModule(url);
+      await sharedStorage.run('reach-measurement', {
+        data: { campaign, prefix, bucketOffset: 1 },
+        privateAggregationConfig: { contributionLimit: 1 },
+      });
+      summaryRow.innerHTML = `
+        <div class="metric-card"><div class="metric-val">OK</div><div class="metric-label">Worklet run resolved</div></div>
+        <div class="metric-card"><div class="metric-val">${campaign}</div><div class="metric-label">Campaign</div></div>
+        <div class="metric-card"><div class="metric-val">${prefix}</div><div class="metric-label">IG prefix checked</div></div>
+      `;
+    } catch (e) {
+      summaryRow.innerHTML = `<div class="metric-card"><div class="metric-val">ERR</div><div class="metric-label">${e.name}: ${e.message}</div></div>`;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
   });
 })();
 </script>
