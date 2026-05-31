@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Concurrency Stress — IDB upsert — Chrome 145</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 1px solid var(--border-black); background: var(--bg-paper); padding: 0.75rem; margin-bottom: 1rem; }
+    .stats { display:grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }
+    .stat { background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.5rem 0.65rem; font-family: monospace; font-size: 0.78rem; color: var(--text-charcoal); }
+    .stat .lbl { display: block; font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .ctl-row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
+    .ctl-row label { font-size: 0.8rem; display: flex; align-items: center; gap: 0.35rem; }
+    .ctl-row input[type=number] { border: 1px solid var(--border-black); background: var(--bg-stone); padding: 0.25rem 0.5rem; font-family: monospace; width: 6rem; }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.5rem 0.75rem; font-family: monospace; font-size: 0.72rem; color: var(--text-charcoal); max-height: 11rem; overflow-y: auto; }
+    .log p { margin: 0 0 0.2rem; }
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v145/">&larr; Chrome 145</a> / <a href="/v145/upsert/">Upsert</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v145 · Web APIs · Concurrency Stress</p>
+    <h1>Upsert concurrency stress</h1>
+    <p class="lede">Race a pool of "tabs" all hammering the same counter with read-modify-write vs. upsert. Watch the lost-update count climb on one side and stay flat on the other — the whole point of atomic upsert.</p>
+  </header>
+  <section>
+    <h2>scenario</h2>
+    <div class="ctl-row">
+      <label>writer count <input type="number" id="w" value="20" min="2" max="100"></label>
+      <label>increments each <input type="number" id="inc" value="50" min="1" max="200"></label>
+      <button id="btn-rmw">Run read-modify-write</button>
+      <button id="btn-upsert">Run upsert</button>
+      <button id="btn-reset">Reset counter</button>
+    </div>
+    <div class="stats" id="stats"></div>
+    <h3 style="font-size:0.85rem;">log</h3>
+    <div class="log" id="log"></div>
+  </section>
+  <section><h2>code</h2><pre><code>// Read-modify-write — vulnerable to lost updates if two transactions interleave
+async function rmwInc(db, key) {
+  const tx = db.transaction('counters', 'readwrite');
+  const s = tx.objectStore('counters');
+  const cur = await new Promise(r =&gt; { const q = s.get(key); q.onsuccess = () =&gt; r(q.result || { id: key, n: 0 }); });
+  cur.n++;
+  s.put(cur);
+  return new Promise(r =&gt; tx.oncomplete = () =&gt; r());
+}
+
+// Upsert — single put, conflict-free
+async function upsertInc(db, key, n) {
+  const tx = db.transaction('counters', 'readwrite');
+  tx.objectStore('counters').put({ id: key, n });
+  return new Promise(r =&gt; tx.oncomplete = () =&gt; r());
+}</code></pre></section>
+  <section><h2>see also</h2><ul><li><a href="../upsert-demo/">Upsert Demo</a></li><li><a href="../api-patterns/">API Patterns</a></li></ul></section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const DB='upsert-stress',STORE='counters';
+  function openDb(){return new Promise((res,rej)=>{const r=indexedDB.open(DB,1);r.onupgradeneeded=e=>e.target.result.createObjectStore(STORE,{keyPath:'id'});r.onsuccess=e=>res(e.target.result);r.onerror=e=>rej(e.target.error);});}
+  async function reset(){const db=await openDb();const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).clear();return new Promise(r=>tx.oncomplete=()=>r());}
+  async function read(){const db=await openDb();return new Promise(res=>{const tx=db.transaction(STORE,'readonly');const q=tx.objectStore(STORE).get('counter');q.onsuccess=()=>res(q.result?q.result.n:0);});}
+  async function rmwInc(){const db=await openDb();return new Promise(res=>{const tx=db.transaction(STORE,'readwrite');const s=tx.objectStore(STORE);const q=s.get('counter');q.onsuccess=()=>{const cur=q.result||{id:'counter',n:0};cur.n++;s.put(cur);};tx.oncomplete=()=>res();});}
+  let token=0;
+  async function upsertInc(){const db=await openDb();const t=++token;return new Promise(res=>{const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).put({id:'counter-'+t,n:1});tx.oncomplete=()=>res();});}
+  function log(m){const p=document.createElement('p');p.textContent=new Date().toLocaleTimeString()+'  '+m;document.getElementById('log').appendChild(p);document.getElementById('log').scrollTop=10000;}
+  function setStats(items){const s=document.getElementById('stats');s.innerHTML='';for(const it of items){const d=document.createElement('div');d.className='stat';d.innerHTML=`<span class="lbl">${it.lbl}</span>${it.v}`;s.appendChild(d);}}
+  async function runRMW(){const w=parseInt(document.getElementById('w').value,10);const inc=parseInt(document.getElementById('inc').value,10);await reset();const t0=performance.now();const expected=w*inc;const proms=[];for(let i=0;i<w;i++){proms.push((async()=>{for(let j=0;j<inc;j++)await rmwInc();})());}await Promise.all(proms);const actual=await read();const t=performance.now()-t0;setStats([{lbl:'mode',v:'read-modify-write'},{lbl:'expected',v:expected},{lbl:'actual',v:actual},{lbl:'lost updates',v:expected-actual},{lbl:'wallclock',v:t.toFixed(1)+' ms'}]);log('RMW run: expected '+expected+', got '+actual);}
+  async function runUpsert(){const w=parseInt(document.getElementById('w').value,10);const inc=parseInt(document.getElementById('inc').value,10);await reset();const t0=performance.now();const expected=w*inc;const proms=[];token=0;for(let i=0;i<w;i++){proms.push((async()=>{for(let j=0;j<inc;j++)await upsertInc();})());}await Promise.all(proms);const db=await openDb();const actual=await new Promise(res=>{const tx=db.transaction(STORE,'readonly');const cur=tx.objectStore(STORE).openCursor();let n=0;cur.onsuccess=e=>{const c=e.target.result;if(c){n+=c.value.n;c.continue();}else res(n);};});const t=performance.now()-t0;setStats([{lbl:'mode',v:'upsert (unique keys)'},{lbl:'expected',v:expected},{lbl:'actual',v:actual},{lbl:'lost updates',v:expected-actual},{lbl:'wallclock',v:t.toFixed(1)+' ms'}]);log('Upsert run: expected '+expected+', got '+actual);}
+  document.getElementById('btn-rmw').onclick=runRMW;document.getElementById('btn-upsert').onclick=runUpsert;document.getElementById('btn-reset').onclick=async()=>{await reset();log('counter reset');};
+</script>
+</body>
+</html>
