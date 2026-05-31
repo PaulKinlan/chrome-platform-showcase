@@ -3576,7 +3576,7 @@ async function renderFeaturesCatalogue(channels: Channels): Promise<string> {
     const slug = slugify(r.name);
     const cat = categoryTag(r.category);
     const demoCell = r.hasDemo
-      ? `<a class="tag tag-live" href="/v${r.mstone}/${slug}/">built &rarr;</a>`
+      ? `<a class="tag tag-live" href="/v${r.mstone}/${slug}/">demo &rarr;</a>`
       : `<span class="tag tag-pending">pending</span>`;
     const search = `${r.name} ${r.summary} ${cat} v${r.mstone}`.toLowerCase();
     return `<tr data-search="${escapeHTML(search)}" data-mstone="${r.mstone}" data-status="${
@@ -3675,7 +3675,7 @@ async function renderFeaturesCatalogue(channels: Channels): Promise<string> {
   <header class="lede-block">
     <p class="eyebrow">catalogue</p>
     <h1>all features</h1>
-    <p class="lede">Every feature with a built demo, across every milestone. Filter by name, milestone, or status. Pending features still show up on the per-release pages.</p>
+    <p class="lede">Every feature with a demo available, across every milestone. Filter by name, milestone, or status. Pending features still show up on the per-release pages.</p>
   </header>
 
   <div class="filters">
