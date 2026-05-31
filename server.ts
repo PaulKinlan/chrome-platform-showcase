@@ -542,8 +542,7 @@ const CATEGORIES: Category[] = [
   {
     slug: "webassembly",
     label: "WebAssembly",
-    blurb:
-      "Wasm features: memory64, branch hints, JSPI, JS String Builtins, custom descriptors.",
+    blurb: "Wasm features: memory64, branch hints, JSPI, JS String Builtins, custom descriptors.",
     patterns: [
       /webassembly/i,
       /\bwasm\b/i,
