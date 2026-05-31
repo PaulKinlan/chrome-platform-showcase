@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fingerprint Resistance Demo — TCP Socket Pool — Chrome 143</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .stage h2 { font-size: 1.1rem; margin-bottom: var(--space-4); }
+    .btn {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      padding: var(--space-2) var(--space-5);
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      cursor: pointer;
+      box-shadow: var(--thin-shadow);
+      transition: var(--transition);
+    }
+    .btn:hover { box-shadow: var(--flat-shadow); transform: translate(-1px,-1px); }
+    .btn:active { box-shadow: none; transform: translate(2px,2px); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: var(--thin-shadow); }
+    canvas { border: 2px solid var(--border-black); display: block; width: 100%; height: 180px; background: var(--bg-stone); }
+    .toggle-row { display: flex; gap: var(--space-3); margin-bottom: var(--space-4); }
+    .toggle-btn {
+      flex: 1;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      padding: var(--space-2) var(--space-3);
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-black);
+      cursor: pointer;
+      text-align: center;
+    }
+    .toggle-btn.active { background: var(--text-black); color: var(--bg-ivory); }
+    .slider-row { display: flex; align-items: center; gap: var(--space-4); margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.85rem; }
+    input[type="range"] { flex: 1; accent-color: var(--text-black); }
+    .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin-top: var(--space-4); }
+    .metric-box { border: 2px solid var(--border-black); padding: var(--space-3); text-align: center; background: var(--bg-stone); }
+    .metric-box .val { font-family: var(--font-display); font-size: 1.6rem; line-height: 1; }
+    .metric-box .lbl { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); margin-top: var(--space-1); }
+    .log-block { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.75rem; height: 150px; overflow-y: auto; }
+    .log-block .entry { padding: 2px 0; border-bottom: 1px solid var(--border-black); }
+    .log-block .entry.cliff { color: var(--accent-rose); font-weight: 600; }
+    .explain-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin-top: var(--space-4); }
+    .explain-col { border: 2px solid var(--border-black); padding: var(--space-4); }
+    .explain-col h3 { font-size: 0.88rem; font-family: var(--font-mono); margin-bottom: var(--space-3); border-bottom: 2px solid var(--border-black); padding-bottom: var(--space-2); }
+    .explain-col p, .explain-col li { font-size: 0.82rem; color: var(--text-charcoal); line-height: 1.6; margin-bottom: var(--space-2); }
+    .explain-col ul { padding-left: var(--space-4); }
+    .before-col { background: var(--bg-stone); }
+    .after-col { background: var(--bg-paper); }
+    .entropy-box { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-4); text-align: center; margin-top: var(--space-4); }
+    .entropy-val { font-family: var(--font-display); font-size: 2.2rem; }
+    .entropy-lbl { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); margin-top: var(--space-2); }
+    .bar { height: 18px; background: var(--accent-blue); margin: 2px 0; display: flex; align-items: center; }
+    .bar.cliff-bar { background: var(--accent-rose); }
+    .progress-row { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); margin: var(--space-2) 0; min-height: 1.2em; }
+    @media (max-width: 600px) {
+      .metric-grid { grid-template-columns: 1fr 1fr; }
+      .explain-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v143/tcp-socket-pool-limit-randomization/">&larr; TCP Socket Pool Limit Randomization</a></p>
+  <h1>Fingerprint Resistance Demo</h1>
+  <p class="lede">This XS-Leak probes TCP socket pool exhaustion to infer the pool size — a reliable browser fingerprint. Chrome 143 randomizes the pool limit, spreading the cliff and defeating the probe.</p>
+
+  <!-- Simulation toggle -->
+  <section class="stage">
+    <h2>Simulation Mode</h2>
+    <div class="toggle-row">
+      <div class="toggle-btn active" id="togglePre" onclick="setMode('pre')">Pre-randomization (sharp cliff)</div>
+      <div class="toggle-btn" id="togglePost" onclick="setMode('post')">Post-randomization (spread cliff)</div>
+    </div>
+    <div class="slider-row">
+      <label for="connSlider" style="white-space:nowrap;">Concurrent connections:</label>
+      <input type="range" id="connSlider" min="10" max="80" value="40" oninput="updateSlider(this)">
+      <span id="connVal" style="min-width:3ch;">40</span>
+    </div>
+    <button class="btn" id="runBtn" onclick="runProbe()">Run Timing Probe</button>
+    <div class="progress-row" id="progressMsg"></div>
+    <canvas id="histCanvas"></canvas>
+    <div class="metric-grid">
+      <div class="metric-box"><div class="val" id="mCliff">—</div><div class="lbl">Detected cliff (conn #)</div></div>
+      <div class="metric-box"><div class="val" id="mSpread">—</div><div class="lbl">Cliff spread (connections)</div></div>
+      <div class="metric-box"><div class="val" id="mEntropy">—</div><div class="lbl">Bits leaked</div></div>
+    </div>
+  </section>
+
+  <!-- Log -->
+  <section class="stage">
+    <h2>Timing Log</h2>
+    <div class="log-block" id="logBlock"></div>
+  </section>
+
+  <!-- Entropy Calculator -->
+  <section class="stage">
+    <h2>Entropy Calculator</h2>
+    <p style="font-family:var(--font-mono);font-size:0.82rem;color:var(--text-charcoal);margin-bottom:var(--space-3);">Given the timing histogram, how much information does the pool-exhaustion probe leak about your browser?</p>
+    <div class="entropy-box">
+      <div class="entropy-val" id="entropyBig">—</div>
+      <div class="entropy-lbl" id="entropyDesc">Run the probe above to calculate entropy.</div>
+    </div>
+  </section>
+
+  <!-- Explanation -->
+  <section class="stage">
+    <h2>How It Works</h2>
+    <div class="explain-grid">
+      <div class="explain-col before-col">
+        <h3>Pre-Chrome 143: XS-Leak</h3>
+        <ul>
+          <li>Browsers cap concurrent TCP connections per host (typically 6) and globally (e.g. 256).</li>
+          <li>An attacker page opens many fetches simultaneously.</li>
+          <li>When the pool hits the limit, subsequent connections queue — producing a sharp latency spike at connection #N.</li>
+          <li>This cliff value is stable and reproducible: it identifies browser version and platform to within ~4 bits.</li>
+          <li>Cross-site: a page can probe connections opened by a victim site, inferring whether the victim has N sessions open.</li>
+        </ul>
+      </div>
+      <div class="explain-col after-col">
+        <h3>After Chrome 143: Randomization</h3>
+        <ul>
+          <li>Chrome 143 jitters the effective pool limit by a random offset each session.</li>
+          <li>The cliff no longer falls at a fixed connection number.</li>
+          <li>Across probes, the cliff is uniformly spread over a range &mdash; destroying the sharp fingerprint signal.</li>
+          <li>Entropy leaked drops from ~4 bits to &lt;1 bit: the probe becomes statistically unreliable.</li>
+          <li>Remaining side channels (global connection timing, OS-level jitter) are out of Chrome&rsquo;s control but far noisier.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  let simMode = 'pre';
+  let lastTimings = [];
+
+  function setMode(m) {
+    simMode = m;
+    document.getElementById('togglePre').classList.toggle('active', m === 'pre');
+    document.getElementById('togglePost').classList.toggle('active', m === 'post');
+  }
+
+  function updateSlider(el) {
+    document.getElementById('connVal').textContent = el.value;
+  }
+
+  // Simulate pool exhaustion timings
+  function simulateTimings(n, mode) {
+    const timings = [];
+    // Pool limit: pre = fixed at 32, post = random 24-40
+    const fixedLimit = 32;
+    const randomLimit = 24 + Math.floor(Math.random() * 17);
+    const poolLimit = mode === 'pre' ? fixedLimit : randomLimit;
+    const jitterRange = mode === 'pre' ? 5 : 40; // spread of cliff
+
+    for (let i = 0; i < n; i++) {
+      let t;
+      if (i < poolLimit) {
+        // Under limit: fast with small jitter
+        t = 20 + Math.random() * 30;
+      } else {
+        // Over limit: queued — cliff
+        const queuePos = i - poolLimit;
+        const baseDelay = 150 + queuePos * 35;
+        const jitter = (Math.random() - 0.5) * jitterRange;
+        t = baseDelay + jitter;
+      }
+      timings.push({ conn: i + 1, ms: Math.max(5, t) });
+    }
+    return { timings, poolLimit };
+  }
+
+  async function runProbe() {
+    const btn = document.getElementById('runBtn');
+    btn.disabled = true;
+    const n = parseInt(document.getElementById('connSlider').value);
+    const progress = document.getElementById('progressMsg');
+    const log = document.getElementById('logBlock');
+    log.innerHTML = '';
+    progress.textContent = 'Simulating concurrent connection timings…';
+
+    // Simulate async progress
+    await new Promise(r => setTimeout(r, 120));
+
+    const { timings, poolLimit } = simulateTimings(n, simMode);
+    lastTimings = timings;
+
+    // Find cliff: first connection where latency jumps significantly
+    let cliffAt = null;
+    for (let i = 2; i < timings.length; i++) {
+      const prev = timings[i - 1].ms;
+      const curr = timings[i].ms;
+      if (curr > prev * 2.5 && curr > 100) { cliffAt = timings[i].conn; break; }
+    }
+
+    // Log
+    timings.forEach(t => {
+      const div = document.createElement('div');
+      div.className = 'entry' + (t.conn === cliffAt ? ' cliff' : '');
+      div.textContent = `conn #${String(t.conn).padStart(3)} → ${t.ms.toFixed(1)} ms` + (t.conn === cliffAt ? ' ← CLIFF (pool exhausted)' : '');
+      log.appendChild(div);
+    });
+    log.scrollTop = log.scrollHeight;
+
+    drawHistogram(timings, cliffAt);
+
+    // Metrics
+    const spread = simMode === 'pre' ? 1 : Math.floor(Math.random() * 8) + 10;
+    const bitsLeaked = simMode === 'pre'
+      ? (Math.log2(n / 1)).toFixed(1)
+      : (Math.log2(Math.max(1, n / spread))).toFixed(1);
+
+    document.getElementById('mCliff').textContent = cliffAt ? '#' + cliffAt : '?';
+    document.getElementById('mSpread').textContent = spread + ' conn';
+    document.getElementById('mEntropy').textContent = bitsLeaked + ' bits';
+
+    // Entropy box
+    document.getElementById('entropyBig').textContent = bitsLeaked + ' bits';
+    if (simMode === 'pre') {
+      document.getElementById('entropyDesc').textContent =
+        `Sharp cliff at connection #${cliffAt || '?'}. The probe reliably identifies pool limit = ${poolLimit}, leaking ~${bitsLeaked} bits of fingerprint entropy.`;
+    } else {
+      document.getElementById('entropyDesc').textContent =
+        `Cliff is spread over ~${spread} connections. Pool limit was randomized to ${poolLimit}. Only ~${bitsLeaked} bits remain — the probe is unreliable as a fingerprint.`;
+    }
+
+    progress.textContent = `Done — ${n} connections simulated (${simMode === 'pre' ? 'fixed cliff' : 'randomized, spread cliff'}).`;
+    btn.disabled = false;
+  }
+
+  function drawHistogram(timings, cliffAt) {
+    const canvas = document.getElementById('histCanvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = canvas.offsetWidth * window.devicePixelRatio;
+    canvas.height = canvas.offsetHeight * window.devicePixelRatio;
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    const W = canvas.offsetWidth, H = canvas.offsetHeight;
+
+    // Background
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg-stone').trim() || '#f4f3ee';
+    ctx.fillRect(0, 0, W, H);
+
+    if (!timings.length) return;
+
+    const maxMs = Math.max(...timings.map(t => t.ms));
+    const barW = Math.max(2, (W - 32) / timings.length);
+    const pad = { l: 30, r: 8, t: 8, b: 24 };
+    const chartH = H - pad.t - pad.b;
+    const chartW = W - pad.l - pad.r;
+
+    // Axes
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(pad.l, pad.t);
+    ctx.lineTo(pad.l, H - pad.b);
+    ctx.lineTo(W - pad.r, H - pad.b);
+    ctx.stroke();
+
+    // Y label
+    ctx.fillStyle = '#666';
+    ctx.font = `10px monospace`;
+    ctx.save(); ctx.translate(10, pad.t + chartH / 2); ctx.rotate(-Math.PI / 2);
+    ctx.fillText('ms', -10, 0); ctx.restore();
+
+    // Bars
+    timings.forEach((t, i) => {
+      const bh = (t.ms / maxMs) * chartH;
+      const x = pad.l + (i / timings.length) * chartW;
+      const y = H - pad.b - bh;
+      ctx.fillStyle = t.conn === cliffAt ? '#d11a2a' : '#0022ff';
+      ctx.fillRect(x, y, Math.max(barW - 1, 1), bh);
+    });
+
+    // X label
+    ctx.fillStyle = '#666';
+    ctx.font = '10px monospace';
+    ctx.fillText('connection #', pad.l + chartW / 2 - 30, H - 4);
+
+    // Cliff line annotation
+    if (cliffAt) {
+      const cx = pad.l + ((cliffAt - 1) / timings.length) * chartW;
+      ctx.strokeStyle = '#d11a2a';
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(cx, pad.t); ctx.lineTo(cx, H - pad.b); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#d11a2a';
+      ctx.font = 'bold 10px monospace';
+      ctx.fillText('cliff', cx + 3, pad.t + 14);
+    }
+  }
+
+  // Auto-run on load
+  window.addEventListener('load', () => runProbe());
+</script>
+</body>
+</html>
