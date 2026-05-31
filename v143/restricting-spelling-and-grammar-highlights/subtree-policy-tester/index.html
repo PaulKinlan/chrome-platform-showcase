@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subtree policy tester — Restricting spelling/grammar highlights — Chrome 143</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: 0 0 var(--space-5); }
+    .editor[contenteditable] {
+      border: 2px dashed var(--text-muted);
+      background: var(--bg-ivory);
+      padding: var(--space-3);
+      font-family: var(--font-serif);
+      font-size: 1.05rem;
+      line-height: 1.6;
+      color: var(--text-black);
+    }
+    .editor[contenteditable]:focus { outline: 3px solid var(--accent-blue); outline-offset: -2px; }
+    .editor section {
+      border-left: 4px solid var(--text-muted);
+      padding: var(--space-2) var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    .editor section.password { border-left-color: var(--accent-rose); }
+    .editor section.creds   { border-left-color: var(--accent-rose); }
+    .editor section.public  { border-left-color: var(--accent-emerald); }
+    .editor section.code    { border-left-color: var(--accent-amber); }
+    .editor section h4 { margin: 0 0 var(--space-1); font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; }
+    .pills { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .pill { background: var(--bg-paper); color: var(--text-black); border: 2px solid var(--border-black); padding: 0.3rem 0.6rem; font-family: var(--font-mono); font-size: 0.75rem; cursor: pointer; }
+    .pill.active { background: var(--text-black); color: var(--bg-ivory); }
+    .audit { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin-top: var(--space-3); box-shadow: var(--thin-shadow); }
+    .audit table { width: 100%; border-collapse: collapse; }
+    .audit th, .audit td { padding: var(--space-2); border-bottom: 1px solid var(--text-muted); text-align: left; }
+    .audit td.bad { color: var(--accent-rose); font-weight: bold; }
+    .audit td.ok { color: var(--accent-emerald); font-weight: bold; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v143/restricting-spelling-and-grammar-highlights/">&larr; Restricting spelling/grammar highlights</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v143</p>
+    <h1>Subtree policy tester</h1>
+    <p class="lede">A page with four annotated subtrees — a password area, a credentials hand-off, a public blog post, and a code block — combined under one form. Toggle <code>spellcheck</code> at the page and per-subtree level and audit which fields would actually leak content to the dictionary service.</p>
+  </header>
+
+  <p>Chrome 143 tightens which subtrees may be sent to spell-check / grammar services. The rules are: never on password / credit-card / credentials inputs, never on <code>contenteditable</code> fields whose closest <code>spellcheck</code> attribute resolves to <code>false</code>, and never on <code>&lt;input type=text&gt;</code> when <code>autocomplete</code> is <code>off</code> on a password-context form.</p>
+
+  <h3>Page-level policy</h3>
+  <div class="controls">
+    <span>Top-level &lt;body spellcheck=…&gt;:</span>
+    <div class="pills" id="page-pills">
+      <button class="pill" data-page="true">true (default)</button>
+      <button class="pill" data-page="false">false</button>
+      <button class="pill active" data-page="default">unset</button>
+    </div>
+    <button id="rerun">re-audit</button>
+  </div>
+
+  <div class="stage">
+    <h3>Editable subtrees</h3>
+    <div class="editor" id="editor" contenteditable>
+      <section class="password" data-zone="password">
+        <h4>password zone — never spell-check</h4>
+        <input type="password" placeholder="your password" id="pw">
+        <input type="text" autocomplete="current-password" placeholder="legacy text-as-password" id="legacy-pw">
+      </section>
+      <section class="creds" data-zone="creds" spellcheck="false">
+        <h4>credentials hand-off (spellcheck=false)</h4>
+        <p>API key: <span contenteditable spellcheck="false">sk-7XJq…</span></p>
+        <p>Recovery phrase: <span contenteditable>plant carbon photograph fall lonely</span></p>
+      </section>
+      <section class="public" data-zone="public">
+        <h4>public blog body</h4>
+        <p contenteditable>Type a misspelled werd here. Spellcheck should fire.</p>
+      </section>
+      <section class="code" data-zone="code" spellcheck="false">
+        <h4>code block (spellcheck=false)</h4>
+        <pre contenteditable>function helloWurld() { return 42; }</pre>
+      </section>
+    </div>
+
+    <div class="audit" id="audit"></div>
+  </div>
+
+  <h3>What the audit reports</h3>
+  <ol class="how">
+    <li>For each field, we resolve the effective <code>spellcheck</code> by walking up the DOM (closest <code>spellcheck</code> attribute wins; unset inherits).</li>
+    <li>For each field, we report whether v143 would block the dictionary call regardless — because of type, autocomplete, or context.</li>
+    <li>"Leak risk" reflects what would actually go to the spell-check service if the user typed in the field.</li>
+  </ol>
+
+  <pre><code>// v143 forces this combination:
+&lt;input type="password"&gt;                           {/* never spell-checked */}
+&lt;input type="text" autocomplete="cc-number"&gt;     {/* never spell-checked */}
+&lt;form autocomplete="off"&gt;…&lt;/form&gt;                  {/* same on text fields */}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v143/restricting-spelling-and-grammar-highlights/">Feature page</a></li>
+      <li><a href="/v143/restricting-spelling-and-grammar-highlights/dictionary-leak-probe/">Dictionary leak probe</a></li>
+      <li><a href="/v143/restricting-spelling-and-grammar-highlights/spellcheck-fence/">Spellcheck fence</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/interaction.html#spelling-and-grammar-checking" target="_blank" rel="noopener">HTML spec — spelling/grammar</a></li>
+      <li><a href="https://chromestatus.com/feature/5080415048171520" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const editor = document.getElementById("editor");
+  const audit = document.getElementById("audit");
+
+  function resolveSpellcheck(el) {
+    while (el && el.nodeType === 1) {
+      if (el.hasAttribute("spellcheck")) return el.getAttribute("spellcheck") === "true";
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function isSensitiveType(el) {
+    if (el.tagName !== "INPUT") return false;
+    if (el.type === "password" || el.type === "email" || el.type === "tel") return el.type === "password";
+    if (el.autocomplete && /password|cc-|new-password|current-password|one-time-code/.test(el.autocomplete)) return true;
+    return false;
+  }
+
+  function inSensitiveZone(el) {
+    let p = el.closest("section");
+    return p && (p.dataset.zone === "password" || p.dataset.zone === "creds");
+  }
+
+  function rerun() {
+    const pageState = document.querySelector("#page-pills .active").dataset.page;
+    if (pageState === "default") editor.removeAttribute("spellcheck");
+    else editor.setAttribute("spellcheck", pageState);
+
+    const fields = editor.querySelectorAll('[contenteditable], input[type=text], input[type=password], pre[contenteditable]');
+    const rows = [];
+    for (const f of fields) {
+      const eff = resolveSpellcheck(f);
+      const sens = isSensitiveType(f);
+      const inZone = inSensitiveZone(f);
+      const blockedByV143 = sens || inZone;
+      const effActive = (eff === null ? "default (true)" : (eff ? "true" : "false"));
+      const willCheck = !blockedByV143 && (eff !== false);
+      const note = blockedByV143
+        ? "blocked — sensitive context (v143 always blocks)"
+        : (eff === false ? "blocked by spellcheck=false" : "will spell-check");
+      rows.push({ id: f.id || f.tagName + " in zone " + (f.closest("section")?.dataset.zone || "?"), eff: effActive, note, leak: willCheck });
+    }
+    audit.innerHTML = "<table><thead><tr><th>field</th><th>effective spellcheck</th><th>verdict</th><th>leak risk</th></tr></thead>" +
+      "<tbody>" + rows.map((r) =>
+        "<tr><td>" + r.id + "</td><td>" + r.eff + "</td><td>" + r.note + "</td><td class=\"" + (r.leak ? "bad" : "ok") + "\">" + (r.leak ? "YES" : "no") + "</td></tr>"
+      ).join("") + "</tbody></table>";
+  }
+
+  document.querySelectorAll("#page-pills .pill").forEach((p) => {
+    p.addEventListener("click", () => {
+      document.querySelectorAll("#page-pills .pill").forEach((x) => x.classList.remove("active"));
+      p.classList.add("active");
+      rerun();
+    });
+  });
+  document.getElementById("rerun").addEventListener("click", rerun);
+  rerun();
+</script>
+</body>
+</html>
