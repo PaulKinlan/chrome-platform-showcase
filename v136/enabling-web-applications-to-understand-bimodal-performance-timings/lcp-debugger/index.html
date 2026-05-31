@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LCP Debugger — Bimodal Timings — Chrome 136 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-4); }
+    .toolbar button { padding: 0.45rem 0.8rem; font-size: 0.82rem; }
+    .timeline { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); margin-bottom: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); }
+    .ev-row { display: grid; grid-template-columns: 110px 130px 1fr; gap: 0.5rem; padding: 0.15rem 0; border-bottom: 1px dashed var(--border-black); }
+    .ev-row:last-child { border-bottom: none; }
+    .ev-row .name { color: var(--text-black); font-weight: 500; }
+    .ev-row .ts { color: var(--text-muted); }
+    .marker { background: var(--accent-blue); color: var(--bg-ivory); }
+    .stat { display: grid; grid-template-columns: 1fr auto; gap: 0.5rem; padding: 0.2rem 0; }
+    .verdict { font-family: var(--font-mono); font-size: 0.85rem; padding: var(--space-3); border: 2px solid var(--border-black); margin-top: var(--space-3); }
+    .verdict.cold { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .verdict.warm { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .warn-block { border: 2px solid var(--accent-amber); background: color-mix(in srgb, var(--accent-amber) 8%, var(--bg-ivory)); padding: var(--space-3); margin-bottom: var(--space-4); font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Bimodal performance timings</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v136</p>
+    <h1>LCP Debugger</h1>
+    <p class="lede">Read all four "what happened before LCP" markers in one pane: <code>activationStart</code>, <code>firstInteraction</code>, <code>userActivation</code>, and the new entries that surface back/forward cache restores and prerender activations. Hit the buttons to mark the page as activated/interacted and watch the verdict update.</p>
+  </header>
+
+  <div id="featWarn" class="warn-block" hidden>
+    <strong>Note:</strong> some of these fields are still being added to <code>PerformanceObserver</code> entries in Chrome 136. Fields that are missing read as <em>n/a</em> instead of failing.
+  </div>
+
+  <div class="stage">
+    <div class="toolbar">
+      <button id="mark-int">Simulate first interaction</button>
+      <button id="mark-loadbig">Lazy-load a 1 MB image (push LCP)</button>
+      <button id="poll-bfcache">Read bfcache restore field</button>
+      <button id="reset">Reset markers</button>
+    </div>
+
+    <div class="timeline" id="timeline"></div>
+
+    <h3 style="font-family:var(--font-mono);font-size:0.78rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);">verdict</h3>
+    <div id="verdict" class="verdict"></div>
+
+    <h3 style="font-family:var(--font-mono);font-size:0.78rem;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);margin-top:var(--space-4);">computed stats</h3>
+    <div class="timeline">
+      <div class="stat"><span>navigation start (ms since UNIX)</span><span id="ns">—</span></div>
+      <div class="stat"><span>activationStart (prerender / restore)</span><span id="as">—</span></div>
+      <div class="stat"><span>firstInteraction (synthetic)</span><span id="fi">—</span></div>
+      <div class="stat"><span>userActivation API state</span><span id="ua">—</span></div>
+      <div class="stat"><span>LCP entry startTime</span><span id="lcp">—</span></div>
+      <div class="stat"><span>"warm" LCP (LCP − interaction)</span><span id="warmLcp">—</span></div>
+    </div>
+
+    <img id="bigImg" alt="" style="display:none;max-width:100%;">
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../bimodal-timing/">Bimodal Timing</a></li>
+      <li><a href="../cold-vs-warm-histogram/">Cold-vs-warm histogram</a></li>
+      <li><a href="../">Bimodal timings feature index</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const events = [];
+let firstInteraction = null;
+let latestLCP = null;
+
+function logEv(name, extra='') {
+  events.push({ t: Math.round(performance.now()), name, extra });
+  paint();
+}
+
+function paint() {
+  $('timeline').innerHTML = events.map(e =>
+    `<div class="ev-row"><span class="ts">+${e.t}ms</span><span class="name">${e.name}</span><span>${e.extra}</span></div>`
+  ).join('');
+  const nav = performance.getEntriesByType('navigation')[0] || {};
+  $('ns').textContent = Math.round(nav.startTime ?? 0);
+  $('as').textContent = nav.activationStart != null ? Math.round(nav.activationStart) + ' ms' : 'n/a (no prerender / restore)';
+  $('fi').textContent = firstInteraction != null ? Math.round(firstInteraction) + ' ms' : '—';
+  $('ua').textContent = navigator.userActivation ?
+    `hasBeenActive=${navigator.userActivation.hasBeenActive}, isActive=${navigator.userActivation.isActive}` :
+    'userActivation API unavailable';
+  $('lcp').textContent = latestLCP != null ? Math.round(latestLCP) + ' ms' : 'no entry yet';
+  if (latestLCP != null && firstInteraction != null) {
+    const warm = latestLCP - firstInteraction;
+    $('warmLcp').textContent = warm.toFixed(1) + ' ms';
+    const v = $('verdict');
+    v.className = 'verdict ' + (warm < 0 ? 'cold' : 'warm');
+    v.innerHTML = warm < 0
+      ? '<strong>Cold:</strong> LCP painted before any user interaction. Treat this LCP as a cold-start sample.'
+      : '<strong>Warm:</strong> LCP painted after first interaction. The user was already engaged — different bucket.';
+  } else {
+    $('verdict').textContent = 'No verdict yet — interact + load some content.';
+    $('verdict').className = 'verdict';
+  }
+}
+
+// Real LCP observer.
+if ('PerformanceObserver' in window) {
+  try {
+    const po = new PerformanceObserver(list => {
+      const entries = list.getEntries();
+      const last = entries[entries.length - 1];
+      latestLCP = last.startTime;
+      logEv('LCP entry', `element=${last.element?.tagName ?? 'unknown'} size=${last.size}`);
+    });
+    po.observe({ type: 'largest-contentful-paint', buffered: true });
+  } catch { $('featWarn').hidden = false; }
+} else { $('featWarn').hidden = false; }
+
+$('mark-int').addEventListener('click', () => {
+  if (firstInteraction == null) firstInteraction = performance.now();
+  logEv('synthetic first interaction', 'navigator.userActivation now true');
+});
+
+$('mark-loadbig').addEventListener('click', () => {
+  const img = $('bigImg');
+  img.style.display = 'block';
+  // Use a sizeable SVG so LCP swaps to it.
+  img.src = 'data:image/svg+xml,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400"><rect width="800" height="400" fill="black"/>' +
+    '<text x="40" y="220" font-size="64" fill="white" font-family="monospace">forced LCP candidate</text></svg>'
+  );
+  logEv('big image inserted', 'should trigger fresh LCP entry');
+});
+
+$('poll-bfcache').addEventListener('click', () => {
+  const nav = performance.getEntriesByType('navigation')[0];
+  logEv('bfcache read', `activationStart=${nav.activationStart ?? 'n/a'}, type=${nav.type}`);
+});
+
+$('reset').addEventListener('click', () => {
+  events.length = 0; firstInteraction = null; latestLCP = null; paint();
+});
+
+paint();
+logEv('page ready', 'PerformanceObserver attached');
+</script>
+</body>
+</html>
