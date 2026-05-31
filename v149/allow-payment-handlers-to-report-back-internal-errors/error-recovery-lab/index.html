@@ -207,6 +207,29 @@
       border: 2px solid var(--border-black);
       margin: 1.5rem 0;
     }
+    .setup-panel {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-5) 0;
+    }
+    .setup-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+    }
+    .setup-log {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+      min-height: 3rem;
+      white-space: pre-wrap;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-charcoal);
+    }
   </style>
 </head>
 <body>
@@ -216,8 +239,17 @@
   <header class="lede-block">
     <p class="eyebrow">v149 · Payments · demo</p>
     <h1>Error Recovery Lab</h1>
-    <p class="lede">Inject deliberate payment handler errors and observe how a well-written merchant page reacts — field highlighting, retry guidance, and graceful fallback for each error type enabled by Chrome 149.</p>
+    <p class="lede">Request deliberate payment handler errors from a real same-origin payment app and observe how a well-written merchant page reacts — field highlighting, retry guidance, and graceful fallback for each error type enabled by Chrome 149.</p>
   </header>
+
+  <section class="setup-panel">
+    <h2>Payment handler setup</h2>
+    <div class="setup-actions">
+      <button id="install-handler" type="button">Install showcase payment handler</button>
+      <button id="can-make-payment" type="button">Run canMakePayment()</button>
+    </div>
+    <div class="setup-log" id="setup-log">Install the handler before pressing Pay. Each scenario calls PaymentRequest.show() from the Pay button.</div>
+  </section>
 
   <div class="scenario-tabs">
     <button class="scenario-tab active" data-scenario="funds">
@@ -236,7 +268,7 @@
 
   <div class="checkout-wrapper">
     <div class="checkout-heading">
-      <span>Simulated Checkout — Chrome 149 structured error injection</span>
+      <span>Live checkout — Chrome 149 structured error reporting</span>
       <span id="error-scenario-label">scenario: insufficient_funds</span>
     </div>
     <div class="checkout-body">
@@ -333,7 +365,7 @@ async function checkout(method) {
   <section>
     <h2>see also</h2>
     <ul>
-      <li><a href="/v149/allow-payment-handlers-to-report-back-internal-errors/checkout-flow-simulator/">Checkout Flow Simulator</a></li>
+      <li><a href="/v149/allow-payment-handlers-to-report-back-internal-errors/checkout-flow-simulator/">Live Checkout Flow</a></li>
       <li><a href="/v149/allow-payment-handlers-to-report-back-internal-errors/error-signal-tester/">Error Signal Tester</a></li>
       <li><a href="/v149/allow-payment-handlers-to-report-back-internal-errors/smart-retry-flow/">Smart Retry Flow</a></li>
       <li><a href="/v149/allow-payment-handlers-to-report-back-internal-errors/">Back to feature index</a></li>
@@ -343,6 +375,7 @@ async function checkout(method) {
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 
+  <script src="/v149/payment-request-allow-payment-handlers-to-report-back-internal-errors/live-payment-handler.js"></script>
   <script>
     const SCENARIOS = {
       funds: {
@@ -384,6 +417,11 @@ async function checkout(method) {
     };
 
     let currentScenario = 'funds';
+    const setupLog = document.getElementById('setup-log');
+
+    function writeSetup(value) {
+      setupLog.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    }
 
     function resetForm() {
       ['card-num', 'expiry', 'cvv'].forEach(id => {
@@ -430,10 +468,33 @@ async function checkout(method) {
       btn.disabled = true;
       btn.textContent = '⟳ Processing…';
 
-      await sleep(800);
-
       const sc = SCENARIOS[currentScenario];
-      const errObj = sc.errorObj;
+      const result = await showcasePaymentHandler.run(currentScenario, showcasePaymentHandler.paymentDetails({
+        total: {
+          label: 'Developer Conference Ticket',
+          amount: { currency: 'GBP', value: '151.99' },
+        },
+        displayItems: [
+          { label: 'Developer Conference Ticket', amount: { currency: 'GBP', value: '149.00' } },
+          { label: 'Booking fee', amount: { currency: 'GBP', value: '2.99' } },
+        ],
+      }));
+      const errObj = showcasePaymentHandler.parseMessage(result.message) || sc.errorObj;
+
+      if (result.ok) {
+        btn.textContent = 'Paid';
+        btn.disabled = false;
+        return;
+      }
+
+      if (result.name !== 'OperationError') {
+        document.getElementById('timeout-error-obj').textContent =
+          `${result.name}: ${result.message}`;
+        document.getElementById('outcome-timeout').classList.add('show');
+        btn.disabled = false;
+        btn.textContent = 'Try Again';
+        return;
+      }
 
       if (currentScenario === 'funds') {
         document.getElementById('funds-error-obj').textContent =
@@ -453,11 +514,9 @@ async function checkout(method) {
         const outcome = document.getElementById('outcome-timeout');
         outcome.classList.add('show');
         const retryStatus = document.getElementById('retry-status');
-        retryStatus.textContent = '⟳ Retrying automatically (retryable: true)…';
-        await sleep(errObj.retry_after_ms);
-        retryStatus.textContent = '✓ Retry succeeded — payment complete';
-        btn.textContent = '✓ Paid';
+        retryStatus.textContent = 'Retryable error received. Prompt for a new user gesture before opening another payment request.';
         btn.disabled = false;
+        btn.textContent = 'Try Again';
         return;
       }
 
@@ -465,7 +524,25 @@ async function checkout(method) {
       btn.textContent = 'Try Again';
     });
 
-    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+    document.getElementById('install-handler').addEventListener('click', async () => {
+      try {
+        writeSetup('Installing payment handler...');
+        writeSetup(await showcasePaymentHandler.install());
+      } catch (error) {
+        writeSetup(`${error.name || 'Error'}: ${error.message}`);
+      }
+    });
+
+    document.getElementById('can-make-payment').addEventListener('click', async () => {
+      try {
+        writeSetup({
+          canMakePayment: await showcasePaymentHandler.canMakePayment(),
+          methodUrl: showcasePaymentHandler.methodUrl,
+        });
+      } catch (error) {
+        writeSetup(`${error.name || 'Error'}: ${error.message}`);
+      }
+    });
 
     applyScenario('funds');
   </script>

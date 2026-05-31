@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Checkout Flow Simulator — Payment Handler Error Reporting — Chrome 149</title>
+  <title>Live Checkout Flow — Payment Handler Error Reporting — Chrome 149</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
     .checkout-layout {
@@ -138,6 +138,29 @@
     .trace-err { color: var(--accent-rose); }
     .trace-ok { color: var(--accent-emerald); }
     .trace-info { color: var(--text-muted); }
+    .setup-panel {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin-bottom: var(--space-5);
+    }
+    .setup-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+    }
+    .setup-log {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+      min-height: 3rem;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      white-space: pre-wrap;
+      color: var(--text-charcoal);
+    }
   </style>
 </head>
 <body>
@@ -146,9 +169,18 @@
 
   <header class="lede-block">
     <p class="eyebrow">v149 · Web APIs · Payments</p>
-    <h1>Checkout Flow Simulator</h1>
-    <p class="lede">A realistic checkout page showing how Chrome 149's payment handler error reporting changes the UX. <code>AbortError</code> (user cancelled) gets a polite message; <code>OperationError</code> (payment app failure) triggers automatic retry with a fallback method.</p>
+    <h1>Live Checkout Flow</h1>
+    <p class="lede">A realistic checkout page backed by a same-origin payment handler. Each scenario calls <code>PaymentRequest.show()</code> and branches on the actual <code>DOMException.name</code> returned by the browser.</p>
   </header>
+
+  <section class="setup-panel">
+    <h2>Payment handler setup</h2>
+    <div class="setup-actions">
+      <button id="install-handler" type="button">Install showcase payment handler</button>
+      <button id="can-make-payment" type="button">Run canMakePayment()</button>
+    </div>
+    <div class="setup-log" id="setup-log">Install the handler before pressing Pay. The payment request itself must be triggered by the Pay button.</div>
+  </section>
 
   <div class="checkout-layout">
     <div class="checkout-panel">
@@ -161,7 +193,7 @@
           <div class="order-row order-total"><span>Total</span><span>$48.48</span></div>
         </div>
 
-        <div style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);margin-bottom:var(--space-2)">Simulate payment handler response:</div>
+        <div style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);margin-bottom:var(--space-2)">Payment handler response to request:</div>
         <div class="error-scenario-grid">
           <button class="error-scenario-btn" data-scenario="success">
             Payment succeeds
@@ -251,6 +283,7 @@
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script src="/v149/payment-request-allow-payment-handlers-to-report-back-internal-errors/live-payment-handler.js"></script>
 <script>
 const SCENARIOS = {
   success: { label: 'Payment succeeds', tag: 'resolve', message: null },
@@ -263,6 +296,11 @@ const SCENARIOS = {
 let selectedScenario = null;
 const payBtn = document.getElementById('pay-btn');
 const trace = document.getElementById('code-trace');
+const setupLog = document.getElementById('setup-log');
+
+function writeSetup(value) {
+  setupLog.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
 
 function showResult(id) {
   ['result-idle','result-success','result-abort','result-operation'].forEach(rid => {
@@ -307,35 +345,63 @@ payBtn.addEventListener('click', async () => {
   appendTrace('const request = new PaymentRequest(methods, details);', 'trace-info');
   appendTrace('const response = await request.show();', 'trace-info');
   appendTrace('');
-  appendTrace('// Payment handler running…', 'trace-info');
-  await new Promise(r => setTimeout(r, 600));
+  appendTrace('// Browser is invoking the registered payment handler…', 'trace-info');
 
-  if (selectedScenario === 'success') {
-    appendTrace('// Handler resolves', 'trace-ok');
+  const result = await showcasePaymentHandler.run(selectedScenario);
+  const parsed = showcasePaymentHandler.parseMessage(result.message);
+
+  if (result.ok) {
+    appendTrace('// Handler resolved with PaymentResponse', 'trace-ok');
     appendTrace('await response.complete("success");', 'trace-ok');
     appendTrace('// → Order confirmed', 'trace-ok');
     showResult('result-success');
-  } else if (s.tag === 'AbortError') {
-    appendTrace(`// Handler throws: { name: "AbortError", message: "${s.message}" }`, 'trace-err');
+  } else if (result.name === 'AbortError') {
+    appendTrace(`// Browser caught: { name: "AbortError", message: "${result.message}" }`, 'trace-err');
     appendTrace('} catch (err) {', 'trace-info');
     appendTrace('  if (err.name === "AbortError") {', 'trace-info');
     appendTrace('    showReturnToCartMessage(); // ← user intent', 'trace-ok');
     appendTrace('  }', 'trace-info');
     showResult('result-abort');
-  } else {
-    appendTrace(`// Handler throws: { name: "OperationError", message: "${s.message}" }`, 'trace-err');
+  } else if (result.name === 'OperationError') {
+    const message = parsed?.message || s.message || result.message;
+    appendTrace(`// Browser caught: { name: "OperationError", message: "${message}" }`, 'trace-err');
     appendTrace('} catch (err) {', 'trace-info');
     appendTrace('  if (err.name === "OperationError") {', 'trace-info');
-    appendTrace(`    logError("${s.message}");`, 'trace-err');
+    appendTrace(`    logError("${message}");`, 'trace-err');
     appendTrace('    tryFallbackPaymentMethod(); // ← retry, not user fault', 'trace-ok');
     appendTrace('  }', 'trace-info');
     document.getElementById('operation-body').textContent =
-      `Handler error: "${s.message}". Trying fallback payment method…`;
+      `Handler error: "${message}". Trying fallback payment method…`;
+    showResult('result-operation');
+  } else {
+    appendTrace(`// Browser caught: { name: "${result.name}", message: "${result.message}" }`, 'trace-err');
+    document.getElementById('operation-body').textContent =
+      `${result.name}: ${result.message}`;
     showResult('result-operation');
   }
 
   payBtn.disabled = false;
   payBtn.textContent = '▶ Pay $48.48';
+});
+
+document.getElementById('install-handler').addEventListener('click', async () => {
+  try {
+    writeSetup('Installing payment handler...');
+    writeSetup(await showcasePaymentHandler.install());
+  } catch (error) {
+    writeSetup(`${error.name || 'Error'}: ${error.message}`);
+  }
+});
+
+document.getElementById('can-make-payment').addEventListener('click', async () => {
+  try {
+    writeSetup({
+      canMakePayment: await showcasePaymentHandler.canMakePayment(),
+      methodUrl: showcasePaymentHandler.methodUrl,
+    });
+  } catch (error) {
+    writeSetup(`${error.name || 'Error'}: ${error.message}`);
+  }
 });
 </script>
 </body>

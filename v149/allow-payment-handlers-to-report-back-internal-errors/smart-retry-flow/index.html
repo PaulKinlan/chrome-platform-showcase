@@ -169,6 +169,29 @@
       color: var(--text-black);
       cursor: pointer;
     }
+    .setup-panel {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin-bottom: var(--space-5);
+    }
+    .setup-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+    }
+    .setup-log {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+      min-height: 3rem;
+      white-space: pre-wrap;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-charcoal);
+    }
   </style>
 </head>
 <body>
@@ -178,11 +201,20 @@
   <header class="lede-block">
     <p class="eyebrow">v149 · Payments · demo</p>
     <h1>Smart Retry Flow</h1>
-    <p class="lede">A simulated checkout that reacts differently to each error type: a user cancellation gets a gentle nudge to continue shopping, while an internal app error triggers an automatic retry with a fallback payment method.</p>
+    <p class="lede">A checkout that reacts to real <code>PaymentRequest.show()</code> outcomes from a same-origin payment handler: user cancellation gets a gentle nudge to continue shopping, while an internal app error opens a fallback payment path.</p>
   </header>
 
+  <section class="setup-panel">
+    <h2>Payment handler setup</h2>
+    <div class="setup-actions">
+      <button id="install-handler" type="button">Install showcase payment handler</button>
+      <button id="can-make-payment" type="button">Run canMakePayment()</button>
+    </div>
+    <div class="setup-log" id="setup-log">Install the handler before pressing Pay. The live payment request is launched from the Pay button.</div>
+  </section>
+
   <div class="scenario-chooser">
-    <label for="outcome-select">Simulate payment handler outcome:</label>
+    <label for="outcome-select">Payment handler outcome:</label>
     <select id="outcome-select">
       <option value="success">✓ Payment succeeds</option>
       <option value="abort">✕ User cancels (AbortError)</option>
@@ -239,8 +271,8 @@
         <div class="log-trace">
           err.name === 'OperationError' → <strong>true</strong><br>
           → internal handler failure, not user decision<br>
-          → auto-switch to fallback method<br>
-          → retry silently
+          → switch to fallback method<br>
+          → wait for a new user gesture before reopening payment UI
         </div>
       </div>
     </div>
@@ -260,8 +292,8 @@ async function pay(method) {
       showCancelMessage('Your basket is saved for later.');
 
     } else if (err.name === 'OperationError') {
-      // Payment app bug — user didn't cancel, safe to retry
-      await pay(FALLBACK_METHOD); // switch to bank transfer
+      // Payment app bug — user didn't cancel, safe to offer fallback
+      showFallbackPaymentMethod();
 
     } else {
       showGenericError(err.message);
@@ -278,8 +310,15 @@ async function pay(method) {
     </ul>
   </section>
 
+  <script src="/v149/payment-request-allow-payment-handlers-to-report-back-internal-errors/live-payment-handler.js"></script>
   <script>
     let selectedMethod = 'primary';
+    let fallbackReady = false;
+    const setupLog = document.getElementById('setup-log');
+
+    function writeSetup(value) {
+      setupLog.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    }
 
     function selectMethod(m) {
       selectedMethod = m;
@@ -297,8 +336,10 @@ async function pay(method) {
       hideAllOutcomes();
       document.getElementById('btn-fallback').style.display = 'none';
       selectMethod('primary');
+      fallbackReady = false;
       document.getElementById('payment-step').style.opacity = '1';
       document.getElementById('pay-btn').disabled = false;
+      document.getElementById('pay-btn').textContent = 'Pay £32.50';
     }
 
     async function pay() {
@@ -309,35 +350,68 @@ async function pay(method) {
 
       hideAllOutcomes();
 
-      await new Promise(r => setTimeout(r, 500));
+      const scenario = selectedMethod === 'fallback' && fallbackReady ? 'success' : outcome;
+      const result = await showcasePaymentHandler.run(scenario, showcasePaymentHandler.paymentDetails({
+        total: {
+          label: 'Premium Widget order',
+          amount: { currency: 'GBP', value: '32.50' },
+        },
+        displayItems: [
+          { label: 'Premium Widget', amount: { currency: 'GBP', value: '29.00' } },
+          { label: 'Shipping', amount: { currency: 'GBP', value: '3.50' } },
+        ],
+      }));
 
-      if (outcome === 'success') {
+      if (result.ok) {
         document.getElementById('payment-step').style.opacity = '0.4';
         document.getElementById('outcome-success').classList.add('show');
         payBtn.textContent = '✓ Paid';
         return;
       }
 
-      if (outcome === 'abort') {
+      if (result.name === 'AbortError') {
         payBtn.disabled = false;
         payBtn.textContent = 'Pay £32.50';
         document.getElementById('outcome-cancel').classList.add('show');
         return;
       }
 
-      if (outcome === 'internal') {
-        // Show retry panel and switch to fallback
+      if (result.name === 'OperationError') {
         document.getElementById('outcome-retry').classList.add('show');
         document.getElementById('btn-fallback').style.display = '';
+        fallbackReady = true;
         selectMethod('fallback');
-
-        await new Promise(r => setTimeout(r, 1200));
-        document.getElementById('retry-status').textContent = '✓ Fallback payment succeeded';
-        document.getElementById('payment-step').style.opacity = '0.4';
-        payBtn.textContent = '✓ Paid via bank transfer';
+        document.getElementById('retry-status').textContent = 'Fallback method selected. Press Pay again to launch a new request.';
+        payBtn.disabled = false;
+        payBtn.textContent = 'Pay with fallback method';
         return;
       }
+
+      document.getElementById('outcome-retry').classList.add('show');
+      document.getElementById('retry-status').textContent = `${result.name}: ${result.message}`;
+      payBtn.disabled = false;
+      payBtn.textContent = 'Try again';
     }
+
+    document.getElementById('install-handler').addEventListener('click', async () => {
+      try {
+        writeSetup('Installing payment handler...');
+        writeSetup(await showcasePaymentHandler.install());
+      } catch (error) {
+        writeSetup(`${error.name || 'Error'}: ${error.message}`);
+      }
+    });
+
+    document.getElementById('can-make-payment').addEventListener('click', async () => {
+      try {
+        writeSetup({
+          canMakePayment: await showcasePaymentHandler.canMakePayment(),
+          methodUrl: showcasePaymentHandler.methodUrl,
+        });
+      } catch (error) {
+        writeSetup(`${error.name || 'Error'}: ${error.message}`);
+      }
+    });
   </script>
 </main>
 </body>

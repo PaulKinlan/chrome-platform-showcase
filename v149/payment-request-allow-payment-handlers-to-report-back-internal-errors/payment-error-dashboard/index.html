@@ -167,9 +167,13 @@
   <div id="probe-line" class="probe-line"></div>
 
   <div class="btn-row">
-    <button onclick="firePayment()">Fire Live PaymentRequest</button>
-    <button onclick="startStream()" style="background:var(--bg-ivory);color:var(--text-black)">Simulate Error Stream</button>
-    <button onclick="stopStream()" style="background:var(--bg-ivory);color:var(--text-black)">Pause Stream</button>
+    <button onclick="installHandler()">Install showcase payment handler</button>
+    <button onclick="firePayment('success')">Run success</button>
+    <button onclick="firePayment('abort')">Run AbortError</button>
+    <button onclick="firePayment('internal')">Run OperationError</button>
+    <button onclick="firePayment('card_expired')" style="background:var(--bg-ivory);color:var(--text-black)">Run expired card</button>
+    <button onclick="firePayment('insufficient_funds')" style="background:var(--bg-ivory);color:var(--text-black)">Run insufficient funds</button>
+    <button onclick="firePayment('network_error')" style="background:var(--bg-ivory);color:var(--text-black)">Run network timeout</button>
     <button onclick="clearStream()" style="background:var(--bg-ivory);color:var(--text-black)">Clear</button>
   </div>
 
@@ -190,7 +194,7 @@
 
   <h2>Live payment response</h2>
   <p>The raw <code>PaymentHandlerResponse</code> or <code>DOMException</code> detail from the last payment attempt:</p>
-  <div class="error-detail-panel" id="error-detail">Press "Fire Live PaymentRequest" to see a structured error response.</div>
+  <div class="error-detail-panel" id="error-detail">Install the handler, then run a PaymentRequest outcome to see the response.</div>
 
   <h2>Error taxonomy</h2>
   <p>All <code>PaymentHandlerResponse</code> error types with running counts. Click to expand each.</p>
@@ -217,6 +221,7 @@
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 
+  <script src="../live-payment-handler.js"></script>
   <script>
     const ERROR_TYPES = [
       { code: 'user-cancelled',         label: 'User Cancelled',         recovery: 'Show "Payment cancelled" — offer retry or alternative method.', color: 'warn' },
@@ -232,14 +237,12 @@
     const counts = {};
     ERROR_TYPES.forEach(e => { counts[e.code] = 0; });
     let successCount = 0;
-    let streamInterval = null;
-
     // Feature probe
-    const hasPaymentRequest = typeof PaymentRequest !== 'undefined';
+    const hasPaymentRequest = showcasePaymentHandler.isSupported();
     document.getElementById('probe-line').innerHTML =
       hasPaymentRequest
-        ? '<span style="color:var(--accent-emerald)">✓ PaymentRequest API available in this browser.</span>'
-        : '<span style="color:var(--text-muted)">⚠ PaymentRequest API not available — live payment test will show a graceful fallback.</span>';
+        ? '<span style="color:var(--accent-emerald)">✓ PaymentRequest and service workers available in this browser.</span>'
+        : '<span style="color:var(--text-muted)">⚠ PaymentRequest or service workers unavailable — the live payment test will report the browser error.</span>';
 
     // Build taxonomy
     const taxDiv = document.getElementById('taxonomy');
@@ -316,33 +319,7 @@
       updateChart();
     }
 
-    function randomError() {
-      const r = Math.random();
-      if (r < 0.35) return null; // success
-      const errs = ERROR_TYPES.filter(e => e.code !== 'unknown');
-      return errs[Math.floor(Math.random() * errs.length)];
-    }
-
-    function startStream() {
-      if (streamInterval) return;
-      streamInterval = setInterval(() => {
-        const err = randomError();
-        if (!err) {
-          successCount++;
-          addStreamItem('success', '✓ Payment completed successfully', 'ok');
-        } else {
-          addStreamItem(err.code, `✗ ${err.label} — ${err.code}`, 'err');
-        }
-      }, 900);
-    }
-
-    function stopStream() {
-      clearInterval(streamInterval);
-      streamInterval = null;
-    }
-
     function clearStream() {
-      stopStream();
       document.getElementById('stream').innerHTML = '';
       ERROR_TYPES.forEach(e => { counts[e.code] = 0; });
       successCount = 0;
@@ -353,47 +330,56 @@
       updateChart();
     }
 
-    async function firePayment() {
+    function errorCodeFromResult(result) {
+      if (result.ok) return 'success';
+      if (result.name === 'AbortError') return 'user-cancelled';
+      const parsed = showcasePaymentHandler.parseMessage(result.message);
+      if (parsed?.type === 'card_expired') return 'expired-card';
+      if (parsed?.type === 'insufficient_funds') return 'insufficient-funds';
+      if (parsed?.type === 'timeout') return 'network-error';
+      if (parsed?.type === 'internal_error') return 'handler-internal-error';
+      return result.name === 'OperationError' ? 'handler-internal-error' : 'unknown';
+    }
+
+    async function installHandler() {
+      const detail = document.getElementById('error-detail');
+      try {
+        detail.textContent = 'Installing payment handler...';
+        detail.textContent = JSON.stringify(await showcasePaymentHandler.install(), null, 2);
+      } catch (error) {
+        detail.textContent = `${error.name || 'Error'}: ${error.message}`;
+      }
+    }
+
+    async function firePayment(scenario) {
       const detail = document.getElementById('error-detail');
       detail.textContent = 'Initiating PaymentRequest…';
 
-      if (!hasPaymentRequest) {
-        detail.textContent = 'PaymentRequest API not available.\n\nSimulated response:\n' +
-          JSON.stringify({ error: 'handler-internal-error', message: 'PaymentRequest unavailable in this context', details: { reason: 'API_NOT_SUPPORTED', code: 42 } }, null, 2);
-        addStreamItem('handler-internal-error', '✗ Simulated: handler-internal-error (API not available)', 'warn');
-        return;
-      }
+      const result = await showcasePaymentHandler.run(scenario, showcasePaymentHandler.paymentDetails({
+        total: {
+          label: 'Dashboard probe purchase',
+          amount: { currency: 'GBP', value: '1.00' },
+        },
+        displayItems: [
+          { label: 'Dashboard probe purchase', amount: { currency: 'GBP', value: '1.00' } },
+        ],
+      }));
 
-      try {
-        const request = new PaymentRequest(
-          [{ supportedMethods: 'https://example.com/pay' }],
-          { total: { label: 'Demo purchase', amount: { currency: 'USD', value: '1.00' } } }
-        );
-        const canMake = await request.canMakePayment().catch(() => false);
-        if (!canMake) {
-          const simErr = { error: 'no-handler', message: 'No payment handler registered for https://example.com/pay', details: { available: false } };
-          detail.textContent = 'No registered payment handler (expected for demo).\n\nSimulated PaymentHandlerResponse error:\n' + JSON.stringify(simErr, null, 2);
-          addStreamItem('handler-internal-error', '✗ No payment handler registered (demo)', 'warn');
-          return;
-        }
-        const response = await request.show();
-        detail.textContent = 'Payment response received:\n' + JSON.stringify({ methodName: response.methodName, details: response.details }, null, 2);
-        await response.complete('success');
+      detail.textContent = JSON.stringify({
+        scenario,
+        result,
+        parsedMessage: showcasePaymentHandler.parseMessage(result.message),
+      }, null, 2);
+
+      const code = errorCodeFromResult(result);
+      if (result.ok) {
         successCount++;
         addStreamItem('success', '✓ Payment completed', 'ok');
         updateChart();
-      } catch(e) {
-        const structured = {
-          type: e.name,
-          message: e.message,
-          details: e.details || null,
-          internalErrorCode: e.internalErrorCode || null,
-        };
-        detail.textContent = 'DOMException / PaymentHandlerResponse error:\n' + JSON.stringify(structured, null, 2);
-        const code = e.message?.includes('cancelled') || e.name === 'AbortError' ? 'user-cancelled' : 'handler-internal-error';
-        addStreamItem(code, `✗ ${e.name}: ${e.message?.slice(0,60)}`, 'err');
-        updateChart();
+        return;
       }
+      addStreamItem(code, `✗ ${result.name}: ${result.message?.slice(0, 70)}`, result.name === 'AbortError' ? 'warn' : 'err');
+      updateChart();
     }
 
     updateChart();
