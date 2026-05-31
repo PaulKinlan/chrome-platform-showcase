@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RTP Jitter Tracker — rtpTimestamp — Chrome 145</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .controls { display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom: 1rem; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .stat {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: 0.5rem 0.65rem;
+      font-family: monospace;
+      font-size: 0.78rem;
+      color: var(--text-charcoal);
+    }
+    .stat .lbl { display: block; color: var(--text-muted); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .canvas-wrap {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      height: 8rem;
+      position: relative;
+      margin-bottom: 1rem;
+    }
+    canvas { display: block; width: 100%; height: 100%; }
+    .warn-block {
+      background: var(--bg-stone);
+      border-left: 3px solid #b87b00;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.85rem;
+      color: var(--text-charcoal);
+    }
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs">
+    <a href="/v145/">&larr; Chrome 145</a> /
+    <a href="/v145/expose-rtptimestamp-from-webrtc-video-frames-via-videoframe-metadata/">rtpTimestamp on VideoFrame</a>
+  </p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v145 · WebRTC · Jitter Tracker</p>
+    <h1>RTP jitter tracker</h1>
+    <p class="lede">Sample synthetic <code>rtpTimestamp</code> values from a generator, compute inter-arrival jitter via the standard RFC 3550 formula, and plot it live. Models what an Insertable Streams pipeline would see in real call.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Webcam optional.</strong> The page synthesises an RTP-clocked timestamp stream so you
+    can see jitter math live. If you press "Use webcam" we set up an actual VideoFrame pipeline
+    and read <code>rtpTimestamp</code> off real frames where available.
+  </div>
+
+  <section>
+    <h2>controls</h2>
+    <div class="controls">
+      <button id="btn-start">Start synthetic stream</button>
+      <button id="btn-stop">Stop</button>
+      <button id="btn-spike">Inject network spike</button>
+      <button id="btn-webcam">Use webcam</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="lbl">frames seen</span><span id="s-n">0</span></div>
+      <div class="stat"><span class="lbl">last rtpTimestamp</span><span id="s-rtp">—</span></div>
+      <div class="stat"><span class="lbl">jitter (RFC 3550)</span><span id="s-j">— ms</span></div>
+      <div class="stat"><span class="lbl">peak jitter</span><span id="s-jp">— ms</span></div>
+      <div class="stat"><span class="lbl">media clock</span><span id="s-clk">90 kHz</span></div>
+    </div>
+    <div class="canvas-wrap"><canvas id="cv" width="800" height="160"></canvas></div>
+  </section>
+
+  <section>
+    <h2>code</h2>
+    <pre><code>// Chrome 145: VideoFrameMetadata exposes rtpTimestamp on frames
+// coming through Insertable Streams from a WebRTC transceiver.
+const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+let prev = null;
+while (true) {
+  const { value: frame, done } = await reader.read();
+  if (done) break;
+  const meta = frame.metadata();          // { rtpTimestamp, captureTime, ... }
+  if (prev) {
+    const d = Math.abs(meta.rtpTimestamp - prev.rtpTimestamp) / 90;   // ms
+    jitter += (Math.abs(d - prevD) - jitter) / 16;                    // RFC 3550
+  }
+  frame.close();
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../rtptimestamp-demo/">rtpTimestamp Demo</a></li>
+      <li><a href="../videoframe-metadata/">VideoFrame Metadata</a></li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc3550" target="_blank" rel="noopener">RFC 3550 — RTP jitter formula</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const canvas = document.getElementById('cv');
+  const ctx = canvas.getContext('2d');
+  const history = [];
+  let frames = 0;
+  let prevRtp = null;
+  let prevDelta = null;
+  let jitter = 0;
+  let peak = 0;
+  let timer = null;
+  let arrivalBase = performance.now();
+
+  function setStat(id, v) { document.getElementById(id).textContent = v; }
+
+  function draw() {
+    const w = canvas.width, h = canvas.height;
+    ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg-stone') || '#f0eadf';
+    ctx.fillRect(0, 0, w, h);
+    if (history.length < 2) return;
+    const max = Math.max(...history, 1);
+    ctx.strokeStyle = '#36c'; ctx.lineWidth = 1.5; ctx.beginPath();
+    history.forEach((v, i) => {
+      const x = (i / (history.length - 1)) * w;
+      const y = h - (v / max) * (h - 10) - 5;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  function step() {
+    frames++;
+    const elapsed = performance.now() - arrivalBase;
+    // Synthesise rtpTimestamp at 90 kHz with some noise/jitter
+    const ideal = frames * 1500;  // 16.66 ms per frame in 90kHz units
+    const noise = (Math.random() - 0.5) * 1200;
+    const rtp = ideal + noise;
+    const arrivalMs = elapsed;
+    setStat('s-rtp', rtp.toFixed(0));
+    setStat('s-n', frames);
+
+    // RFC 3550 jitter: J = J + (|D(i-1,i)| - J)/16
+    // D = (arrival_i - arrival_(i-1)) - (rtp_i - rtp_(i-1))/90
+    if (prevRtp !== null) {
+      const d = arrivalMs - prevArrival - (rtp - prevRtp) / 90;
+      jitter += (Math.abs(d) - jitter) / 16;
+      peak = Math.max(peak, jitter);
+      history.push(jitter);
+      if (history.length > 200) history.shift();
+      setStat('s-j', jitter.toFixed(2) + ' ms');
+      setStat('s-jp', peak.toFixed(2) + ' ms');
+      draw();
+    }
+    prevRtp = rtp;
+    prevArrival = arrivalMs;
+  }
+
+  let prevArrival = null;
+  document.getElementById('btn-start').onclick = () => {
+    arrivalBase = performance.now();
+    frames = 0; prevRtp = null; prevArrival = null; jitter = 0; peak = 0; history.length = 0;
+    if (timer) clearInterval(timer);
+    timer = setInterval(step, 16);  // 60 fps
+  };
+  document.getElementById('btn-stop').onclick = () => { if (timer) { clearInterval(timer); timer = null; } };
+  document.getElementById('btn-spike').onclick = () => {
+    if (!prevArrival) return;
+    prevArrival += 80;  // simulate 80 ms network spike on next arrival
+  };
+  document.getElementById('btn-webcam').onclick = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const track = stream.getVideoTracks()[0];
+      if (typeof MediaStreamTrackProcessor === 'undefined') {
+        alert('MediaStreamTrackProcessor not available in this browser. Synthetic mode still works.');
+        return;
+      }
+      const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+      arrivalBase = performance.now();
+      frames = 0; prevRtp = null; prevArrival = null; jitter = 0; peak = 0; history.length = 0;
+      while (true) {
+        const { value: frame, done } = await reader.read();
+        if (done) break;
+        frames++;
+        const meta = typeof frame.metadata === 'function' ? frame.metadata() : {};
+        const rtp = meta.rtpTimestamp || (performance.now() * 90);
+        const arrivalMs = performance.now() - arrivalBase;
+        setStat('s-rtp', rtp.toFixed(0));
+        setStat('s-n', frames);
+        if (prevRtp !== null) {
+          const d = arrivalMs - prevArrival - (rtp - prevRtp) / 90;
+          jitter += (Math.abs(d) - jitter) / 16;
+          peak = Math.max(peak, jitter);
+          history.push(jitter);
+          if (history.length > 200) history.shift();
+          setStat('s-j', jitter.toFixed(2) + ' ms');
+          setStat('s-jp', peak.toFixed(2) + ' ms');
+          draw();
+        }
+        prevRtp = rtp;
+        prevArrival = arrivalMs;
+        frame.close();
+      }
+    } catch (e) {
+      alert('Webcam access failed: ' + e.message);
+    }
+  };
+</script>
+</body>
+</html>
