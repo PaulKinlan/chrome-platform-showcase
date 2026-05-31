@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Texture Cache Manager — Chrome 137 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .no-webgpu { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); display: none; }
+    .main-ui { display: none; }
+    .main-ui.visible, .no-webgpu.visible { display: block; }
+
+    .cache-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+      gap: var(--space-2); margin-bottom: var(--space-3);
+    }
+    .cache-slot {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      padding: var(--space-1); cursor: pointer; text-align: center; min-height: 100px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+      transition: border-color .1s;
+    }
+    .cache-slot:hover { border-color: var(--accent-blue); }
+    .cache-slot.selected { border-color: var(--accent-blue); background: #e8f4ff; }
+    .cache-slot.empty { background: var(--bg-stone); border-style: dashed; }
+    .cache-slot canvas { display: block; width: 80px; height: 80px; image-rendering: pixelated; }
+    .cache-slot .slot-label { font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-muted); }
+    .cache-slot .slot-badge {
+      font-size: 0.65rem; font-family: var(--font-mono); padding: 1px 4px;
+    }
+    .slot-badge.hit   { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .slot-badge.new   { background: var(--accent-blue); color: var(--bg-ivory); }
+    .slot-badge.empty { background: var(--bg-stone); border: 1px solid var(--border-black); }
+
+    .output-area {
+      display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-3);
+    }
+    @media (max-width: 640px) { .output-area { grid-template-columns: 1fr; } }
+    .output-box { background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-2); }
+    .output-box h4 { margin: 0 0 var(--space-1); font-size: 0.82rem; font-family: var(--font-mono); }
+    .output-box canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; }
+
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    button {
+      padding: 8px 16px; border: 1px solid var(--border-black);
+      background: var(--text-black); color: var(--bg-ivory); cursor: pointer; font-size: 0.85rem;
+    }
+    button.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    select {
+      padding: 6px 10px; border: 1px solid var(--border-black);
+      background: var(--bg-ivory); font-size: 0.85rem;
+    }
+
+    .stats { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); padding: 6px 12px; background: var(--bg-stone); border: 1px solid var(--border-black); margin-bottom: var(--space-2); }
+
+    .code-box {
+      background: var(--bg-stone); border: 1px solid var(--border-black);
+      padding: var(--space-2); font-family: var(--font-mono); font-size: 0.75rem;
+      white-space: pre; overflow-x: auto; color: var(--text-charcoal); line-height: 1.6;
+    }
+    .kw { color: var(--accent-blue); }
+    .cm { color: var(--text-muted); }
+    .hi { color: var(--accent-emerald); font-weight: 600; }
+    .info-box {
+      background: var(--bg-paper); border-left: 3px solid var(--accent-blue);
+      padding: var(--space-2) var(--space-3); margin-top: var(--space-3);
+      font-size: 0.85rem; color: var(--text-charcoal);
+    }
+    h3 { margin: var(--space-3) 0 var(--space-2); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v137/webgpu-gputextureview-for-externaltexture-binding/">&larr; WebGPU: GPUTextureView for externalTexture binding</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v137 · webgpu</p>
+    <h1>Texture Cache Manager</h1>
+    <p class="lede">A GPU texture cache that stores procedurally generated frames. Click a cache slot to recall a frame via <code>GPUTextureView</code> — bound in the external-texture slot (Chrome 137+) — and apply a filter without re-creating the pipeline. Shows hit/miss stats and how one bind group layout serves both cached and live textures.</p>
+  </header>
+
+  <div class="no-webgpu" id="no-gpu">WebGPU not available — requires Chrome 113+.</div>
+
+  <div class="main-ui" id="main-ui">
+    <section>
+      <h2>Cache</h2>
+
+      <div class="controls">
+        <button id="btn-generate">Generate &amp; cache new frame</button>
+        <label>Filter: <select id="filter-sel">
+          <option value="passthrough">None</option>
+          <option value="invert">Invert</option>
+          <option value="grayscale">Grayscale</option>
+          <option value="sepia">Sepia</option>
+        </select></label>
+        <button class="secondary" id="btn-clear-cache">Clear cache</button>
+      </div>
+
+      <div class="stats" id="stats">Cache: 0 / 6 slots used — hits: 0 — misses: 0</div>
+
+      <p style="font-size:.82rem;color:var(--text-muted);margin-bottom:var(--space-1)">Cached frames (click to recall):</p>
+      <div class="cache-grid" id="cache-grid"></div>
+
+      <div class="output-area">
+        <div class="output-box">
+          <h4>Cached source texture</h4>
+          <canvas id="src-out" width="128" height="128"></canvas>
+        </div>
+        <div class="output-box">
+          <h4>Filtered output (via externalTexture slot)</h4>
+          <canvas id="filtered-out" width="128" height="128"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Code: cache lookup + bind group reuse</h2>
+      <div class="code-box"
+><span class="cm">// Retrieve cached GPUTexture and bind via externalTexture slot (Chrome 137+)</span>
+function renderCachedFrame(device, cachedTex, filterPipeline, outputCanvas) {
+  const view = cachedTex.<span class="hi">createView()</span>; <span class="cm">// GPUTextureView from cached texture</span>
+
+  const bindGroup = device.createBindGroup({
+    layout: filterPipeline.getBindGroupLayout(0),
+    entries: [
+      <span class="cm">// Same slot as GPUExternalTexture — now accepts GPUTextureView (v137+)</span>
+      { binding: 0, resource: <span class="hi">view</span> },
+      { binding: 1, resource: sampler }
+    ]
+  });
+
+  <span class="cm">// No pipeline re-compilation needed — same layout works for cached frame</span>
+  const enc = device.createCommandEncoder();
+  const pass = enc.beginRenderPass({ colorAttachments: [{ view: outView, … }] });
+  pass.setPipeline(filterPipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.draw(4); pass.end();
+  device.queue.submit([enc.finish()]);
+}</div>
+
+      <div class="info-box">
+        <strong>Why this matters:</strong> Before Chrome 137, a texture cache that stored frames
+        as <code>GPUTexture</code> objects could not reuse a pipeline with an
+        <code>externalTexture</code> binding layout — you'd need a separate pipeline with a
+        <code>texture_2d&lt;f32&gt;</code> layout. Now, one pipeline and one bind group layout
+        handles both live <code>GPUExternalTexture</code> (from video) and cached
+        <code>GPUTextureView</code> (from stored frames).
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+const CACHE_SIZE = 6;
+const cache = []; // { texture, canvas (preview), label }
+let hitCount = 0, missCount = 0;
+let selectedSlot = null;
+let gpuDevice = null, gpuSampler = null;
+
+const EFFECTS = {
+  passthrough: 'return textureSample(tex, samp, uv);',
+  invert:      'let c = textureSample(tex, samp, uv); return vec4f(1.0-c.r, 1.0-c.g, 1.0-c.b, c.a);',
+  grayscale:   'let c = textureSample(tex, samp, uv); let l = dot(c.rgb, vec3f(0.2126,0.7152,0.0722)); return vec4f(l,l,l,c.a);',
+  sepia:       'let c = textureSample(tex, samp, uv); let r = dot(c.rgb,vec3f(.393,.769,.189)); let g = dot(c.rgb,vec3f(.349,.686,.168)); let b = dot(c.rgb,vec3f(.272,.534,.131)); return vec4f(min(r,1.),min(g,1.),min(b,1.),c.a);'
+};
+
+function buildShader(fx) {
+  return `@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+struct V { @builtin(position) p: vec4f, @location(0) uv: vec2f }
+@vertex fn vert(@builtin(vertex_index) i: u32) -> V {
+  var pos = array<vec2f,4>(vec2f(-1,-1),vec2f(1,-1),vec2f(-1,1),vec2f(1,1));
+  var uv  = array<vec2f,4>(vec2f(0,1),vec2f(1,1),vec2f(0,0),vec2f(1,0));
+  return V(vec4f(pos[i],0,1), uv[i]);
+}
+@fragment fn frag(@location(0) uv: vec2f) -> @location(0) vec4f { ${fx} }`;
+}
+
+function generateTexture(device, idx) {
+  const SIZE = 128;
+  const data = new Uint8Array(SIZE * SIZE * 4);
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      const i = (y * SIZE + x) * 4;
+      const u = x / SIZE, v = y / SIZE;
+      const t = (idx * 0.7 + u + v);
+      data[i]   = Math.floor((Math.sin(t * 6) * 0.5 + 0.5) * 255);
+      data[i+1] = Math.floor((Math.cos(t * 4) * 0.5 + 0.5) * 255);
+      data[i+2] = Math.floor(((u * v + idx * 0.1) % 1) * 255);
+      data[i+3] = 255;
+    }
+  }
+  const tex = device.createTexture({
+    size: [SIZE, SIZE], format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+  });
+  device.queue.writeTexture({ texture: tex }, data, { bytesPerRow: SIZE * 4 }, [SIZE, SIZE]);
+
+  // preview canvas
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = SIZE;
+  const ctx2d = cv.getContext('2d');
+  ctx2d.putImageData(new ImageData(new Uint8ClampedArray(data), SIZE, SIZE), 0, 0);
+  return { texture: tex, preview: cv, data };
+}
+
+function renderCached(slot, filter) {
+  const entry = cache[slot];
+  if (!entry) return;
+
+  // show source preview
+  const srcOut = document.getElementById('src-out');
+  const ctx2d = srcOut.getContext('2d');
+  ctx2d.drawImage(entry.preview, 0, 0);
+
+  // render filtered via GPU
+  const device = gpuDevice;
+  const shader = device.createShaderModule({ code: buildShader(EFFECTS[filter]) });
+  const bgl = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }
+    ]
+  });
+  const pipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+    vertex:   { module: shader, entryPoint: 'vert' },
+    fragment: { module: shader, entryPoint: 'frag', targets: [{ format: navigator.gpu.getPreferredCanvasFormat() }] },
+    primitive: { topology: 'triangle-strip' }
+  });
+
+  const view = entry.texture.createView();
+  const bindGroup = device.createBindGroup({
+    layout: bgl,
+    entries: [
+      { binding: 0, resource: view },
+      { binding: 1, resource: gpuSampler }
+    ]
+  });
+
+  const outCanvas = document.getElementById('filtered-out');
+  const gpuCtx = outCanvas.getContext('webgpu');
+  gpuCtx.configure({ device, format: navigator.gpu.getPreferredCanvasFormat(), alphaMode: 'premultiplied' });
+  const enc = device.createCommandEncoder();
+  const pass = enc.beginRenderPass({
+    colorAttachments: [{ view: gpuCtx.getCurrentTexture().createView(), loadOp: 'clear', clearValue: {r:0,g:0,b:0,a:1}, storeOp: 'store' }]
+  });
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.draw(4); pass.end();
+  device.queue.submit([enc.finish()]);
+}
+
+function updateStats() {
+  document.getElementById('stats').textContent =
+    `Cache: ${cache.length} / ${CACHE_SIZE} slots used — hits: ${hitCount} — misses: ${missCount}`;
+}
+
+function renderGrid() {
+  const grid = document.getElementById('cache-grid');
+  grid.innerHTML = '';
+  for (let i = 0; i < CACHE_SIZE; i++) {
+    const slot = document.createElement('div');
+    slot.className = 'cache-slot' + (i === selectedSlot ? ' selected' : '') + (!cache[i] ? ' empty' : '');
+    slot.dataset.slot = i;
+    if (cache[i]) {
+      const cv = document.createElement('canvas');
+      cv.width = cv.height = 80;
+      cv.getContext('2d').drawImage(cache[i].preview, 0, 0, 80, 80);
+      slot.appendChild(cv);
+      slot.innerHTML += `<div class="slot-label">Frame ${cache[i].label}</div><div class="slot-badge ${i === selectedSlot ? 'hit' : 'new'}">slot ${i}</div>`;
+    } else {
+      slot.innerHTML = `<div class="slot-label">empty</div><div class="slot-badge empty">—</div>`;
+    }
+    slot.addEventListener('click', () => {
+      if (!cache[i]) { missCount++; updateStats(); return; }
+      hitCount++;
+      selectedSlot = i;
+      updateStats();
+      renderGrid();
+      renderCached(i, document.getElementById('filter-sel').value);
+    });
+    grid.appendChild(slot);
+  }
+}
+
+async function init() {
+  if (!navigator.gpu) { document.getElementById('no-gpu').classList.add('visible'); return; }
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) { document.getElementById('no-gpu').classList.add('visible'); return; }
+  gpuDevice = await adapter.requestDevice();
+  gpuSampler = gpuDevice.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+  document.getElementById('main-ui').classList.add('visible');
+
+  renderGrid();
+  updateStats();
+
+  let frameCounter = 0;
+  document.getElementById('btn-generate').addEventListener('click', () => {
+    if (cache.length >= CACHE_SIZE) {
+      const evicted = cache.shift();
+      evicted.texture.destroy();
+    }
+    frameCounter++;
+    const entry = generateTexture(gpuDevice, frameCounter);
+    entry.label = frameCounter;
+    cache.push(entry);
+    missCount++;
+    selectedSlot = cache.length - 1;
+    updateStats();
+    renderGrid();
+    renderCached(selectedSlot, document.getElementById('filter-sel').value);
+  });
+
+  document.getElementById('filter-sel').addEventListener('change', () => {
+    if (selectedSlot !== null && cache[selectedSlot]) {
+      renderCached(selectedSlot, document.getElementById('filter-sel').value);
+    }
+  });
+
+  document.getElementById('btn-clear-cache').addEventListener('click', () => {
+    cache.forEach(e => e.texture.destroy());
+    cache.length = 0;
+    hitCount = 0; missCount = 0; selectedSlot = null;
+    updateStats();
+    renderGrid();
+    ['src-out','filtered-out'].forEach(id => {
+      const cv = document.getElementById(id);
+      cv.getContext('2d').clearRect(0, 0, cv.width, cv.height);
+    });
+  });
+}
+
+init();
+</script>
+</body>
+</html>

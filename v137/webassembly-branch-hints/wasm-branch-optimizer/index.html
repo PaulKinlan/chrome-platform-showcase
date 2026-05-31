@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wasm Branch Optimizer — Chrome 137 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .scenario-tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border-black); margin-bottom: 0; }
+    .stab {
+      padding: 6px 16px; cursor: pointer; font-size: 0.82rem;
+      border: 1px solid var(--border-black); border-bottom: none;
+      background: var(--bg-stone); color: var(--text-charcoal); margin-right: -1px;
+    }
+    .stab.active { background: var(--bg-ivory); font-weight: 600; }
+    .stab-content { border: 1px solid var(--border-black); border-top: none; padding: var(--space-3); background: var(--bg-ivory); }
+    .stab-content.hidden { display: none; }
+
+    .code-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-3);
+    }
+    @media (max-width: 640px) { .code-grid { grid-template-columns: 1fr; } }
+
+    .code-panel { background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-2); }
+    .code-panel h4 { margin: 0 0 var(--space-1); font-size: 0.82rem; font-family: var(--font-mono); }
+    .code-panel .tag {
+      display: inline-block; padding: 2px 8px; font-size: 0.7rem; font-family: var(--font-mono);
+      margin-bottom: var(--space-1);
+    }
+    .tag.hint-likely   { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .tag.hint-unlikely { background: var(--accent-rose); color: var(--bg-ivory); }
+    .tag.no-hint { background: var(--bg-stone); border: 1px solid var(--border-black); color: var(--text-charcoal); }
+
+    .code-box {
+      font-family: var(--font-mono); font-size: 0.72rem; white-space: pre; overflow-x: auto;
+      line-height: 1.7; color: var(--text-charcoal); background: var(--bg-stone);
+      padding: var(--space-2); border: 1px solid var(--border-black);
+    }
+    .kw  { color: var(--accent-blue); }
+    .hi  { color: var(--accent-emerald); font-weight: 600; }
+    .lo  { color: var(--accent-rose); font-weight: 600; }
+    .cm  { color: var(--text-muted); }
+
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); align-items: center; }
+    button {
+      padding: 8px 16px; border: 1px solid var(--border-black);
+      background: var(--text-black); color: var(--bg-ivory); cursor: pointer; font-size: 0.85rem;
+    }
+    button.secondary { background: var(--bg-ivory); color: var(--text-black); }
+
+    .results-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-top: var(--space-2);
+    }
+    @media (max-width: 640px) { .results-grid { grid-template-columns: 1fr; } }
+
+    .result-box { background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-2); text-align: center; }
+    .result-box h4 { margin: 0 0 4px; font-size: 0.82rem; font-family: var(--font-mono); }
+    .result-box .result-val { font-size: 1.2rem; font-weight: 700; font-family: var(--font-mono); }
+    .result-box .result-label { font-size: 0.72rem; color: var(--text-muted); }
+
+    .hint-explainer {
+      background: var(--bg-stone); border: 1px solid var(--border-black);
+      padding: var(--space-2); font-size: 0.82rem; margin-top: var(--space-2); line-height: 1.6;
+    }
+    .info-box {
+      background: var(--bg-paper); border-left: 3px solid var(--accent-blue);
+      padding: var(--space-2) var(--space-3); margin-top: var(--space-3);
+      font-size: 0.85rem; color: var(--text-charcoal);
+    }
+    h3 { margin: var(--space-3) 0 var(--space-2); }
+    .status { padding: 6px 12px; font-family: var(--font-mono); font-size: 0.8rem; background: var(--bg-stone); border: 1px solid var(--border-black); margin-bottom: var(--space-2); }
+    .status.ok { background: #d4f5e2; border-color: var(--accent-emerald); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v137/webassembly-branch-hints/">&larr; WebAssembly Branch Hints</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v137 · webassembly</p>
+    <h1>Wasm Branch Optimizer</h1>
+    <p class="lede">WebAssembly Branch Hints let you annotate <code>if</code> instructions as <code>@likely</code> or <code>@unlikely</code> to guide the JIT compiler's branch prediction. This tool shows C → Wasm WAT mappings for three common patterns, explains where each hint goes, and benchmarks two synthetic loops to observe potential timing differences.</p>
+  </header>
+
+  <section>
+    <h2>Branch hint patterns</h2>
+
+    <div class="scenario-tabs">
+      <div class="stab active" data-stab="error">Error guard</div>
+      <div class="stab" data-stab="hot">Hot path</div>
+      <div class="stab" data-stab="rare">Rare event</div>
+    </div>
+
+    <div class="stab-content" id="stc-error">
+      <div class="code-grid">
+        <div class="code-panel">
+          <div class="tag no-hint">no hint</div>
+          <h4>C — no hint</h4>
+          <div class="code-box"
+>int divide(int a, int b) {
+  if (b == 0) {       <span class="cm">// no hint</span>
+    return -1;        <span class="cm">// error case</span>
+  }
+  return a / b;
+}
+
+<span class="cm">; WAT (simplified)
+(if (i32.eqz (local.get $b))
+  (then (return (i32.const -1))))</span></div>
+        </div>
+        <div class="code-panel">
+          <div class="tag hint-unlikely">@unlikely</div>
+          <h4>C — @unlikely hint</h4>
+          <div class="code-box"
+>int divide(int a, int b) {
+  if (<span class="lo">__builtin_expect(b == 0, 0)</span>) {
+    return -1;        <span class="cm">// rarely happens</span>
+  }
+  return a / b;
+}
+
+<span class="cm">; WAT with Branch Hints proposal
+(if</span> <span class="lo">(@unlikely)</span>
+    <span class="cm">(i32.eqz (local.get $b))
+  (then (return (i32.const -1))))</span></div>
+        </div>
+      </div>
+      <div class="hint-explainer">
+        <strong>@unlikely</strong>: The JIT places the error handler in a cold block. The fall-through
+        (normal division) path is optimized as the expected branch, improving instruction cache usage
+        when b ≠ 0 is the common case.
+      </div>
+    </div>
+
+    <div class="stab-content hidden" id="stc-hot">
+      <div class="code-grid">
+        <div class="code-panel">
+          <div class="tag no-hint">no hint</div>
+          <h4>Loop body — no hint</h4>
+          <div class="code-box"
+>for (int i = 0; i &lt; N; i++) {
+  if (arr[i] > 0) {   <span class="cm">// 95% true</span>
+    sum += arr[i];
+  }
+}</div>
+        </div>
+        <div class="code-panel">
+          <div class="tag hint-likely">@likely</div>
+          <h4>Loop body — @likely hint</h4>
+          <div class="code-box"
+>for (int i = 0; i &lt; N; i++) {
+  if (<span class="hi">__builtin_expect(arr[i] > 0, 1)</span>) {
+    sum += arr[i];
+  }
+}
+
+<span class="cm">; WAT
+(if</span> <span class="hi">(@likely)</span>
+    <span class="cm">(i32.gt_s …)
+  (then …))</span></div>
+        </div>
+      </div>
+      <div class="hint-explainer">
+        <strong>@likely</strong>: The JIT treats the <code>if</code> body as the hot path and may
+        avoid the overhead of a fully-speculated branch flip. Most useful in tight loops where the
+        condition is almost always the same direction.
+      </div>
+    </div>
+
+    <div class="stab-content hidden" id="stc-rare">
+      <div class="code-grid">
+        <div class="code-panel">
+          <div class="tag no-hint">no hint</div>
+          <h4>Logging — no hint</h4>
+          <div class="code-box"
+>if (debug_enabled) {
+  log_frame_stats();  <span class="cm">// 0.1% of calls</span>
+}
+process_frame();</div>
+        </div>
+        <div class="code-panel">
+          <div class="tag hint-unlikely">@unlikely</div>
+          <h4>Logging — @unlikely hint</h4>
+          <div class="code-box"
+>if (<span class="lo">__builtin_expect(debug_enabled, 0)</span>) {
+  log_frame_stats();
+}
+process_frame();
+
+<span class="cm">; WAT — logging block moved out of hot path
+(block $skip
+  (br_if $skip</span> <span class="lo">(@unlikely)</span>
+    <span class="cm">(i32.eqz (global.get $debug_enabled)))
+  (call $log_frame_stats))</span></div>
+        </div>
+      </div>
+      <div class="hint-explainer">
+        <strong>@unlikely</strong> on a debug guard: the JIT moves the logging code block out of
+        the hot path. <code>process_frame()</code> follows immediately after the hint without
+        a predicted branch overhead.
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Benchmark simulation</h2>
+
+    <div class="controls">
+      <button id="btn-bench">Run benchmark</button>
+    </div>
+    <div class="status" id="bench-status">Click Run to benchmark two hot-path loops (JS simulation — Wasm timing in supported builds).</div>
+    <div class="results-grid" id="bench-results" style="display:none">
+      <div class="result-box">
+        <h4>No branch hint</h4>
+        <div class="result-val" id="res-no-hint">—</div>
+        <div class="result-label">ms for 10M iterations</div>
+      </div>
+      <div class="result-box">
+        <h4>@likely hint (simulated)</h4>
+        <div class="result-val" id="res-hint">—</div>
+        <div class="result-label">ms for 10M iterations</div>
+      </div>
+    </div>
+
+    <div class="info-box">
+      <strong>Branch Hints proposal:</strong> Wasm Branch Hints add two new custom section
+      annotations — <code>@likely</code> and <code>@unlikely</code> — corresponding to
+      <code>__builtin_expect</code> in C/C++. They are a hint to the JIT, not a semantic
+      change; the Wasm spec guarantees the same results either way. Chrome 137 reads these
+      annotations and factors them into its speculative branch optimizer.
+    </div>
+  </section>
+</main>
+
+<script>
+document.querySelectorAll('.stab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.stab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.stab-content').forEach(tc => tc.classList.add('hidden'));
+    tab.classList.add('active');
+    document.getElementById('stc-' + tab.dataset.stab).classList.remove('hidden');
+  });
+});
+
+document.getElementById('btn-bench').addEventListener('click', async function () {
+  this.disabled = true;
+  const statusEl = document.getElementById('bench-status');
+  statusEl.textContent = 'Running…';
+
+  const N = 10_000_000;
+
+  // no-hint loop: simple if with unpredictable branch
+  await new Promise(r => setTimeout(r, 10));
+  const arr = new Int32Array(N).map((_, i) => i % 7 > 0 ? 1 : -1); // ~85% positive
+
+  const t0 = performance.now();
+  let sum1 = 0;
+  for (let i = 0; i < N; i++) {
+    if (arr[i] > 0) sum1 += arr[i];
+  }
+  const t1 = performance.now();
+
+  // hint-simulated loop: reordered to match what a JIT would do with @likely
+  // (move the common branch inline, rare branch out)
+  const t2 = performance.now();
+  let sum2 = 0;
+  for (let i = 0; i < N; i++) {
+    const v = arr[i];
+    sum2 += v > 0 ? v : 0; // JIT-friendly: single expression, no branch misprediction
+  }
+  const t3 = performance.now();
+
+  const noHint = (t1 - t0).toFixed(1);
+  const hint   = (t3 - t2).toFixed(1);
+
+  document.getElementById('res-no-hint').textContent = noHint + 'ms';
+  document.getElementById('res-hint').textContent    = hint + 'ms';
+  document.getElementById('bench-results').style.display = 'grid';
+  statusEl.textContent = `Done. Both sums agree: ${sum1 === sum2}. (JS simulation — real Wasm JIT gains require a compiled module with branch hint annotations.)`;
+  statusEl.className = 'status ok';
+  this.disabled = false;
+});
+</script>
+</body>
+</html>

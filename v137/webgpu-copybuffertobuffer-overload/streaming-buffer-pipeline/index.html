@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Streaming Buffer Pipeline — Chrome 137 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .no-webgpu { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); display: none; }
+    .main-ui { display: none; }
+    .main-ui.visible, .no-webgpu.visible { display: block; }
+
+    .pipeline-vis {
+      display: flex; gap: 0; align-items: center; flex-wrap: wrap;
+      margin-bottom: var(--space-3); background: var(--bg-paper);
+      border: 1px solid var(--border-black); padding: var(--space-2);
+    }
+    .pbuf {
+      background: var(--bg-stone); border: 2px solid var(--border-black);
+      padding: var(--space-2); min-width: 100px; text-align: center;
+    }
+    .pbuf h4 { margin: 0 0 4px; font-size: 0.78rem; font-family: var(--font-mono); }
+    .pbuf .bval { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); min-height: 20px; }
+    .pbuf.active { border-color: var(--accent-blue); background: #e8f4ff; }
+    .pbuf.done   { border-color: var(--accent-emerald); background: #e8f5ee; }
+
+    .arrow {
+      padding: 0 var(--space-1); font-size: 1.2rem; color: var(--text-muted);
+      display: flex; align-items: center;
+    }
+    .arrow.active { color: var(--accent-blue); }
+
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); align-items: center; }
+    button {
+      padding: 8px 16px; border: 1px solid var(--border-black);
+      background: var(--text-black); color: var(--bg-ivory); cursor: pointer; font-size: 0.85rem;
+    }
+    button.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .log {
+      background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2);
+      font-family: var(--font-mono); font-size: 0.75rem; max-height: 200px; overflow-y: auto;
+      color: var(--text-charcoal); line-height: 1.7;
+    }
+    .log .entry { border-bottom: 1px solid var(--border-black); padding: 2px 0; }
+    .log .entry:last-child { border: none; }
+    .ts  { color: var(--text-muted); margin-right: 8px; }
+    .ok  { color: var(--accent-emerald); }
+    .new { color: var(--accent-blue); }
+
+    .code-box {
+      background: var(--bg-stone); border: 1px solid var(--border-black);
+      padding: var(--space-2); font-family: var(--font-mono); font-size: 0.75rem;
+      white-space: pre; overflow-x: auto; color: var(--text-charcoal); line-height: 1.6;
+      margin-top: var(--space-3);
+    }
+    .kw { color: var(--accent-blue); }
+    .cm { color: var(--text-muted); }
+    .hi { color: var(--accent-emerald); font-weight: 600; }
+
+    h3 { margin: var(--space-3) 0 var(--space-2); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v137/webgpu-copybuffertobuffer-overload/">&larr; WebGPU copyBufferToBuffer overload</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v137 · webgpu</p>
+    <h1>Streaming Buffer Pipeline</h1>
+    <p class="lede">Simulates a per-frame streaming pipeline: CPU generates data → uploads to a staging buffer → copies to a GPU processing buffer using the simplified <code>copyBufferToBuffer(src, dst)</code> overload → result mapped back to CPU. Shows how the 2-arg overload reduces boilerplate in real frame loops.</p>
+  </header>
+
+  <div class="no-webgpu" id="no-gpu">WebGPU not available — requires Chrome 113+.</div>
+
+  <div class="main-ui" id="main-ui">
+    <section>
+      <h2>Pipeline</h2>
+
+      <div class="pipeline-vis" id="pipeline-vis">
+        <div class="pbuf" id="pb-cpu">
+          <h4>CPU data</h4>
+          <div class="bval" id="pv-cpu">—</div>
+        </div>
+        <div class="arrow" id="arr1">→</div>
+        <div class="pbuf" id="pb-staging">
+          <h4>Staging buf</h4>
+          <div class="bval" id="pv-staging">—</div>
+        </div>
+        <div class="arrow" id="arr2">→</div>
+        <div class="pbuf" id="pb-proc">
+          <h4>Processing buf</h4>
+          <div class="bval" id="pv-proc">—</div>
+        </div>
+        <div class="arrow" id="arr3">→</div>
+        <div class="pbuf" id="pb-readback">
+          <h4>Readback</h4>
+          <div class="bval" id="pv-readback">—</div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="btn-frame">Run one frame</button>
+        <button class="secondary" id="btn-auto">Auto (5 frames)</button>
+        <button class="secondary" id="btn-clear">Clear log</button>
+      </div>
+
+      <div class="log" id="log">
+        <div class="entry"><span class="ts">—</span>Ready — click "Run one frame" to start.</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Code pattern</h2>
+      <div class="code-box"
+><span class="cm">// Per-frame pattern — simplified with 2-arg overload (Chrome 137+)</span>
+
+async function renderFrame(device, frameData) {
+  <span class="cm">// 1. Upload CPU data to staging buffer</span>
+  const staging = device.createBuffer({
+    size: frameData.byteLength,
+    usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.MAP_WRITE
+  });
+  await staging.mapAsync(GPUMapMode.WRITE);
+  new Float32Array(staging.getMappedRange()).set(frameData);
+  staging.unmap();
+
+  <span class="cm">// 2. Copy staging → processing (new 2-arg overload — no offsets needed)</span>
+  const enc = device.createCommandEncoder();
+  enc.<span class="hi">copyBufferToBuffer(staging, processingBuf)</span>; <span class="cm">// ← Chrome 137+</span>
+  <span class="cm">// old form required: enc.copyBufferToBuffer(staging, 0, processingBuf, 0, size)</span>
+  device.queue.submit([enc.finish()]);
+
+  staging.destroy();
+}</div>
+    </section>
+  </div>
+</main>
+
+<script>
+const t0 = Date.now();
+function ts() { return '+' + ((Date.now() - t0) / 1000).toFixed(2) + 's'; }
+
+function addLog(msg, cls) {
+  const log = document.getElementById('log');
+  if (log.querySelector('div:first-child')?.textContent.includes('Ready')) log.innerHTML = '';
+  const d = document.createElement('div');
+  d.className = 'entry';
+  d.innerHTML = `<span class="ts">${ts()}</span><span class="${cls || ''}">${msg}</span>`;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+
+function setPipelineStep(step) {
+  // step 0=idle, 1=cpu, 2=staging, 3=proc, 4=readback
+  ['pb-cpu','pb-staging','pb-proc','pb-readback'].forEach((id, i) => {
+    const el = document.getElementById(id);
+    el.className = 'pbuf' + (i + 1 === step ? ' active' : (i + 1 < step ? ' done' : ''));
+  });
+  ['arr1','arr2','arr3'].forEach((id, i) => {
+    document.getElementById(id).className = 'arrow' + (i + 1 < step ? ' active' : '');
+  });
+}
+
+function setVal(id, val) {
+  document.getElementById(id).textContent = val;
+}
+
+let device = null;
+let procBuf = null;
+let frameIdx = 0;
+
+async function runFrame() {
+  if (!device) return;
+  frameIdx++;
+  const N = 8;
+  const frameData = new Float32Array(N).map((_, i) => Math.round((Math.sin(frameIdx * 0.5 + i) * 10) * 100) / 100);
+
+  // CPU
+  setPipelineStep(1);
+  setVal('pv-cpu', frameData.slice(0, 3).join(', ') + '…');
+  addLog(`Frame ${frameIdx}: CPU data generated (${N} floats)`, 'new');
+  await new Promise(r => setTimeout(r, 200));
+
+  // Upload to staging
+  setPipelineStep(2);
+  const byteLen = frameData.byteLength;
+  const staging = device.createBuffer({
+    size: byteLen, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.MAP_WRITE
+  });
+  await staging.mapAsync(GPUMapMode.WRITE);
+  new Float32Array(staging.getMappedRange()).set(frameData);
+  staging.unmap();
+  setVal('pv-staging', byteLen + ' bytes');
+  addLog(`Staging buffer written (MAP_WRITE)`, '');
+  await new Promise(r => setTimeout(r, 200));
+
+  // Copy staging → proc (new 2-arg overload)
+  setPipelineStep(3);
+  if (!procBuf || procBuf.size < byteLen) {
+    if (procBuf) procBuf.destroy();
+    procBuf = device.createBuffer({ size: byteLen, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  }
+  const enc = device.createCommandEncoder();
+  try {
+    enc.copyBufferToBuffer(staging, procBuf); // new 2-arg
+    addLog('copyBufferToBuffer(staging, procBuf) — 2-arg overload ✓', 'ok');
+  } catch {
+    enc.copyBufferToBuffer(staging, 0, procBuf, 0, byteLen);
+    addLog('copyBufferToBuffer(staging, 0, procBuf, 0, size) — 5-arg fallback', '');
+  }
+  device.queue.submit([enc.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  setVal('pv-proc', byteLen + ' bytes (GPU)');
+  staging.destroy();
+  await new Promise(r => setTimeout(r, 200));
+
+  // Readback
+  setPipelineStep(4);
+  await procBuf.mapAsync(GPUMapMode.READ);
+  const result = new Float32Array(procBuf.getMappedRange().slice(0));
+  procBuf.unmap();
+  setVal('pv-readback', result.slice(0, 3).join(', ') + '…');
+  addLog(`Readback complete — first 3 values: [${result.slice(0,3).join(', ')}]`, 'ok');
+
+  setPipelineStep(5); // all done
+}
+
+async function init() {
+  if (!navigator.gpu) { document.getElementById('no-gpu').classList.add('visible'); return; }
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) { document.getElementById('no-gpu').classList.add('visible'); return; }
+  device = await adapter.requestDevice();
+  document.getElementById('main-ui').classList.add('visible');
+
+  document.getElementById('btn-frame').addEventListener('click', async function () {
+    this.disabled = true;
+    await runFrame();
+    this.disabled = false;
+  });
+
+  document.getElementById('btn-auto').addEventListener('click', async function () {
+    this.disabled = true;
+    document.getElementById('btn-frame').disabled = true;
+    for (let i = 0; i < 5; i++) {
+      await runFrame();
+      await new Promise(r => setTimeout(r, 100));
+    }
+    this.disabled = false;
+    document.getElementById('btn-frame').disabled = false;
+  });
+
+  document.getElementById('btn-clear').addEventListener('click', () => {
+    document.getElementById('log').innerHTML = '';
+    frameIdx = 0;
+    setPipelineStep(0);
+    ['pv-cpu','pv-staging','pv-proc','pv-readback'].forEach(id => setVal(id, '—'));
+  });
+}
+
+init();
+</script>
+</body>
+</html>
