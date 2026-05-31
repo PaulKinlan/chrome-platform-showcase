@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pull to Load More — Overscroll Gestures — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .feed-frame {
+      max-width: 440px;
+      margin: 0 auto 1.25rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      box-shadow: var(--flat-shadow);
+      overflow: hidden;
+      position: relative;
+    }
+    .feed-head {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: 0.5rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    .feed {
+      height: 420px;
+      overflow-y: auto;
+      overscroll-behavior-y: contain;
+      position: relative;
+    }
+
+    /* Load-more trigger zone at bottom */
+    .load-sentinel {
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      cursor: default;
+      user-select: none;
+      transition: background 0.2s;
+    }
+    .load-sentinel.armed {
+      background: var(--accent-blue);
+      color: var(--bg-ivory);
+    }
+    .load-sentinel.loading {
+      color: var(--text-muted);
+      background: var(--bg-stone);
+    }
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid var(--text-muted);
+      border-top-color: var(--text-black);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin-right: 0.4rem;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .post {
+      padding: 0.75rem 0.85rem;
+      border-bottom: 1px solid var(--border-black);
+      background: var(--bg-paper);
+    }
+    .post:last-of-type { border-bottom: none; }
+    .post-author {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      margin-bottom: 0.3rem;
+    }
+    .post-author strong { color: var(--text-black); font-weight: 600; }
+    .post-text {
+      font-size: 0.88rem;
+      color: var(--text-black);
+      line-height: 1.55;
+      margin: 0;
+    }
+    .post-meta {
+      display: flex;
+      gap: 0.85rem;
+      margin-top: 0.4rem;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--text-muted);
+    }
+    .post.new { animation: slide-in 0.22s ease; }
+    @keyframes slide-in {
+      from { opacity: 0; transform: translateY(-8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .stats {
+      background: var(--bg-stone);
+      border-top: 1px solid var(--border-black);
+      padding: 0.4rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      display: flex;
+      gap: 1rem;
+    }
+    .stats .sv { color: var(--text-black); font-weight: 600; }
+
+    .tip {
+      max-width: 440px;
+      margin: 0 auto 0.75rem;
+      padding: 0.4rem 0.75rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-charcoal);
+    }
+
+    pre code {
+      display: block;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.6;
+      overflow-x: auto;
+      border: 2px solid var(--border-black);
+      margin: 1.5rem 0;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v149/overscroll-gestures/">&larr; Overscroll Gestures</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v149 · overscroll · feeds</p>
+    <h1>Pull to Load More</h1>
+    <p class="lede">Scroll to the bottom of the feed and keep pulling. The sentinel zone turns blue when the load threshold is crossed; release and the next page loads. An <code>IntersectionObserver</code> on the sentinel drives the load, <code>overscroll-behavior-y: contain</code> prevents the pull from bouncing the outer page.</p>
+  </header>
+
+  <div class="tip">Scroll to the bottom of the feed, then keep scrolling to trigger a load.</div>
+
+  <div class="feed-frame">
+    <div class="feed-head">
+      <span>Developer Feed</span>
+      <span id="pageLabel">Page 1 / ∞</span>
+    </div>
+    <div class="feed" id="feed">
+      <div id="postList"></div>
+      <div class="load-sentinel" id="sentinel">↓ pull past here to load more</div>
+    </div>
+    <div class="stats">
+      <span>Posts: <span class="sv" id="postCount">0</span></span>
+      <span>Page: <span class="sv" id="pageCount">1</span></span>
+      <span>Loads triggered: <span class="sv" id="loadCount">0</span></span>
+    </div>
+  </div>
+
+  <pre><code>// Detect when the sentinel enters the viewport
+const observer = new IntersectionObserver(([entry]) => {
+  if (entry.isIntersecting && !loading) {
+    loadNextPage();
+  }
+}, {
+  root: feedEl,
+  rootMargin: '0px',
+  threshold: 0.8,         // 80% visible = trigger
+});
+
+observer.observe(sentinel);
+
+// overscroll-behavior: contain keeps the pull
+// gesture from also scrolling the outer page
+feedEl.style.overscrollBehaviorY = 'contain';
+
+async function loadNextPage() {
+  loading = true;
+  sentinel.textContent = 'Loading…';
+  const items = await fetchPage(currentPage++);
+  items.forEach(item => renderPost(item));
+  sentinel.textContent = '↓ pull past here to load more';
+  loading = false;
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../pull-to-reveal/">Pull to Reveal</a> — pull-to-refresh panel at top</li>
+      <li><a href="../swipe-drawer/">Swipe Drawer</a> — action drawer from bottom overscroll</li>
+      <li><a href="../chat-reactions/">Chat Reactions</a> — swipe to reveal reaction bar</li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const feed = document.getElementById('feed');
+  const postList = document.getElementById('postList');
+  const sentinel = document.getElementById('sentinel');
+  const postCountEl = document.getElementById('postCount');
+  const pageCountEl = document.getElementById('pageCount');
+  const loadCountEl = document.getElementById('loadCount');
+  const pageLabel = document.getElementById('pageLabel');
+
+  let page = 1, loading = false, loadTriggers = 0, totalPosts = 0;
+
+  const AUTHORS = ['@sarah_dev','@tinyrobot','@css_nerd','@ts_wizard','@perf_hawk','@a11y_ada','@webgl_kim'];
+  const CONTENT = [
+    'Just shipped `flex-wrap: balance` support. The orphan-free layouts it produces are genuinely impressive.',
+    'Chrome 149\'s scroll promise makes guided tours so much cleaner — no more fragile setTimeout chains.',
+    'If you haven\'t tried `text-fit: contain` yet, open DevTools and type it. Zero JS, fluid typography.',
+    'WebMCP is fascinating. Sites exposing machine-readable tools for AI agents to call directly.',
+    'IndexedDB now uses SQLite under the hood in Chrome 149. Durability semantics finally match disk-based DBs.',
+    'The `Intl.Locale.prototype.variants` array is tiny but it closes a real gap in BCP 47 round-tripping.',
+    'Deferred clipboard reads are a privacy win. Content is only read when the app actually requests it.',
+    'On-device speech recognition in Chrome 150 means my meeting notes app finally works offline.',
+    'Pull-to-refresh was the one gesture I dreaded building on the web. Overscroll gestures fix it properly.',
+    'Spent the morning comparing `@supports (text-fit: contain)` polyfill vs native. Native is faster by 2×.',
+    'Intl.Locale variants round-trip is something I\'ve needed for a CLDR-powered i18n toolkit for ages.',
+    'The `overscroll-behavior-y: contain` trick should be in every scrollable widget you build.',
+    'Swipe-to-delete without pointer-event listeners feels like magic the first time you see it.',
+  ];
+
+  function makePost(idx) {
+    const author = AUTHORS[idx % AUTHORS.length];
+    const text = CONTENT[idx % CONTENT.length];
+    const likes = Math.floor(Math.random() * 80) + 1;
+    const time = new Date(Date.now() - (totalPosts - idx) * 240000);
+    const ts = time.toLocaleTimeString('en',{hour:'2-digit',minute:'2-digit',hour12:false});
+    return { author, text, likes, ts };
+  }
+
+  function renderPost(data, isNew) {
+    const div = document.createElement('div');
+    div.className = 'post' + (isNew ? ' new' : '');
+    div.innerHTML = `<div class="post-author"><strong>${escHtml(data.author)}</strong> · ${data.ts}</div><p class="post-text">${escHtml(data.text)}</p><div class="post-meta"><span>♥ ${data.likes}</span><span>↩ reply</span></div>`;
+    postList.appendChild(div);
+  }
+
+  function loadPage(n) {
+    if (loading) return;
+    loading = true;
+    loadTriggers++;
+    loadCountEl.textContent = loadTriggers;
+    sentinel.className = 'load-sentinel loading';
+    sentinel.innerHTML = '<span class="spinner"></span> Loading page ' + n + '…';
+
+    setTimeout(() => {
+      const perPage = 4;
+      for (let i = 0; i < perPage; i++) {
+        renderPost(makePost(totalPosts + i), true);
+      }
+      totalPosts += perPage;
+      page = n + 1;
+      postCountEl.textContent = totalPosts;
+      pageCountEl.textContent = n;
+      pageLabel.textContent = 'Page ' + n + ' / ∞';
+      sentinel.className = 'load-sentinel';
+      sentinel.textContent = '↓ pull past here to load more';
+      loading = false;
+      // scroll so sentinel is just below viewport
+      feed.scrollTop = feed.scrollHeight - feed.clientHeight - 30;
+    }, 900);
+  }
+
+  // IntersectionObserver on sentinel
+  const io = new IntersectionObserver(entries => {
+    const entry = entries[0];
+    if (entry.isIntersecting && !loading) {
+      sentinel.className = 'load-sentinel armed';
+      sentinel.textContent = '↑ release to load page ' + page;
+      // Small delay lets user see the armed state before loading
+      setTimeout(() => {
+        if (!loading) loadPage(page);
+      }, 250);
+    } else if (!loading) {
+      sentinel.className = 'load-sentinel';
+      sentinel.textContent = '↓ pull past here to load more';
+    }
+  }, { root: feed, threshold: 0.9 });
+
+  io.observe(sentinel);
+
+  // Initial load
+  loadPage(1);
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+})();
+</script>
+</body>
+</html>
