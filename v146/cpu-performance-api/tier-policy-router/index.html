@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tier policy router — CPU Performance API — Chrome 146</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-5);
+      margin-bottom: var(--space-5);
+    }
+    .tier-row {
+      display: flex;
+      gap: var(--space-2);
+      margin-bottom: var(--space-4);
+      flex-wrap: wrap;
+    }
+    .tier-btn {
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      border: 2px solid var(--border-black);
+      padding: 0.4rem 0.85rem;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+    .tier-btn.on {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+    }
+    .policy-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      margin-bottom: var(--space-4);
+    }
+    .policy-table th, .policy-table td {
+      text-align: left;
+      padding: var(--space-2) var(--space-3);
+      border: 1px solid var(--border-black);
+      vertical-align: top;
+    }
+    .policy-table th {
+      background: var(--bg-stone);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .policy-table td.match {
+      background: var(--accent-emerald);
+      color: var(--bg-ivory);
+    }
+    .policy-table td.skip {
+      color: var(--text-muted);
+    }
+
+    .decision-card {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin-bottom: var(--space-4);
+    }
+    .decision-card h4 {
+      font-family: var(--font-display);
+      font-size: 1.1rem;
+      margin: 0 0 var(--space-2);
+    }
+    .decision-grid {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      column-gap: var(--space-4);
+      row-gap: var(--space-1);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+    }
+    .decision-grid dt { color: var(--text-muted); }
+    .decision-grid dd { color: var(--text-black); }
+
+    pre.policy-source {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      overflow-x: auto;
+    }
+
+    .warn-block {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: var(--space-3) var(--space-4);
+      margin: 0 0 var(--space-5);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+    }
+
+    .gauge {
+      height: 8px;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      position: relative;
+    }
+    .gauge > span {
+      position: absolute;
+      top: 0; left: 0; bottom: 0;
+      background: var(--accent-blue);
+      transition: width 0.3s ease;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v146/cpu-performance-api/">&larr; CPU Performance API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v146</p>
+    <h1>Tier policy router</h1>
+    <p class="lede">A real product needs a <em>routing table</em>, not just a tier number. This demo encodes a policy table that maps <code>navigator.cpuPerformance</code> levels onto product-level feature flags — what gets compiled in, what gets pre-loaded, what gets server-rendered. Drag the tier and watch a JSON config recompute live.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Behind a flag:</strong> <code>navigator.cpuPerformance</code> ships behind
+    <code>chrome://flags/#enable-experimental-web-platform-features</code> in Chrome 146. The
+    fallback path runs a coarse synthetic benchmark plus <code>hardwareConcurrency</code> and
+    <code>deviceMemory</code> heuristics.
+  </div>
+
+  <p>Read the tier <strong>once</strong> at boot, run the policy, dispatch features. Re-reading on every frame is anti-pattern — the value is stable across the page lifetime.</p>
+
+  <div class="stage">
+    <h3 style="margin-top:0">Pretend my device is&hellip;</h3>
+    <div class="tier-row" id="tier-row">
+      <button class="tier-btn" data-tier="low">low</button>
+      <button class="tier-btn" data-tier="mid">mid</button>
+      <button class="tier-btn on" data-tier="high">high</button>
+      <button class="tier-btn" data-tier="auto">read &amp; auto-detect</button>
+    </div>
+
+    <div class="decision-card">
+      <h4>Detected</h4>
+      <dl class="decision-grid">
+        <dt>cpuPerformance tier:</dt><dd id="d-tier">high</dd>
+        <dt>hardwareConcurrency:</dt><dd id="d-hc">—</dd>
+        <dt>deviceMemory:</dt><dd id="d-dm">—</dd>
+        <dt>sieve bench (ms):</dt><dd id="d-bench">—</dd>
+        <dt>final tier (after blend):</dt><dd id="d-final">high</dd>
+      </dl>
+      <div class="gauge" style="margin-top:0.5rem"><span id="d-gauge" style="width:90%"></span></div>
+    </div>
+
+    <h3>Policy routing</h3>
+    <table class="policy-table" id="policy-table"></table>
+
+    <div class="decision-card">
+      <h4>Effective config dispatched to the rest of the app</h4>
+      <pre style="background:var(--bg-paper);padding:var(--space-3);border:1px solid var(--border-black);font-size:0.78rem;overflow-x:auto" id="effective"></pre>
+    </div>
+  </div>
+
+  <h3>The policy table that drives the demo</h3>
+  <pre class="policy-source">const POLICY = [
+  { feature: "animationStyle",      low: "css-only",   mid: "css+canvas",     high: "webgl"          },
+  { feature: "imagePipeline",       low: "thumb-only", mid: "thumb-then-hi",  high: "hi-res-direct"  },
+  { feature: "ml.tokenizerWorker",  low: "off",        mid: "lazy",           high: "preload"        },
+  { feature: "physicsEngine",       low: "rigid-2d",   mid: "rigid-3d",       high: "soft-body-3d"   },
+  { feature: "particleBudget",      low: 200,          mid: 2000,             high: 20000            },
+  { feature: "shadowQuality",       low: "off",        mid: "low",            high: "high"           },
+  { feature: "audioReverb",         low: "off",        mid: "mono-ir",        high: "stereo-ir"      },
+  { feature: "telemetry.flushMs",   low: 30000,        mid: 10000,            high: 5000             },
+];
+const config = Object.fromEntries(
+  POLICY.map(({ feature, ...row }) =&gt; [feature, row[tier]])
+);</pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v146/cpu-performance-api/">Feature page</a></li>
+      <li><a href="/v146/cpu-performance-api/device-tier-readout/">Device tier readout</a></li>
+      <li><a href="/v146/cpu-performance-api/video-conference-tier-adapter/">Video conference tier adapter</a></li>
+      <li><a href="/v146/cpu-performance-api/game-quality-preset/">Game quality preset</a></li>
+      <li><a href="https://github.com/WICG/cpu-performance" target="_blank" rel="noopener">WICG CPU Performance explainer</a></li>
+      <li><a href="https://chromestatus.com/feature/5189864286978048" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const POLICY = [
+    { feature: "animationStyle",     low: "css-only",   mid: "css+canvas",    high: "webgl" },
+    { feature: "imagePipeline",      low: "thumb-only", mid: "thumb-then-hi", high: "hi-res-direct" },
+    { feature: "ml.tokenizerWorker", low: "off",        mid: "lazy",          high: "preload" },
+    { feature: "physicsEngine",      low: "rigid-2d",   mid: "rigid-3d",      high: "soft-body-3d" },
+    { feature: "particleBudget",     low: 200,          mid: 2000,            high: 20000 },
+    { feature: "shadowQuality",     low: "off",        mid: "low",           high: "high" },
+    { feature: "audioReverb",       low: "off",        mid: "mono-ir",       high: "stereo-ir" },
+    { feature: "telemetry.flushMs", low: 30000,        mid: 10000,           high: 5000 },
+  ];
+
+  const table = document.getElementById("policy-table");
+  const eff = document.getElementById("effective");
+  const tierRow = document.getElementById("tier-row");
+  const dTier = document.getElementById("d-tier");
+  const dHc = document.getElementById("d-hc");
+  const dDm = document.getElementById("d-dm");
+  const dBench = document.getElementById("d-bench");
+  const dFinal = document.getElementById("d-final");
+  const dGauge = document.getElementById("d-gauge");
+
+  function renderPolicy(active) {
+    const head = document.createElement("thead");
+    head.innerHTML = "<tr><th>feature flag</th><th>low</th><th>mid</th><th>high</th></tr>";
+    const body = document.createElement("tbody");
+    for (const row of POLICY) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + row.feature + "</td>" +
+        ["low","mid","high"].map((t) => "<td class='" + (t === active ? "match" : "skip") + "'>" + row[t] + "</td>").join("");
+      body.appendChild(tr);
+    }
+    table.innerHTML = "";
+    table.appendChild(head);
+    table.appendChild(body);
+
+    const config = Object.fromEntries(POLICY.map(({ feature, ...row }) => [feature, row[active]]));
+    eff.textContent = JSON.stringify(config, null, 2);
+  }
+
+  function setTier(t) {
+    [...tierRow.children].forEach((b) => b.classList.toggle("on", b.dataset.tier === t));
+    dTier.textContent = t;
+    dFinal.textContent = t;
+    dGauge.style.width = (t === "low" ? 20 : t === "mid" ? 55 : 90) + "%";
+    renderPolicy(t);
+  }
+
+  async function autoDetect() {
+    const hc = navigator.hardwareConcurrency || 4;
+    const dm = navigator.deviceMemory || 4;
+    dHc.textContent = hc;
+    dDm.textContent = dm + " GB";
+
+    // Synthetic sieve benchmark.
+    const t0 = performance.now();
+    const N = 200000;
+    const isPrime = new Uint8Array(N + 1);
+    isPrime.fill(1);
+    isPrime[0] = isPrime[1] = 0;
+    for (let i = 2; i * i <= N; i++) {
+      if (isPrime[i]) for (let j = i * i; j <= N; j += i) isPrime[j] = 0;
+    }
+    const ms = performance.now() - t0;
+    dBench.textContent = ms.toFixed(1);
+
+    let tier = "mid";
+    const cpuApi = navigator.cpuPerformance?.tier;
+    if (cpuApi) {
+      tier = cpuApi;
+      dTier.textContent = "API → " + cpuApi;
+    } else {
+      // Heuristic: blend benchmark with hardwareConcurrency / deviceMemory.
+      const score = (hc * 1.5) + dm + (ms < 8 ? 4 : ms < 16 ? 2 : 0);
+      tier = score >= 14 ? "high" : score >= 8 ? "mid" : "low";
+      dTier.textContent = "synthetic (" + tier + ")";
+    }
+    dFinal.textContent = tier;
+    dGauge.style.width = (tier === "low" ? 20 : tier === "mid" ? 55 : 90) + "%";
+    [...tierRow.children].forEach((b) => b.classList.toggle("on", b.dataset.tier === "auto"));
+    renderPolicy(tier);
+  }
+
+  tierRow.addEventListener("click", (e) => {
+    const t = e.target.closest("[data-tier]");
+    if (!t) return;
+    if (t.dataset.tier === "auto") autoDetect();
+    else setTier(t.dataset.tier);
+  });
+
+  renderPolicy("high");
+</script>
+</body>
+</html>

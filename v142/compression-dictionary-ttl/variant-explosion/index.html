@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cache Variant Explosion — Compression Dictionary TTL — Chrome 142</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-4);
+    }
+    @media (max-width: 700px) { .row { grid-template-columns: 1fr; } }
+
+    .sliders {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: var(--space-4);
+    }
+    .slider label {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-bottom: var(--space-2);
+    }
+    .slider label span {
+      float: right;
+      color: var(--text-black);
+      font-weight: 500;
+    }
+    input[type=range] { width: 100%; accent-color: var(--accent-blue); }
+    input[type=number] {
+      font: inherit;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: 0.4rem 0.6rem;
+      width: 100%;
+    }
+
+    .timeline {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      position: relative;
+      height: 220px;
+      overflow: hidden;
+    }
+    .lane {
+      display: flex;
+      gap: 2px;
+      margin-bottom: var(--space-2);
+      align-items: center;
+    }
+    .lane .label {
+      width: 110px;
+      flex-shrink: 0;
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+    }
+    .lane .cells {
+      display: flex;
+      gap: 2px;
+      flex: 1;
+      height: 26px;
+    }
+    .cell {
+      flex: 1;
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      position: relative;
+    }
+    .cell.fresh { background: var(--accent-emerald); }
+    .cell.expired { background: color-mix(in srgb, var(--accent-rose) 30%, var(--bg-paper)); }
+    .cell.served { background: var(--accent-blue); }
+
+    .meter {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: var(--space-2);
+      margin-top: var(--space-4);
+    }
+    @media (max-width: 600px) { .meter { grid-template-columns: 1fr 1fr; } }
+    .stat {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .stat-l { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 0.3rem; }
+    .stat-v { font-family: var(--font-mono); font-size: 1.05rem; color: var(--text-black); font-weight: 500; }
+    .stat-v.warn { color: var(--accent-amber); }
+    .stat-v.good { color: var(--accent-emerald); }
+    .stat-v.bad { color: var(--accent-rose); }
+
+    .headers {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.55;
+      white-space: pre;
+      overflow-x: auto;
+      margin-top: var(--space-3);
+    }
+    .legend { display: flex; gap: var(--space-4); font-family: var(--font-mono); font-size: 0.72rem; margin: var(--space-3) 0; flex-wrap: wrap; }
+    .legend .sw { display: inline-block; width: 14px; height: 14px; border: 1px solid var(--border-black); vertical-align: middle; margin-right: 4px; }
+    .sw.fresh { background: var(--accent-emerald); }
+    .sw.expired { background: color-mix(in srgb, var(--accent-rose) 30%, var(--bg-paper)); }
+    .sw.served { background: var(--accent-blue); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Compression Dictionary TTL</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v142</p>
+    <h1>Cache Variant Explosion</h1>
+    <p class="lede">A CDN cache keyed on <code>Available-Dictionary</code> grows one variant per dictionary hash in the wild. Without a TTL, every dictionary ever shipped stays a valid cache key forever — your origin keeps generating delta variants for each one. <code>ttl=</code> is the surgical fix: it tells clients when to stop offering an old dictionary, so the variant set converges.</p>
+  </header>
+
+  <section class="stage">
+    <h3>Simulate 8 weeks of deploys</h3>
+
+    <div class="row">
+      <div class="sliders">
+        <div class="slider">
+          <label>Deploys per week <span id="freqVal">3</span></label>
+          <input type="range" id="freq" min="1" max="10" value="3" step="1">
+        </div>
+        <div class="slider">
+          <label>TTL on each shipped dictionary <span id="ttlVal">14 days</span></label>
+          <input type="range" id="ttl" min="0" max="56" value="14" step="1">
+        </div>
+        <div class="slider">
+          <label>Inactive users that never re-fetch <span id="staleVal">20%</span></label>
+          <input type="range" id="stale" min="0" max="100" value="20" step="5">
+        </div>
+        <button id="recalc">Recalculate</button>
+      </div>
+
+      <div>
+        <div class="timeline" id="timeline"></div>
+        <div class="legend">
+          <span><span class="sw fresh"></span>dictionary live (within TTL)</span>
+          <span><span class="sw expired"></span>dictionary expired (TTL passed)</span>
+          <span><span class="sw served"></span>variant served from cache</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="meter">
+      <div class="stat"><div class="stat-l">live variants</div><div class="stat-v" id="mLive">—</div></div>
+      <div class="stat"><div class="stat-l">expired variants</div><div class="stat-v" id="mExpired">—</div></div>
+      <div class="stat"><div class="stat-l">peak set size</div><div class="stat-v" id="mPeak">—</div></div>
+      <div class="stat"><div class="stat-l">delta savings</div><div class="stat-v" id="mSavings">—</div></div>
+    </div>
+
+    <h3 style="margin-top:1.5rem">Use-As-Dictionary header at deploy time</h3>
+    <div class="headers" id="headerOut">—</div>
+  </section>
+
+  <h2>relevant markup</h2>
+<pre><code># When ttl is set, browsers stop sending Available-Dictionary
+# after `ttl` seconds since the last fetch of the dictionary.
+HTTP/1.1 200 OK
+Content-Type: application/javascript
+Use-As-Dictionary: match="/app-*.js", id="abc", ttl=1209600
+Vary: Available-Dictionary, accept-encoding
+Cache-Control: max-age=2592000</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Compression Dictionary TTL</a> — feature index</li>
+      <li><a href="../dict-ttl/">Dictionary TTL</a> — request/response inspector</li>
+      <li><a href="../bundle-delta/">Bundle Delta Savings</a> — wire size simulator</li>
+      <li><a href="https://chromestatus.com/feature/6408307086589952" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://datatracker.ietf.org/doc/draft-ietf-httpbis-compression-dictionary/" target="_blank" rel="noopener">Compression Dictionary Transport spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const freq = document.getElementById("freq");
+  const ttl = document.getElementById("ttl");
+  const stale = document.getElementById("stale");
+  const freqVal = document.getElementById("freqVal");
+  const ttlVal = document.getElementById("ttlVal");
+  const staleVal = document.getElementById("staleVal");
+  const timeline = document.getElementById("timeline");
+  const mLive = document.getElementById("mLive");
+  const mExpired = document.getElementById("mExpired");
+  const mPeak = document.getElementById("mPeak");
+  const mSavings = document.getElementById("mSavings");
+  const headerOut = document.getElementById("headerOut");
+
+  const WEEKS = 8;
+  const DAYS = WEEKS * 7;
+
+  function fmtDays(d) {
+    if (d === 0) return "0 (immediately expires)";
+    if (d >= 7) return `${(d / 7).toFixed(1)} weeks`;
+    return `${d} days`;
+  }
+
+  function render() {
+    const dpw = parseInt(freq.value);
+    const ttlDays = parseInt(ttl.value);
+    const stalePct = parseInt(stale.value) / 100;
+    freqVal.textContent = dpw + " deploys";
+    ttlVal.textContent = fmtDays(ttlDays);
+    staleVal.textContent = (stalePct * 100).toFixed(0) + "%";
+
+    // simulate
+    const totalDeploys = dpw * WEEKS;
+    const dictionaries = [];
+    for (let i = 0; i < totalDeploys; i++) {
+      const start = Math.floor((DAYS * i) / totalDeploys);
+      dictionaries.push({ id: i, start, end: ttlDays === 0 ? start : start + ttlDays, hash: "d" + (1000 + i).toString(16) });
+    }
+
+    // Build timeline
+    timeline.innerHTML = "";
+    const showCount = Math.min(7, dictionaries.length);
+    const recent = dictionaries.slice(-showCount);
+    for (const d of recent) {
+      const lane = document.createElement("div");
+      lane.className = "lane";
+      const lbl = document.createElement("div");
+      lbl.className = "label";
+      lbl.textContent = d.hash;
+      lane.appendChild(lbl);
+      const cells = document.createElement("div");
+      cells.className = "cells";
+      for (let day = 0; day < DAYS; day++) {
+        const c = document.createElement("div");
+        c.className = "cell";
+        if (day >= d.start && day < d.end) c.classList.add("fresh");
+        if (day >= d.end && day < d.start + 70) c.classList.add("expired");
+        cells.appendChild(c);
+      }
+      lane.appendChild(cells);
+      timeline.appendChild(lane);
+    }
+
+    // Stats: at end-of-window, how many variants does the cache key?
+    // Live = dictionaries whose [start, end) overlaps the present day.
+    // Expired but still requested = stale users still send Available-Dictionary for it.
+    const now = DAYS - 1;
+    const live = dictionaries.filter(d => now >= d.start && now < d.end).length;
+    const expired = dictionaries.filter(d => now >= d.end).length;
+    const peak = Math.max(live, Math.ceil(live + expired * stalePct));
+    const savingsPct = ttlDays === 0 ? 0 : Math.min(85, 30 + (dpw * 6) + (ttlDays / 4));
+
+    mLive.textContent = live + " keys";
+    mLive.className = "stat-v good";
+    mExpired.textContent = expired + " keys";
+    mExpired.className = expired === 0 ? "stat-v good" : (expired > 10 ? "stat-v bad" : "stat-v warn");
+    mPeak.textContent = peak + " variants";
+    mPeak.className = peak > 15 ? "stat-v bad" : (peak > 6 ? "stat-v warn" : "stat-v good");
+    mSavings.textContent = savingsPct.toFixed(0) + "% smaller";
+    mSavings.className = savingsPct > 50 ? "stat-v good" : (savingsPct > 25 ? "stat-v warn" : "stat-v bad");
+
+    // Header preview
+    const ttlSeconds = ttlDays * 86400;
+    headerOut.textContent = `HTTP/1.1 200 OK
+Content-Type: application/javascript
+Cache-Control: public, max-age=2592000
+Use-As-Dictionary: match="/app-*.js", id="${recent[recent.length - 1]?.hash ?? "d1000"}"${ttlDays > 0 ? `, ttl=${ttlSeconds}` : ""}
+Vary: Available-Dictionary, accept-encoding`;
+  }
+
+  for (const el of [freq, ttl, stale]) el.addEventListener("input", render);
+  document.getElementById("recalc").addEventListener("click", render);
+  render();
+</script>
+</body>
+</html>
