@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>File Transfer Demo — WebRTC DataChannel Always Negotiate — Chrome 148</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .peers { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0; }
+    @media (max-width: 640px) { .peers { grid-template-columns: 1fr; } }
+    .peer-card { background: var(--bg-paper); border: 2px solid var(--border-black); padding: 1.1rem; }
+    .peer-card h3 { margin: 0 0 0.75rem; font-size: 0.875rem; }
+    .peer-status { font-family: monospace; font-size: 0.72rem; color: var(--text-muted); margin-bottom: 0.5rem; }
+    .drop-zone { border: 2px dashed var(--border-black); padding: 1.5rem; text-align: center; font-size: 0.82rem; color: var(--text-muted); cursor: pointer; margin: 0.75rem 0; background: var(--bg-stone); }
+    .drop-zone:hover, .drop-zone.dragover { background: var(--bg-ivory); border-color: var(--accent-blue); }
+    .file-queue { min-height: 50px; }
+    .file-item { display: flex; gap: 0.5rem; align-items: center; padding: 0.4rem 0.5rem; border: 1px solid var(--border-black); margin: 0.25rem 0; font-size: 0.78rem; background: var(--bg-stone); }
+    .file-item .fi-name { flex: 1; font-family: monospace; }
+    .fi-size { color: var(--text-muted); font-family: monospace; font-size: 0.72rem; }
+    .fi-status { font-size: 0.7rem; font-weight: 700; padding: 0.1rem 0.35rem; border: 1px solid; }
+    .fi-status.queued { background: var(--bg-stone); border-color: var(--border-black); color: var(--text-muted); }
+    .fi-status.sending { background: #dbeafe; border-color: #3b82f6; color: #1e40af; }
+    .fi-status.done { background: #d1fae5; border-color: #059669; color: #065f46; }
+    .fi-status.recv { background: #f3e8ff; border-color: #7c3aed; color: #4c1d95; }
+    .progress-bar { height: 4px; background: var(--bg-stone); border: 1px solid var(--border-black); margin-top: 0.25rem; }
+    .progress-fill { height: 100%; background: #3b82f6; transition: width 0.15s; width: 0%; }
+    .channel-state { display: flex; gap: 0.5rem; align-items: center; font-size: 0.75rem; font-family: monospace; color: var(--text-muted); margin: 0.5rem 0; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+    .dot.green { background: #059669; }
+    .dot.grey { background: #9ca3af; }
+    .dot.amber { background: #d97706; }
+    button { padding: 0.4rem 0.85rem; font-size: 0.82rem; cursor: pointer; border: 1px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); }
+    button:hover { opacity: 0.85; }
+    button.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    button.secondary:hover { background: var(--bg-stone); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .toggle-row { display: flex; gap: 0.5rem; align-items: center; font-size: 0.8rem; margin-bottom: 1rem; }
+    .toggle-row label { color: var(--text-charcoal); }
+    input[type="checkbox"] { cursor: pointer; }
+    .negotiation-note { background: #fef3c7; border: 1px solid #d97706; padding: 0.5rem 0.75rem; font-size: 0.78rem; color: #92400e; margin: 0.5rem 0; display: none; }
+    .event-log { background: var(--bg-stone); border: 1px solid var(--border-black); font-family: monospace; font-size: 0.72rem; max-height: 120px; overflow-y: auto; padding: 0.5rem 0.65rem; margin-top: 0.75rem; }
+    .log-r { margin: 0.1rem 0; color: var(--text-charcoal); }
+    .log-r.warn { color: #d97706; }
+    .log-r.ok { color: #059669; }
+    .log-r.err { color: #991b1b; }
+    .support-note { background: var(--bg-stone); border-left: 3px solid var(--accent-blue); padding: 0.6rem 0.9rem; font-size: 0.8rem; color: var(--text-charcoal); margin: 1rem 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v148/webrtc-datachannel-always-negotiate-data-channels/">&larr; WebRTC DataChannel — alwaysNegotiateDataChannels</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v148 · WebRTC · DataChannel</p>
+    <h1>File Transfer Demo</h1>
+    <p class="lede">P2P file transfer over a loopback <code>RTCPeerConnection</code> using <code>alwaysNegotiateDataChannels: true</code>. The toggle lets you simulate the pre-Chrome 148 race where a channel was created before the remote peer was ready to receive it.</p>
+  </header>
+
+  <section>
+    <div class="support-note" id="support-note">Checking RTCPeerConnection support…</div>
+
+    <div class="toggle-row">
+      <input type="checkbox" id="always-negotiate" checked>
+      <label for="always-negotiate">
+        <code>alwaysNegotiateDataChannels: true</code> <span style="font-size:0.72rem;color:var(--text-muted);">(Chrome 148 fix — uncheck to simulate the race condition)</span>
+      </label>
+    </div>
+
+    <div class="negotiation-note" id="neg-note">
+      ⚠ alwaysNegotiateDataChannels disabled — simulating pre-148 race condition where channel creation before negotiation could fail silently.
+    </div>
+
+    <div class="peers">
+      <div class="peer-card" id="peer-a">
+        <h3>Peer A — Sender</h3>
+        <div class="channel-state">
+          <span class="dot grey" id="dot-a"></span>
+          <span id="state-a">disconnected</span>
+        </div>
+        <div class="drop-zone" id="drop-zone">
+          Click or drop file here to send
+          <input type="file" id="file-input" style="display:none;" multiple>
+        </div>
+        <div class="file-queue" id="send-queue"></div>
+        <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
+          <button id="btn-connect">Connect</button>
+          <button class="secondary" id="btn-reset">Reset</button>
+        </div>
+      </div>
+
+      <div class="peer-card" id="peer-b">
+        <h3>Peer B — Receiver</h3>
+        <div class="channel-state">
+          <span class="dot grey" id="dot-b"></span>
+          <span id="state-b">waiting</span>
+        </div>
+        <div class="file-queue" id="recv-queue">
+          <div style="font-size:0.78rem;color:var(--text-muted);padding:0.5rem 0;">Received files will appear here</div>
+        </div>
+      </div>
+    </div>
+
+    <p style="font-size:0.72rem;color:var(--text-muted);margin:0.5rem 0 0.2rem;">Connection log</p>
+    <div class="event-log" id="event-log">
+      <div class="log-r">Click "Connect" to establish a loopback RTCPeerConnection…</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>alwaysNegotiateDataChannels</h2>
+    <pre style="background:var(--bg-stone);border:1px solid var(--border-black);padding:1rem;overflow-x:auto;"><code style="font-size:0.8125rem;line-height:1.6;color:var(--text-charcoal);">// Chrome 148: alwaysNegotiateDataChannels option
+const pc = new RTCPeerConnection({
+  alwaysNegotiateDataChannels: true,
+});
+
+// Now it's safe to create a DataChannel immediately,
+// even before the remote peer has added one.
+// The SDP offer/answer will always include data channel negotiation.
+const channel = pc.createDataChannel('files');
+channel.onopen = () => console.log('channel open — no race');
+
+// Without the flag (pre-148), creating a channel before offer/answer
+// could fail silently if the remote didn't expect one.</code></pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5141048152891392" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/createDataChannel" target="_blank" rel="noopener">MDN — RTCPeerConnection.createDataChannel()</a></li>
+      <li><a href="https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-createdatachannel" target="_blank" rel="noopener">WebRTC spec — createDataChannel</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const supported = typeof RTCPeerConnection !== 'undefined';
+  const note = document.getElementById('support-note');
+  note.textContent = supported
+    ? '✓ RTCPeerConnection available. Demo uses a loopback connection (both peers in the same page).'
+    : 'RTCPeerConnection not available. Demo is fully simulated.';
+  if (supported) note.style.borderLeftColor = 'var(--accent-emerald)';
+
+  let pcA = null, pcB = null, channelA = null;
+  let connected = false;
+
+  document.getElementById('always-negotiate').addEventListener('change', e => {
+    document.getElementById('neg-note').style.display = e.target.checked ? 'none' : 'block';
+  });
+
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault(); dropZone.classList.remove('dragover');
+    handleFiles([...e.dataTransfer.files]);
+  });
+  fileInput.addEventListener('change', () => handleFiles([...fileInput.files]));
+
+  function log(msg, cls) {
+    const el = document.getElementById('event-log');
+    const d = document.createElement('div');
+    d.className = 'log-r ' + (cls || '');
+    const ts = new Date().toLocaleTimeString('en', { hour12: false });
+    d.textContent = `[${ts}] ${msg}`;
+    el.appendChild(d);
+    el.scrollTop = el.scrollHeight;
+    if (el.children.length > 80) el.removeChild(el.firstChild);
+  }
+
+  function setDot(id, state) {
+    const dot = document.getElementById('dot-' + id);
+    dot.className = 'dot ' + ({'connected':'green','waiting':'amber','disconnected':'grey'}[state] || 'grey');
+    document.getElementById('state-' + id).textContent = state;
+  }
+
+  function fmtBytes(b) {
+    if (b >= 1e6) return (b/1e6).toFixed(1) + ' MB';
+    if (b >= 1e3) return (b/1e3).toFixed(1) + ' KB';
+    return b + ' B';
+  }
+
+  document.getElementById('btn-connect').addEventListener('click', async () => {
+    if (connected) { log('Already connected'); return; }
+    const alwaysNeg = document.getElementById('always-negotiate').checked;
+
+    log('Creating loopback RTCPeerConnection pair…');
+    const conf = { iceServers: [] };
+    if (alwaysNeg) conf.alwaysNegotiateDataChannels = true;
+
+    if (supported) {
+      pcA = new RTCPeerConnection(conf);
+      pcB = new RTCPeerConnection(conf);
+
+      pcA.onicecandidate = e => { if (e.candidate) pcB.addIceCandidate(e.candidate); };
+      pcB.onicecandidate = e => { if (e.candidate) pcA.addIceCandidate(e.candidate); };
+
+      channelA = pcA.createDataChannel('files', { ordered: true });
+      if (!alwaysNeg) {
+        log('⚠ alwaysNegotiateDataChannels off — channel created before negotiation (race simulation)', 'warn');
+      }
+
+      channelA.onopen = () => { log('DataChannel open — ready to send', 'ok'); setDot('a', 'connected'); setDot('b', 'connected'); connected = true; };
+      channelA.onerror = e => log('Channel error: ' + e.message, 'err');
+
+      pcB.ondatachannel = e => {
+        const ch = e.channel;
+        log('Peer B: data channel received', 'ok');
+        let recvBuf = [], recvName = '', recvSize = 0, recvRecv = 0;
+
+        ch.onmessage = ev => {
+          if (typeof ev.data === 'string') {
+            const meta = JSON.parse(ev.data);
+            recvName = meta.name; recvSize = meta.size; recvRecv = 0; recvBuf = [];
+            addRecvItem(recvName, recvSize);
+          } else {
+            recvBuf.push(ev.data);
+            recvRecv += ev.data.byteLength;
+            updateRecvProgress(recvName, recvRecv, recvSize);
+            if (recvRecv >= recvSize) {
+              markRecvDone(recvName);
+              log(`Peer B: received "${recvName}" (${fmtBytes(recvSize)})`, 'ok');
+            }
+          }
+        };
+      };
+
+      const offer = await pcA.createOffer();
+      await pcA.setLocalDescription(offer);
+      await pcB.setRemoteDescription(offer);
+      const answer = await pcB.createAnswer();
+      await pcB.setLocalDescription(answer);
+      await pcA.setRemoteDescription(answer);
+      log('SDP exchange complete — waiting for ICE…');
+    } else {
+      // Simulate
+      await delay(400);
+      setDot('a', 'connected'); setDot('b', 'connected');
+      connected = true;
+      log('Simulated connection established', 'ok');
+    }
+  });
+
+  const recvItems = {};
+
+  function addRecvItem(name, size) {
+    const q = document.getElementById('recv-queue');
+    if (q.querySelector('.empty-note')) q.innerHTML = '';
+    const div = document.createElement('div');
+    div.className = 'file-item';
+    div.id = 'recv-' + name;
+    div.innerHTML = `<span class="fi-name">${escHtml(name)}</span><span class="fi-size">${fmtBytes(size)}</span><span class="fi-status recv" id="rstat-${escId(name)}">receiving</span><div class="progress-bar"><div class="progress-fill" id="rprog-${escId(name)}" style="width:0%"></div></div>`;
+    q.appendChild(div);
+    recvItems[name] = { size };
+  }
+
+  function updateRecvProgress(name, recv, total) {
+    const fill = document.getElementById('rprog-' + escId(name));
+    if (fill) fill.style.width = Math.min(100, (recv / total * 100)) + '%';
+  }
+
+  function markRecvDone(name) {
+    const stat = document.getElementById('rstat-' + escId(name));
+    if (stat) { stat.textContent = '✓ done'; stat.className = 'fi-status done'; }
+    const fill = document.getElementById('rprog-' + escId(name));
+    if (fill) fill.style.width = '100%';
+  }
+
+  function escId(s) { return s.replace(/[^a-zA-Z0-9_]/g, '_'); }
+  function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  async function handleFiles(files) {
+    if (!connected) { log('Connect first before sending files', 'warn'); return; }
+    for (const file of files) {
+      addSendItem(file.name, file.size);
+      await sendFile(file);
+    }
+  }
+
+  function addSendItem(name, size) {
+    const q = document.getElementById('send-queue');
+    const div = document.createElement('div');
+    div.className = 'file-item';
+    div.id = 'send-' + escId(name);
+    div.innerHTML = `<span class="fi-name">${escHtml(name)}</span><span class="fi-size">${fmtBytes(size)}</span><span class="fi-status sending" id="sstat-${escId(name)}">queued</span><div class="progress-bar"><div class="progress-fill" id="sprog-${escId(name)}" style="width:0%"></div></div>`;
+    q.appendChild(div);
+  }
+
+  async function sendFile(file) {
+    const CHUNK = 16384;
+    const name = file.name;
+    const eid = escId(name);
+
+    const meta = JSON.stringify({ name: file.name, size: file.size });
+
+    if (supported && channelA && channelA.readyState === 'open') {
+      channelA.send(meta);
+      let offset = 0;
+      while (offset < file.size) {
+        const slice = file.slice(offset, offset + CHUNK);
+        const buf = await slice.arrayBuffer();
+        channelA.send(buf);
+        offset += buf.byteLength;
+        const pct = Math.min(100, (offset / file.size) * 100);
+        document.getElementById('sprog-' + eid).style.width = pct + '%';
+        await delay(1);
+      }
+    } else {
+      // Simulate
+      channelA = channelA || { readyState: 'simulated' };
+      let sent = 0;
+      const interval = setInterval(() => {
+        sent = Math.min(file.size, sent + CHUNK * 4);
+        const pct = (sent / file.size) * 100;
+        document.getElementById('sprog-' + eid).style.width = pct + '%';
+        if (sent >= file.size) {
+          clearInterval(interval);
+          addRecvItem(file.name, file.size);
+          setTimeout(() => markRecvDone(file.name), 200);
+        }
+      }, 30);
+      await new Promise(r => setTimeout(r, (file.size / (CHUNK * 4)) * 30 + 300));
+    }
+
+    document.getElementById('sstat-' + eid).textContent = '✓ sent';
+    document.getElementById('sstat-' + eid).className = 'fi-status done';
+    document.getElementById('sprog-' + eid).style.width = '100%';
+    log(`Sent "${file.name}" (${fmtBytes(file.size)})`, 'ok');
+  }
+
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    if (pcA) { try { pcA.close(); } catch(e) {} pcA = null; }
+    if (pcB) { try { pcB.close(); } catch(e) {} pcB = null; }
+    channelA = null; connected = false;
+    setDot('a', 'disconnected'); setDot('b', 'waiting');
+    document.getElementById('send-queue').innerHTML = '';
+    document.getElementById('recv-queue').innerHTML = '<div style="font-size:0.78rem;color:var(--text-muted);padding:0.5rem 0;">Received files will appear here</div>';
+    log('Reset — click Connect to start again');
+  });
+
+  function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+</script>
+</body>
+</html>

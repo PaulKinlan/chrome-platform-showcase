@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sensor Data Logger — Web Serial API on Android — Chrome 148</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .connect-bar { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin: 1.5rem 0 1rem; }
+    .port-label { font-family: monospace; font-size: 0.8rem; color: var(--text-muted); background: var(--bg-stone); padding: 0.3rem 0.6rem; border: 1px solid var(--border-black); }
+    button { padding: 0.4rem 0.85rem; font-size: 0.82rem; cursor: pointer; border: 1px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); }
+    button:hover { opacity: 0.85; }
+    button.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    button.secondary:hover { background: var(--bg-stone); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .sensor-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+    .sensor-card { background: var(--bg-paper); border: 1px solid var(--border-black); padding: 1rem; }
+    .sensor-card .val { font-size: 2rem; font-weight: 900; font-family: monospace; color: var(--text-black); line-height: 1; }
+    .sensor-card .unit { font-size: 0.82rem; color: var(--text-muted); }
+    .sensor-card .label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-top: 0.3rem; }
+    .chart-area { background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.75rem; margin: 0.5rem 0; }
+    canvas#chart { display: block; width: 100%; height: 120px; }
+    .raw-log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.5rem 0.65rem; font-family: monospace; font-size: 0.72rem; max-height: 130px; overflow-y: auto; margin-top: 0.75rem; }
+    .log-row { margin: 0.1rem 0; color: var(--text-charcoal); }
+    .log-row.data { color: var(--accent-blue); }
+    .log-row.event { color: var(--accent-emerald); }
+    .log-row.err { color: #991b1b; }
+    .status-bar { display: flex; gap: 0.75rem; align-items: center; font-family: monospace; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.5rem; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+    .dot.green { background: #059669; }
+    .dot.grey { background: #9ca3af; }
+    .dot.amber { background: #d97706; }
+    .support-note { background: var(--bg-stone); border-left: 3px solid var(--accent-blue); padding: 0.6rem 0.9rem; font-size: 0.8rem; color: var(--text-charcoal); margin: 1rem 0; }
+    select.baud-select { font-size: 0.82rem; padding: 0.35rem 0.5rem; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .sim-badge { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; padding: 0.1rem 0.35rem; background: #fef3c7; border: 1px solid #d97706; color: #92400e; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v148/web-serial-api-on-android/">&larr; Web Serial API on Android</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v148 · Web Serial · Android</p>
+    <h1>Sensor Data Logger</h1>
+    <p class="lede">Connect to a serial sensor device (like an Arduino sending temperature and humidity readings) and plot the data in real time. Chrome 148 brings <code>navigator.serial</code> to Android, so this same code now works on mobile.</p>
+  </header>
+
+  <section>
+    <div class="support-note" id="support-note">Checking Web Serial API support…</div>
+
+    <div class="connect-bar">
+      <select class="baud-select" id="baud">
+        <option value="9600" selected>9600 baud</option>
+        <option value="115200">115200 baud</option>
+        <option value="57600">57600 baud</option>
+      </select>
+      <button id="btn-connect">Connect serial port</button>
+      <button class="secondary" id="btn-sim" style="display:none;">Stop simulation</button>
+      <span class="port-label" id="port-label">No port selected</span>
+    </div>
+
+    <div class="status-bar">
+      <span><span class="dot grey" id="status-dot"></span><span id="status-text">Disconnected</span></span>
+      <span>Packets: <span id="packet-count">0</span></span>
+    </div>
+
+    <div class="sensor-grid">
+      <div class="sensor-card">
+        <div class="val" id="val-temp">—</div>
+        <div class="unit">°C</div>
+        <div class="label">Temperature</div>
+      </div>
+      <div class="sensor-card">
+        <div class="val" id="val-hum">—</div>
+        <div class="unit">%RH</div>
+        <div class="label">Humidity</div>
+      </div>
+      <div class="sensor-card">
+        <div class="val" id="val-pres">—</div>
+        <div class="unit">hPa</div>
+        <div class="label">Pressure</div>
+      </div>
+      <div class="sensor-card">
+        <div class="val" id="val-packets">0</div>
+        <div class="unit">pkt/s</div>
+        <div class="label">Throughput</div>
+      </div>
+    </div>
+
+    <div class="chart-area">
+      <canvas id="chart" height="120"></canvas>
+    </div>
+
+    <p style="font-size:0.72rem;color:var(--text-muted);margin:0.5rem 0 0.2rem;">Serial data log</p>
+    <div class="raw-log" id="raw-log">
+      <div class="log-row">Waiting for connection…</div>
+    </div>
+
+    <p style="font-size:0.78rem;color:var(--text-muted);margin-top:0.75rem;">
+      No device? <button class="secondary" id="btn-sim-start" style="padding:0.2rem 0.5rem;font-size:0.75rem;">Start simulation</button>
+      <span class="sim-badge" id="sim-badge" style="display:none;">SIMULATED</span>
+    </p>
+  </section>
+
+  <section>
+    <h2>Serial read pattern</h2>
+    <pre style="background:var(--bg-stone);border:1px solid var(--border-black);padding:1rem;overflow-x:auto;"><code style="font-size:0.8125rem;line-height:1.6;color:var(--text-charcoal);">// Chrome 148: navigator.serial now works on Android
+const port = await navigator.serial.requestPort();
+await port.open({ baudRate: 9600 });
+
+const decoder = new TextDecoderStream();
+port.readable.pipeTo(decoder.writable);
+
+const reader = decoder.readable.getReader();
+let buffer = '';
+
+while (true) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  buffer += value;
+  const lines = buffer.split('\n');
+  buffer = lines.pop(); // incomplete last line
+  for (const line of lines) {
+    const [temp, hum, pres] = line.split(',').map(Number);
+    updateDisplay(temp, hum, pres);
+  }
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5122129587478528" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API" target="_blank" rel="noopener">MDN — Web Serial API</a></li>
+      <li><a href="https://developer.chrome.com/docs/capabilities/serial" target="_blank" rel="noopener">Chrome Developers — Web Serial</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const supported = 'serial' in navigator;
+  const note = document.getElementById('support-note');
+  if (supported) {
+    note.textContent = '✓ Web Serial API available. Chrome 148+ required on Android. Click "Connect serial port" to select a device.';
+    note.style.borderLeftColor = 'var(--accent-emerald)';
+  } else {
+    note.textContent = 'Web Serial API not available in this browser (requires Chrome 148+ on Android, Chrome 89+ on desktop, HTTPS). Use the simulation below.';
+  }
+
+  const CHART_LEN = 50;
+  const chartData = { temp: [], hum: [], pres: [] };
+  const canvas = document.getElementById('chart');
+  const ctx2d = canvas.getContext('2d');
+  let simInterval = null;
+  let packetCount = 0;
+  let pktPerSec = 0;
+  let lastPktTime = Date.now();
+
+  function drawChart() {
+    const W = canvas.offsetWidth * devicePixelRatio;
+    const H = canvas.offsetHeight * devicePixelRatio;
+    canvas.width = W; canvas.height = H;
+    ctx2d.clearRect(0, 0, W, H);
+
+    const series = [
+      { data: chartData.temp, color: '#dc2626', min: 0, max: 50 },
+      { data: chartData.hum, color: '#3b82f6', min: 0, max: 100 },
+    ];
+
+    series.forEach(s => {
+      if (!s.data.length) return;
+      ctx2d.beginPath();
+      ctx2d.strokeStyle = s.color;
+      ctx2d.lineWidth = 1.5 * devicePixelRatio;
+      s.data.forEach((v, i) => {
+        const x = (i / (CHART_LEN - 1)) * W;
+        const y = H - ((v - s.min) / (s.max - s.min)) * H * 0.85 - H * 0.05;
+        i === 0 ? ctx2d.moveTo(x, y) : ctx2d.lineTo(x, y);
+      });
+      ctx2d.stroke();
+    });
+  }
+
+  function updateSensors(temp, hum, pres) {
+    document.getElementById('val-temp').textContent = temp.toFixed(1);
+    document.getElementById('val-hum').textContent = hum.toFixed(1);
+    document.getElementById('val-pres').textContent = pres.toFixed(0);
+    packetCount++;
+    document.getElementById('packet-count').textContent = packetCount;
+
+    const now = Date.now();
+    const elapsed = (now - lastPktTime) / 1000;
+    if (elapsed >= 1) {
+      pktPerSec = Math.round(packetCount / elapsed);
+      document.getElementById('val-packets').textContent = pktPerSec;
+      lastPktTime = now;
+      packetCount = 0;
+    }
+
+    chartData.temp.push(temp);
+    chartData.hum.push(hum);
+    chartData.pres.push(pres);
+    if (chartData.temp.length > CHART_LEN) {
+      chartData.temp.shift(); chartData.hum.shift(); chartData.pres.shift();
+    }
+    drawChart();
+  }
+
+  function logSerial(msg, cls) {
+    const log = document.getElementById('raw-log');
+    const d = document.createElement('div');
+    d.className = 'log-row ' + (cls || '');
+    const ts = new Date().toLocaleTimeString('en', { hour12: false });
+    d.textContent = `[${ts}] ${msg}`;
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+    if (log.children.length > 80) log.removeChild(log.firstChild);
+  }
+
+  function startSimulation() {
+    document.getElementById('status-dot').className = 'dot amber';
+    document.getElementById('status-text').textContent = 'Simulated sensor';
+    document.getElementById('port-label').textContent = 'Simulated: /dev/ttyUSB0';
+    document.getElementById('sim-badge').style.display = '';
+    document.getElementById('btn-sim-start').style.display = 'none';
+    document.getElementById('btn-sim').style.display = '';
+
+    let t = 22 + Math.random() * 5;
+    let h = 55 + Math.random() * 10;
+    let p = 1013 + Math.random() * 5;
+    logSerial('Simulation started — emitting sensor packets at ~2 Hz', 'event');
+
+    simInterval = setInterval(() => {
+      t += (Math.random() - 0.5) * 0.4;
+      h += (Math.random() - 0.5) * 1.5;
+      p += (Math.random() - 0.5) * 0.8;
+      t = Math.max(15, Math.min(40, t));
+      h = Math.max(20, Math.min(95, h));
+      p = Math.max(1005, Math.min(1025, p));
+      const line = `${t.toFixed(2)},${h.toFixed(2)},${p.toFixed(2)}`;
+      logSerial(line, 'data');
+      updateSensors(t, h, p);
+    }, 500);
+  }
+
+  function stopSimulation() {
+    clearInterval(simInterval);
+    simInterval = null;
+    document.getElementById('status-dot').className = 'dot grey';
+    document.getElementById('status-text').textContent = 'Disconnected';
+    document.getElementById('port-label').textContent = 'No port selected';
+    document.getElementById('sim-badge').style.display = 'none';
+    document.getElementById('btn-sim').style.display = 'none';
+    document.getElementById('btn-sim-start').style.display = '';
+    logSerial('Simulation stopped', 'event');
+  }
+
+  document.getElementById('btn-sim-start').addEventListener('click', startSimulation);
+  document.getElementById('btn-sim').addEventListener('click', stopSimulation);
+
+  document.getElementById('btn-connect').addEventListener('click', async () => {
+    if (!supported) {
+      logSerial('Web Serial not supported — start simulation instead', 'err');
+      return;
+    }
+    try {
+      const port = await navigator.serial.requestPort();
+      const baud = parseInt(document.getElementById('baud').value);
+      await port.open({ baudRate: baud });
+      logSerial(`Port opened at ${baud} baud`, 'event');
+      document.getElementById('status-dot').className = 'dot green';
+      document.getElementById('status-text').textContent = 'Connected';
+      document.getElementById('port-label').textContent = 'Serial port open';
+
+      const decoder = new TextDecoderStream();
+      port.readable.pipeTo(decoder.writable);
+      const reader = decoder.readable.getReader();
+      let buf = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += value;
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          logSerial(line.trim(), 'data');
+          const parts = line.trim().split(',').map(Number);
+          if (parts.length >= 3 && parts.every(n => !isNaN(n))) {
+            updateSensors(parts[0], parts[1], parts[2]);
+          }
+        }
+      }
+    } catch(e) {
+      logSerial('Error: ' + e.message, 'err');
+    }
+  });
+
+  drawChart();
+</script>
+</body>
+</html>
