@@ -33,21 +33,21 @@
 
   <header class="lede-block">
     <p class="eyebrow">demo · v135</p>
-    <h1>Cookie replay attack visualised</h1>
-    <p class="lede">DBSC's headline use case from the Chrome blog post: session cookie theft no longer hands the attacker the session. The simulation has three actors &mdash; the real user, the server, and an attacker who exfiltrated the cookie. Watch the server verify (or reject) the replayed cookie depending on which actor signs the challenge.</p>
+    <h1>Cookie replay attack lab</h1>
+    <p class="lede">DBSC's headline use case from the Chrome blog post: session cookie theft no longer hands the attacker the session. This lab registers a real backend session, then sends refresh proofs signed by either Alice's registered key or an attacker key that only copied the cookie value.</p>
   </header>
 
   <div class="warn-block">
-    <strong>Flag</strong>
-    DBSC ships behind <code>chrome://flags/#device-bound-session-credentials</code>. The simulator below uses WebCrypto's ECDSA P-256 directly to show the cryptographic shape the browser would use under the hood.
+    <strong>Backend-backed</strong>
+    The server stores Alice's public key from a real <code>dbsc+jwt</code> registration proof. Replay attempts call the same <code>/refresh</code> endpoint and are accepted or rejected by backend signature verification.
   </div>
 
   <div class="stage">
     <div class="row">
       <span class="pill" id="cap">WebCrypto: ?</span>
-      <button id="reset">Reset scene</button>
-      <button id="legit">Step: legit refresh</button>
-      <button id="attack">Step: attacker replays cookie</button>
+      <button id="reset">Set up live session</button>
+      <button id="legit">Run Alice refresh</button>
+      <button id="attack">Run attacker replay</button>
     </div>
 
     <div class="scene">
@@ -77,12 +77,12 @@
   <section>
     <h2>the protocol</h2>
 <pre><code>// Real flow happens in HTTP headers.
-Sec-Session-Registration: alg=ES256
-Sec-Session-Response: { jwk: &lt;public&gt;, sig: &lt;reg-proof&gt; }
+Secure-Session-Registration: (ES256);path="...";challenge="..."
+Secure-Session-Response: &lt;ES256 dbsc+jwt with public JWK&gt;
 
 // On every refresh, server issues a fresh challenge.
-Sec-Session-Challenge: &lt;nonce&gt;
-Sec-Session-Response: sig(nonce, bound-priv-key)
+Secure-Session-Challenge: "nonce";id="session"
+Secure-Session-Response: &lt;ES256 dbsc+jwt signed by bound key&gt;
 
 // Server verifies sig with the bound public key.
 // Stolen cookie + attacker's key → signature fails → 401.</code></pre>
@@ -92,7 +92,7 @@ Sec-Session-Response: sig(nonce, bound-priv-key)
     <h2>see also</h2>
     <ul>
       <li><a href="../">Device Bound Session Credentials</a> &mdash; feature index</li>
-      <li><a href="../dbsc/">DBSC live simulator</a> &mdash; end-to-end protocol walkthrough</li>
+      <li><a href="../dbsc/">DBSC live handshake</a> &mdash; end-to-end protocol walkthrough</li>
       <li><a href="https://chromestatus.com/feature/5140168270413824" target="_blank" rel="noopener">ChromeStatus entry</a></li>
       <li><a href="https://developer.chrome.com/docs/web-platform/device-bound-session-credentials" target="_blank" rel="noopener">DBSC explainer</a></li>
     </ul>
@@ -102,75 +102,155 @@ Sec-Session-Response: sig(nonce, bound-priv-key)
 </main>
 
 <script>
+const BASE = location.pathname.match(/^\/v\d+\/device-bound-session-credentials/)?.[0] ||
+  "/v135/device-bound-session-credentials";
+const encoder = new TextEncoder();
 const cap = document.getElementById("cap");
-const ok = !!crypto.subtle;
+const ok = Boolean(crypto?.subtle);
 cap.textContent = ok ? "WebCrypto: yes" : "WebCrypto: no";
 cap.classList.add(ok ? "ok" : "bad");
 
-let aliceKey = null;     // real device's bound keypair
-let serverPub = null;    // server's record of the bound public key
-let cookie = null;       // session cookie (just a random token)
-let mallorysKey = null;  // attacker's own keypair
+let aliceKey = null;
+let alicePublicJwk = null;
+let mallorysKey = null;
+let sessionId = null;
+let loginChallenge = null;
+let refreshChallenge = null;
+let authorization = null;
 
-function b64(bytes) {
-  let s = "";
-  for (const b of new Uint8Array(bytes)) s += String.fromCharCode(b);
-  return btoa(s).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+function bytesToBase64Url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function encodeJson(value) {
+  return bytesToBase64Url(encoder.encode(JSON.stringify(value)));
+}
+
+async function readJson(response) {
+  const data = await response.json();
+  return {
+    ok: response.ok,
+    status: response.status,
+    header: response.headers.get("Secure-Session-Registration") ||
+      response.headers.get("Secure-Session-Challenge"),
+    data,
+  };
+}
+
+async function call(path, options = {}) {
+  return await readJson(await fetch(`${BASE}${path}`, {
+    credentials: "same-origin",
+    ...options,
+  }));
+}
+
+async function makeJwt(keyPair, challenge, publicJwk = null) {
+  const header = { alg: "ES256", typ: "dbsc+jwt" };
+  if (publicJwk) header.jwk = publicJwk;
+  const payload = { jti: challenge };
+  if (publicJwk && authorization) payload.authorization = authorization;
+  const signingInput = `${encodeJson(header)}.${encodeJson(payload)}`;
+  const signature = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" },
+    keyPair.privateKey,
+    encoder.encode(signingInput),
+  );
+  return `${signingInput}.${bytesToBase64Url(new Uint8Array(signature))}`;
+}
+
+function prepend(id, text, isOk) {
+  const line = document.createElement("div");
+  line.className = `out ${isOk ? "ok" : "bad"}`;
+  line.textContent = text;
+  document.getElementById(id).prepend(line);
 }
 
 async function setup() {
-  aliceKey = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
-  mallorysKey = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
-  cookie = "dbsc=" + b64(crypto.getRandomValues(new Uint8Array(12)));
-  serverPub = aliceKey.publicKey;
+  if (!ok) return;
+  await call("/reset", { method: "POST" });
+  aliceKey = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"],
+  );
+  mallorysKey = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"],
+  );
+  alicePublicJwk = await crypto.subtle.exportKey("jwk", aliceKey.publicKey);
 
-  const ajwk = await crypto.subtle.exportKey("jwk", aliceKey.publicKey);
-  document.getElementById("user-key").textContent = "bound P-256 (non-extractable)";
-  document.getElementById("srv-pubkey").textContent = ajwk.x.slice(0, 12) + "… (matches Alice)";
-  document.getElementById("srv-cookie").textContent = cookie;
-  document.getElementById("att-cookie").textContent = cookie + "  (stolen)";
+  const login = await call("/login", { method: "POST" });
+  loginChallenge = login.data.challenge;
+  authorization = login.data.authorization;
+  sessionId = login.data.sessionId;
+
+  const registrationProof = await makeJwt(aliceKey, loginChallenge, alicePublicJwk);
+  const registered = await call("/register", {
+    method: "POST",
+    headers: { "content-type": "application/json", "Secure-Session-Response": registrationProof },
+    body: JSON.stringify({ proof: registrationProof }),
+  });
+  if (!registered.ok) throw new Error(registered.data.error || "Registration failed.");
+
+  document.getElementById("user-key").textContent = "bound P-256 signing key";
+  document.getElementById("srv-pubkey").textContent = alicePublicJwk.x.slice(0, 12) + "... (stored by backend)";
+  document.getElementById("srv-cookie").textContent = `showcase_dbsc=${sessionId.slice(0, 16)}...`;
+  document.getElementById("att-cookie").textContent = `showcase_dbsc=${sessionId.slice(0, 16)}... copied`;
   document.getElementById("user-out").innerHTML = "";
   document.getElementById("srv-out").innerHTML = "";
   document.getElementById("att-out").innerHTML = "";
+  prepend("srv-out", "registered: backend verified Alice's public-key proof", true);
+}
+
+async function prepareChallenge() {
+  if (!sessionId) await setup();
+  await call("/expire", { method: "POST" });
+  const challenge = await call("/refresh", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+  refreshChallenge = challenge.data.challenge;
+  return refreshChallenge;
 }
 
 async function refresh(who) {
-  const challenge = crypto.getRandomValues(new Uint8Array(32));
-  const signer = who === "alice" ? aliceKey.privateKey : mallorysKey.privateKey;
-  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, signer, challenge);
-  const verified = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, serverPub, sig, challenge);
-  return { verified };
+  const challenge = await prepareChallenge();
+  const key = who === "alice" ? aliceKey : mallorysKey;
+  const proof = await makeJwt(key, challenge, null);
+  return await call("/refresh", {
+    method: "POST",
+    headers: { "content-type": "application/json", "Secure-Session-Response": proof },
+    body: JSON.stringify({ sessionId, proof }),
+  });
 }
 
-document.getElementById("reset").addEventListener("click", setup);
+document.getElementById("reset").addEventListener("click", () => {
+  setup().catch((error) => prepend("srv-out", error.message, false));
+});
 document.getElementById("legit").addEventListener("click", async () => {
-  const { verified } = await refresh("alice");
-  const userOut = document.getElementById("user-out");
-  const srvOut = document.getElementById("srv-out");
-  const line = document.createElement("div");
-  line.className = "out " + (verified ? "ok" : "bad");
-  line.textContent = `→ Sec-Session-Response signed with bound key`;
-  userOut.prepend(line);
-  const srv = document.createElement("div");
-  srv.className = "out " + (verified ? "ok" : "bad");
-  srv.textContent = verified ? "verify(sig, alice-pub) OK — refresh granted" : "verify failed — 401";
-  srvOut.prepend(srv);
+  const result = await refresh("alice");
+  prepend("user-out", "-> Secure-Session-Response signed with Alice's bound key", result.ok);
+  prepend(
+    "srv-out",
+    result.ok ? "200 OK: refresh proof verified, short cookie renewed" : `${result.status}: ${result.data.error}`,
+    result.ok,
+  );
 });
 document.getElementById("attack").addEventListener("click", async () => {
-  const { verified } = await refresh("mallory");
-  const attOut = document.getElementById("att-out");
-  const srvOut = document.getElementById("srv-out");
-  const line = document.createElement("div");
-  line.className = "out " + (verified ? "ok" : "bad");
-  line.textContent = `→ replays cookie + signs with own key`;
-  attOut.prepend(line);
-  const srv = document.createElement("div");
-  srv.className = "out " + (verified ? "ok" : "bad");
-  srv.textContent = verified ? "verify OK (impossible!)" : "verify(sig, alice-pub) FAILED — 401, cookie revoked";
-  srvOut.prepend(srv);
+  const result = await refresh("mallory");
+  prepend("att-out", "-> copied cookie + proof signed with Mallory's key", result.ok);
+  prepend(
+    "srv-out",
+    result.ok ? "unexpected 200 OK" : `${result.status}: ${result.data.error}`,
+    result.ok,
+  );
 });
 
-if (ok) setup();
+if (ok) setup().catch((error) => prepend("srv-out", error.message, false));
 </script>
 </body>
 </html>

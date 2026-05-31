@@ -27,23 +27,23 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v135</p>
     <h1>Session handshake walkthrough</h1>
-    <p class="lede">Step through a full DBSC handshake &mdash; from <code>Sec-Session-Registration</code> response header to the rotating short-lived cookie &mdash; on a ladder diagram. Each step lights up so you can see what the browser, the server, and the TPM-bound key all contribute.</p>
+    <p class="lede">Step through a full DBSC handshake &mdash; from <code>Secure-Session-Registration</code> response header to the rotating short-lived cookie &mdash; on a ladder diagram. Each step lights up as the page calls the backend and signs proofs.</p>
   </header>
 
   <div class="stage">
     <div class="row">
-      <span class="pill" id="cap">DBSC origin trial: ?</span>
-      <button id="play">play handshake</button>
+      <span class="pill" id="cap">WebCrypto: ?</span>
+      <button id="play">run live handshake</button>
       <button id="reset">reset</button>
     </div>
-    <div id="warn" class="warn-block">DBSC is in origin trial as of Chrome 135. This walkthrough is a simulation &mdash; no real keys are generated. Enable <code>chrome://flags/#dbsc-token-binding</code> or join the OT to test against real servers.</div>
+    <div id="warn" class="warn-block">This walkthrough calls the showcase backend. The server emits <code>Secure-Session-Registration</code> and <code>Secure-Session-Challenge</code>; this page signs <code>dbsc+jwt</code> proofs with WebCrypto so the server can verify the session binding.</div>
     <div class="ladder">
       <div class="lane">
         <h3>browser</h3>
-        <div id="b1" class="step">1. POST /login (Cookie: session=...)</div>
-        <div id="b3" class="step">3. generate device-bound key in TPM</div>
-        <div id="b5" class="step">5. POST /refresh signed with key</div>
-        <div id="b7" class="step">7. attach short-lived cookie to subsequent requests</div>
+        <div id="b1" class="step">1. POST /login</div>
+        <div id="b3" class="step">3. generate P-256 key in WebCrypto</div>
+        <div id="b5" class="step">5. request refresh challenge after cookie expiry</div>
+        <div id="b7" class="step">7. call protected resource with renewed cookie</div>
       </div>
       <div class="center">
         <div class="arrow">&rarr;</div>
@@ -54,10 +54,10 @@
       </div>
       <div class="lane">
         <h3>server</h3>
-        <div id="b2" class="step">2. response: <code>Sec-Session-Registration: ...</code></div>
-        <div id="b4" class="step">4. receives public key + challenge</div>
-        <div id="b6" class="step">6. verifies signature, issues short-lived cookie</div>
-        <div id="b8" class="step">8. each request: cookie binds to TPM key</div>
+        <div id="b2" class="step">2. response: <code>Secure-Session-Registration: ...</code></div>
+        <div id="b4" class="step">4. verifies registration proof + stores public key</div>
+        <div id="b6" class="step">6. verifies refresh proof + renews short cookie</div>
+        <div id="b8" class="step">8. resource returns device-bound account data</div>
       </div>
     </div>
   </div>
@@ -76,19 +76,140 @@
 </main>
 
 <script>
+const BASE = location.pathname.match(/^\/v\d+\/device-bound-session-credentials/)?.[0] ||
+  "/v135/device-bound-session-credentials";
+const encoder = new TextEncoder();
 const cap = document.getElementById("cap");
-const ot = "originTrial" in document || document.querySelector('meta[http-equiv="origin-trial"]');
-cap.textContent = "DBSC origin trial: " + (ot ? "configured" : "off (sim mode)");
-cap.classList.add(ot ? "ok" : "bad");
+const hasCrypto = Boolean(crypto?.subtle);
+cap.textContent = hasCrypto ? "WebCrypto: available" : "WebCrypto: missing";
+cap.classList.add(hasCrypto ? "ok" : "bad");
 
-const steps = ["b1","b2","b3","b4","b5","b6","b7","b8"];
-let timer = null;
-document.getElementById("play").addEventListener("click", () => {
+const steps = ["b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8"];
+let keyPair = null;
+let publicJwk = null;
+let loginChallenge = null;
+let refreshChallenge = null;
+let authorization = null;
+let sessionId = null;
+
+function setStep(id, text) {
+  const el = document.getElementById(id);
+  if (text) el.textContent = text;
+  el.classList.add("done");
+}
+
+function reset() {
+  steps.forEach((id) => document.getElementById(id).classList.remove("done"));
+}
+
+function bytesToBase64Url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function encodeJson(value) {
+  return bytesToBase64Url(encoder.encode(JSON.stringify(value)));
+}
+
+async function ensureKeyPair() {
+  if (keyPair) return;
+  if (!hasCrypto) throw new Error("SubtleCrypto is required for this DBSC proof.");
+  keyPair = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"],
+  );
+  publicJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+}
+
+async function makeDbscJwt(challenge, includePublicKey) {
+  await ensureKeyPair();
+  const header = { alg: "ES256", typ: "dbsc+jwt" };
+  if (includePublicKey) header.jwk = publicJwk;
+  const payload = { jti: challenge };
+  if (authorization && includePublicKey) payload.authorization = authorization;
+  const signingInput = `${encodeJson(header)}.${encodeJson(payload)}`;
+  const signature = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" },
+    keyPair.privateKey,
+    encoder.encode(signingInput),
+  );
+  return `${signingInput}.${bytesToBase64Url(new Uint8Array(signature))}`;
+}
+
+async function readJson(response) {
+  const data = await response.json();
+  return {
+    ok: response.ok,
+    status: response.status,
+    header: response.headers.get("Secure-Session-Registration") ||
+      response.headers.get("Secure-Session-Challenge"),
+    data,
+  };
+}
+
+async function call(path, options = {}) {
+  return await readJson(await fetch(`${BASE}${path}`, {
+    credentials: "same-origin",
+    ...options,
+  }));
+}
+
+async function runHandshake() {
   reset();
-  steps.forEach((id, i) => setTimeout(() => document.getElementById(id).classList.add("done"), 350 * (i + 1)));
+  keyPair = null;
+  publicJwk = null;
+  setStep("b1", "1. POST /login sent to backend");
+  const login = await call("/login", { method: "POST" });
+  if (!login.ok) throw new Error(login.data.error || "Login failed.");
+  loginChallenge = login.data.challenge;
+  authorization = login.data.authorization;
+  sessionId = login.data.sessionId;
+  setStep("b2", `2. Secure-Session-Registration received (${login.header.length} chars)`);
+
+  await ensureKeyPair();
+  setStep("b3", "3. P-256 key generated and public JWK exported");
+  const registrationProof = await makeDbscJwt(loginChallenge, true);
+  const registered = await call("/register", {
+    method: "POST",
+    headers: { "content-type": "application/json", "Secure-Session-Response": registrationProof },
+    body: JSON.stringify({ proof: registrationProof }),
+  });
+  if (!registered.ok) throw new Error(registered.data.error || "Registration failed.");
+  setStep("b4", "4. Server verified registration proof and issued short cookie");
+
+  await call("/expire", { method: "POST" });
+  const challenge = await call("/refresh", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  });
+  refreshChallenge = challenge.data.challenge;
+  setStep("b5", `5. Refresh challenge received (${refreshChallenge.slice(0, 12)}...)`);
+
+  const refreshProof = await makeDbscJwt(refreshChallenge, false);
+  const refreshed = await call("/refresh", {
+    method: "POST",
+    headers: { "content-type": "application/json", "Secure-Session-Response": refreshProof },
+    body: JSON.stringify({ sessionId, proof: refreshProof }),
+  });
+  if (!refreshed.ok) throw new Error(refreshed.data.error || "Refresh failed.");
+  setStep("b6", "6. Server verified refresh proof and renewed short cookie");
+
+  setStep("b7", "7. GET /resource sent with renewed cookie");
+  const resource = await call("/resource");
+  if (!resource.ok) throw new Error(resource.data.error || "Resource request failed.");
+  setStep("b8", `8. Resource returned ${resource.data.account.assurance}`);
+}
+
+document.getElementById("play").addEventListener("click", () => {
+  runHandshake().catch((error) => {
+    const warn = document.getElementById("warn");
+    warn.textContent = error.message;
+  });
 });
 document.getElementById("reset").addEventListener("click", reset);
-function reset() { steps.forEach(id => document.getElementById(id).classList.remove("done")); }
 </script>
 </body>
 </html>

@@ -363,15 +363,20 @@ interface DbscSession {
 
 const DBSC_LONG_COOKIE = "showcase_dbsc";
 const DBSC_SHORT_COOKIE = "showcase_dbsc_short";
-const DBSC_PATH = "/v145/device-bound-session-credentials";
+const DBSC_DEFAULT_PATH = "/v145/device-bound-session-credentials";
 const DBSC_SHORT_COOKIE_MAX_AGE = 90;
 const dbscSessions = new Map<string, DbscSession>();
+
+function dbscPath(req: Request): string {
+  const pathname = new URL(req.url).pathname;
+  return pathname.match(/^\/v\d+\/device-bound-session-credentials/)?.[0] ?? DBSC_DEFAULT_PATH;
+}
 
 function dbscCookieAttributes(req: Request, maxAge: number): string {
   const { protocol } = new URL(req.url);
   const forwardedProto = req.headers.get("x-forwarded-proto") ?? protocol.replace(":", "");
   const secure = forwardedProto === "https" ? "; Secure" : "";
-  return `Path=${DBSC_PATH}; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${secure}`;
+  return `Path=${dbscPath(req)}; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${secure}`;
 }
 
 function createDbscSession(): DbscSession {
@@ -408,8 +413,10 @@ function dbscOrigin(req: Request): string {
   return new URL(req.url).origin;
 }
 
-function dbscRegistrationHeader(session: DbscSession): string {
-  return `(ES256);path="${DBSC_PATH}/register";challenge="${session.loginChallenge}";authorization="${session.authorization}"`;
+function dbscRegistrationHeader(req: Request, session: DbscSession): string {
+  return `(ES256);path="${
+    dbscPath(req)
+  }/register";challenge="${session.loginChallenge}";authorization="${session.authorization}"`;
 }
 
 function dbscChallengeHeader(session: DbscSession): string {
@@ -471,22 +478,23 @@ async function verifyDbscJwt(
 }
 
 function dbscInstructions(req: Request, session: DbscSession): Record<string, unknown> {
+  const path = dbscPath(req);
   return {
     session_identifier: session.id,
-    refresh_url: `${DBSC_PATH}/refresh`,
+    refresh_url: `${path}/refresh`,
     scope: {
       origin: dbscOrigin(req),
       include_site: false,
       scope_specification: [{
         type: "include",
         domain: new URL(req.url).hostname,
-        path: DBSC_PATH,
+        path,
       }],
     },
     credentials: [{
       type: "cookie",
       name: DBSC_SHORT_COOKIE,
-      attributes: `Path=${DBSC_PATH}; HttpOnly; SameSite=Lax`,
+      attributes: `Path=${path}; HttpOnly; SameSite=Lax`,
     }],
   };
 }
@@ -539,10 +547,10 @@ async function renderDbscRoute(req: Request, sub: string): Promise<Response | nu
       "set-cookie",
       `${DBSC_LONG_COOKIE}=${session.id}; ${dbscCookieAttributes(req, 60 * 60 * 24 * 30)}`,
     );
-    headers.set("Secure-Session-Registration", dbscRegistrationHeader(session));
+    headers.set("Secure-Session-Registration", dbscRegistrationHeader(req, session));
     return jsonResponse({
       message: "Login accepted. Browser can now register a device-bound session.",
-      registrationHeader: dbscRegistrationHeader(session),
+      registrationHeader: dbscRegistrationHeader(req, session),
       challenge: session.loginChallenge,
       authorization: session.authorization,
       ...dbscSessionState(req, session),
@@ -2528,7 +2536,7 @@ Deno.serve({ port: PORT }, async (req) => {
       const webAuthnSignalResponse = await renderWebAuthnSignalRoute(req, sub);
       if (webAuthnSignalResponse) return webAuthnSignalResponse;
     }
-    if (release === "v145") {
+    if (release === "v135" || release === "v145") {
       const dbscResponse = await renderDbscRoute(req, sub);
       if (dbscResponse) return dbscResponse;
     }
