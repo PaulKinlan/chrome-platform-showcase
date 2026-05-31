@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Red-Team Bench — Abusive Notification Detection — Chrome 134</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .lab { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .row { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: var(--space-3) 0; }
+    .field { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; }
+    input[type="text"], textarea { font-family: var(--font-mono); padding: 0.3rem 0.5rem; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-black); }
+    textarea { min-height: 5rem; }
+
+    .notification {
+      background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3);
+      display: grid; grid-template-columns: 48px 1fr auto; gap: var(--space-3); align-items: center;
+      margin: var(--space-3) 0; box-shadow: var(--thin-shadow);
+    }
+    .notification .ico { width: 48px; height: 48px; background: var(--accent-blue); display: flex; align-items: center; justify-content: center; color: white; font-family: var(--font-mono); font-size: 1.2rem; border: 1px solid var(--border-black); }
+    .notification .body { font-family: var(--font-serif); }
+    .notification .title { font-family: var(--font-display); font-size: 1.1rem; margin-bottom: 0.2rem; }
+    .notification .text { font-size: 0.95rem; color: var(--text-charcoal); }
+    .notification .score { font-family: var(--font-mono); font-size: 0.78rem; padding: 0.2rem 0.5rem; border: 1px solid var(--border-black); }
+    .notification.flagged { background: var(--bg-stone); position: relative; }
+    .notification.flagged .body { color: var(--text-muted); }
+    .notification.flagged .body .text { filter: blur(4px); user-select: none; }
+    .notification.flagged .reveal {
+      grid-column: 1 / -1; display: flex; gap: var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--border-black);
+    }
+    .notification.flagged .reveal button { font-family: var(--font-mono); font-size: 0.74rem; padding: 0.25rem 0.5rem; }
+
+    .verdict-low { color: var(--accent-emerald); }
+    .verdict-mid { color: var(--accent-amber); }
+    .verdict-high { color: var(--accent-rose); font-weight: bold; }
+
+    .signals { font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 0.4rem; }
+    .signal { background: var(--bg-stone); border: 1px solid var(--text-muted); padding: 0.1rem 0.4rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v134/">&larr; Chrome 134</a> / <a href="../">LLM-powered abusive notification detection</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v134 · security · android</p>
+    <h1>Red-Team Bench</h1>
+    <p class="lede">A simulated classifier that scores notifications on the same patterns Chrome's on-device model targets: urgency, prize-bait, credential phishing, currency claims, fake brand prefixes. Type your own or pick from a red-team list, then see exactly which signals fire and what the user sees.</p>
+  </header>
+
+  <div class="lab">
+    <div class="field">
+      <label>title</label>
+      <input type="text" id="title" value="🚨 URGENT: Your Apple ID is suspended">
+    </div>
+    <div class="field">
+      <label>body</label>
+      <textarea id="body">Click below to verify your identity in the next 10 minutes or your account will be permanently deleted. www.apple-id-verify.help</textarea>
+    </div>
+    <div class="row">
+      <button id="fire">fire notification</button>
+      <button class="preset-btn" data-p="prize" style="background: var(--bg-paper); color: var(--text-black);">Preset: prize</button>
+      <button class="preset-btn" data-p="virus" style="background: var(--bg-paper); color: var(--text-black);">virus</button>
+      <button class="preset-btn" data-p="phishing" style="background: var(--bg-paper); color: var(--text-black);">phishing</button>
+      <button class="preset-btn" data-p="real" style="background: var(--bg-paper); color: var(--text-black);">legitimate</button>
+    </div>
+    <div id="feed"></div>
+  </div>
+
+  <section>
+    <h2>signal taxonomy</h2>
+    <p>The on-device model surfaces multiple signals per notification. We mock four buckets here, drawn from public reporting on the classifier's training set:</p>
+    <ul>
+      <li><strong>urgency</strong> — time-bounded threats ("in 10 minutes", "expires today")</li>
+      <li><strong>prize-bait</strong> — won/free/claim language</li>
+      <li><strong>credential</strong> — verify/confirm/reset + brand name (often misspelled or look-alike domains)</li>
+      <li><strong>monetary</strong> — large unsolicited amounts</li>
+    </ul>
+    <p>Scoring crosses 0.7 → notification body is blurred and the user gets dismiss / unsubscribe / show-anyway.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Abusive notification detection</a> — feature index</li>
+      <li><a href="../abusive-notif/">Abusive Notification Filter basics</a></li>
+      <li><a href="../scam-classifier/">Scam classifier wave</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const presets = {
+    prize: { title: "🎉 Congratulations! You won an iPhone 16!", body: "Claim your prize NOW: https://win-iphone-now.example/claim?ref=abc - offer expires in 1 hour" },
+    virus: { title: "Your phone has 3 viruses!", body: "Critical malware detected. Tap to run free scan and clean your device immediately." },
+    phishing: { title: "ChaseBank: Unusual activity", body: "Please verify your card details at https://chase-secure-verify.help within 24 hours to avoid suspension." },
+    real: { title: "GitHub: New release available", body: "release-v2.3 is now available for paulkinlan/chrome-platform-showcase." },
+  };
+  document.querySelectorAll(".preset-btn").forEach(b => {
+    b.addEventListener("click", () => {
+      const p = presets[b.dataset.p];
+      document.getElementById("title").value = p.title;
+      document.getElementById("body").value = p.body;
+    });
+  });
+
+  function score(text) {
+    const t = text.toLowerCase();
+    const signals = [];
+    let s = 0;
+    if (/urgent|immediately|in \d+ (minutes?|hours?|days?)|expires?|now|within \d/.test(t)) { signals.push("urgency"); s += 0.3; }
+    if (/won|prize|free|claim|congratulations|iphone|gift card/.test(t)) { signals.push("prize-bait"); s += 0.3; }
+    if (/verify|confirm|reset|suspended|locked|unusual activity|card details|password/.test(t)) { signals.push("credential"); s += 0.25; }
+    if (/\$\d|£\d|€\d|inr|usd|btc|paypal|chase|bank|amazon|apple/.test(t)) { signals.push("monetary-or-brand"); s += 0.2; }
+    if (/https?:\/\/[^\s]+\.(help|info|click|tk|xyz|top)/i.test(t)) { signals.push("suspicious-tld"); s += 0.25; }
+    if (/\d+ virus|malware/.test(t)) { signals.push("malware-bait"); s += 0.3; }
+    return { s: Math.min(1, s), signals };
+  }
+
+  document.getElementById("fire").addEventListener("click", () => {
+    const title = document.getElementById("title").value;
+    const body = document.getElementById("body").value;
+    const { s, signals } = score(title + " " + body);
+    const v = s > 0.7 ? "high" : s > 0.4 ? "mid" : "low";
+    const note = document.createElement("div");
+    note.className = "notification" + (v === "high" ? " flagged" : "");
+    note.innerHTML = `
+      <div class="ico">!</div>
+      <div class="body">
+        <div class="title">${title}</div>
+        <div class="text">${body}</div>
+        <div class="signals">${signals.map(g => `<span class="signal">${g}</span>`).join("")}</div>
+      </div>
+      <div class="score verdict-${v}">${(s*100|0)}%</div>
+      ${v === "high" ? `<div class="reveal">
+        <button class="show">show anyway</button>
+        <button class="dismiss" style="background: var(--bg-paper); color: var(--text-black);">dismiss</button>
+        <button class="unsub" style="background: var(--accent-rose); color: white;">unsubscribe</button>
+      </div>` : ""}
+    `;
+    document.getElementById("feed").prepend(note);
+    note.querySelector(".show")?.addEventListener("click", () => { note.classList.remove("flagged"); note.querySelector(".reveal").remove(); });
+    note.querySelector(".dismiss")?.addEventListener("click", () => note.remove());
+    note.querySelector(".unsub")?.addEventListener("click", () => note.remove());
+  });
+</script>
+</body>
+</html>
