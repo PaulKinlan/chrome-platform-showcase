@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lock Contention Simulator — Web Locks in Shared Storage — Chrome 134</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .worklet-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+    }
+    .worklet-card {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: var(--space-2);
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .worklet-card.waiting { border-color: #b45309; background: #fffbeb; }
+    .worklet-card.locked { border-color: var(--accent-emerald); background: #f0fdf4; }
+    .worklet-card.done { border-color: var(--border-black); opacity: 0.5; }
+    .worklet-card.reported { border-color: var(--accent-blue); background: #eff6ff; }
+    .wk-name { font-weight: 700; font-size: 0.82rem; margin-bottom: 4px; }
+    .wk-state {
+      display: inline-block;
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 2px 5px;
+      margin-bottom: 4px;
+    }
+    .wk-state.waiting { background: #b45309; color: var(--bg-ivory); }
+    .wk-state.locked { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .wk-state.done { background: var(--bg-stone); color: var(--text-charcoal); border: 1px solid var(--border-black); }
+    .wk-state.reported { background: var(--accent-blue); color: var(--bg-ivory); }
+    .wk-info { font-size: 0.72rem; color: var(--text-charcoal); font-family: var(--font-mono); }
+    .section-title { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: var(--space-3) 0 var(--space-2); }
+    .probe-row { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .probe { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border-black); font-size: 0.8rem; }
+    .probe.fail { background: var(--accent-rose); color: var(--bg-ivory); }
+    .probe.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .probe.warn { background: #b45309; color: var(--bg-ivory); }
+    .info-box { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-size: 0.82rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+    .controls-row { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: flex-end; margin-bottom: var(--space-3); }
+    .field-group { display: flex; flex-direction: column; gap: 4px; }
+    .field-group label { font-size: 0.8rem; color: var(--text-muted); }
+    input[type="range"] { accent-color: var(--text-black); width: 120px; }
+    select { padding: 6px 8px; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); font-size: 0.82rem; }
+    button.primary {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      border: none;
+      padding: 8px 16px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    button.primary:hover { opacity: 0.85; }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.76rem; min-height: 80px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; margin-bottom: var(--space-3); }
+    .l-acquire { color: var(--accent-emerald); }
+    .l-wait { color: #b45309; }
+    .l-report { color: var(--accent-blue); font-weight: 700; }
+    .l-dup { color: var(--accent-rose); font-weight: 700; }
+    .l-skip { color: var(--text-muted); }
+    .summary-row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    .metric-card { flex: 1; min-width: 100px; background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-2); text-align: center; }
+    .metric-val { font-family: var(--font-mono); font-size: 1.2rem; font-weight: 700; }
+    .metric-val.bad { color: var(--accent-rose); }
+    .metric-val.good { color: var(--accent-emerald); }
+    .metric-lbl { font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: .04em; }
+    code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-stone); padding: 1px 4px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v134/support-web-locks-api-in-shared-storage/">&larr; Web Locks in Shared Storage</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v134 · privacy sandbox / storage</p>
+    <h1>Lock Contention Simulator</h1>
+    <p class="lede">Simulate multiple Shared Storage worklets racing to read-check-write a "seen" flag. Without locks, concurrent worklets all see <code>false</code> and over-report. With <code>navigator.locks.request()</code>, they queue and only the first reports — eliminating duplicates.</p>
+  </header>
+
+  <section>
+    <div class="probe-row">
+      <span class="probe fail" id="probeLocks">checking Web Locks API…</span>
+    </div>
+
+    <div class="info-box">
+      The bug: worklet A reads <code>seen = false</code>, worklet B reads <code>seen = false</code> (before A writes), both report. Chrome 134 lets worklets call <code>navigator.locks.request('reach-lock', async () => { … })</code> — only one holds the lock at a time, so the second worklet reads the updated value and skips.
+    </div>
+
+    <p class="section-title">Simulation settings</p>
+    <div class="controls-row">
+      <div class="field-group">
+        <label>Worklets: <span id="wkCountVal">6</span></label>
+        <input type="range" id="wkCount" min="2" max="10" value="6">
+      </div>
+      <div class="field-group">
+        <label>Critical section time</label>
+        <select id="critTime">
+          <option value="50">50ms (fast)</option>
+          <option value="150" selected>150ms (typical)</option>
+          <option value="400">400ms (slow)</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label>Mode</label>
+        <select id="modeSelect">
+          <option value="nolock">Without locks (race condition)</option>
+          <option value="lock">With locks (Chrome 134)</option>
+          <option value="both">Both (side by side)</option>
+        </select>
+      </div>
+      <button class="primary" id="runBtn">Run simulation</button>
+    </div>
+
+    <p class="section-title">Worklet states</p>
+    <div class="worklet-grid" id="workletGrid"></div>
+
+    <div class="summary-row">
+      <div class="metric-card"><div class="metric-val" id="metTotal">—</div><div class="metric-lbl">Total worklets</div></div>
+      <div class="metric-card"><div class="metric-val bad" id="metDups">—</div><div class="metric-lbl">Duplicate reports</div></div>
+      <div class="metric-card"><div class="metric-val good" id="metUniq">—</div><div class="metric-lbl">Unique reports</div></div>
+      <div class="metric-card"><div class="metric-val" id="metTime">—</div><div class="metric-lbl">Total time (ms)</div></div>
+    </div>
+
+    <p class="section-title">Execution log</p>
+    <div class="log" id="execLog">Configure and click "Run simulation".</div>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const probe = document.getElementById('probeLocks');
+  const hasLocks = typeof navigator.locks !== 'undefined';
+  if (hasLocks) { probe.textContent = 'Web Locks API available'; probe.classList.replace('fail', 'ok'); }
+  else { probe.textContent = 'Web Locks API not available — simulation only'; probe.classList.replace('fail', 'warn'); }
+
+  const wkSlider = document.getElementById('wkCount');
+  const wkValEl = document.getElementById('wkCountVal');
+  wkSlider.addEventListener('input', () => { wkValEl.textContent = wkSlider.value; });
+
+  const logEl = document.getElementById('execLog');
+
+  function addLog(msg, cls) {
+    const span = document.createElement('span');
+    span.className = cls || '';
+    span.textContent = msg + '\n';
+    logEl.appendChild(span);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function clearLog() { logEl.innerHTML = ''; }
+
+  const STATES = {
+    idle: { label: 'idle', cls: '' },
+    waiting: { label: 'waiting for lock', cls: 'waiting' },
+    locked: { label: 'holds lock', cls: 'locked' },
+    reported: { label: 'reported ✓', cls: 'reported' },
+    done: { label: 'done (skipped)', cls: 'done' },
+  };
+
+  function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  let cards = [];
+
+  function buildGrid(n) {
+    const grid = document.getElementById('workletGrid');
+    grid.innerHTML = '';
+    cards = [];
+    for (let i = 0; i < n; i++) {
+      const card = document.createElement('div');
+      card.className = 'worklet-card';
+      card.innerHTML = `<div class="wk-name">Worklet ${i + 1}</div><div class="wk-state">idle</div><div class="wk-info"> </div>`;
+      grid.appendChild(card);
+      cards.push(card);
+    }
+  }
+
+  function setCard(i, state, info) {
+    const card = cards[i];
+    if (!card) return;
+    const s = STATES[state] || STATES.idle;
+    card.className = 'worklet-card ' + (s.cls || '');
+    card.querySelector('.wk-state').textContent = s.label;
+    card.querySelector('.wk-state').className = 'wk-state ' + (s.cls || '');
+    card.querySelector('.wk-info').textContent = info || '';
+  }
+
+  async function runWithoutLocks(n, critMs) {
+    const t0 = performance.now();
+    let sharedSeen = false;
+    let reports = 0;
+    let dups = 0;
+    addLog('-- Without locks: all worklets read "seen" before any writes --', '');
+    const promises = Array.from({ length: n }, async (_, i) => {
+      setCard(i, 'waiting', 'checking seen...');
+      addLog(`W${i+1}: read seen = ${sharedSeen}`, 'l-wait');
+      const localSeen = sharedSeen;
+      await delay(critMs + Math.random() * 30);
+      if (!localSeen) {
+        if (sharedSeen) {
+          dups++;
+          setCard(i, 'done', 'duplicate! skipped');
+          addLog(`W${i+1}: DUPLICATE REPORT (race: another wrote first)`, 'l-dup');
+        } else {
+          sharedSeen = true;
+          reports++;
+          setCard(i, 'reported', 'reported ✓');
+          addLog(`W${i+1}: reported (first)`, 'l-report');
+        }
+      } else {
+        setCard(i, 'done', 'already seen');
+        addLog(`W${i+1}: skipped (seen=true)`, 'l-skip');
+      }
+    });
+    await Promise.all(promises);
+    const elapsed = (performance.now() - t0).toFixed(0);
+    document.getElementById('metTotal').textContent = n;
+    document.getElementById('metDups').textContent = reports - 1 >= 0 ? reports - 1 : 0;
+    document.getElementById('metUniq').textContent = 1;
+    document.getElementById('metTime').textContent = elapsed;
+    addLog(`Done: ${reports} report(s) sent for 1 unique user — ${reports - 1} duplicates`, reports > 1 ? 'l-dup' : 'l-report');
+  }
+
+  async function runWithLocks(n, critMs) {
+    const t0 = performance.now();
+    let sharedSeen = false;
+    let reports = 0;
+    addLog('-- With locks: worklets queue, each reads fresh value --', '');
+
+    let lockQueue = Promise.resolve();
+    const promises = Array.from({ length: n }, async (_, i) => {
+      setCard(i, 'waiting', 'queued for lock...');
+      addLog(`W${i+1}: waiting for lock`, 'l-wait');
+      await delay(i * 10);
+
+      lockQueue = lockQueue.then(async () => {
+        setCard(i, 'locked', 'holds lock');
+        addLog(`W${i+1}: acquired lock, reading seen = ${sharedSeen}`, 'l-acquire');
+        await delay(critMs);
+        if (!sharedSeen) {
+          sharedSeen = true;
+          reports++;
+          setCard(i, 'reported', 'reported ✓');
+          addLog(`W${i+1}: seen=false → write seen=true, REPORT`, 'l-report');
+        } else {
+          setCard(i, 'done', 'seen=true, skip');
+          addLog(`W${i+1}: seen=true → skip (no duplicate)`, 'l-skip');
+        }
+      });
+      return lockQueue;
+    });
+    await Promise.all(promises);
+    await lockQueue;
+    const elapsed = (performance.now() - t0).toFixed(0);
+    document.getElementById('metTotal').textContent = n;
+    document.getElementById('metDups').textContent = 0;
+    document.getElementById('metUniq').textContent = reports;
+    document.getElementById('metTime').textContent = elapsed;
+    addLog(`Done: ${reports} report(s) sent — 0 duplicates ✓`, 'l-report');
+  }
+
+  document.getElementById('runBtn').addEventListener('click', async () => {
+    const n = parseInt(wkSlider.value);
+    const critMs = parseInt(document.getElementById('critTime').value);
+    const mode = document.getElementById('modeSelect').value;
+    clearLog();
+    buildGrid(n);
+    document.getElementById('metTotal').textContent = '—';
+    document.getElementById('metDups').textContent = '—';
+    document.getElementById('metUniq').textContent = '—';
+    document.getElementById('metTime').textContent = '—';
+    document.getElementById('runBtn').disabled = true;
+    try {
+      if (mode === 'nolock') await runWithoutLocks(n, critMs);
+      else if (mode === 'lock') await runWithLocks(n, critMs);
+      else {
+        await runWithoutLocks(Math.ceil(n / 2), critMs);
+        await delay(200);
+        buildGrid(n);
+        await runWithLocks(n, critMs);
+      }
+    } finally {
+      document.getElementById('runBtn').disabled = false;
+    }
+  });
+
+  buildGrid(6);
+})();
+</script>
+</body>
+</html>
