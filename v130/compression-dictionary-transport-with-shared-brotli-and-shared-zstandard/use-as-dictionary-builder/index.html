@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Use-as-Dictionary builder — CDT — Chrome 130</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .layout { display: grid; grid-template-columns: 280px 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
+    .col-label { font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); border-bottom: 1px solid var(--border-black); padding-bottom: 0.4rem; }
+    .field { display: flex; flex-direction: column; gap: 0.3rem; }
+    label { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 600; }
+    input[type="text"], select { border: 2px solid var(--border-black); padding: 0.4rem 0.6rem; font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-ivory); color: var(--text-black); }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .chip { padding: 0.25rem 0.6rem; font-family: var(--font-mono); font-size: 0.74rem; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); cursor: pointer; }
+    .chip[aria-pressed="true"] { background: var(--text-black); color: var(--bg-ivory); }
+    .header-out { background: var(--text-black); color: var(--bg-ivory); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; white-space: pre-wrap; border: 2px solid var(--border-black); }
+
+    .url-tester { display: flex; gap: 0.5rem; }
+    .url-tester input { flex: 1; }
+    .match-row { display: grid; grid-template-columns: 1fr auto auto; gap: 0.5rem; align-items: center; padding: 0.45rem 0.5rem; border-bottom: 1px solid #ddd; font-family: var(--font-mono); font-size: 0.78rem; }
+    .badge-ok { font-size: 0.72rem; padding: 0.1rem 0.4rem; background: var(--accent-emerald); color: var(--bg-ivory); border: 1px solid var(--border-black); }
+    .badge-no { font-size: 0.72rem; padding: 0.1rem 0.4rem; background: var(--bg-stone); color: var(--text-muted); border: 1px solid var(--border-black); }
+    .field-val { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; CDT</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>Use-as-Dictionary header builder</h1>
+    <p class="lede">Construct the <code>Use-As-Dictionary</code> response header that promotes a resource into the browser's dictionary cache. Tweak match (URL pattern), match-dest, type, ttl; then probe several future request URLs and request-destinations to see which would pick this dictionary up.</p>
+  </header>
+
+  <div class="layout">
+    <section class="panel">
+      <p class="col-label">dictionary properties</p>
+
+      <div class="field">
+        <label for="match">match</label>
+        <input id="match" type="text" value="/static/app-*">
+        <span class="field-val">URL pattern (UrlPattern syntax)</span>
+      </div>
+
+      <div class="field">
+        <label>match-dest</label>
+        <div class="chip-row" id="dest-chips">
+          <button class="chip" data-d="document">document</button>
+          <button class="chip" data-d="script" aria-pressed="true">script</button>
+          <button class="chip" data-d="style">style</button>
+          <button class="chip" data-d="font">font</button>
+          <button class="chip" data-d="image">image</button>
+          <button class="chip" data-d="empty">empty</button>
+        </div>
+        <span class="field-val">leave empty for "any"</span>
+      </div>
+
+      <div class="field">
+        <label for="type">type</label>
+        <select id="type">
+          <option value="raw">raw (used with dcb / dcz)</option>
+        </select>
+        <span class="field-val">spec currently only defines "raw"</span>
+      </div>
+
+      <div class="field">
+        <label for="ttl">cache-control max-age (the dictionary's TTL)</label>
+        <input id="ttl" type="text" value="2592000">
+        <span class="field-val">dictionary is dropped after this many seconds</span>
+      </div>
+
+      <div class="field">
+        <label for="id-tag">id (optional)</label>
+        <input id="id-tag" type="text" value="app-v3-base">
+      </div>
+    </section>
+
+    <section class="panel">
+      <p class="col-label">generated response headers</p>
+      <pre class="header-out" id="header-out"></pre>
+
+      <p class="col-label">match probe</p>
+      <p style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);">would these future requests pick this dictionary up?</p>
+      <div id="probes"></div>
+
+      <div class="url-tester">
+        <input id="probe-url" type="text" placeholder="/static/app-v4.js" value="/static/app-v4.js">
+        <select id="probe-dest" style="min-width: 110px;">
+          <option>script</option>
+          <option>style</option>
+          <option>document</option>
+          <option>font</option>
+          <option>image</option>
+          <option>empty</option>
+        </select>
+        <button id="probe-add">test</button>
+      </div>
+    </section>
+  </div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>// Express / Hono / Workers etc.
+res.headers.set("Use-As-Dictionary",
+  'match="/static/app-*", match-dest=("script"), type="raw", id="app-v3-base"');
+res.headers.set("Cache-Control", "max-age=2592000");
+
+// Subsequent matching requests will carry:
+//   Available-Dictionary: :sha256-of-the-dictionary-bytes:
+//   Sec-Available-Dictionary: app-v3-base
+// Server may then respond with Content-Encoding: dcb (or dcz).</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../cdt-shared/">Shared CDT simulator</a></li>
+      <li><a href="../version-evolution/">Library version evolution</a></li>
+      <li><a href="../handshake-protocol/">Handshake protocol walkthrough</a></li>
+      <li><a href="https://datatracker.ietf.org/doc/draft-ietf-httpbis-compression-dictionary/" target="_blank" rel="noopener">draft-ietf-httpbis-compression-dictionary</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const selectedDests = new Set(["script"]);
+  document.querySelectorAll("#dest-chips .chip").forEach((c) => {
+    c.addEventListener("click", () => {
+      const d = c.dataset.d;
+      if (selectedDests.has(d)) { selectedDests.delete(d); c.setAttribute("aria-pressed", "false"); }
+      else { selectedDests.add(d); c.setAttribute("aria-pressed", "true"); }
+      update();
+    });
+  });
+
+  const probes = [
+    { url: "/static/app-v3.js", dest: "script" },
+    { url: "/static/app-v4.js", dest: "script" },
+    { url: "/static/theme.css", dest: "style" },
+    { url: "/api/cart", dest: "empty" },
+    { url: "/static/app-icons.svg", dest: "image" },
+  ];
+
+  function patternToRegex(pat) {
+    // Minimal UrlPattern-ish: '*' wildcard
+    return new RegExp("^" + pat.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$");
+  }
+
+  function matchProbe(p) {
+    const pat = document.getElementById("match").value;
+    const rx = patternToRegex(pat);
+    const urlOk = rx.test(p.url);
+    const destOk = selectedDests.size === 0 || selectedDests.has(p.dest);
+    return { urlOk, destOk, all: urlOk && destOk };
+  }
+
+  function update() {
+    const match = document.getElementById("match").value;
+    const type = document.getElementById("type").value;
+    const ttl = document.getElementById("ttl").value;
+    const idTag = document.getElementById("id-tag").value.trim();
+
+    const dests = [...selectedDests].map((d) => `"${d}"`).join(" ");
+    let line = `Use-As-Dictionary: match="${match}"`;
+    if (dests) line += `, match-dest=(${dests})`;
+    line += `, type="${type}"`;
+    if (idTag) line += `, id="${idTag}"`;
+    let headers = line + `\nCache-Control: max-age=${ttl}`;
+    document.getElementById("header-out").textContent = headers;
+
+    const probesEl = document.getElementById("probes");
+    probesEl.innerHTML = probes.map((p) => {
+      const r = matchProbe(p);
+      const badge = r.all
+        ? '<span class="badge-ok">picks up dictionary</span>'
+        : '<span class="badge-no">no match</span>';
+      const why = r.all ? "" : (!r.urlOk ? "url pattern fails" : "dest not in list");
+      return `<div class="match-row"><code>${p.dest} ${p.url}</code> ${badge} <span class="field-val">${why}</span></div>`;
+    }).join("");
+  }
+
+  document.getElementById("probe-add").addEventListener("click", () => {
+    const url = document.getElementById("probe-url").value.trim();
+    if (!url) return;
+    const dest = document.getElementById("probe-dest").value;
+    probes.push({ url, dest });
+    update();
+  });
+
+  ["match", "type", "ttl", "id-tag"].forEach((id) => {
+    document.getElementById(id).addEventListener("input", update);
+  });
+
+  update();
+</script>
+</body>
+</html>

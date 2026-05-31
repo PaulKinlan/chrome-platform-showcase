@@ -1184,8 +1184,17 @@ async function collectCategorizedRows(channels: Channels): Promise<CategorizedRo
   for (const m of known) {
     try {
       const feats = await getMilestoneFeatures(m);
+      // Chromestatus puts the same feature in multiple groups when it's under
+      // several statuses (e.g. "Origin trial" + "In developer trial"). Dedupe
+      // by (milestone, slug) so we don't list the same demo twice on the
+      // category page.
+      const seen = new Set<string>();
       for (const g of feats.groups) {
         for (const f of g.features) {
+          const slug = slugify(f.name);
+          const key = `${m}:${slug}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
           const hasDemo = await featureHasDemo(`v${m}`, f);
           rows.push({
             mstone: m,
