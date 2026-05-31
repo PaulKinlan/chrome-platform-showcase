@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Router Optimization Guide — ServiceWorker Static Router Timing Info — Chrome 140 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .fields-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-3); margin-bottom: var(--space-4); }
+    .field-card { border: 2px solid var(--border-black); padding: var(--space-3); background: var(--bg-stone); }
+    .field-card .field-name { font-family: var(--font-mono); font-size: 0.78rem; color: var(--accent-blue); margin-bottom: var(--space-1); }
+    .field-card .field-desc { font-family: var(--font-serif); font-size: 0.85rem; }
+    .controls { display: flex; gap: var(--space-2); margin-bottom: var(--space-4); flex-wrap: wrap; align-items: center; }
+    .waterfall { margin: var(--space-3) 0; }
+    .wf-row { display: grid; grid-template-columns: 180px 1fr; gap: var(--space-2); margin-bottom: var(--space-2); align-items: center; }
+    @media (max-width: 580px) { .wf-row { grid-template-columns: 1fr; } }
+    .wf-url { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-charcoal); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wf-bars { display: flex; height: 20px; border: 1px solid var(--border-black); background: var(--bg-stone); position: relative; overflow: hidden; }
+    .wf-seg { height: 100%; position: absolute; transition: width 0.3s ease, left 0.3s ease; display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 0.6rem; color: var(--bg-ivory); overflow: hidden; white-space: nowrap; }
+    .wf-seg.router-eval { background: var(--accent-blue); }
+    .wf-seg.cache-lookup { background: var(--accent-emerald); }
+    .wf-seg.network { background: var(--accent-amber); color: var(--text-black); }
+    .wf-seg.slow { outline: 2px solid var(--accent-rose); outline-offset: -2px; }
+    .wf-total { font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-muted); white-space: nowrap; }
+    .legend { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    .legend-item { display: flex; align-items: center; gap: var(--space-1); font-family: var(--font-mono); font-size: 0.72rem; }
+    .legend-dot { width: 12px; height: 12px; border: 1px solid var(--border-black); flex-shrink: 0; }
+    .suggestions { border: 2px solid var(--border-black); padding: var(--space-4); background: var(--bg-stone); margin: var(--space-4) 0; }
+    .suggestions h3 { font-family: var(--font-mono); font-size: 0.85rem; margin-bottom: var(--space-3); }
+    .suggestion { display: flex; gap: var(--space-3); margin-bottom: var(--space-3); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border-black); }
+    .suggestion:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+    .suggestion-icon { font-size: 1.2rem; flex-shrink: 0; }
+    .suggestion-body { font-family: var(--font-serif); font-size: 0.85rem; }
+    .suggestion-body strong { font-family: var(--font-mono); font-size: 0.8rem; display: block; margin-bottom: 0.25rem; color: var(--text-black); }
+    .summary-row { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    .summary-stat { font-family: var(--font-mono); font-size: 0.82rem; border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); background: var(--bg-paper); }
+    .summary-stat strong { display: block; font-size: 1.3rem; }
+    .summary-stat.warn strong { color: var(--accent-rose); }
+    .summary-stat.ok strong { color: var(--accent-emerald); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v140/serviceworkerstaticroutertiminginfo/">&larr; ServiceWorkerStaticRouterTimingInfo</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v140</p>
+    <h1>Router Optimization Guide</h1>
+    <p class="lede">Chrome 140 adds <code>workerRouterEvaluationStart</code> and <code>workerCacheLookupStart</code> to <code>PerformanceResourceTiming</code>. Run a timing audit, inspect the waterfall, and follow the optimization suggestions to tighten your static router rules.</p>
+  </header>
+
+  <h2>New timing fields</h2>
+  <div class="fields-grid">
+    <div class="field-card">
+      <div class="field-name">workerRouterEvaluationStart</div>
+      <div class="field-desc">When the browser began evaluating static router rules for this navigation. Relative to the navigation start.</div>
+    </div>
+    <div class="field-card">
+      <div class="field-name">workerCacheLookupStart</div>
+      <div class="field-desc">When a cache lookup began after a router rule matched <code>source: "cache"</code>. Only present if a cache rule fired.</div>
+    </div>
+    <div class="field-card">
+      <div class="field-name">workerStart</div>
+      <div class="field-desc">When the service worker fetch handler started. Present when the request fell through to <code>source: "fetch-event"</code>.</div>
+    </div>
+    <div class="field-card">
+      <div class="field-name">fetchStart</div>
+      <div class="field-desc">When the actual network fetch began. Set when a <code>source: "network"</code> rule or fallback fired.</div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="controls">
+      <button id="audit-btn">Run timing audit (10 navigations)</button>
+      <button id="clear-btn" style="background: var(--bg-stone); color: var(--text-black);">Clear</button>
+    </div>
+
+    <div class="summary-row" id="summary-row" style="display: none">
+      <div class="summary-stat" id="stat-avg"><strong>—</strong>avg router eval</div>
+      <div class="summary-stat" id="stat-slow"><strong>—</strong>slow routes (&gt;5ms)</div>
+      <div class="summary-stat" id="stat-cache-hit"><strong>—</strong>cache hits</div>
+      <div class="summary-stat" id="stat-network"><strong>—</strong>network fallbacks</div>
+    </div>
+
+    <div class="legend">
+      <div class="legend-item"><div class="legend-dot" style="background: var(--accent-blue)"></div>router evaluation</div>
+      <div class="legend-item"><div class="legend-dot" style="background: var(--accent-emerald)"></div>cache lookup</div>
+      <div class="legend-item"><div class="legend-dot" style="background: var(--accent-amber)"></div>network fetch</div>
+      <div class="legend-item"><div class="legend-dot" style="background: transparent; outline: 2px solid var(--accent-rose); outline-offset: -2px"></div>slow (&gt;5ms eval)</div>
+    </div>
+
+    <div class="waterfall" id="waterfall">
+      <p style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);">Click &ldquo;Run timing audit&rdquo; to populate the waterfall.</p>
+    </div>
+  </div>
+
+  <div class="suggestions" id="suggestions" style="display: none">
+    <h3>Optimization suggestions</h3>
+    <div id="suggestions-list"></div>
+  </div>
+
+  <pre><code>// Read timing fields in your RUM pipeline
+const obs = new PerformanceObserver(list =&gt; {
+  for (const entry of list.getEntries()) {
+    const routerEval = entry.workerRouterEvaluationStart ?? null;
+    const cacheLookup = entry.workerCacheLookupStart ?? null;
+    const swStart = entry.workerStart;
+    const fetchStart = entry.fetchStart;
+
+    // Router evaluation time
+    const evalMs = cacheLookup
+      ? cacheLookup - routerEval
+      : swStart
+        ? swStart - routerEval
+        : fetchStart - routerEval;
+
+    analytics.record("sw-router-eval-ms", evalMs);
+  }
+});
+obs.observe({ type: "navigation", buffered: true });
+obs.observe({ type: "resource", buffered: true });</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v140/serviceworkerstaticroutertiminginfo/">ServiceWorkerStaticRouterTimingInfo</a> — feature index</li>
+      <li><a href="/v140/serviceworkerstaticroutertiminginfo/router-timing/">Router Timing</a> — single-route visualizer</li>
+      <li><a href="/v140/serviceworkerstaticroutertiminginfo/route-matrix/">Route Matrix</a> — rules vs source types</li>
+      <li><a href="https://chromestatus.com/feature/5101470691803136" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://w3c.github.io/performance-timeline/" target="_blank" rel="noopener">Performance Timeline spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(() => {
+  // Simulated navigation timing entries (10 entries)
+  const SIMULATED_ENTRIES = [
+    { name: '/feed.json',         routerEval: 3,  cache: 10,  network: 0,   src: 'cache' },
+    { name: '/api/user',          routerEval: 4,  cache: 0,   network: 42,  src: 'network' },
+    { name: '/article/123',       routerEval: 7,  cache: 18,  network: 0,   src: 'cache' },   // slow eval
+    { name: '/images/hero.webp',  routerEval: 2,  cache: 8,   network: 0,   src: 'cache' },
+    { name: '/api/comments',      routerEval: 4,  cache: 0,   network: 68,  src: 'network' },
+    { name: '/settings',          routerEval: 9,  cache: 0,   network: 0,   src: 'fetch-event', sw: 22 },  // slow + SW
+    { name: '/about',             routerEval: 3,  cache: 6,   network: 0,   src: 'cache' },
+    { name: '/api/search?q=css',  routerEval: 4,  cache: 0,   network: 55,  src: 'network' },
+    { name: '/manifest.json',     routerEval: 2,  cache: 4,   network: 0,   src: 'cache' },
+    { name: '/dashboard',         routerEval: 11, cache: 0,   network: 0,   src: 'fetch-event', sw: 35 }, // slow eval
+  ];
+
+  const SLOW_THRESHOLD = 5;
+
+  function buildSuggestions(entries) {
+    const suggestions = [];
+    const slowEvals = entries.filter(e => e.routerEval > SLOW_THRESHOLD);
+    const longCacheLookups = entries.filter(e => e.cache > 12);
+    const networkFallbacks = entries.filter(e => e.src === 'network');
+    const swFallbacks = entries.filter(e => e.src === 'fetch-event');
+
+    if (slowEvals.length) {
+      suggestions.push({
+        icon: '&#x26A0;&#xFE0F;',
+        title: `${slowEvals.length} route(s) with slow router evaluation (&gt;${SLOW_THRESHOLD}ms)`,
+        detail: `Affected: ${slowEvals.map(e => e.name).join(', ')}. Consider simplifying URL pattern conditions — complex regex patterns add evaluation cost. Prefer exact string matches or simple glob patterns like <code>/api/*</code> over lookaheads or alternations.`
+      });
+    }
+    if (longCacheLookups.length) {
+      suggestions.push({
+        icon: '&#x1F4CB;',
+        title: `${longCacheLookups.length} route(s) with slow cache lookup (&gt;12ms)`,
+        detail: 'Try adding <code>ignoreVary: true</code> to cache rules where vary semantics are not needed, or narrow the URL pattern to reduce the cache scan range. Cache lookup time includes vary header matching.'
+      });
+    }
+    if (networkFallbacks.length > 3) {
+      suggestions.push({
+        icon: '&#x1F310;',
+        title: `${networkFallbacks.length} routes always hitting network — consider cache-first`,
+        detail: `Affected: ${networkFallbacks.map(e => e.name).join(', ')}. If these responses are stable, add a <code>source: "cache"</code> rule with a stale-while-revalidate fallback to serve from cache and revalidate in the background.`
+      });
+    }
+    if (swFallbacks.length) {
+      suggestions.push({
+        icon: '&#x2699;&#xFE0F;',
+        title: `${swFallbacks.length} route(s) falling through to fetch handler`,
+        detail: `Affected: ${swFallbacks.map(e => e.name).join(', ')}. For these URLs the static router didn&apos;t match — adding explicit rules can skip the JS handler overhead (${swFallbacks.map(e => e.sw + 'ms').join(', ')} savings each).`
+      });
+    }
+    if (!suggestions.length) {
+      suggestions.push({ icon: '&#x2705;', title: 'All routes look healthy!', detail: 'Router evaluation is fast, cache lookups are tight, and most routes are served from cache or network rules without falling back to the SW handler.' });
+    }
+    return suggestions;
+  }
+
+  function render(entries) {
+    const waterfall = document.getElementById('waterfall');
+    const summaryRow = document.getElementById('summary-row');
+    const suggestionsEl = document.getElementById('suggestions');
+    const suggestionsList = document.getElementById('suggestions-list');
+
+    // Summary stats
+    const avgEval = Math.round(entries.reduce((a, e) => a + e.routerEval, 0) / entries.length);
+    const slowCount = entries.filter(e => e.routerEval > SLOW_THRESHOLD).length;
+    const cacheHits = entries.filter(e => e.src === 'cache').length;
+    const networkCount = entries.filter(e => e.src === 'network').length;
+    summaryRow.style.display = 'flex';
+    const statAvg = document.getElementById('stat-avg');
+    const statSlow = document.getElementById('stat-slow');
+    const statCacheHit = document.getElementById('stat-cache-hit');
+    const statNetwork = document.getElementById('stat-network');
+    statAvg.querySelector('strong').textContent = avgEval + 'ms';
+    statSlow.querySelector('strong').textContent = slowCount;
+    statSlow.className = 'summary-stat ' + (slowCount > 0 ? 'warn' : 'ok');
+    statCacheHit.querySelector('strong').textContent = cacheHits + '/' + entries.length;
+    statCacheHit.className = 'summary-stat ' + (cacheHits >= entries.length * 0.6 ? 'ok' : '');
+    statNetwork.querySelector('strong').textContent = networkCount;
+
+    // Waterfall
+    const maxTotal = Math.max(...entries.map(e => e.routerEval + (e.cache || 0) + (e.sw || 0) + (e.network || 0)));
+    waterfall.innerHTML = '';
+    entries.forEach(entry => {
+      const total = entry.routerEval + (entry.cache || 0) + (entry.sw || 0) + (entry.network || 0);
+      const pctOf = ms => ((ms / maxTotal) * 100).toFixed(1) + '%';
+      const row = document.createElement('div');
+      row.className = 'wf-row';
+      const urlEl = document.createElement('div');
+      urlEl.className = 'wf-url';
+      urlEl.title = entry.name;
+      urlEl.textContent = entry.name;
+      const barsEl = document.createElement('div');
+      barsEl.className = 'wf-bars';
+      let offset = 0;
+      function addSeg(ms, cls) {
+        if (!ms) return;
+        const seg = document.createElement('div');
+        seg.className = 'wf-seg ' + cls + (entry.routerEval > SLOW_THRESHOLD && cls === 'router-eval' ? ' slow' : '');
+        seg.style.left = pctOf(offset);
+        seg.style.width = '0%';
+        seg.textContent = ms + 'ms';
+        barsEl.appendChild(seg);
+        requestAnimationFrame(() => { seg.style.width = pctOf(ms); });
+        offset += ms;
+      }
+      addSeg(entry.routerEval, 'router-eval');
+      if (entry.cache) addSeg(entry.cache, 'cache-lookup');
+      if (entry.sw) addSeg(entry.sw, 'network'); // reuse amber for SW handler
+      if (entry.network) addSeg(entry.network, 'network');
+      const totalEl = document.createElement('div');
+      totalEl.className = 'wf-total';
+      totalEl.textContent = total + 'ms';
+      row.appendChild(urlEl);
+      const barWrap = document.createElement('div');
+      barWrap.style.display = 'flex';
+      barWrap.style.gap = '4px';
+      barWrap.style.alignItems = 'center';
+      barWrap.appendChild(barsEl);
+      barWrap.appendChild(totalEl);
+      row.appendChild(barWrap);
+      waterfall.appendChild(row);
+    });
+
+    // Suggestions
+    const suggs = buildSuggestions(entries);
+    suggestionsEl.style.display = 'block';
+    suggestionsList.innerHTML = suggs.map(s => `
+      <div class="suggestion">
+        <div class="suggestion-icon">${s.icon}</div>
+        <div class="suggestion-body"><strong>${s.title}</strong>${s.detail}</div>
+      </div>`).join('');
+  }
+
+  document.getElementById('audit-btn').addEventListener('click', () => {
+    render(SIMULATED_ENTRIES);
+  });
+
+  document.getElementById('clear-btn').addEventListener('click', () => {
+    document.getElementById('waterfall').innerHTML = '<p style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);">Click &ldquo;Run timing audit&rdquo; to populate the waterfall.</p>';
+    document.getElementById('summary-row').style.display = 'none';
+    document.getElementById('suggestions').style.display = 'none';
+  });
+})();
+</script>
+</body>
+</html>

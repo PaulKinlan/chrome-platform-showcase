@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fixed-Frame Binary Reader — ReadableStream BYOB min option — Chrome 140 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .readers-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 600px) { .readers-grid { grid-template-columns: 1fr; } }
+    .reader-pane { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); }
+    .reader-pane h3 { font-family: var(--font-mono); font-size: 0.82rem; margin-bottom: var(--space-2); color: var(--text-charcoal); }
+    .reader-pane.with-min h3 { color: var(--accent-emerald); }
+    .log { font-family: var(--font-mono); font-size: 0.72rem; background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-2); height: 240px; overflow-y: auto; }
+    .log-entry { padding: 0.15rem 0; border-bottom: 1px solid var(--bg-stone); }
+    .log-entry.complete { color: var(--accent-emerald); }
+    .log-entry.partial { color: var(--accent-amber); }
+    .log-entry.error { color: var(--accent-rose); }
+    .stats-row { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-top: var(--space-3); }
+    .stat { font-family: var(--font-mono); font-size: 0.75rem; border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); background: var(--bg-paper); flex: 1; min-width: 100px; }
+    .stat strong { display: block; font-size: 1.2rem; color: var(--text-black); }
+    .stat.highlight strong { color: var(--accent-emerald); }
+    .controls { display: flex; gap: var(--space-2); margin-bottom: var(--space-4); flex-wrap: wrap; align-items: center; }
+    .badge { font-family: var(--font-mono); font-size: 0.7rem; padding: 0.1rem 0.35rem; border: 1px solid var(--border-black); }
+    .badge.complete-badge { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .badge.partial-badge { background: var(--accent-amber); color: var(--text-black); border-color: var(--accent-amber); }
+    .frame-format { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); margin-bottom: var(--space-4); font-family: var(--font-mono); font-size: 0.78rem; }
+    .frame-format .field { display: inline-block; border: 1px solid var(--border-black); padding: 0.15rem 0.5rem; margin: 0.15rem; background: var(--bg-paper); }
+    .frame-format .field.magic { background: var(--accent-blue); color: var(--bg-ivory); border-color: var(--accent-blue); }
+    .frame-format .field.len { background: var(--accent-amber); color: var(--text-black); border-color: var(--accent-amber); }
+    .frame-format .field.payload { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v140/readablestreambyobreader-min-option/">&larr; ReadableStream BYOB min option</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v140</p>
+    <h1>Fixed-Frame Binary Reader</h1>
+    <p class="lede">A simulated binary stream emits chunks at random sizes. Two BYOB readers race side by side: one without <code>min</code> accumulates partial reads; one with <code>min: 8</code> waits for complete headers before yielding, eliminating reassembly entirely.</p>
+  </header>
+
+  <div class="frame-format">
+    <strong>Frame format:</strong>
+    <span class="field magic">MAGIC 2B</span>
+    <span>+</span>
+    <span class="field len">LENGTH 2B</span>
+    <span>+</span>
+    <span class="field payload">PAYLOAD (N bytes)</span>
+    <br>
+    <span style="color: var(--text-muted); font-size: 0.7rem; display: block; margin-top: var(--space-2);">Header is always 4 bytes. Payload length is encoded in bytes 2-3. Stream emits chunks at random sizes: 3, 7, 2, 5, 12, 1, 9, …</span>
+  </div>
+
+  <div class="stage">
+    <div class="controls">
+      <button id="generate-btn">Generate stream &amp; read</button>
+      <button id="clear-btn" style="background: var(--bg-stone); color: var(--text-black);">Clear logs</button>
+    </div>
+
+    <div class="readers-grid">
+      <div class="reader-pane" id="pane-without">
+        <h3>Without min (standard BYOB)</h3>
+        <div class="log" id="log-without"></div>
+        <div class="stats-row">
+          <div class="stat" id="reads-without"><strong>—</strong>total reads</div>
+          <div class="stat" id="partials-without"><strong>—</strong>partial reads</div>
+          <div class="stat" id="frames-without"><strong>—</strong>frames decoded</div>
+        </div>
+      </div>
+      <div class="reader-pane with-min" id="pane-with">
+        <h3>With min: 4 (header) then min: payload</h3>
+        <div class="log" id="log-with"></div>
+        <div class="stats-row">
+          <div class="stat" id="reads-with"><strong>—</strong>total reads</div>
+          <div class="stat highlight" id="partials-with"><strong>—</strong>partial reads</div>
+          <div class="stat highlight" id="frames-with"><strong>—</strong>frames decoded</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <pre><code>// With min: the read resolves only when at least min bytes are filled
+const reader = stream.getReader({ mode: "byob" });
+
+// Read exactly 4 bytes for the header
+const { value: header } = await reader.read(new Uint8Array(4), { min: 4 });
+const magic = (header[0] &lt;&lt; 8) | header[1];  // 0xDEAD
+const len   = (header[2] &lt;&lt; 8) | header[3];
+
+// Read exactly len bytes for the payload — zero reassembly
+const { value: payload } = await reader.read(new Uint8Array(len), { min: len });</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v140/readablestreambyobreader-min-option/">ReadableStream BYOB min option</a> — feature index</li>
+      <li><a href="/v140/readablestreambyobreader-min-option/protocol-decoder/">Protocol Decoder</a> — sibling concept</li>
+      <li><a href="/v140/readablestreambyobreader-min-option/min-vs-default/">min vs default</a> — read-count race</li>
+      <li><a href="https://chromestatus.com/feature/6396991665602560" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://streams.spec.whatwg.org/#byob-reader-read" target="_blank" rel="noopener">WHATWG Streams — BYOB read</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(() => {
+  const MAGIC = 0xDE;
+  const MAGIC2 = 0xAD;
+
+  // Build a synthetic byte stream with frames of varying payload sizes
+  // Chunk sizes are random/small to simulate real network fragmentation
+  function buildFrameBytes() {
+    const frames = [];
+    const payloads = [
+      new Uint8Array([0x48, 0x65, 0x6C, 0x6C, 0x6F]),           // "Hello" (5 bytes)
+      new Uint8Array([0x57, 0x6F, 0x72, 0x6C, 0x64, 0x21]),      // "World!" (6 bytes)
+      new Uint8Array([0x42, 0x59, 0x4F, 0x42]),                  // "BYOB" (4 bytes)
+      new Uint8Array([0x6D, 0x69, 0x6E]),                        // "min" (3 bytes)
+    ];
+    const all = [];
+    for (const payload of payloads) {
+      const frame = new Uint8Array(4 + payload.length);
+      frame[0] = MAGIC; frame[1] = MAGIC2;
+      frame[2] = (payload.length >> 8) & 0xFF;
+      frame[3] = payload.length & 0xFF;
+      frame.set(payload, 4);
+      all.push(...frame);
+    }
+    return new Uint8Array(all);
+  }
+
+  // Chop a byte array into random-sized chunks (sizes 1-7)
+  function chopIntoChunks(bytes) {
+    const sizes = [3, 1, 7, 2, 5, 4, 3, 6, 1, 2, 8, 3];
+    const chunks = [];
+    let offset = 0;
+    let si = 0;
+    while (offset < bytes.length) {
+      const sz = Math.min(sizes[si % sizes.length], bytes.length - offset);
+      chunks.push(bytes.slice(offset, offset + sz));
+      offset += sz; si++;
+    }
+    return chunks;
+  }
+
+  function makeStream(chunks) {
+    let i = 0;
+    return new ReadableStream({
+      type: 'bytes',
+      pull(ctrl) {
+        if (i >= chunks.length) { ctrl.close(); return; }
+        ctrl.enqueue(chunks[i++]);
+      }
+    });
+  }
+
+  function addLog(logEl, text, cls) {
+    const p = document.createElement('div');
+    p.className = 'log-entry ' + (cls || '');
+    p.textContent = text;
+    logEl.appendChild(p);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // ---- Reader WITHOUT min ----
+  async function readWithoutMin(chunks, logEl, statsReads, statsPartials, statsFrames) {
+    const stream = makeStream(chunks);
+    const reader = stream.getReader({ mode: 'byob' });
+    let readCount = 0, partialCount = 0, frameCount = 0;
+    let buf = new Uint8Array(64);
+    let filled = 0;
+    try {
+      while (true) {
+        const view = new Uint8Array(buf.buffer, filled, buf.length - filled);
+        const { value, done } = await reader.read(view);
+        if (done) break;
+        readCount++;
+        buf = new Uint8Array(value.buffer);
+        filled += value.byteLength;
+        const isComplete = filled >= 4 && filled >= 4 + ((buf[2] << 8) | buf[3]);
+        addLog(logEl,
+          `read #${readCount}: got ${value.byteLength}B, total ${filled}B ${isComplete ? '— complete frame' : '— partial'}`,
+          isComplete ? 'complete' : 'partial'
+        );
+        if (!isComplete) partialCount++;
+        // Try to consume frames from buffer
+        let pos = 0;
+        while (pos + 4 <= filled) {
+          const payLen = (buf[pos + 2] << 8) | buf[pos + 3];
+          if (pos + 4 + payLen > filled) break;
+          frameCount++;
+          pos += 4 + payLen;
+        }
+        if (pos > 0) {
+          buf.copyWithin(0, pos, filled);
+          filled -= pos;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    statsReads.querySelector('strong').textContent = readCount;
+    statsPartials.querySelector('strong').textContent = partialCount;
+    statsFrames.querySelector('strong').textContent = frameCount;
+    addLog(logEl, `— done: ${readCount} reads, ${partialCount} partials, ${frameCount} frames`, '');
+  }
+
+  // ---- Reader WITH min ----
+  async function readWithMin(chunks, logEl, statsReads, statsPartials, statsFrames) {
+    const minSupported = typeof ReadableStream !== 'undefined';
+    const stream = makeStream(chunks);
+    let reader;
+    try {
+      reader = stream.getReader({ mode: 'byob' });
+    } catch (e) {
+      addLog(logEl, 'BYOB reader not available: ' + e.message, 'error');
+      return;
+    }
+    let readCount = 0, partialCount = 0, frameCount = 0;
+    try {
+      while (true) {
+        // Step 1: read header with min: 4
+        const headerBuf = new Uint8Array(4);
+        let headerFilled = 0;
+        // Simulate min behaviour: loop until we have 4 bytes
+        while (headerFilled < 4) {
+          const view = new Uint8Array(headerBuf.buffer, headerFilled, 4 - headerFilled);
+          let result;
+          try {
+            // Try native min option
+            result = await reader.read(view, { min: 4 - headerFilled });
+          } catch {
+            result = await reader.read(view);
+          }
+          if (result.done) break;
+          readCount++;
+          headerFilled += result.value.byteLength;
+          const wasPartial = result.value.byteLength < (4 - (headerFilled - result.value.byteLength));
+          if (wasPartial) partialCount++;
+          addLog(logEl,
+            `hdr read #${readCount}: got ${result.value.byteLength}B → header ${headerFilled}/4B`,
+            headerFilled >= 4 ? 'complete' : 'partial'
+          );
+        }
+        if (headerFilled < 4) break;
+        const payLen = (headerBuf[2] << 8) | headerBuf[3];
+        // Step 2: read payload with min: payLen
+        const payloadBuf = new Uint8Array(payLen);
+        let payFilled = 0;
+        while (payFilled < payLen) {
+          const view = new Uint8Array(payloadBuf.buffer, payFilled, payLen - payFilled);
+          let result;
+          try {
+            result = await reader.read(view, { min: payLen - payFilled });
+          } catch {
+            result = await reader.read(view);
+          }
+          if (result.done) break;
+          readCount++;
+          payFilled += result.value.byteLength;
+          addLog(logEl,
+            `pay read #${readCount}: got ${result.value.byteLength}B → payload ${payFilled}/${payLen}B — ${payFilled >= payLen ? 'complete frame' : 'partial'}`,
+            payFilled >= payLen ? 'complete' : 'partial'
+          );
+        }
+        if (payFilled >= payLen) frameCount++;
+      }
+    } catch (e) {
+      addLog(logEl, 'stream ended: ' + e.message, 'error');
+    } finally {
+      reader.releaseLock();
+    }
+    statsReads.querySelector('strong').textContent = readCount;
+    statsPartials.querySelector('strong').textContent = partialCount;
+    statsFrames.querySelector('strong').textContent = frameCount;
+    addLog(logEl, `— done: ${readCount} reads, ${partialCount} partials, ${frameCount} frames`, '');
+  }
+
+  document.getElementById('generate-btn').addEventListener('click', async () => {
+    const logWithout = document.getElementById('log-without');
+    const logWith = document.getElementById('log-with');
+    logWithout.innerHTML = '';
+    logWith.innerHTML = '';
+    const bytes = buildFrameBytes();
+    const chunks1 = chopIntoChunks(bytes);
+    const chunks2 = chopIntoChunks(bytes);
+    addLog(logWithout, `stream: ${bytes.length}B total, ${chunks1.length} network chunks`, '');
+    addLog(logWith, `stream: ${bytes.length}B total, ${chunks2.length} network chunks`, '');
+    await Promise.all([
+      readWithoutMin(
+        chunks1,
+        logWithout,
+        document.getElementById('reads-without'),
+        document.getElementById('partials-without'),
+        document.getElementById('frames-without')
+      ),
+      readWithMin(
+        chunks2,
+        logWith,
+        document.getElementById('reads-with'),
+        document.getElementById('partials-with'),
+        document.getElementById('frames-with')
+      )
+    ]);
+  });
+
+  document.getElementById('clear-btn').addEventListener('click', () => {
+    ['log-without', 'log-with'].forEach(id => { document.getElementById(id).innerHTML = ''; });
+    ['reads-without', 'partials-without', 'frames-without', 'reads-with', 'partials-with', 'frames-with'].forEach(id => {
+      document.getElementById(id).querySelector('strong').textContent = '—';
+    });
+  });
+})();
+</script>
+</body>
+</html>
