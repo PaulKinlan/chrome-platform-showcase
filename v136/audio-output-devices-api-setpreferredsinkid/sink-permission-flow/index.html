@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sink Permission Flow — Audio Output Devices API — Chrome 136</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .section-title { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: var(--space-3) 0 var(--space-2); }
+    .probe-row { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .probe { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border-black); font-size: 0.8rem; }
+    .probe.fail { background: var(--accent-rose); color: var(--bg-ivory); }
+    .probe.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .probe.warn { background: #b45309; color: var(--bg-ivory); }
+    .info-box { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-size: 0.82rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+
+    /* Flow steps */
+    .flow {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+    }
+    .flow-step {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      display: flex;
+      align-items: flex-start;
+      gap: var(--space-2);
+    }
+    .flow-step.active { border-color: var(--accent-blue); }
+    .flow-step.done { border-color: var(--accent-emerald); }
+    .flow-step.error { border-color: var(--accent-rose); }
+    .step-num {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      background: var(--bg-stone);
+      padding: 2px 6px;
+      border: 1px solid var(--border-black);
+      flex-shrink: 0;
+    }
+    .step-body { flex: 1; }
+    .step-title { font-size: 0.82rem; font-weight: 600; margin-bottom: 2px; }
+    .step-detail { font-size: 0.74rem; color: var(--text-muted); }
+    .step-result {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      padding: 2px 7px;
+      border: 1px solid var(--border-black);
+      flex-shrink: 0;
+    }
+    .step-result.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .step-result.fail { background: var(--accent-rose); color: var(--bg-ivory); }
+    .step-result.pending { background: var(--bg-stone); color: var(--text-muted); }
+
+    /* Device list */
+    .device-list { margin-bottom: var(--space-3); }
+    .device-row {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      padding: 4px 0;
+      border-bottom: 1px solid var(--bg-stone);
+      font-size: 0.78rem;
+    }
+    .device-row:last-child { border-bottom: none; }
+    .device-id { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); flex: 1; word-break: break-all; }
+    .device-label { font-size: 0.78rem; color: var(--text-charcoal); }
+    .device-default { font-family: var(--font-mono); font-size: 0.7rem; background: var(--bg-stone); padding: 1px 5px; color: var(--text-muted); }
+
+    button.action-btn {
+      padding: 8px 14px;
+      border: 1px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      font-size: 0.82rem;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    button.action-btn.secondary { background: var(--bg-stone); color: var(--text-charcoal); }
+    .btn-row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    .output-block { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.76rem; white-space: pre; overflow-x: auto; line-height: 1.5; margin-bottom: var(--space-3); }
+    code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-stone); padding: 1px 4px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v136/audio-output-devices-api-setpreferredsinkid/">&larr; Audio Output Devices API — setPreferredSinkId</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v136 · media</p>
+    <h1>Sink Permission Flow</h1>
+    <p class="lede">Enumerate audio output devices, understand why some appear as empty strings until permission is granted, and walk the full flow: <code>getUserMedia</code> → enumerate → <code>setPreferredSinkId</code>. Shows the difference between <code>sinkId: ""</code> (default) and a real device ID, and what happens when permission is absent.</p>
+  </header>
+
+  <section>
+    <div class="probe-row">
+      <span class="probe fail" id="probeMD">checking MediaDevices…</span>
+      <span class="probe fail" id="probeSPSI">checking setPreferredSinkId…</span>
+      <span class="probe fail" id>probeEnum">checking enumerateDevices…</span>
+    </div>
+
+    <div class="info-box">
+      <code>setPreferredSinkId</code> requires the user to have granted microphone permission via <code>getUserMedia</code> before <code>enumerateDevices</code> returns real device labels and IDs for <em>output</em> devices. Without permission, <code>deviceId</code> is an empty string and <code>label</code> is blank — the API exists but you can't pick a device.
+    </div>
+
+    <p class="section-title">Permission & enumeration flow</p>
+    <div class="flow" id="flowSteps">
+      <div class="flow-step" id="step1">
+        <span class="step-num">1</span>
+        <div class="step-body">
+          <div class="step-title">Check MediaDevices API availability</div>
+          <div class="step-detail">navigator.mediaDevices and enumerateDevices must exist</div>
+        </div>
+        <span class="step-result pending" id="r1">—</span>
+      </div>
+      <div class="flow-step" id="step2">
+        <span class="step-num">2</span>
+        <div class="step-body">
+          <div class="step-title">Enumerate devices (no permission yet)</div>
+          <div class="step-detail">audiooutput devices have empty deviceId and label without permission</div>
+        </div>
+        <span class="step-result pending" id="r2">—</span>
+      </div>
+      <div class="flow-step" id="step3">
+        <span class="step-num">3</span>
+        <div class="step-body">
+          <div class="step-title">Request microphone permission (getUserMedia)</div>
+          <div class="step-detail">This unlocks device label/ID enumeration for output devices too</div>
+        </div>
+        <span class="step-result pending" id="r3">—</span>
+      </div>
+      <div class="flow-step" id="step4">
+        <span class="step-num">4</span>
+        <div class="step-body">
+          <div class="step-title">Re-enumerate with permission</div>
+          <div class="step-detail">audiooutput entries now have real deviceId and label</div>
+        </div>
+        <span class="step-result pending" id="r4">—</span>
+      </div>
+      <div class="flow-step" id="step5">
+        <span class="step-num">5</span>
+        <div class="step-body">
+          <div class="step-title">Call setPreferredSinkId with a real device ID</div>
+          <div class="step-detail">Sets the origin's preferred audio output for future audio elements</div>
+        </div>
+        <span class="step-result pending" id="r5">—</span>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="action-btn" id="runFlowBtn">Run permission flow</button>
+    </div>
+
+    <p class="section-title">Audio output devices found</p>
+    <div class="device-list" id="deviceList">
+      <div style="color:var(--text-muted);font-size:0.8rem">Run the flow to enumerate devices.</div>
+    </div>
+
+    <p class="section-title">sinkId semantics</p>
+    <div class="output-block">// sinkId values and what they mean:
+//
+// ""  (empty string)  — default device; no explicit selection
+//                      Also returned by enumerateDevices when no permission
+//
+// "default"           — explicitly the system default output
+//                      (may differ from "" in some OS configurations)
+//
+// "communications"    — communications device (headset, VoIP preferred)
+//
+// "&lt;device-id&gt;"       — specific device; only visible after getUserMedia grants
+//                      access (microphone permission unlocks output IDs too)
+//
+// Chrome 136: setPreferredSinkId(deviceId) persists the choice for the origin.
+// Future HTMLAudioElement instances get this sink without calling setSinkId().
+//
+// Difference from setSinkId():
+//   setSinkId()           — per-element, per-session
+//   setPreferredSinkId()  — origin-level, persists across navigation</div>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const probeMD = document.getElementById('probeMD');
+  const probeSPSI = document.getElementById('probeSPSI');
+
+  const hasMD = navigator.mediaDevices && typeof navigator.mediaDevices.enumerateDevices === 'function';
+  probeMD.textContent = hasMD ? 'MediaDevices available' : 'MediaDevices not available';
+  probeMD.className = hasMD ? 'probe ok' : 'probe fail';
+
+  const hasSPSI = hasMD && typeof navigator.mediaDevices.setPreferredSinkId === 'function';
+  probeSPSI.textContent = hasSPSI ? 'setPreferredSinkId available ✓' : 'setPreferredSinkId not available';
+  probeSPSI.className = hasSPSI ? 'probe ok' : 'probe warn';
+
+  // Fix malformed probe id in HTML (typo — ignored by DOM, probe3 still needs updating)
+  const probe3El = document.querySelector('[id="probeEnum"]') || document.querySelector('[id$="probeEnum"]');
+
+  function setStep(id, status, text) {
+    const el = document.getElementById('step' + id);
+    const r = document.getElementById('r' + id);
+    if (el) el.className = 'flow-step ' + (status === 'ok' ? 'done' : status === 'fail' ? 'error' : 'active');
+    if (r) { r.textContent = text; r.className = 'step-result ' + status; }
+  }
+
+  function renderDevices(devices, listEl) {
+    listEl.innerHTML = '';
+    const outputs = devices.filter(d => d.kind === 'audiooutput');
+    if (outputs.length === 0) {
+      listEl.innerHTML = '<div style="color:var(--text-muted);font-size:0.8rem">No audiooutput devices found.</div>';
+      return;
+    }
+    outputs.forEach(d => {
+      const row = document.createElement('div');
+      row.className = 'device-row';
+      const label = d.label || '(no label — permission not granted)';
+      const devId = d.deviceId || '(empty — permission not granted)';
+      row.innerHTML = `
+        <div>
+          <div class="device-label">${label}</div>
+          <div class="device-id">deviceId: ${devId}</div>
+        </div>
+        ${d.deviceId === '' ? '<span class="device-default">no id</span>' : ''}
+        ${d.deviceId === 'default' ? '<span class="device-default">default</span>' : ''}
+      `;
+      listEl.appendChild(row);
+    });
+  }
+
+  document.getElementById('runFlowBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('runFlowBtn');
+    btn.disabled = true;
+    const listEl = document.getElementById('deviceList');
+
+    // Step 1: API check
+    setStep(1, 'active', 'checking…');
+    await new Promise(r => setTimeout(r, 100));
+    if (!hasMD) {
+      setStep(1, 'fail', 'no API');
+      btn.disabled = false;
+      return;
+    }
+    setStep(1, 'ok', 'available');
+
+    // Step 2: Enumerate without permission
+    setStep(2, 'active', 'enumerating…');
+    const devsBefore = await navigator.mediaDevices.enumerateDevices();
+    const outputsBefore = devsBefore.filter(d => d.kind === 'audiooutput');
+    const hasIdsBefore = outputsBefore.some(d => d.deviceId && d.deviceId !== '');
+    setStep(2, 'ok', `${outputsBefore.length} output(s), IDs: ${hasIdsBefore ? 'visible' : 'hidden'}`);
+    renderDevices(devsBefore, listEl);
+
+    // Step 3: getUserMedia
+    setStep(3, 'active', 'requesting…');
+    let stream = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      setStep(3, 'ok', 'granted');
+    } catch (e) {
+      setStep(3, 'fail', 'denied: ' + e.name);
+      btn.disabled = false;
+      return;
+    }
+
+    // Step 4: Re-enumerate
+    setStep(4, 'active', 'enumerating…');
+    const devsAfter = await navigator.mediaDevices.enumerateDevices();
+    const outputsAfter = devsAfter.filter(d => d.kind === 'audiooutput');
+    const hasIdsAfter = outputsAfter.some(d => d.deviceId && d.deviceId !== '');
+    setStep(4, 'ok', `${outputsAfter.length} output(s), IDs: ${hasIdsAfter ? 'now visible ✓' : 'still hidden'}`);
+    renderDevices(devsAfter, listEl);
+
+    // Stop stream — we only needed it for the permission
+    stream.getTracks().forEach(t => t.stop());
+
+    // Step 5: setPreferredSinkId
+    setStep(5, 'active', 'calling…');
+    const firstRealOutput = outputsAfter.find(d => d.kind === 'audiooutput' && d.deviceId && d.deviceId !== '');
+    if (!hasSPSI) {
+      setStep(5, 'fail', 'not supported');
+    } else if (!firstRealOutput) {
+      setStep(5, 'fail', 'no device ID available');
+    } else {
+      try {
+        await navigator.mediaDevices.setPreferredSinkId(firstRealOutput.deviceId);
+        setStep(5, 'ok', `set to: ${firstRealOutput.deviceId.substring(0, 12)}…`);
+      } catch (e) {
+        setStep(5, 'fail', e.name + ': ' + e.message.substring(0, 30));
+      }
+    }
+
+    btn.disabled = false;
+  });
+})();
+</script>
+</body>
+</html>
