@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BFCache State Audit — WebSocket BFCache — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .audit-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.75rem;
+      margin: 1.25rem 0;
+    }
+    @media (max-width: 640px) { .audit-grid { grid-template-columns: 1fr; } }
+
+    .audit-card {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+    }
+    .audit-head {
+      background: var(--bg-stone);
+      border-bottom: 2px solid var(--border-black);
+      padding: 0.4rem 0.65rem;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: var(--text-black);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .audit-body { padding: 0.65rem; }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      border: 1.5px solid var(--border-black);
+    }
+    .dot-unknown { background: var(--bg-stone); }
+    .dot-ok    { background: var(--accent-emerald); }
+    .dot-lost  { background: var(--accent-rose); }
+    .dot-warn  { background: #854d0e; }
+
+    .audit-detail {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+    .audit-detail strong { color: var(--text-charcoal); }
+
+    .behaviour-row {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 0.2rem;
+      font-family: var(--font-mono);
+      font-size: 0.67rem;
+    }
+    .beh-label { min-width: 90px; color: var(--text-muted); }
+    .beh-val   { color: var(--text-charcoal); }
+    .beh-val.good { color: var(--accent-emerald); font-weight: 700; }
+    .beh-val.bad  { color: var(--accent-rose); font-weight: 700; }
+
+    .action-btn {
+      padding: 0.25rem 0.65rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-black);
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      cursor: pointer;
+    }
+    .action-btn:hover { background: var(--bg-ivory); }
+    .action-btn.primary { background: var(--text-black); color: var(--bg-ivory); }
+
+    .event-log {
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      padding: 0.55rem 0.7rem;
+      height: 180px;
+      overflow-y: auto;
+      line-height: 1.6;
+      margin: 0.75rem 0;
+    }
+    .log-ws   { color: #4ade80; }
+    .log-page { color: #93c5fd; }
+    .log-warn { color: #fde68a; }
+    .log-info { color: #d1d5db; }
+
+    .sim-controls {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin: 0.75rem 0;
+    }
+
+    .bfcache-state {
+      border: 2px solid var(--border-black);
+      padding: 0.55rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      font-weight: 700;
+      margin: 0.75rem 0;
+      text-align: center;
+    }
+    .state-live   { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .state-frozen { background: var(--accent-blue); color: var(--bg-ivory); border-color: var(--accent-blue); }
+    .state-restored { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v149/disconnect-websockets-on-bfcache-entry/">&larr; WebSocket BFCache</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v149 · Navigation · BFCache</p>
+    <h1>BFCache State Audit</h1>
+    <p class="lede">Compare which types of state are preserved, lost, or reset when a page enters and exits the back/forward cache. Chrome 149's key change: WebSocket connections, which used to <em>block</em> BFCache, now <em>close gracefully</em> on entry — letting the page cache while requiring a reconnect on restore.</p>
+  </header>
+
+  <div class="audit-grid">
+    <div class="audit-card">
+      <div class="audit-head">
+        WebSocket connection
+        <span class="status-dot dot-unknown" id="dot-ws"></span>
+      </div>
+      <div class="audit-body">
+        <div class="audit-detail">
+          <div class="behaviour-row"><span class="beh-label">Before 149:</span><span class="beh-val bad">Blocks BFCache</span></div>
+          <div class="behaviour-row"><span class="beh-label">Chrome 149+:</span><span class="beh-val good">Closed gracefully, BFCache allowed</span></div>
+          <div class="behaviour-row"><span class="beh-label">On restore:</span><span class="beh-val">Must reconnect in pageshow handler</span></div>
+        </div>
+        <div style="display:flex;gap:0.4rem;margin-top:0.5rem;">
+          <button class="action-btn primary" id="btnConnectWS" onclick="connectWS()">Connect WebSocket</button>
+          <button class="action-btn" id="btnDisconnectWS" onclick="disconnectWS()" disabled>Disconnect</button>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:0.68rem;color:var(--text-muted);margin-top:0.35rem;" id="wsStatus">Not connected</div>
+      </div>
+    </div>
+
+    <div class="audit-card">
+      <div class="audit-head">
+        localStorage / sessionStorage
+        <span class="status-dot dot-ok"></span>
+      </div>
+      <div class="audit-body">
+        <div class="audit-detail">
+          <div class="behaviour-row"><span class="beh-label">BFCache entry:</span><span class="beh-val good">Preserved (snapshotted)</span></div>
+          <div class="behaviour-row"><span class="beh-label">On restore:</span><span class="beh-val good">Available, reads current values</span></div>
+          <div class="behaviour-row"><span class="beh-label">Note:</span><span class="beh-val">Storage events from other tabs fire on restore</span></div>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:0.68rem;color:var(--accent-emerald);margin-top:0.4rem;">✓ No action needed — always preserved</div>
+      </div>
+    </div>
+
+    <div class="audit-card">
+      <div class="audit-head">
+        JavaScript variables / DOM state
+        <span class="status-dot dot-ok"></span>
+      </div>
+      <div class="audit-body">
+        <div class="audit-detail">
+          <div class="behaviour-row"><span class="beh-label">BFCache entry:</span><span class="beh-val good">Frozen in memory (exact snapshot)</span></div>
+          <div class="behaviour-row"><span class="beh-label">On restore:</span><span class="beh-val good">Restored to exact state</span></div>
+          <div class="behaviour-row"><span class="beh-label">DOM:</span><span class="beh-val good">Scroll position, form state, focus all preserved</span></div>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:0.68rem;color:var(--accent-emerald);margin-top:0.4rem;">✓ This is the point of BFCache</div>
+      </div>
+    </div>
+
+    <div class="audit-card">
+      <div class="audit-head">
+        setTimeout / setInterval
+        <span class="status-dot dot-warn"></span>
+      </div>
+      <div class="audit-body">
+        <div class="audit-detail">
+          <div class="behaviour-row"><span class="beh-label">BFCache entry:</span><span class="beh-val bad">Timers frozen (don't fire)</span></div>
+          <div class="behaviour-row"><span class="beh-label">On restore:</span><span class="beh-val">Timers resume — may fire immediately if overdue</span></div>
+          <div class="behaviour-row"><span class="beh-label">Advice:</span><span class="beh-val">Clear intervals in pagehide, restart in pageshow</span></div>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:0.68rem;color:var(--text-muted);margin-top:0.4rem;">⚠ Timers need explicit management</div>
+      </div>
+    </div>
+
+    <div class="audit-card">
+      <div class="audit-head">
+        fetch() / XMLHttpRequest in-flight
+        <span class="status-dot dot-lost"></span>
+      </div>
+      <div class="audit-body">
+        <div class="audit-detail">
+          <div class="behaviour-row"><span class="beh-label">BFCache entry:</span><span class="beh-val bad">In-flight requests aborted</span></div>
+          <div class="behaviour-row"><span class="beh-label">On restore:</span><span class="beh-val">Requests must be re-issued</span></div>
+          <div class="behaviour-row"><span class="beh-label">Note:</span><span class="beh-val">Completed responses are preserved in memory</span></div>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:0.68rem;color:var(--accent-rose);margin-top:0.4rem;">✗ In-flight requests are lost</div>
+      </div>
+    </div>
+
+    <div class="audit-card">
+      <div class="audit-head">
+        IndexedDB transactions
+        <span class="status-dot dot-lost"></span>
+      </div>
+      <div class="audit-body">
+        <div class="audit-detail">
+          <div class="behaviour-row"><span class="beh-label">BFCache entry:</span><span class="beh-val bad">Open transactions block BFCache</span></div>
+          <div class="behaviour-row"><span class="beh-label">Advice:</span><span class="beh-val">Commit or abort transactions on pagehide</span></div>
+          <div class="behaviour-row"><span class="beh-label">On restore:</span><span class="beh-val">Re-open transactions as needed</span></div>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:0.68rem;color:var(--accent-rose);margin-top:0.4rem;">✗ Open transactions block BFCache</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bfcache-state state-live" id="pageStateBox">PAGE STATE: LIVE (active)</div>
+
+  <div class="sim-controls">
+    <button class="action-btn primary" onclick="simFreeze()">Simulate pagehide (BFCache freeze)</button>
+    <button class="action-btn" onclick="simRestore()" id="btnRestore" disabled>Simulate pageshow (BFCache restore)</button>
+    <button class="action-btn" onclick="simReset()">Reset</button>
+  </div>
+
+  <div class="event-log" id="eventLog">
+    <p class="log-info">// Events will appear here as you simulate page lifecycle…</p>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../connection-lifecycle/">Connection Lifecycle Observer</a> — WebSocket events through BFCache</li>
+      <li><a href="../reconnect-on-restore/">Reconnect on Restore</a> — reconnect pattern implementation</li>
+      <li><a href="../navigation-simulator/">Navigation Simulator</a> — step through BFCache navigation</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  let ws = null;
+  let frozen = false;
+  let msgCounter = 0;
+
+  function log(msg, cls) {
+    const box = document.getElementById('eventLog');
+    const p = document.createElement('p');
+    p.className = cls || 'log-info';
+    const ts = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    p.textContent = ts + ' — ' + msg;
+    box.appendChild(p);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function setDot(id, cls) {
+    const dot = document.getElementById('dot-' + id);
+    if (dot) { dot.className = 'status-dot ' + cls; }
+  }
+
+  window.connectWS = function () {
+    if (ws && ws.readyState <= 1) return;
+    try {
+      ws = new WebSocket('wss://echo.websocket.org');
+      document.getElementById('wsStatus').textContent = 'Connecting…';
+      ws.onopen = () => {
+        document.getElementById('wsStatus').textContent = 'Connected (readyState: OPEN)';
+        document.getElementById('btnConnectWS').disabled = true;
+        document.getElementById('btnDisconnectWS').disabled = false;
+        setDot('ws', 'dot-ok');
+        log('WebSocket opened (readyState=OPEN)', 'log-ws');
+        ws.send('Hello from BFCache State Audit demo');
+      };
+      ws.onmessage = (e) => {
+        msgCounter++;
+        log(`WS message #${msgCounter} received: "${e.data.slice(0,50)}"`, 'log-ws');
+      };
+      ws.onclose = (e) => {
+        document.getElementById('wsStatus').textContent = 'Closed (code: ' + e.code + (e.reason ? ', reason: ' + e.reason : '') + ')';
+        document.getElementById('btnConnectWS').disabled = false;
+        document.getElementById('btnDisconnectWS').disabled = true;
+        setDot('ws', 'dot-lost');
+        log('WebSocket closed — code: ' + e.code + (frozen ? ' (closed by BFCache entry)' : ''), 'log-ws');
+      };
+      ws.onerror = () => {
+        document.getElementById('wsStatus').textContent = 'Connection failed (echo server may be unreachable)';
+        log('WebSocket connection error — using simulated events for demo', 'log-warn');
+        setDot('ws', 'dot-warn');
+      };
+    } catch (e) {
+      log('WebSocket creation error: ' + e.message + ' — simulating instead', 'log-warn');
+      document.getElementById('wsStatus').textContent = 'Simulated (no real connection)';
+      setDot('ws', 'dot-warn');
+    }
+  };
+
+  window.disconnectWS = function () {
+    if (ws) { ws.close(); ws = null; }
+  };
+
+  window.simFreeze = function () {
+    frozen = true;
+    document.getElementById('pageStateBox').textContent = 'PAGE STATE: FROZEN (BFCache — pagehide persisted:true)';
+    document.getElementById('pageStateBox').className = 'bfcache-state state-frozen';
+    document.getElementById('btnRestore').disabled = false;
+    log('pagehide event fired (persisted: true) — page entering BFCache', 'log-page');
+    if (ws && ws.readyState <= 1) {
+      log('Chrome 149: WebSocket closed gracefully (allowed BFCache entry)', 'log-ws');
+      ws.close(1001, 'BFCache entry');
+    } else {
+      log('No open WebSocket — BFCache entry proceeds without close', 'log-page');
+    }
+    log('JS heap, DOM, scroll position, form state: all frozen in memory', 'log-page');
+    log('setTimeout/setInterval: timers frozen, will resume on restore', 'log-warn');
+  };
+
+  window.simRestore = function () {
+    frozen = false;
+    document.getElementById('pageStateBox').textContent = 'PAGE STATE: RESTORED (pageshow persisted:true)';
+    document.getElementById('pageStateBox').className = 'bfcache-state state-restored';
+    document.getElementById('btnRestore').disabled = true;
+    log('pageshow event fired (persisted: true) — page restored from BFCache', 'log-page');
+    log('DOM state, scroll position, JS variables: all restored to frozen state', 'log-page');
+    log('Overdue timers may fire immediately', 'log-warn');
+    if (!ws || ws.readyState > 1) {
+      log('WebSocket is closed — reconnect needed (Chrome 149+ pattern):', 'log-page');
+      log('  if (event.persisted) { reconnect(); }', 'log-ws');
+    }
+    setTimeout(() => {
+      document.getElementById('pageStateBox').textContent = 'PAGE STATE: LIVE (active after restore)';
+      document.getElementById('pageStateBox').className = 'bfcache-state state-live';
+    }, 1500);
+  };
+
+  window.simReset = function () {
+    frozen = false;
+    document.getElementById('pageStateBox').textContent = 'PAGE STATE: LIVE (active)';
+    document.getElementById('pageStateBox').className = 'bfcache-state state-live';
+    document.getElementById('eventLog').innerHTML = '<p class="log-info">// Reset. Simulate BFCache lifecycle above…</p>';
+    document.getElementById('btnRestore').disabled = true;
+    if (ws) { ws.close(); ws = null; }
+    document.getElementById('wsStatus').textContent = 'Not connected';
+    setDot('ws', 'dot-unknown');
+    document.getElementById('btnConnectWS').disabled = false;
+    document.getElementById('btnDisconnectWS').disabled = true;
+    msgCounter = 0;
+  };
+
+  // Real page events
+  window.addEventListener('pagehide', (e) => {
+    if (e.persisted) log('[REAL pagehide] persisted=true — entering BFCache', 'log-page');
+  });
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) log('[REAL pageshow] persisted=true — restored from BFCache', 'log-page');
+  });
+
+  log('Demo ready. Connect a WebSocket then simulate freeze/restore.', 'log-info');
+})();
+</script>
+</body>
+</html>
