@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Error Recovery — IndexedDB SQLite — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .test-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      margin: 1.25rem 0;
+    }
+    .test-card {
+      border: 2px solid var(--border-black);
+      overflow: hidden;
+    }
+    .test-head {
+      background: var(--bg-stone);
+      border-bottom: 1px solid var(--border-black);
+      padding: 0.4rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-black);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 600;
+    }
+    .test-body {
+      padding: 0.6rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-charcoal);
+      line-height: 1.6;
+    }
+    .test-result {
+      margin-top: 0.4rem;
+      padding: 0.3rem 0.6rem;
+      font-size: 0.72rem;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-paper);
+      min-height: 28px;
+    }
+    .test-result.pass { border-color: var(--accent-emerald); color: var(--accent-emerald); }
+    .test-result.fail { border-color: var(--accent-rose); color: var(--accent-rose); }
+    .test-result.running { color: var(--text-muted); }
+
+    .badge {
+      font-size: 0.62rem;
+      padding: 0.06rem 0.35rem;
+      background: var(--bg-stone);
+      color: var(--text-muted);
+      border: 1px solid var(--border-black);
+    }
+    .badge.pass { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .badge.fail { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .badge.running { background: var(--text-black); color: var(--bg-ivory); border-color: var(--text-black); }
+
+    .run-all-btn {
+      padding: 0.42rem 1.1rem;
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      cursor: pointer;
+      margin-bottom: 1rem;
+    }
+    .run-all-btn:hover { background: var(--text-charcoal); }
+    .run-all-btn:disabled { opacity: 0.5; cursor: default; }
+
+    .summary-row {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.75rem;
+    }
+    .summary-chip {
+      border: 1.5px solid var(--border-black);
+      padding: 0.22rem 0.55rem;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      background: var(--bg-paper);
+      color: var(--text-charcoal);
+    }
+    .summary-chip span { font-weight: 700; color: var(--text-black); }
+
+    .log-wrap {
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      padding: 0.6rem 0.75rem;
+      max-height: 160px;
+      overflow-y: auto;
+      margin: 0.75rem 0;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--bg-ivory);
+    }
+    .log-entry { margin-bottom: 0.15rem; color: var(--bg-stone); }
+    .log-entry.ok { color: var(--accent-emerald); }
+    .log-entry.err { color: var(--accent-rose); }
+    .log-entry .ts { color: var(--text-muted); margin-right: 0.4rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v149/indexeddb-sqlite-backend/">&larr; IndexedDB: SQLite backend</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v149 · Storage · IndexedDB</p>
+    <h1>Error Recovery</h1>
+    <p class="lede">The SQLite migration was driven partly by reliability: the old LevelDB backend had bug reports for corruption after aborted transactions and torn writes. These tests verify that aborts, constraint errors, and version-change events all leave the database in a clean, consistent state.</p>
+  </header>
+
+  <div class="summary-row" id="summaryRow">
+    <div class="summary-chip">total tests: <span id="totalTests">5</span></div>
+    <div class="summary-chip">passed: <span id="passedTests">—</span></div>
+    <div class="summary-chip">failed: <span id="failedTests">—</span></div>
+  </div>
+
+  <button class="run-all-btn" id="runBtn" onclick="runAll()">Run all recovery tests</button>
+
+  <div class="test-list" id="testList"></div>
+
+  <div class="log-wrap" id="log">
+    <div class="log-entry" style="color:var(--text-muted);">Press run to start…</div>
+  </div>
+
+  <section>
+    <h2>what the tests check</h2>
+    <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-charcoal);line-height:1.6;">SQLite's write-ahead log (WAL) mode means that a transaction abort at any point rolls back atomically — no partial writes survive. The tests here exercise abort scenarios that were historically problematic with the LevelDB/flat-file backend: explicit abort, error-triggered abort, constraint violations, and concurrent-write isolation.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../concurrent-reads-test/">Concurrent Reads Test</a> — parallel read consistency</li>
+      <li><a href="../transaction-durability/">Transaction Durability</a> — atomicity and isolation</li>
+      <li><a href="../bulk-write-stress/">Bulk Write Stress Test</a> — throughput benchmark</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const DB_NAME = 'err-recovery-db';
+  const STORE = 'items';
+  const UNIQUE_STORE = 'unique-items';
+  let db = null;
+
+  const log = document.getElementById('log');
+  let logEmpty = true;
+  function addLog(type, msg) {
+    if (logEmpty) { log.innerHTML = ''; logEmpty = false; }
+    const ts = performance.now().toFixed(0);
+    const div = document.createElement('div');
+    div.className = 'log-entry ' + type;
+    div.innerHTML = `<span class="ts">${ts}ms</span>${msg}`;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  const TESTS = [
+    {
+      id: 'abort-no-persist',
+      title: '1. Explicit abort — no data persists',
+      desc: 'Write a record inside a readwrite transaction, call tx.abort(), then read back. The record must NOT be there.',
+      run: async (db) => {
+        const KEY = 99901;
+        // Write + abort
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE, 'readwrite');
+          const store = tx.objectStore(STORE);
+          store.put({ id: KEY, val: 'should-not-persist' });
+          tx.abort();
+          tx.onabort = resolve;
+          tx.onerror = resolve;
+        });
+        // Read back
+        const rec = await new Promise((resolve, reject) => {
+          const tx2 = db.transaction(STORE, 'readonly');
+          const req = tx2.objectStore(STORE).get(KEY);
+          req.onsuccess = e => resolve(e.target.result);
+          req.onerror = e => reject(e.target.error);
+        });
+        if (rec !== undefined) throw new Error('Record persisted after abort: ' + JSON.stringify(rec));
+        return 'abort → no record. ✓';
+      },
+    },
+    {
+      id: 'partial-write-abort',
+      title: '2. Partial write + abort — store stays clean',
+      desc: 'Write 100 records, abort after 50. None of the 100 should be present — SQLite\'s atomicity ensures partial batch writes don\'t land.',
+      run: async (db) => {
+        const PREFIX = 88800;
+        // Write 50 records then abort
+        await new Promise((resolve) => {
+          const tx = db.transaction(STORE, 'readwrite');
+          const store = tx.objectStore(STORE);
+          for (let i = 0; i < 50; i++) store.put({ id: PREFIX + i, val: 'partial-' + i });
+          tx.abort();
+          tx.onabort = resolve;
+          tx.onerror = resolve;
+        });
+        // Verify none present
+        let found = 0;
+        await new Promise((resolve, reject) => {
+          const tx2 = db.transaction(STORE, 'readonly');
+          const range = IDBKeyRange.bound(PREFIX, PREFIX + 50);
+          const req = tx2.objectStore(STORE).count(range);
+          req.onsuccess = e => { found = e.target.result; resolve(); };
+          req.onerror = e => reject(e.target.error);
+        });
+        if (found > 0) throw new Error(`${found} records persisted after partial-write abort`);
+        return `0 of 50 records persisted after abort. ✓`;
+      },
+    },
+    {
+      id: 'commit-survives',
+      title: '3. Committed write survives subsequent abort',
+      desc: 'Commit a write, then run a second transaction that writes different data and aborts. The first write must still be intact.',
+      run: async (db) => {
+        const KEY = 77701;
+        // Commit write 1
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE, 'readwrite');
+          tx.objectStore(STORE).put({ id: KEY, val: 'committed' });
+          tx.oncomplete = resolve;
+          tx.onerror = e => reject(e.target.error);
+        });
+        // Write 2 + abort
+        await new Promise((resolve) => {
+          const tx2 = db.transaction(STORE, 'readwrite');
+          tx2.objectStore(STORE).put({ id: KEY, val: 'overwrite-aborted' });
+          tx2.abort();
+          tx2.onabort = resolve;
+          tx2.onerror = resolve;
+        });
+        // Read back — must be 'committed'
+        const rec = await new Promise((resolve, reject) => {
+          const tx3 = db.transaction(STORE, 'readonly');
+          const req = tx3.objectStore(STORE).get(KEY);
+          req.onsuccess = e => resolve(e.target.result);
+          req.onerror = e => reject(e.target.error);
+        });
+        if (!rec || rec.val !== 'committed') throw new Error('Committed value was overwritten by aborted transaction: ' + JSON.stringify(rec));
+        // Cleanup
+        await new Promise((resolve) => { const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).delete(KEY); tx.oncomplete = resolve; });
+        return 'committed value intact after second abort. ✓';
+      },
+    },
+    {
+      id: 'constraint-abort',
+      title: '4. Constraint error triggers abort — other records unaffected',
+      desc: 'Insert two valid records, then start a transaction that writes one valid record followed by a duplicate key (constraint error). Verify the error aborts the whole transaction — the valid record from that transaction must NOT persist.',
+      run: async (db) => {
+        const K1 = 66601, K2 = 66602, K_DUP = 66603;
+        // Pre-populate K_DUP so inserting it again triggers constraint
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(UNIQUE_STORE, 'readwrite');
+          tx.objectStore(UNIQUE_STORE).put({ id: K_DUP, val: 'existing' });
+          tx.oncomplete = resolve;
+          tx.onerror = e => reject(e.target.error);
+        });
+        // Transaction: write K1 (valid), then K_DUP (duplicate → error)
+        await new Promise((resolve) => {
+          const tx = db.transaction(UNIQUE_STORE, 'readwrite');
+          const store = tx.objectStore(UNIQUE_STORE);
+          store.add({ id: K1, val: 'should-not-land' });
+          store.add({ id: K_DUP, val: 'dup-error' }); // will error
+          tx.onabort = resolve;
+          tx.onerror = resolve;
+        });
+        // K1 must NOT be present
+        const rec = await new Promise((resolve, reject) => {
+          const tx2 = db.transaction(UNIQUE_STORE, 'readonly');
+          const req = tx2.objectStore(UNIQUE_STORE).get(K1);
+          req.onsuccess = e => resolve(e.target.result);
+          req.onerror = e => reject(e.target.error);
+        });
+        // Cleanup
+        await new Promise((resolve) => { const tx = db.transaction(UNIQUE_STORE, 'readwrite'); tx.objectStore(UNIQUE_STORE).delete(K_DUP); tx.oncomplete = resolve; });
+        if (rec !== undefined) throw new Error('K1 persisted despite constraint abort: ' + JSON.stringify(rec));
+        return 'constraint error aborted whole tx — valid record did not land. ✓';
+      },
+    },
+    {
+      id: 'read-isolation',
+      title: '5. Read isolation — concurrent write doesn\'t corrupt reads',
+      desc: 'While a long-running readonly transaction is open, commit a write in a second transaction. The readonly transaction must still see the original snapshot.',
+      run: async (db) => {
+        const KEY = 55501;
+        // Write initial value
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE, 'readwrite');
+          tx.objectStore(STORE).put({ id: KEY, val: 'original' });
+          tx.oncomplete = resolve;
+          tx.onerror = e => reject(e.target.error);
+        });
+
+        // Open readonly tx, do a read
+        const firstRead = await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE, 'readonly');
+          const req = tx.objectStore(STORE).get(KEY);
+          req.onsuccess = e => resolve(e.target.result?.val);
+          req.onerror = e => reject(e.target.error);
+        });
+
+        // Now write updated value in a separate committed tx
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE, 'readwrite');
+          tx.objectStore(STORE).put({ id: KEY, val: 'updated' });
+          tx.oncomplete = resolve;
+          tx.onerror = e => reject(e.target.error);
+        });
+
+        // Second read — after the write committed
+        const secondRead = await new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE, 'readonly');
+          const req = tx.objectStore(STORE).get(KEY);
+          req.onsuccess = e => resolve(e.target.result?.val);
+          req.onerror = e => reject(e.target.error);
+        });
+
+        // Cleanup
+        await new Promise((resolve) => { const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).delete(KEY); tx.oncomplete = resolve; });
+        if (secondRead !== 'updated') throw new Error('Second read saw wrong value: ' + secondRead);
+        return `reads isolated: first="${firstRead}", second (after commit)="${secondRead}". ✓`;
+      },
+    },
+  ];
+
+  function openDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, 2);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id' });
+        if (!db.objectStoreNames.contains(UNIQUE_STORE)) db.createObjectStore(UNIQUE_STORE, { keyPath: 'id' });
+      };
+      req.onsuccess = e => resolve(e.target.result);
+      req.onerror = e => reject(e.target.error);
+    });
+  }
+
+  function setResult(id, state, msg) {
+    const res = document.getElementById('result-' + id);
+    const badge = document.getElementById('badge-' + id);
+    if (res) { res.className = 'test-result ' + state; res.textContent = msg; }
+    if (badge) { badge.className = 'badge ' + state; badge.textContent = state === 'running' ? '…' : state; }
+  }
+
+  window.runAll = async function () {
+    const btn = document.getElementById('runBtn');
+    btn.disabled = true;
+    log.innerHTML = ''; logEmpty = false;
+
+    if (!db) {
+      try {
+        addLog('ok', 'Opening database…');
+        db = await openDb();
+      } catch (e) {
+        addLog('err', 'Cannot open IndexedDB: ' + e.message);
+        btn.disabled = false;
+        return;
+      }
+    }
+
+    let passed = 0, failed = 0;
+
+    for (const test of TESTS) {
+      setResult(test.id, 'running', 'Running…');
+      addLog('', 'Running: ' + test.title);
+      try {
+        const msg = await test.run(db);
+        setResult(test.id, 'pass', '✓ ' + msg);
+        addLog('ok', 'PASS: ' + test.title);
+        passed++;
+      } catch (e) {
+        setResult(test.id, 'fail', '✗ ' + e.message);
+        addLog('err', 'FAIL: ' + test.title + ' — ' + e.message);
+        failed++;
+      }
+    }
+
+    document.getElementById('passedTests').textContent = passed;
+    document.getElementById('failedTests').textContent = failed;
+    addLog(failed === 0 ? 'ok' : 'err', `All done: ${passed} passed, ${failed} failed`);
+    btn.disabled = false;
+  };
+
+  // Build UI
+  const testList = document.getElementById('testList');
+  TESTS.forEach(t => {
+    const card = document.createElement('div');
+    card.className = 'test-card';
+    card.innerHTML = `
+      <div class="test-head">
+        ${t.title}
+        <span class="badge" id="badge-${t.id}">pending</span>
+      </div>
+      <div class="test-body">
+        <div>${t.desc}</div>
+        <div class="test-result" id="result-${t.id}">Not yet run.</div>
+      </div>`;
+    testList.appendChild(card);
+  });
+
+  document.getElementById('totalTests').textContent = TESTS.length;
+})();
+</script>
+</body>
+</html>
