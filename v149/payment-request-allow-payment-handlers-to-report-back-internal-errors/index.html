@@ -13,15 +13,15 @@
   <header class="lede-block">
     <p class="eyebrow">v149 · Web APIs · Payment Request</p>
     <h1>Allow payment handlers to report back internal errors</h1>
-    <p class="lede">Chrome 149 lets payment handler service workers report specific internal errors back to the merchant page via the Payment Request API. Previously a handler could only succeed or generically abort; now it can surface a structured error message that the merchant can inspect and display.</p>
+    <p class="lede">Chrome 149 lets payment handler service workers distinguish internal payment-app failures from user cancellation. Previously a handler rejection was flattened into a generic abort; now an <code>OperationError</code> rejection from <code>PaymentRequestEvent.respondWith()</code> reaches the merchant as an internal app error, so checkout can retry or fall back instead of treating it as user cancellation.</p>
   </header>
 
   <section>
     <h2>concepts</h2>
     <ol class="demo-list">
       <li class="demo-card">
-        <h3><a href="./error-reporting-demo/">Error Reporting Demo</a></h3>
-        <p>Simulates a payment handler returning various internal errors — card expired, insufficient funds, 3DS challenge failed — and shows how the merchant page receives and displays each error via <code>PaymentResponse</code>.</p>
+        <h3><a href="./error-reporting-demo/">Real Payment Handler Error Probe</a></h3>
+        <p>Installs a same-origin service-worker payment handler, invokes it through <code>PaymentRequest.show()</code>, and compares the real merchant-side errors for success, <code>OperationError</code>, <code>AbortError</code>, and generic handler failure.</p>
       </li>
       <li class="demo-card">
         <h3><a href="./handler-integration/">Handler Integration</a></h3>
@@ -44,7 +44,7 @@
 
   <section>
     <h2>why it shipped</h2>
-    <p>The Payment Request API allows merchant sites to invoke registered payment handlers (browser built-ins, or third-party service worker handlers). When a handler encountered an internal error — a failed 3DS challenge, an expired card, a network timeout with the payment network — the only option was to call <code>PaymentRequestEvent.respondWith(Promise.reject())</code>, which surfaced as a generic <code>AbortError</code> on the merchant side. Chrome 149 adds a mechanism for the handler to include a structured error detail that survives the boundary and reaches the merchant's catch block.</p>
+    <p>The Payment Request API allows merchant sites to invoke registered payment handlers (browser built-ins, or third-party service worker handlers). When a handler encountered an internal error — a failed 3DS challenge, an expired card, a network timeout with the payment network — the merchant previously saw the same generic abort shape used for user cancellation. Chrome 149 preserves the handler's <code>OperationError</code> signal so merchants can tell "the app failed" apart from "the user cancelled".</p>
   </section>
 
   <section>
@@ -58,10 +58,10 @@ self.addEventListener('paymentrequest', event => {
 // Payment handler service worker (Chrome 149+)
 self.addEventListener('paymentrequest', event => {
   event.respondWith(
-    Promise.reject({
-      error: 'card_expired',
-      message: 'Your card expired 2024-01. Update your payment method.'
-    })
+    Promise.reject(new DOMException(
+      'Issuer processor timed out inside the payment app.',
+      'OperationError'
+    ))
   );
 });
 
@@ -70,9 +70,10 @@ try {
   const response = await request.show();
   await response.complete('success');
 } catch (err) {
-  // err.detail is the object the handler rejected with
-  if (err.detail?.error === 'card_expired') {
-    showCardUpdateFlow(err.detail.message);
+  if (err.name === 'OperationError') {
+    showRetryOrFallback();
+  } else if (err.name === 'AbortError') {
+    stopCheckoutBecauseUserCancelled();
   }
 }</code></pre>
   </section>
