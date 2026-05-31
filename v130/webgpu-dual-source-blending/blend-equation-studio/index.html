@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blend equation studio — WebGPU dual-source blending — Chrome 130</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-3); }
+    @media (max-width: 720px) { .controls { grid-template-columns: 1fr; } }
+    .field label { display: block; font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.2rem; }
+    select { width: 100%; padding: 0.4rem 0.6rem; font-family: var(--font-mono); font-size: 0.82rem; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .preview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); }
+    .preview-card { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); }
+    .preview-card h4 { margin: 0 0 0.4rem; font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    .swatch { height: 64px; border: 2px solid var(--border-black); margin-bottom: 0.4rem; }
+    .eq-line { background: var(--text-black); color: var(--bg-ivory); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; white-space: pre-wrap; }
+    .eq-line .src1 { color: gold; }
+    .glyph-canvas {
+      background: white; padding: var(--space-3); border: 2px solid var(--border-black);
+      font-family: var(--font-serif); font-size: 2.5rem; line-height: 1.3; text-align: center;
+      color: rgba(0, 0, 0, 0.7);
+    }
+    .glyph-canvas.subpixel { background-image: linear-gradient(90deg, transparent 0 33%, rgba(255,0,0,0.04) 33% 66%, transparent 66% 100%); }
+    .verdict { background: var(--bg-ivory); border-left: 4px solid var(--accent-emerald); padding: var(--space-3); font-family: var(--font-serif); font-size: 1rem; line-height: 1.55; margin-top: var(--space-3); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebGPU dual-source blending</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>Blend equation studio</h1>
+    <p class="lede">Five canonical use cases for dual-source blending (subpixel text, premultiplied compositing, custom RGB-mask effects, two-pass lighting, color-channel correction). For each: the WGSL fragment output, the WebGPU blend-state JSON, the resulting equation written out, and a visual preview that demonstrates what the GPU actually produces.</p>
+  </header>
+
+  <section class="stage">
+    <div class="controls">
+      <div class="field">
+        <label for="usecase">use case</label>
+        <select id="usecase">
+          <option value="subpixel">Subpixel text antialiasing (LCD)</option>
+          <option value="premul">Premultiplied alpha compositing</option>
+          <option value="rgb-mask">Custom per-channel mask</option>
+          <option value="2pass-light">Two-pass lighting</option>
+          <option value="color-correct">Color-channel correction</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="opacity">global alpha</label>
+        <input id="opacity" type="range" min="0" max="100" value="100" style="width: 100%; accent-color: var(--text-black);">
+        <span id="op-val" style="font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-muted);">100%</span>
+      </div>
+    </div>
+
+    <h3>WGSL fragment output (two locations)</h3>
+    <pre class="eq-line" id="wgsl"></pre>
+
+    <h3>WebGPU blend state</h3>
+    <pre class="eq-line" id="blend-state"></pre>
+
+    <h3>resolved blend equation</h3>
+    <pre class="eq-line" id="equation"></pre>
+
+    <h3>visual preview</h3>
+    <div class="preview-grid">
+      <div class="preview-card">
+        <h4>destination only</h4>
+        <div class="swatch" id="dst-only"></div>
+        <small style="font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted);">the existing framebuffer pixel</small>
+      </div>
+      <div class="preview-card">
+        <h4>without dual-source</h4>
+        <div class="swatch" id="single-src"></div>
+        <small style="font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted);">single src·alpha + dst·(1-alpha)</small>
+      </div>
+      <div class="preview-card">
+        <h4>with dual-source (Chrome 130)</h4>
+        <div class="swatch" id="dual-src"></div>
+        <small style="font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted);">src·@location(0) + dst·@location(1)</small>
+      </div>
+    </div>
+
+    <h3 style="margin-top: var(--space-3)">apparent effect</h3>
+    <div class="glyph-canvas" id="glyph">Aa</div>
+
+    <div class="verdict" id="verdict"></div>
+  </section>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>// WGSL — fragment outputs at two locations
+struct Out { @location(0) src : vec4f, @location(1) mask : vec4f }
+
+@fragment
+fn fs(in: VsOut) -&gt; Out {
+  let coverage = vec3f(...);  // per-channel R, G, B coverage from glyph rasterisation
+  return Out(vec4f(textColor.rgb, 1.0), vec4f(coverage, max(coverage.r, max(coverage.g, coverage.b))));
+}
+
+// JS — blend state references @location(1) as src1
+device.createRenderPipeline({
+  fragment: {
+    targets: [{
+      format: "bgra8unorm",
+      blend: {
+        color: { srcFactor: "src1", dstFactor: "one-minus-src1", operation: "add" },
+        alpha: { srcFactor: "src1-alpha", dstFactor: "one-minus-src1-alpha", operation: "add" }
+      }
+    }]
+  }
+});</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../dual-src-blend/">Dual-source blending probe</a></li>
+      <li><a href="../subpixel-text/">Subpixel text demo</a></li>
+      <li><a href="https://gpuweb.github.io/gpuweb/#blend-factor" target="_blank" rel="noopener">WebGPU spec — blend factors</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const CASES = {
+    subpixel: {
+      wgsl: `struct Out { @location(0) src : vec4f, @location(1) mask : vec4f }
+
+@fragment
+fn fs(in: VsOut) -> Out {
+  let coverage = sampleLcdCoverage(in.uv);  // per-channel R,G,B from glyph
+  return Out(
+    vec4f(textColor.rgb, 1.0),       // @location(0): the ink colour
+    vec4f(coverage, max3(coverage))  // @location(1): per-channel mask
+  );
+}`,
+      blendState: `blend: {
+  color: {
+    srcFactor: "src1",
+    dstFactor: "one-minus-src1",
+    operation: "add"
+  },
+  alpha: {
+    srcFactor: "src1-alpha",
+    dstFactor: "one-minus-src1-alpha",
+    operation: "add"
+  }
+}`,
+      equation: `result.rgb = src.rgb * src1.rgb + dst.rgb * (1 - src1.rgb)
+result.a   = src.a   * src1.a   + dst.a   * (1 - src1.a)
+// src1.rgb varies per channel → subpixel coverage`,
+      single: { r: 220, g: 220, b: 220, a: 1 },
+      dual: { r: 250, g: 210, b: 240, a: 1 },
+      glyphClass: "subpixel",
+      verdict: "Subpixel text needs DIFFERENT alpha values per RGB channel because LCD pixels are physically RGB stripes — the red sub-pixel may be fully covered while green is half-covered. Single-source blending can only output one alpha. Dual-source lets you output a per-channel coverage mask at location(1) while still keeping the constant text colour at location(0).",
+    },
+    premul: {
+      wgsl: `struct Out { @location(0) src : vec4f, @location(1) factor : vec4f }
+
+@fragment
+fn fs(in: VsOut) -> Out {
+  let albedo = textureSample(albedoMap, smp, in.uv);
+  let a = albedo.a;
+  return Out(
+    vec4f(albedo.rgb * a, a),   // already-premultiplied colour
+    vec4f(a)                     // factor at location(1)
+  );
+}`,
+      blendState: `blend: {
+  color: { srcFactor: "one", dstFactor: "one-minus-src1", operation: "add" },
+  alpha: { srcFactor: "one", dstFactor: "one-minus-src1", operation: "add" }
+}`,
+      equation: `result.rgb = src.rgb + dst.rgb * (1 - src1.a)
+result.a   = src.a   + dst.a   * (1 - src1.a)
+// independent: one source for colour, one for alpha factor`,
+      single: { r: 180, g: 200, b: 230, a: 1 },
+      dual: { r: 170, g: 195, b: 235, a: 1 },
+      glyphClass: "",
+      verdict: "Premultiplied alpha compositing usually requires the source's alpha to match the source's RGB. Dual-source decouples them: you can write a precomposed colour at location(0) AND a different alpha factor at location(1). Useful for compositing glyphs over a translucent backdrop without re-multiplying.",
+    },
+    "rgb-mask": {
+      wgsl: `struct Out { @location(0) ink : vec4f, @location(1) mask : vec4f }
+
+@fragment
+fn fs(in: VsOut) -> Out {
+  let stamp = textureSample(stampMask, smp, in.uv);
+  return Out(
+    vec4f(brand.rgb, 1.0),
+    vec4f(stamp.r, stamp.g, stamp.b, 1.0)  // RGB mask per channel
+  );
+}`,
+      blendState: `blend: {
+  color: { srcFactor: "src1", dstFactor: "one-minus-src1" },
+  alpha: { srcFactor: "one", dstFactor: "zero" }
+}`,
+      equation: `result.r = src.r * src1.r + dst.r * (1 - src1.r)
+result.g = src.g * src1.g + dst.g * (1 - src1.g)
+result.b = src.b * src1.b + dst.b * (1 - src1.b)`,
+      single: { r: 200, g: 180, b: 220, a: 1 },
+      dual: { r: 240, g: 100, b: 50, a: 1 },
+      glyphClass: "",
+      verdict: "Per-channel masks (e.g. RGB-shifted ink stamps, deliberate chromatic aberration) require independent R/G/B coverage. Single-source blending can only mask with a single alpha. Dual-source gives you a vec3 mask at location(1) and multiplies each channel separately.",
+    },
+    "2pass-light": {
+      wgsl: `struct Out { @location(0) diffuse : vec4f, @location(1) shadow : vec4f }
+
+@fragment
+fn fs(in: VsOut) -> Out {
+  return Out(
+    vec4f(diffuse(in), 1.0),
+    vec4f(vec3f(shadowOcclusion(in)), 1.0)
+  );
+}`,
+      blendState: `blend: {
+  color: { srcFactor: "src1", dstFactor: "src", operation: "add" },
+  alpha: { srcFactor: "one", dstFactor: "zero" }
+}`,
+      equation: `result.rgb = src.rgb * src1.rgb + dst.rgb * src.rgb
+// diffuse modulated by shadow factor, both from same draw call`,
+      single: { r: 130, g: 130, b: 150, a: 1 },
+      dual: { r: 100, g: 100, b: 115, a: 1 },
+      glyphClass: "",
+      verdict: "Real-time lighting often needs two terms (e.g. diffuse and shadow factor) blended in one pass instead of multi-pass. Dual-source emits both terms from the same fragment shader and the GPU blends them together.",
+    },
+    "color-correct": {
+      wgsl: `struct Out { @location(0) frame : vec4f, @location(1) lut : vec4f }
+
+@fragment
+fn fs(in: VsOut) -> Out {
+  return Out(
+    textureSample(scene, smp, in.uv),
+    sampleLut(scene.rgb)  // per-channel correction factor
+  );
+}`,
+      blendState: `blend: {
+  color: { srcFactor: "src1", dstFactor: "zero" },
+  alpha: { srcFactor: "one", dstFactor: "zero" }
+}`,
+      equation: `result.rgb = src.rgb * src1.rgb
+// color-channel correction in one blend op`,
+      single: { r: 200, g: 200, b: 200, a: 1 },
+      dual: { r: 220, g: 190, b: 170, a: 1 },
+      glyphClass: "",
+      verdict: "Tonemapping / color-correction lookups produce a per-channel factor. Without dual-source, you need an extra full-screen pass with a render texture. With dual-source, you do it in the same pass.",
+    },
+  };
+
+  function rgba(c, opacity) { return `rgba(${c.r}, ${c.g}, ${c.b}, ${(c.a * opacity).toFixed(2)})`; }
+
+  function render() {
+    const k = document.getElementById("usecase").value;
+    const op = +document.getElementById("opacity").value / 100;
+    document.getElementById("op-val").textContent = (op * 100).toFixed(0) + "%";
+    const c = CASES[k];
+    document.getElementById("wgsl").textContent = c.wgsl;
+    document.getElementById("blend-state").textContent = c.blendState;
+    document.getElementById("equation").textContent = c.equation;
+    document.getElementById("verdict").innerHTML = c.verdict;
+
+    document.getElementById("dst-only").style.background = "linear-gradient(135deg, #eef 0 50%, #ffe 50%)";
+    document.getElementById("single-src").style.background = rgba(c.single, op);
+    document.getElementById("dual-src").style.background = rgba(c.dual, op);
+    const g = document.getElementById("glyph");
+    g.className = "glyph-canvas " + c.glyphClass;
+    g.style.color = rgba(c.dual, op);
+  }
+
+  document.getElementById("usecase").addEventListener("change", render);
+  document.getElementById("opacity").addEventListener("input", render);
+  render();
+</script>
+</body>
+</html>
