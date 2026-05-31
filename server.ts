@@ -138,6 +138,25 @@ async function readReleaseAsset(release: string, sub: string): Promise<Response 
   }
 }
 
+function renderReferrerEcho(req: Request): Response {
+  const url = new URL(req.url);
+  const payload = {
+    policy: url.searchParams.get("policy") ?? "default",
+    method: req.method,
+    referer: req.headers.get("referer") ?? "",
+    origin: req.headers.get("origin") ?? "",
+    secFetchSite: req.headers.get("sec-fetch-site") ?? "",
+    note:
+      "This endpoint echoes request metadata so CSS URL request modifier demos can compare per-request referrer behavior.",
+  };
+  return new Response(JSON.stringify(payload, null, 2), {
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 // ----- Page rendering -----
 
 function statusBadgeFor(channels: Channels, milestone: number): string {
@@ -237,11 +256,11 @@ async function renderIndex(channels: Channels): Promise<string> {
     <section class="how">
       <h2>how it works</h2>
       <ol>
-        <li>The routine reads the <a href="https://chromestatus.com/" target="_blank" rel="noopener">chromestatus.com</a> JSON API every day.</li>
-        <li>It opens a GitHub issue for each new feature without a demo, proposing 2-3 demo concepts using the feature's overview, motivation, spec links, and explainers.</li>
-        <li>A human picks a concept (or writes a different one) in the issue.</li>
-        <li>The routine opens a draft PR. A human reviews and merges. Deno Deploy redeploys.</li>
-        <li>The release uber demo follows the same flow, gated behind a "concept locked" comment.</li>
+        <li>The routine reads the <a href="https://chromestatus.com/" target="_blank" rel="noopener">chromestatus.com</a> JSON API for current, upcoming, and backfilled milestones.</li>
+        <li>It builds every missing feature directly from the listing name, feature details, specs, docs, samples, and explainers.</li>
+        <li>Each feature gets a feature index plus every distinct interactive concept the API needs; 2-3 concepts is a floor, not a cap.</li>
+        <li>The routine commits one feature at a time to <code>main</code>. Deno Deploy redeploys from GitHub.</li>
+        <li>Humans review the live output and tighten demos, server routes, and the routine prompt as needed.</li>
       </ol>
       <p class="note">Repo: <a href="https://github.com/PaulKinlan/chrome-platform-showcase" target="_blank" rel="noopener">PaulKinlan/chrome-platform-showcase</a>.</p>
     </section>
@@ -949,7 +968,7 @@ async function renderReleasePage(
 
   <section>
     <h2>uber demo</h2>
-    <p>Concept is locked in a GitHub issue first; humans pick the direction, the routine builds it, the result lives at <code>/${release}/showcase/</code>. Per-feature demos below are built automatically (no human gate) — every concept the routine proposes gets shipped.</p>
+    <p>The release-level experience lives at <code>/${release}/uber-demo/</code> when it has been built. Per-feature demos below are built automatically, one feature per commit, and every distinct use case should become an interactive concept page.</p>
   </section>
 
   <section>
@@ -1479,6 +1498,10 @@ Deno.serve({ port: PORT }, async (req) => {
       } catch (err) {
         return new Response(`Failed to render release: ${err}`, { status: 502 });
       }
+    }
+
+    if (release === "v150" && sub === "/css-url-request-modifiers/referrer-echo") {
+      return renderReferrerEcho(req);
     }
 
     return (await readReleaseAsset(release, sub)) ??

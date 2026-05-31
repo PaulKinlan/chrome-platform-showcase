@@ -6,15 +6,15 @@ combines several APIs into something compelling.
 
 The site is generated and maintained by an automated routine:
 
-1. Each day the routine fetches the [chromestatus.com](https://chromestatus.com/) JSON API for the
-   current and recent Chrome milestones.
-2. For features that don't yet have a demo, it opens a GitHub issue proposing 2-3 concepts (using
-   the chromestatus overview, motivation, spec links, and explainers).
-3. A human picks a concept (or writes a different one) in the issue.
-4. The routine opens a draft PR with a working demo.
-5. The human reviews and merges. The site redeploys to Deno Deploy.
+1. Every run fetches the [chromestatus.com](https://chromestatus.com/) JSON API for the current,
+   upcoming, and backfilled Chrome milestones.
+2. For features that do not yet have a demo, the routine builds the feature page and every distinct
+   interactive concept it can identify from the ChromeStatus entry, specs, docs, and explainers.
+3. The routine commits one feature at a time directly to `main`. Deno Deploy redeploys from GitHub.
+4. Humans review the live output and tighten the routine prompt, demos, or server routes as needed.
 
-Same flow for the per-release uber demo, with the "concept lock" gate before any code lands.
+Per-release uber demos are the exception: those are larger editorial experiences that combine
+several APIs and still get a separate concept pass before implementation.
 
 ## Why
 
@@ -31,19 +31,27 @@ chrome-platform-showcase/
   deno.json              Tasks + fmt config.
   lib/                   Shared streaming helpers and a sibling-file loader.
   public/styles.css      Shared design system: palette, type, surfaces, motion.
-  v148/                  Per-release directory.
+  v<N>/                  Per-release directory.
     index.html           Index page listing every feature demo + the uber showcase.
-    showcase/            The uber demo for Chrome 148.
-    <feature-slug>/      One folder per feature, with handler.ts + index.html + assets.
+    uber-demo/           The larger combined demo for that Chrome release.
+    <feature-slug>/      One folder per feature, with index.html + concept subfolders.
 ```
 
-`v148/` is the starting point. Earlier releases are a backlog the same loop will chew through.
+Chrome milestones from `v130/` onward are backfilled as the same loop works through the ChromeStatus
+archive.
 
 ## Running it
 
 ```
 deno task dev
 # open http://localhost:3000/
+```
+
+Useful checks:
+
+```
+deno task check
+deno task audit
 ```
 
 ## License
