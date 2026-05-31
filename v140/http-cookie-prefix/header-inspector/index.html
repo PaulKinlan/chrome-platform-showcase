@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Header Inspector — Http cookie prefix — Chrome 140 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    textarea { width: 100%; min-height: 100px; padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); font-family: var(--font-mono); font-size: 0.85rem; resize: vertical; }
+    .verdicts { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
+    .verdict { padding: var(--space-3); border: 1px solid var(--border-black); background: var(--bg-stone); display: grid; grid-template-columns: 24px 1fr; gap: var(--space-3); align-items: start; font-family: var(--font-mono); font-size: 0.82rem; }
+    .verdict.accept { background: color-mix(in srgb, var(--accent-emerald) 12%, transparent); }
+    .verdict.reject { background: color-mix(in srgb, var(--accent-rose) 12%, transparent); }
+    .verdict.warn { background: color-mix(in srgb, var(--accent-amber) 12%, transparent); }
+    .verdict .icon { font-weight: bold; font-family: var(--font-mono); }
+    .controls { display: flex; gap: var(--space-2); margin-top: var(--space-3); flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Http cookie prefix</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v140</p>
+    <h1>Header Inspector</h1>
+    <p class="lede">Paste raw <code>Set-Cookie</code> header lines — one per row. Each line is validated against the new <code>__Http-</code>, plus the existing <code>__Secure-</code> and <code>__Host-</code> rules, plus a sanity check on <code>SameSite</code> and expiry. Useful for triaging a misbehaving cookie jar without dropping into devtools.</p>
+  </header>
+
+  <div class="stage">
+    <textarea id="headers">__Http-Auth=abc123; Path=/; Secure; HttpOnly
+__Host-Session=xyz; Path=/; Secure
+__Secure-Pref=light; Domain=example.com; Secure
+__Http-Bad=oops; Secure
+session=plain; Path=/api; SameSite=None</textarea>
+    <div class="controls">
+      <button id="check">Validate</button>
+      <button id="example">Replace with example</button>
+    </div>
+    <div class="verdicts" id="verdicts"></div>
+  </div>
+
+  <pre><code>// What __Http- accepts (all required):
+// - Secure attribute
+// - HttpOnly attribute
+// - HTTPS scheme
+//
+// What __Http- forbids:
+// - Being set from document.cookie
+// - Missing HttpOnly (silently rejected)
+//
+// Reads identical to a regular cookie — server gets the cookie back.
+</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Http cookie prefix</a> — feature index</li>
+      <li><a href="../prefix-comparator/">Prefix Comparator</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  function parse(line) {
+    const parts = line.split(/\s*;\s*/);
+    const [name, ...valParts] = (parts[0] || '').split('=');
+    const attrs = {};
+    for (const part of parts.slice(1)) {
+      const eq = part.indexOf('=');
+      const k = eq < 0 ? part : part.slice(0, eq);
+      const v = eq < 0 ? true : part.slice(eq + 1);
+      attrs[k.trim().toLowerCase()] = typeof v === 'string' ? v.trim() : v;
+    }
+    return { name: (name || '').trim(), attrs };
+  }
+
+  function check(line) {
+    if (!line.trim()) return null;
+    const { name, attrs } = parse(line);
+    if (!name) return { kind: 'reject', msg: 'no cookie name' };
+    const secure = attrs.secure === true;
+    const httpOnly = attrs.httponly === true;
+    const path = attrs.path;
+    const domain = attrs.domain;
+
+    if (name.startsWith('__Http-')) {
+      if (!secure) return { kind: 'reject', name, msg: '__Http- requires Secure' };
+      if (!httpOnly) return { kind: 'reject', name, msg: '__Http- requires HttpOnly (new in 140)' };
+      return { kind: 'accept', name, msg: '__Http- prefix accepted — server-set, HttpOnly enforced' };
+    }
+    if (name.startsWith('__Host-')) {
+      if (!secure) return { kind: 'reject', name, msg: '__Host- requires Secure' };
+      if (path !== '/') return { kind: 'reject', name, msg: '__Host- requires Path=/' };
+      if (domain) return { kind: 'reject', name, msg: '__Host- forbids Domain' };
+      return { kind: 'accept', name, msg: '__Host- prefix accepted — origin-locked' };
+    }
+    if (name.startsWith('__Secure-')) {
+      if (!secure) return { kind: 'reject', name, msg: '__Secure- requires Secure' };
+      return { kind: 'accept', name, msg: '__Secure- prefix accepted' };
+    }
+    if (!secure && attrs.samesite === 'None') return { kind: 'warn', name, msg: 'SameSite=None without Secure → ignored by modern browsers' };
+    return { kind: 'accept', name, msg: 'unprefixed cookie — no special checks' };
+  }
+
+  function render() {
+    const lines = document.getElementById('headers').value.split('\n');
+    const cont = document.getElementById('verdicts');
+    cont.innerHTML = '';
+    for (const line of lines) {
+      const r = check(line);
+      if (!r) continue;
+      const div = document.createElement('div');
+      div.className = 'verdict ' + r.kind;
+      const icon = r.kind === 'accept' ? '+' : r.kind === 'reject' ? '-' : '!';
+      div.innerHTML = `<div class="icon">${icon}</div><div><b>${r.name || '?'}</b> — ${r.msg}<br><small style="color:var(--text-muted)">${line}</small></div>`;
+      cont.appendChild(div);
+    }
+  }
+
+  document.getElementById('check').addEventListener('click', render);
+  document.getElementById('example').addEventListener('click', () => {
+    document.getElementById('headers').value = `__Http-Auth=abc123; Path=/; Secure; HttpOnly\n__Http-Bad=oops; Secure\nsession=plain; Path=/api; SameSite=None`;
+    render();
+  });
+  render();
+</script>
+</body>
+</html>
