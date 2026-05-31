@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Drawing Tool Copy — Deferred Clipboard Data Reads — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 300px;
+      gap: 1.25rem;
+      align-items: start;
+    }
+    @media (max-width: 700px) { .layout { grid-template-columns: 1fr; } }
+
+    .canvas-wrap {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      overflow: hidden;
+    }
+    .canvas-toolbar {
+      display: flex;
+      gap: 0.4rem;
+      padding: 0.5rem 0.6rem;
+      border-bottom: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      cursor: crosshair;
+      background: var(--bg-ivory);
+      touch-action: none;
+    }
+
+    .color-btn {
+      width: 22px; height: 22px;
+      border: 2px solid var(--border-black);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .color-btn.active { outline: 2px solid var(--accent-blue); outline-offset: 1px; }
+
+    .tool-sep { width: 1px; height: 20px; background: var(--border-black); margin: 0 0.2rem; flex-shrink: 0; }
+
+    .tb-btn {
+      padding: 0.28rem 0.65rem;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      cursor: pointer;
+    }
+    .tb-btn:hover { background: var(--bg-paper); }
+    .tb-btn.primary { background: var(--text-black); color: var(--bg-ivory); }
+    .tb-btn.primary:hover { background: var(--text-charcoal); }
+
+    .stroke-sel {
+      padding: 0.22rem 0.4rem;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-black);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      outline: none;
+    }
+
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 0.85rem;
+    }
+
+    .mode-card {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      overflow: hidden;
+    }
+    .mode-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.35rem 0.65rem;
+      background: var(--bg-stone);
+      border-bottom: 1px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-muted);
+    }
+    .mode-body {
+      padding: 0.55rem 0.65rem;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+    }
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-black);
+      padding: 0.2rem 0;
+      color: var(--text-charcoal);
+    }
+    .metric-row:last-child { border-bottom: none; }
+    .mv { color: var(--text-black); font-weight: 600; }
+    .mv.ok { color: var(--accent-emerald); }
+    .mv.bad { color: var(--accent-rose); }
+    .mv.neutral { color: var(--text-charcoal); }
+
+    .copy-btn-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.4rem;
+    }
+    .copy-btn {
+      padding: 0.4rem 0.3rem;
+      border: 2px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      cursor: pointer;
+      text-align: center;
+    }
+    .copy-btn.eager { background: var(--bg-stone); color: var(--text-charcoal); }
+    .copy-btn.eager:hover { background: var(--bg-ivory); }
+    .copy-btn.deferred { background: var(--text-black); color: var(--bg-ivory); }
+    .copy-btn.deferred:hover { background: var(--text-charcoal); }
+    .copy-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .log-panel {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: 0.5rem 0.65rem;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      line-height: 1.65;
+      min-height: 80px;
+      max-height: 130px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column-reverse;
+      border: 2px solid var(--border-black);
+    }
+    .log-panel .ok { color: var(--accent-emerald); }
+    .log-panel .bad { color: var(--accent-rose); }
+    .log-panel .info { color: var(--bg-ivory); opacity: 0.6; }
+
+    .paste-target {
+      border: 2px dashed var(--border-black);
+      padding: 0.75rem;
+      min-height: 80px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-stone);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      cursor: pointer;
+      outline: none;
+    }
+    .paste-target:focus { border-color: var(--accent-blue); }
+    .paste-target img { max-width: 100%; max-height: 100px; }
+
+    pre code {
+      display: block;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.6;
+      overflow-x: auto;
+      border: 2px solid var(--border-black);
+      margin: 1.5rem 0;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v149/deferred-clipboard-data-reads/">&larr; Deferred Clipboard Data Reads</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v149 · clipboard · canvas</p>
+    <h1>Drawing Tool Copy</h1>
+    <p class="lede">A mini canvas drawing tool with two copy buttons: <em>Eager Copy</em> renders the canvas to PNG immediately at copy time; <em>Deferred Copy</em> uses <code>ClipboardItem.delayed()</code> to defer the render until you actually paste. The metrics panel counts renders avoided.</p>
+  </header>
+
+  <div class="layout">
+    <div>
+      <div class="canvas-wrap">
+        <div class="canvas-toolbar">
+          <span style="font-family:var(--font-mono);font-size:0.68rem;color:var(--text-muted);">Color:</span>
+          <button class="color-btn active" style="background:#1a1a1a" data-color="#1a1a1a" onclick="setColor(this)"></button>
+          <button class="color-btn" style="background:#1a6aff" data-color="#1a6aff" onclick="setColor(this)"></button>
+          <button class="color-btn" style="background:#e03030" data-color="#e03030" onclick="setColor(this)"></button>
+          <button class="color-btn" style="background:#1a8a40" data-color="#1a8a40" onclick="setColor(this)"></button>
+          <button class="color-btn" style="background:#c07000" data-color="#c07000" onclick="setColor(this)"></button>
+          <div class="tool-sep"></div>
+          <span style="font-family:var(--font-mono);font-size:0.68rem;color:var(--text-muted);">Width:</span>
+          <select class="stroke-sel" id="strokeSel" onchange="strokeWidth=parseInt(this.value)">
+            <option value="2">2px</option>
+            <option value="4" selected>4px</option>
+            <option value="8">8px</option>
+            <option value="16">16px</option>
+          </select>
+          <div class="tool-sep"></div>
+          <button class="tb-btn" onclick="clearCanvas()">✕ Clear</button>
+          <button class="tb-btn" onclick="drawSample()">Draw sample</button>
+        </div>
+        <canvas id="drawCanvas" height="240"></canvas>
+      </div>
+    </div>
+
+    <div class="sidebar">
+      <div class="mode-card">
+        <div class="mode-head"><span>Copy controls</span></div>
+        <div class="mode-body">
+          <div class="copy-btn-group">
+            <button class="copy-btn eager" onclick="eagerCopy()">📋 Eager Copy</button>
+            <button class="copy-btn deferred" id="deferredBtn" onclick="deferredCopy()">⚡ Deferred Copy</button>
+          </div>
+          <div style="margin-top:0.4rem;font-size:0.68rem;color:var(--text-muted);">
+            Then paste below (Ctrl/Cmd+V):
+          </div>
+          <div class="paste-target" tabindex="0" id="pasteTarget">
+            click here, then paste
+          </div>
+        </div>
+      </div>
+
+      <div class="mode-card">
+        <div class="mode-head"><span>Render metrics</span></div>
+        <div class="mode-body">
+          <div class="metric-row"><span>Copies made</span><span class="mv" id="copiesCount">0</span></div>
+          <div class="metric-row"><span>Eager renders</span><span class="mv bad" id="eagerRenders">0</span></div>
+          <div class="metric-row"><span>Deferred renders</span><span class="mv neutral" id="deferredRenders">0</span></div>
+          <div class="metric-row"><span>Renders avoided</span><span class="mv ok" id="avoided">0</span></div>
+          <div class="metric-row"><span>Deferred supported</span><span class="mv" id="supportedVal">checking…</span></div>
+        </div>
+      </div>
+
+      <div class="log-panel" id="logPanel"><div></div></div>
+    </div>
+  </div>
+
+  <pre><code>// Eager copy: PNG is rendered NOW even if user never pastes
+async function eagerCopy(canvas) {
+  const blob = await canvasToBlob(canvas);  // runs immediately
+  await navigator.clipboard.write([
+    new ClipboardItem({ 'image/png': blob }),
+  ]);
+}
+
+// Deferred copy: PNG rendered ONLY when user pastes
+async function deferredCopy(canvas) {
+  await navigator.clipboard.write([
+    new ClipboardItem({
+      'image/png': ClipboardItem.delayed(async () => {
+        return canvasToBlob(canvas);  // runs on paste, not on copy
+      }),
+    }),
+  ]);
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../deferred-copy-demo/">Deferred Copy Demo</a> — basic callback counter comparison</li>
+      <li><a href="../format-picker/">Format Picker</a> — multiple MIME types with selective callbacks</li>
+      <li><a href="../format-matrix/">Format Matrix</a> — 5-format deferred matrix with consumed/unused tracking</li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const canvas = document.getElementById('drawCanvas');
+  const ctx = canvas.getContext('2d');
+  const logPanel = document.getElementById('logPanel');
+  const pasteTarget = document.getElementById('pasteTarget');
+
+  let drawing = false;
+  let lastX = 0, lastY = 0;
+  let currentColor = '#1a1a1a';
+  let strokeWidth = 4;
+  let copies = 0, eagerR = 0, deferredR = 0;
+
+  // Detect deferred support
+  const supported = typeof ClipboardItem !== 'undefined' && typeof ClipboardItem.delayed === 'function';
+  document.getElementById('supportedVal').textContent = supported ? 'Yes (Chrome 149+)' : 'No — fallback active';
+  document.getElementById('supportedVal').className = 'mv ' + (supported ? 'ok' : 'bad');
+  if (!supported) {
+    document.getElementById('deferredBtn').title = 'ClipboardItem.delayed() not available — will use eager fallback';
+  }
+
+  function scaleX() { return canvas.width / canvas.offsetWidth; }
+  function scaleY() { return canvas.height / canvas.offsetHeight; }
+
+  canvas.addEventListener('pointerdown', e => {
+    drawing = true;
+    [lastX, lastY] = [(e.offsetX || e.clientX - canvas.getBoundingClientRect().left) * scaleX(),
+                     (e.offsetY || e.clientY - canvas.getBoundingClientRect().top) * scaleY()];
+    canvas.setPointerCapture?.(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!drawing) return;
+    const x = (e.offsetX || e.clientX - canvas.getBoundingClientRect().left) * scaleX();
+    const y = (e.offsetY || e.clientY - canvas.getBoundingClientRect().top) * scaleY();
+    ctx.beginPath();
+    ctx.moveTo(lastX, lastY);
+    ctx.lineTo(x, y);
+    ctx.strokeStyle = currentColor;
+    ctx.lineWidth = strokeWidth;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+    [lastX, lastY] = [x, y];
+  });
+  ['pointerup','pointercancel'].forEach(ev => canvas.addEventListener(ev, () => drawing = false));
+
+  window.setColor = function(btn) {
+    document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentColor = btn.dataset.color;
+  };
+  window.clearCanvas = function() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    addLog('Canvas cleared', 'info');
+  };
+  window.drawSample = function() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Draw a simple illustration
+    ctx.fillStyle = '#e8e4d8';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(100, 120, 60, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(200, 60); ctx.lineTo(360, 180); ctx.stroke();
+    ctx.fillStyle = '#1a6aff';
+    ctx.beginPath(); ctx.arc(280, 100, 35, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e03030';
+    ctx.fillRect(160, 140, 80, 60);
+    addLog('Sample drawing added', 'info');
+  };
+
+  function canvasToBlob() {
+    return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+  }
+
+  function addLog(msg, cls='info') {
+    const d = document.createElement('div');
+    d.className = cls;
+    d.textContent = '[' + new Date().toLocaleTimeString('en',{hour12:false}) + '] ' + msg;
+    logPanel.prepend(d);
+  }
+
+  function updateMetrics() {
+    document.getElementById('copiesCount').textContent = copies;
+    document.getElementById('eagerRenders').textContent = eagerR;
+    document.getElementById('deferredRenders').textContent = deferredR;
+    const saved = copies - eagerR - deferredR;
+    document.getElementById('avoided').textContent = Math.max(0, saved) + (saved > 0 ? ' ✓' : '');
+  }
+
+  window.eagerCopy = async function() {
+    if (!navigator.clipboard?.write) { addLog('Clipboard API not available', 'bad'); return; }
+    copies++;
+    const t0 = performance.now();
+    addLog('→ Eager: rendering PNG now…', 'info');
+    const blob = await canvasToBlob();
+    eagerR++;
+    const ms = Math.round(performance.now() - t0);
+    addLog(`✓ Eager: PNG rendered (${ms}ms) — ${(blob.size/1024).toFixed(1)}KB`, 'ok');
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      addLog('Clipboard written (eager)', 'ok');
+    } catch(e) {
+      addLog('Write failed: ' + e.message, 'bad');
+    }
+    updateMetrics();
+  };
+
+  window.deferredCopy = async function() {
+    if (!navigator.clipboard?.write) { addLog('Clipboard API not available', 'bad'); return; }
+    copies++;
+    if (supported) {
+      addLog('→ Deferred: callback registered (no render yet)', 'info');
+      try {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            'image/png': ClipboardItem.delayed(async () => {
+              const t0 = performance.now();
+              addLog('→ Deferred callback fired — rendering PNG…', 'info');
+              const blob = await canvasToBlob();
+              deferredR++;
+              addLog(`✓ Deferred: PNG rendered on paste (${Math.round(performance.now()-t0)}ms)`, 'ok');
+              updateMetrics();
+              return blob;
+            }),
+          }),
+        ]);
+        addLog('Deferred clipboard item registered — paste to trigger render', 'ok');
+      } catch(e) {
+        addLog('Deferred write failed: ' + e.message, 'bad');
+      }
+    } else {
+      addLog('ClipboardItem.delayed() not available — using eager fallback', 'bad');
+      const blob = await canvasToBlob();
+      eagerR++;
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        addLog('Fallback: eager copy used', 'info');
+      } catch(e) { addLog('Failed: ' + e.message, 'bad'); }
+    }
+    updateMetrics();
+  };
+
+  // Paste target
+  pasteTarget.addEventListener('focus', () => pasteTarget.textContent = 'ready — Ctrl/Cmd+V to paste');
+  pasteTarget.addEventListener('blur', () => {
+    if (!pasteTarget.querySelector('img')) pasteTarget.textContent = 'click here, then paste';
+  });
+  pasteTarget.addEventListener('paste', async (e) => {
+    e.preventDefault();
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type === 'image/png') {
+        const blob = item.getAsFile();
+        const url = URL.createObjectURL(blob);
+        const img = document.createElement('img');
+        img.src = url;
+        pasteTarget.innerHTML = '';
+        pasteTarget.appendChild(img);
+        addLog(`Pasted image: ${(blob.size/1024).toFixed(1)}KB`, 'ok');
+        return;
+      }
+    }
+    addLog('No image/png in paste data', 'bad');
+  });
+
+  // Init canvas size
+  canvas.width = canvas.offsetWidth || 600;
+  window.addEventListener('resize', () => {
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    canvas.width = canvas.offsetWidth || 600;
+    ctx.putImageData(imgData, 0, 0);
+  });
+
+  drawSample();
+})();
+</script>
+</body>
+</html>
