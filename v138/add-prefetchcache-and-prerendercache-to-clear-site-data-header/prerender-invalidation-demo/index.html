@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prerender Invalidation Demo — Chrome 138 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .timeline { display: flex; flex-direction: column; gap: var(--space-1); margin-bottom: var(--space-3); }
+    .event-row {
+      display: grid; grid-template-columns: 90px 16px 1fr; gap: var(--space-2); align-items: flex-start;
+      padding: 6px 0; border-bottom: 1px solid var(--border-black);
+    }
+    .event-row:last-child { border-bottom: none; }
+    .event-row .ts { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); }
+    .dot-sm { width: 12px; height: 12px; border-radius: 50%; margin-top: 3px; flex-shrink: 0; }
+    .dot-sm.prefetch   { background: var(--accent-blue); }
+    .dot-sm.prerender  { background: var(--accent-emerald); }
+    .dot-sm.clear      { background: var(--accent-rose); }
+    .dot-sm.hit        { background: #d4a800; }
+    .dot-sm.miss       { background: var(--text-muted); }
+    .event-row .msg { font-size: 0.85rem; color: var(--text-charcoal); }
+
+    .state-panel {
+      display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-3);
+    }
+    @media (max-width: 640px) { .state-panel { grid-template-columns: 1fr; } }
+
+    .cache-box {
+      background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-2);
+    }
+    .cache-box h3 { margin: 0 0 var(--space-2); font-size: 0.85rem; font-family: var(--font-mono); }
+    .cache-entry {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 4px 8px; background: var(--bg-stone); border: 1px solid var(--border-black);
+      margin-bottom: 4px; font-family: var(--font-mono); font-size: 0.78rem;
+    }
+    .cache-entry .url { color: var(--text-charcoal); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .entry-badge {
+      flex-shrink: 0; padding: 1px 6px; font-size: 0.68rem;
+      margin-left: 6px;
+    }
+    .entry-badge.alive   { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .entry-badge.cleared { background: var(--accent-rose); color: var(--bg-ivory); }
+    .entry-badge.empty   { background: var(--bg-stone); border: 1px solid var(--border-black); color: var(--text-muted); }
+
+    .header-builder {
+      background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-3);
+      margin-bottom: var(--space-3);
+    }
+    .header-builder h3 { margin: 0 0 var(--space-2); font-size: 0.85rem; }
+    .cb-row { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center; margin-bottom: var(--space-2); }
+    .cb-row label { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; cursor: pointer; }
+    .header-out {
+      font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-stone);
+      border: 1px solid var(--border-black); padding: 8px 12px; color: var(--text-charcoal);
+      word-break: break-all;
+    }
+
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    button {
+      padding: 8px 16px; border: 1px solid var(--border-black);
+      background: var(--text-black); color: var(--bg-ivory); cursor: pointer; font-size: 0.85rem;
+    }
+    button.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    .info-box {
+      background: var(--bg-paper); border-left: 3px solid var(--accent-blue);
+      padding: var(--space-2) var(--space-3); margin-top: var(--space-3);
+      font-size: 0.85rem; color: var(--text-charcoal);
+    }
+    h3 { margin: var(--space-3) 0 var(--space-2); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v138/add-prefetchcache-and-prerendercache-to-clear-site-data-header/">&larr; prefetchcache and prerendercache in Clear-Site-Data</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v138 · caching · headers</p>
+    <h1>Prerender Invalidation Demo</h1>
+    <p class="lede">Simulate prefetch and prerender caches being populated by navigation hints, then invalidate them selectively using the new <code>Clear-Site-Data: "prefetchcache"</code> and <code>"prerendercache"</code> directives. Build the header, observe what gets cleared, and see which navigation falls back to a network fetch.</p>
+  </header>
+
+  <section>
+    <h2>Build Clear-Site-Data header</h2>
+    <div class="header-builder">
+      <h3>Select directives</h3>
+      <div class="cb-row">
+        <label><input type="checkbox" id="cb-prefetch"> <code>"prefetchcache"</code></label>
+        <label><input type="checkbox" id="cb-prerender" checked> <code>"prerendercache"</code></label>
+        <label><input type="checkbox" id="cb-cache"> <code>"cache"</code></label>
+        <label><input type="checkbox" id="cb-cookies"> <code>"cookies"</code></label>
+      </div>
+      <div class="header-out" id="header-out">Clear-Site-Data: "prerendercache"</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Cache state simulation</h2>
+
+    <div class="controls">
+      <button id="btn-populate">Populate caches (prefetch + prerender 3 URLs)</button>
+      <button class="secondary" id="btn-clear">Send Clear-Site-Data</button>
+      <button class="secondary" id="btn-navigate">Simulate navigation</button>
+      <button class="secondary" id="btn-reset">Reset all</button>
+    </div>
+
+    <div class="state-panel">
+      <div class="cache-box">
+        <h3>Prefetch cache</h3>
+        <div id="prefetch-cache-list">
+          <div class="cache-entry"><span class="url">(empty)</span><span class="entry-badge empty">empty</span></div>
+        </div>
+      </div>
+      <div class="cache-box">
+        <h3>Prerender cache</h3>
+        <div id="prerender-cache-list">
+          <div class="cache-entry"><span class="url">(empty)</span><span class="entry-badge empty">empty</span></div>
+        </div>
+      </div>
+    </div>
+
+    <h3>Event timeline</h3>
+    <div class="timeline" id="timeline">
+      <div class="event-row">
+        <span class="ts">—</span>
+        <span class="dot-sm miss"></span>
+        <span class="msg">Click "Populate caches" to start.</span>
+      </div>
+    </div>
+
+    <div class="info-box">
+      <strong>Chrome 138 adds</strong> <code>"prefetchcache"</code> and <code>"prerendercache"</code>
+      as new directives for the <code>Clear-Site-Data</code> response header. Previously, you could
+      only clear <code>"cache"</code> (HTTP cache) or <code>"cookies"</code>. These new directives
+      let server-side events (e.g. a user logs out, cart changes) selectively invalidate prefetch/prerender
+      speculation without flushing the entire HTTP cache.
+    </div>
+  </section>
+</main>
+
+<script>
+const URLS = [
+  '/page-a', '/product/123', '/checkout'
+];
+
+let prefetchCache = [];
+let prerenderCache = [];
+const t0 = Date.now();
+
+function ts() { return '+' + ((Date.now() - t0) / 1000).toFixed(2) + 's'; }
+
+function addEvent(kind, msg) {
+  const tl = document.getElementById('timeline');
+  if (tl.querySelector('.miss') && tl.children.length === 1) tl.innerHTML = '';
+  const row = document.createElement('div');
+  row.className = 'event-row';
+  row.innerHTML = `<span class="ts">${ts()}</span><span class="dot-sm ${kind}"></span><span class="msg">${msg}</span>`;
+  tl.appendChild(row);
+  tl.scrollTop = tl.scrollHeight;
+}
+
+function renderCacheList(listId, items) {
+  const el = document.getElementById(listId);
+  if (!items.length) {
+    el.innerHTML = '<div class="cache-entry"><span class="url">(empty)</span><span class="entry-badge empty">empty</span></div>';
+    return;
+  }
+  el.innerHTML = items.map(item =>
+    `<div class="cache-entry"><span class="url">${item.url}</span><span class="entry-badge ${item.cleared ? 'cleared' : 'alive'}">${item.cleared ? 'cleared' : 'alive'}</span></div>`
+  ).join('');
+}
+
+function updateHeaderOut() {
+  const parts = [];
+  if (document.getElementById('cb-prefetch').checked) parts.push('"prefetchcache"');
+  if (document.getElementById('cb-prerender').checked) parts.push('"prerendercache"');
+  if (document.getElementById('cb-cache').checked) parts.push('"cache"');
+  if (document.getElementById('cb-cookies').checked) parts.push('"cookies"');
+  document.getElementById('header-out').textContent =
+    parts.length ? 'Clear-Site-Data: ' + parts.join(', ') : '(no directives selected)';
+}
+
+document.querySelectorAll('[id^=cb-]').forEach(cb => cb.addEventListener('change', updateHeaderOut));
+
+document.getElementById('btn-populate').addEventListener('click', () => {
+  prefetchCache = URLS.map(u => ({ url: u, cleared: false }));
+  prerenderCache = URLS.slice(0, 2).map(u => ({ url: u, cleared: false }));
+  renderCacheList('prefetch-cache-list', prefetchCache);
+  renderCacheList('prerender-cache-list', prerenderCache);
+  URLS.forEach(u => addEvent('prefetch', `Prefetched ${u}`));
+  URLS.slice(0,2).forEach(u => addEvent('prerender', `Prerendered ${u}`));
+});
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  const clearPrefetch  = document.getElementById('cb-prefetch').checked;
+  const clearPrerender = document.getElementById('cb-prerender').checked;
+  const clearCache     = document.getElementById('cb-cache').checked;
+
+  if (clearPrefetch) {
+    prefetchCache.forEach(e => e.cleared = true);
+    renderCacheList('prefetch-cache-list', prefetchCache);
+    addEvent('clear', 'Clear-Site-Data: "prefetchcache" — all prefetch entries invalidated');
+  }
+  if (clearPrerender) {
+    prerenderCache.forEach(e => e.cleared = true);
+    renderCacheList('prerender-cache-list', prerenderCache);
+    addEvent('clear', 'Clear-Site-Data: "prerendercache" — all prerender entries invalidated');
+  }
+  if (clearCache) {
+    addEvent('clear', 'Clear-Site-Data: "cache" — HTTP cache cleared (prefetch/prerender unaffected unless also specified)');
+  }
+  if (!clearPrefetch && !clearPrerender && !clearCache) {
+    addEvent('miss', 'No cache directives selected — nothing cleared');
+  }
+});
+
+document.getElementById('btn-navigate').addEventListener('click', () => {
+  const url = URLS[Math.floor(Math.random() * URLS.length)];
+  const prEntry = prerenderCache.find(e => e.url === url && !e.cleared);
+  const pfEntry = prefetchCache.find(e => e.url === url && !e.cleared);
+  if (prEntry) {
+    addEvent('hit', `Navigation to ${url} — prerender cache HIT (instant, no network)`);
+  } else if (pfEntry) {
+    addEvent('hit', `Navigation to ${url} — prefetch cache HIT (subresources pre-fetched)`);
+  } else {
+    addEvent('miss', `Navigation to ${url} — cache MISS (network fetch required)`);
+  }
+});
+
+document.getElementById('btn-reset').addEventListener('click', () => {
+  prefetchCache = []; prerenderCache = [];
+  renderCacheList('prefetch-cache-list', []);
+  renderCacheList('prerender-cache-list', []);
+  document.getElementById('timeline').innerHTML =
+    '<div class="event-row"><span class="ts">—</span><span class="dot-sm miss"></span><span class="msg">Reset.</span></div>';
+});
+
+updateHeaderOut();
+</script>
+</body>
+</html>
