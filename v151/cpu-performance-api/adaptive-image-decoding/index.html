@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Adaptive Image Decoding — CPU Performance API — Chrome 151 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-charcoal);
+      margin: 0 0 var(--space-5);
+    }
+    .warn-block strong { color: var(--accent-rose); }
+    .tier-bar { display: flex; gap: var(--space-2); margin: var(--space-4) 0; flex-wrap: wrap; }
+    .tier-btn {
+      background: var(--bg-paper); color: var(--text-black);
+      border: 2px solid var(--border-black); box-shadow: var(--thin-shadow);
+      padding: 0.45rem 1.1rem; font-family: var(--font-mono); font-size: 0.85rem;
+      cursor: pointer; min-width: 70px;
+    }
+    .tier-btn[aria-pressed=true] {
+      background: var(--accent-blue); color: var(--bg-ivory); border-color: var(--accent-blue);
+    }
+    .pipeline {
+      border: 2px solid var(--border-black); box-shadow: var(--flat-shadow);
+      background: var(--bg-paper); padding: var(--space-4); margin: var(--space-5) 0;
+    }
+    .pipeline-row { display: grid; grid-template-columns: 140px 1fr 90px; gap: var(--space-3); align-items: center; padding: var(--space-2) 0; border-bottom: 1px dashed var(--text-muted); }
+    .pipeline-row:last-child { border-bottom: none; }
+    .pipeline-row .label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); }
+    .pipeline-row .bar { height: 12px; background: var(--bg-stone); border: 1px solid var(--border-black); overflow: hidden; }
+    .pipeline-row .fill { height: 100%; background: var(--accent-blue); transition: width 0.3s; }
+    .pipeline-row .ms { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-black); font-variant-numeric: tabular-nums; text-align: right; }
+    .verdict {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4); margin: var(--space-4) 0;
+      font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-black);
+    }
+    .verdict strong { color: var(--accent-emerald); }
+    .pick { color: var(--accent-blue); font-weight: 700; }
+    .skip { color: var(--accent-rose); }
+    .tier-status { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); margin: 0 0 var(--space-4); }
+    .tier-status code { background: transparent; border: none; padding: 0; color: var(--text-black); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v151/">&larr; Chrome 151</a> / <a href="/v151/cpu-performance-api/">CPU Performance API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v151</p>
+    <h1>Adaptive Image Decoding</h1>
+    <p class="lede">High-quality codecs like AVIF and JPEG-XL deliver smaller files but cost CPU on every decode. On a low-tier device, decoding a feed of 30 AVIFs can blow the main thread frame budget. Pick the right format from the CPU tier — and ship a graceful WebP fallback.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Limited availability.</strong> <code>navigator.cpu.performance()</code> is an Origin Trial in Chrome 151. Use the tier buttons below to simulate any tier; this page will read the real value if available and prefill the matching tier.
+  </div>
+
+  <section>
+    <h2>simulate cpu tier</h2>
+    <p class="tier-status">Read: <code id="real">—</code></p>
+    <div class="tier-bar" role="group" aria-label="CPU tier">
+      <button class="tier-btn" data-tier="0" aria-pressed="false">tier 0</button>
+      <button class="tier-btn" data-tier="1" aria-pressed="false">tier 1</button>
+      <button class="tier-btn" data-tier="2" aria-pressed="true">tier 2</button>
+      <button class="tier-btn" data-tier="3" aria-pressed="false">tier 3</button>
+      <button class="tier-btn" data-tier="4" aria-pressed="false">tier 4</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>decode budget for a 30-image feed</h2>
+    <div class="pipeline" id="pipeline">
+      <div class="pipeline-row"><div class="label">AVIF (best)</div><div class="bar"><div class="fill" data-codec="avif"></div></div><div class="ms" data-ms="avif">—</div></div>
+      <div class="pipeline-row"><div class="label">JPEG-XL</div><div class="bar"><div class="fill" data-codec="jxl"></div></div><div class="ms" data-ms="jxl">—</div></div>
+      <div class="pipeline-row"><div class="label">WebP</div><div class="bar"><div class="fill" data-codec="webp"></div></div><div class="ms" data-ms="webp">—</div></div>
+      <div class="pipeline-row"><div class="label">JPEG (legacy)</div><div class="bar"><div class="fill" data-codec="jpeg"></div></div><div class="ms" data-ms="jpeg">—</div></div>
+    </div>
+    <p class="note">Each codec's per-image cost is multiplied by 30 and compared against the 500&nbsp;ms budget that keeps scrolling smooth.</p>
+  </section>
+
+  <section>
+    <h2>verdict</h2>
+    <div class="verdict" id="verdict"></div>
+  </section>
+
+  <section>
+    <h2>code</h2>
+    <pre><code>// Pick image format from CPU tier.
+const tier = (await navigator.cpu?.performance?.()) ?? 2;
+const pickFormat = (t) =&gt; {
+  if (t &gt;= 3) return ["avif", "jxl", "webp", "jpeg"];   // try richest first
+  if (t === 2) return ["webp", "jpeg"];                  // skip heavy decode
+  return ["jpeg"];                                       // budget device
+};
+
+// Emit a &lt;picture&gt; with only the formats this device can afford.
+function html(src, alt) {
+  const formats = pickFormat(tier);
+  return `&lt;picture&gt;` +
+    formats.slice(0, -1).map(f =&gt;
+      `&lt;source srcset="${src}.${f}" type="image/${f}"&gt;`).join("") +
+    `&lt;img src="${src}.${formats.at(-1)}" alt="${alt}" decoding="async"&gt;` +
+    `&lt;/picture&gt;`;
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">CPU Performance API</a> — feature index</li>
+      <li><a href="../quality-tier-selector/">Quality Tier Selector</a></li>
+      <li><a href="../adaptive-animation/">Adaptive Animation</a></li>
+      <li><a href="https://chromestatus.com/feature/5189864286978048" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  // Per-image decode cost (ms) at each tier × codec.
+  // Indicative figures synthesised from web.dev codec benchmarks.
+  const COST = {
+    0: { avif: 78, jxl: 55, webp: 22, jpeg: 12 },
+    1: { avif: 55, jxl: 38, webp: 16, jpeg: 9 },
+    2: { avif: 30, jxl: 22, webp: 10, jpeg: 6 },
+    3: { avif: 17, jxl: 13, webp: 6,  jpeg: 4 },
+    4: { avif: 9,  jxl: 7,  webp: 4,  jpeg: 3 },
+  };
+  const FEED = 30;
+  const BUDGET = 500;
+
+  function render(tier) {
+    const row = COST[tier];
+    for (const codec of ["avif", "jxl", "webp", "jpeg"]) {
+      const total = row[codec] * FEED;
+      const pct = Math.min(100, total / (BUDGET * 1.5) * 100);
+      const fill = document.querySelector(`.fill[data-codec="${codec}"]`);
+      fill.style.width = pct + "%";
+      fill.style.background = total > BUDGET ? "var(--accent-rose)" : "var(--accent-emerald)";
+      document.querySelector(`[data-ms="${codec}"]`).textContent = total + " ms";
+    }
+    // verdict
+    const ok = Object.entries(row).filter(([c, ms]) => ms * FEED <= BUDGET).map(([c]) => c);
+    const drop = Object.entries(row).filter(([c, ms]) => ms * FEED > BUDGET).map(([c]) => c);
+    const v = document.getElementById("verdict");
+    if (ok.length === 0) {
+      v.innerHTML = `<span class="skip">No codec fits the budget at tier ${tier}.</span> Switch to lower resolution or paginate the feed.`;
+    } else {
+      v.innerHTML = `Ship: <span class="pick">${ok.join(" → ")}</span>` +
+        (drop.length ? `<br>Skip on this tier: <span class="skip">${drop.join(", ")}</span>` : "");
+    }
+  }
+
+  document.querySelectorAll(".tier-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".tier-btn").forEach(b => b.setAttribute("aria-pressed", "false"));
+      btn.setAttribute("aria-pressed", "true");
+      render(parseInt(btn.dataset.tier, 10));
+    });
+  });
+
+  (async () => {
+    const real = document.getElementById("real");
+    if (navigator.cpu?.performance) {
+      try {
+        const t = await navigator.cpu.performance();
+        real.textContent = "tier " + t;
+        document.querySelectorAll(".tier-btn").forEach(b => b.setAttribute("aria-pressed", "false"));
+        const btn = document.querySelector(`.tier-btn[data-tier="${t}"]`);
+        if (btn) { btn.setAttribute("aria-pressed", "true"); render(t); return; }
+      } catch (e) { real.textContent = "error"; }
+    } else {
+      real.textContent = "navigator.cpu.performance() unavailable — using tier 2";
+    }
+    render(2);
+  })();
+</script>
+</body>
+</html>

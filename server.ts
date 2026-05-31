@@ -1168,6 +1168,208 @@ async function renderFeaturesCatalogue(channels: Channels): Promise<string> {
 </html>`;
 }
 
+// ----- /categories (explorer index) and /categories/<slug> -----
+
+interface CategorizedRow {
+  mstone: number;
+  id: number;
+  name: string;
+  summary: string;
+  category: Category;
+  hasDemo: boolean;
+}
+
+async function collectCategorizedRows(channels: Channels): Promise<CategorizedRow[]> {
+  const known = [...await knownReleaseMilestones(channels)].sort((a, b) => b - a);
+  const rows: CategorizedRow[] = [];
+  for (const m of known) {
+    try {
+      const feats = await getMilestoneFeatures(m);
+      for (const g of feats.groups) {
+        for (const f of g.features) {
+          const hasDemo = await featureHasDemo(`v${m}`, f);
+          rows.push({
+            mstone: m,
+            id: f.id,
+            name: f.name,
+            summary: f.summary ?? "",
+            category: categoryForFeature(f.name, g.category),
+            hasDemo,
+          });
+        }
+      }
+    } catch {
+      // skip milestones we can't fetch
+    }
+  }
+  return rows;
+}
+
+async function renderCategoriesIndex(channels: Channels): Promise<string> {
+  const rows = await collectCategorizedRows(channels);
+  const byCategory = new Map<string, CategorizedRow[]>();
+  for (const cat of CATEGORIES) byCategory.set(cat.slug, []);
+  for (const row of rows) {
+    if (!row.hasDemo) continue; // only count built features
+    byCategory.get(row.category.slug)!.push(row);
+  }
+
+  const tiles = CATEGORIES
+    .filter((c) => (byCategory.get(c.slug) ?? []).length > 0)
+    .map((c) => {
+      const count = byCategory.get(c.slug)!.length;
+      return `<li class="category-tile">
+        <a href="/categories/${c.slug}/">
+          <h3>${escapeHTML(c.label)}</h3>
+          <p class="category-blurb">${escapeHTML(c.blurb)}</p>
+          <p class="category-count">${count} ${count === 1 ? "demo" : "demos"}</p>
+        </a>
+      </li>`;
+    }).join("");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>browse by category — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    main { max-width: 1100px; }
+    .category-grid {
+      list-style: none;
+      padding: 0;
+      margin: var(--space-5) 0;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: var(--space-4);
+    }
+    .category-tile {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      transition: transform 80ms ease, box-shadow 80ms ease;
+    }
+    .category-tile:hover { transform: translate(-2px, -2px); box-shadow: var(--flat-shadow-hover); }
+    .category-tile a {
+      display: block;
+      padding: var(--space-4);
+      text-decoration: none;
+      color: var(--text-black);
+    }
+    .category-tile h3 {
+      margin: 0 0 var(--space-2);
+      font-family: var(--font-display);
+      font-size: 1.4rem;
+      letter-spacing: -0.01em;
+    }
+    .category-blurb {
+      margin: 0 0 var(--space-3);
+      font-family: var(--font-serif);
+      color: var(--text-charcoal);
+      line-height: 1.5;
+      font-size: 0.95rem;
+    }
+    .category-count {
+      margin: 0;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/">&larr; home</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">explore</p>
+    <h1>browse by category</h1>
+    <p class="lede">Demos grouped by theme. Identity bundles passkeys + WebAuthn + FedCM + autofill. On-device AI bundles Prompt + Summariser + Translator + speech. Drill into any category to see every demo, grouped by milestone.</p>
+  </header>
+
+  <ol class="category-grid">${tiles}</ol>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>`;
+}
+
+async function renderCategoryPage(slug: string, channels: Channels): Promise<string | null> {
+  const cat = CATEGORIES.find((c) => c.slug === slug);
+  if (!cat) return null;
+  const rows = await collectCategorizedRows(channels);
+  const matching = rows.filter((r) => r.category.slug === slug);
+  if (matching.length === 0) return null;
+
+  // Group by milestone, descending.
+  matching.sort((a, b) => b.mstone - a.mstone || a.name.localeCompare(b.name));
+  const byMstone = new Map<number, CategorizedRow[]>();
+  for (const r of matching) {
+    if (!byMstone.has(r.mstone)) byMstone.set(r.mstone, []);
+    byMstone.get(r.mstone)!.push(r);
+  }
+
+  const milestoneSections = [...byMstone.entries()].map(([m, rs]) => {
+    const cards = rs.map((r) => {
+      const slugged = slugify(r.name);
+      const summary = (r.summary ?? "").slice(0, 220);
+      return `<li class="demo-card">
+        <h3>${
+        r.hasDemo
+          ? `<a href="/v${r.mstone}/${slugged}/">${escapeHTML(r.name)}</a>`
+          : escapeHTML(r.name)
+      }</h3>
+        <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
+        <div class="demo-tags">
+          <a class="tag" href="https://chromestatus.com/feature/${r.id}" target="_blank" rel="noopener">chromestatus</a>
+          ${
+        r.hasDemo
+          ? `<a class="tag tag-live" href="/v${r.mstone}/${slugged}/">demo &rarr;</a>`
+          : `<span class="tag tag-pending">demo pending</span>`
+      }
+        </div>
+      </li>`;
+    }).join("");
+    return `<section>
+      <h3 class="group-title">Chrome ${m} <span class="group-count">(${rs.length})</span></h3>
+      <ol class="demo-list">${cards}</ol>
+    </section>`;
+  }).join("\n");
+
+  const builtCount = matching.filter((r) => r.hasDemo).length;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHTML(cat.label)} — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/categories/">&larr; all categories</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">category</p>
+    <h1>${escapeHTML(cat.label)}</h1>
+    <p class="lede">${escapeHTML(cat.blurb)}</p>
+    <p class="updated-line">${builtCount} of ${matching.length} demos built, across ${byMstone.size} ${
+    byMstone.size === 1 ? "release" : "releases"
+  }.</p>
+  </header>
+
+  ${milestoneSections}
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>`;
+}
+
 async function knownReleaseMilestones(channels: Channels): Promise<Set<number>> {
   // Always accept the three live channels plus the previous stable (since
   // chromestatus's "stable" is the next cut, the previous mstone is what most
@@ -1214,6 +1416,29 @@ Deno.serve({ port: PORT }, async (req) => {
       });
     } catch (err) {
       return new Response(`Failed to render features: ${err}`, { status: 502 });
+    }
+  }
+
+  if (path === "/categories" || path === "/categories/") {
+    try {
+      const channels = await getChannels();
+      return new Response(await renderCategoriesIndex(channels), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    } catch (err) {
+      return new Response(`Failed to render categories: ${err}`, { status: 502 });
+    }
+  }
+
+  const catMatch = path.match(/^\/categories\/([a-z0-9-]+)\/?$/);
+  if (catMatch) {
+    try {
+      const channels = await getChannels();
+      const html = await renderCategoryPage(catMatch[1], channels);
+      if (!html) return new Response("Unknown category", { status: 404 });
+      return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+    } catch (err) {
+      return new Response(`Failed to render category: ${err}`, { status: 502 });
     }
   }
 
