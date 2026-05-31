@@ -23,15 +23,15 @@
       background: var(--bg-paper); border: 1px solid var(--border-black);
       padding: 0.6rem 0.8rem;
     }
-    .fake-embed {
+    .probe-embed {
       background: var(--bg-stone); border: 1px solid var(--border-black);
       padding: var(--space-3); margin-top: var(--space-3); position: relative;
       font-family: var(--font-mono); font-size: 0.85rem;
     }
-    .fake-embed input {
+    .probe-embed iframe {
       width: 100%; box-sizing: border-box; font-family: var(--font-mono); font-size: 0.85rem;
       background: var(--bg-ivory); border: 1px solid var(--border-black);
-      padding: 0.4rem 0.6rem; margin-top: var(--space-2);
+      margin-top: var(--space-2); min-height: 165px;
     }
     .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; }
     .ctl-btn {
@@ -69,11 +69,11 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v151</p>
     <h1>Focus-Steal Attack Replay</h1>
-    <p class="lede">Three classic focus-steal scenarios that the new policy was designed to defeat — a fake login overlay, a polled-poll embed, and an ad iframe yanking focus mid-typing. Replay each, then enable the policy and confirm the attack falls flat.</p>
+    <p class="lede">Three classic focus-steal scenarios that the new policy was designed to defeat — a credential overlay, a polled-poll embed, and an ad iframe yanking focus mid-typing. Replay each, then enable the policy and confirm the attack falls flat.</p>
   </header>
 
   <div class="warn-block">
-    <strong>For research / education.</strong> The page simulates the iframe behavior in-process. In production the policy gates real cross-origin focus calls; here we gate the simulated embeds with a flag so you can observe the difference without setting up nested origins.
+    <strong>For research / education.</strong> Each scenario below uses a real iframe. Toggling the policy reloads those frames with either <code>allow="focus-without-user-activation"</code> or <code>allow="focus-without-user-activation 'none'"</code>, and the frames report actual focus results back to this page.
   </div>
 
   <section>
@@ -90,15 +90,15 @@
   </section>
 
   <section>
-    <h2>scenario 1 — fake login overlay</h2>
+    <h2>scenario 1 — credential overlay</h2>
     <div class="scenario">
       <h3>setup</h3>
       <p>You're typing your bank password. A "promo" embed loads and tries to focus its own password field every 4 seconds, intercepting any keystrokes you'd otherwise direct at the legitimate field.</p>
       <div class="stage">
         <input type="password" placeholder="(your bank password — type something)" data-target="bank">
-        <div class="fake-embed">
+        <div class="probe-embed">
           [embed.example] enter promo code:
-          <input type="password" data-embed="bank" placeholder="(fake password input)">
+          <iframe data-embed="bank" data-label="credential-overlay" title="Credential overlay probe"></iframe>
         </div>
       </div>
     </div>
@@ -111,9 +111,9 @@
       <p>An ad polls every 2.5 seconds and re-focuses its CTA button. While reading your own form, the cursor and ⌘+F search jump there.</p>
       <div class="stage">
         <input type="text" placeholder="(article search — try ⌘+F-style typing here)" data-target="article">
-        <div class="fake-embed">
+        <div class="probe-embed">
           [ads.example] CTA target →
-          <input type="text" data-embed="article" placeholder="(competing focus target)">
+          <iframe data-embed="article" data-label="polled-poll" title="Polled poll probe"></iframe>
         </div>
       </div>
     </div>
@@ -126,13 +126,13 @@
       <p>Two embeds compete for focus every 1.5 seconds. Without the policy, your draft is unwritable. With the policy, the embeds give up and your textarea wins.</p>
       <div class="stage">
         <textarea placeholder="(compose tweet — type freely)" rows="2" data-target="tweet"></textarea>
-        <div class="fake-embed">
+        <div class="probe-embed">
           [embedA] poll target →
-          <input type="text" data-embed="tweet" placeholder="(embed A)">
+          <iframe data-embed="tweet" data-label="sandwich-a" title="Sandwich probe A"></iframe>
         </div>
-        <div class="fake-embed">
+        <div class="probe-embed">
           [embedB] another poll target →
-          <input type="text" data-embed="tweet" placeholder="(embed B)">
+          <iframe data-embed="tweet" data-label="sandwich-b" title="Sandwich probe B"></iframe>
         </div>
       </div>
     </div>
@@ -175,6 +175,7 @@
     policyEnabled = !policyEnabled;
     e.currentTarget.setAttribute("aria-pressed", String(policyEnabled));
     logEvent(`policy ${policyEnabled ? "enabled" : "disabled"}`, "ts");
+    configureFrames();
   });
   document.getElementById("reset").addEventListener("click", () => {
     attempts = stolen = blocked = 0;
@@ -182,29 +183,49 @@
     updateStats();
   });
 
-  // Track real user activation for honest simulation
-  let lastActivation = 0;
-  ["click","keydown","pointerdown"].forEach(t => window.addEventListener(t, () => lastActivation = Date.now()));
+  function configureFrames() {
+    document.querySelectorAll("iframe[data-embed]").forEach((frame, index) => {
+      const label = frame.dataset.label || `probe-${index + 1}`;
+      const channel = `${label}-${policyEnabled ? "deny" : "allow"}`;
+      frame.src = `../probe-frame.html?channel=${encodeURIComponent(channel)}&label=${encodeURIComponent(label)}`;
+      frame.allow = policyEnabled
+        ? "focus-without-user-activation 'none'"
+        : "focus-without-user-activation";
+    });
+  }
 
-  function attempt(label, embedInput) {
+  function attempt(label, frame) {
+    if (!frame?.contentWindow) return;
     attempts++;
-    const hasActivation = (Date.now() - lastActivation) < 5000;
-    if (policyEnabled && !hasActivation) {
-      blocked++;
-      logEvent(`${label} attempted focus() — blocked by policy`, "blocked");
-    } else {
-      embedInput.focus();
+    updateStats();
+    frame.contentWindow.postMessage({
+      type: "focus-now",
+      action: `${label} focus attempt`,
+    }, "*");
+  }
+
+  window.addEventListener("message", event => {
+    const data = event.data || {};
+    if (data.type === "focus-policy-ready" && typeof data.channel === "string") {
+      logEvent(`${data.channel} ready`, "ts");
+      return;
+    }
+    if (data.type !== "focus-policy-result" || typeof data.channel !== "string") return;
+    if (data.focused) {
       stolen++;
-      logEvent(`${label} stole focus`, "stolen");
+      logEvent(`${data.channel} stole focus`, "stolen");
+    } else {
+      blocked++;
+      logEvent(`${data.channel} attempted focus() — blocked by policy`, "blocked");
     }
     updateStats();
-  }
+  });
 
   // Wire up scenarios
   document.querySelectorAll(".scenario").forEach((sc, i) => {
     const embeds = sc.querySelectorAll("[data-embed]");
     const intervals = [4000, 2500, 1500];
-    const labels = ["fake-login", "polled-poll", "sandwich"];
+    const labels = ["credential-overlay", "polled-poll", "sandwich"];
     let toggle = 0;
     setInterval(() => {
       const embed = embeds[toggle % embeds.length];
@@ -212,6 +233,7 @@
       toggle++;
     }, intervals[i] ?? 3000);
   });
+  configureFrames();
 </script>
 </body>
 </html>

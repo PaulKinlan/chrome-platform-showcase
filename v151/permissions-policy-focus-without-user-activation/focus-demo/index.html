@@ -17,19 +17,29 @@
     pre code { font-size: 0.8125rem; line-height: 1.6; }
     code { font-family: monospace; font-size: 0.85em; }
     .action-row { margin-bottom: 1.5rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
-    .focus-target {
-      border: 2px solid var(--border-black);
-      padding: 0.5rem 1rem;
-      background: var(--bg-paper);
-      font-family: monospace;
-      font-size: 0.875rem;
-      color: var(--text-charcoal);
-      cursor: pointer;
+    .probe-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-3);
+      margin-bottom: 1rem;
     }
-    .focus-target:focus {
-      outline: 2px solid var(--accent-blue);
-      outline-offset: 2px;
-      background: var(--bg-stone);
+    @media (max-width: 680px) { .probe-grid { grid-template-columns: 1fr; } }
+    .probe-card {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: var(--space-3);
+    }
+    .probe-card h3 {
+      margin-top: 0;
+      font-family: monospace;
+      font-size: 0.82rem;
+      color: var(--text-charcoal);
+    }
+    .probe-card iframe {
+      width: 100%;
+      min-height: 170px;
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
     }
   </style>
 </head>
@@ -47,7 +57,7 @@
   </header>
 
   <div class="note">
-    The full cross-origin iframe scenario requires two origins and a server that sets the Permissions-Policy header. This page demonstrates the user-activation detection and same-page focus behaviour, which reflects the same mechanism enforced cross-origin.
+    This page uses real iframes with different <code>allow</code> attributes. The parent asks each frame to call <code>focus()</code> without user activation, and the frame reports whether the browser allowed it.
   </div>
 
   <section>
@@ -66,13 +76,20 @@
 
   <section>
     <h2>focus a target element</h2>
-    <p style="font-size:0.875rem;color:var(--text-charcoal);">The box below can be focused programmatically. The first button simulates what an iframe without user activation would do. The second simulates focus inside a click handler (user activation present).</p>
-    <div style="margin-bottom:1rem;">
-      <div class="focus-target" id="focus-target" tabindex="0">Focus target — watch this element</div>
+    <p style="font-size:0.875rem;color:var(--text-charcoal);">The frames below are identical except for their Permissions Policy. Ask each frame to focus its own input from a parent-triggered task and compare the actual browser result.</p>
+    <div class="probe-grid">
+      <div class="probe-card">
+        <h3>allowed iframe</h3>
+        <iframe id="allow-frame" title="Allowed focus probe" src="../probe-frame.html?channel=focus-allow&label=allowed" allow="focus-without-user-activation"></iframe>
+      </div>
+      <div class="probe-card">
+        <h3>denied iframe</h3>
+        <iframe id="deny-frame" title="Denied focus probe" src="../probe-frame.html?channel=focus-deny&label=denied" allow="focus-without-user-activation 'none'"></iframe>
+      </div>
     </div>
     <div class="action-row">
-      <button id="btn-focus-now">Focus without activation (setTimeout 0)</button>
-      <button id="btn-focus-click">Focus inside click handler</button>
+      <button id="btn-focus-allow">Ask allowed iframe to focus</button>
+      <button id="btn-focus-deny">Ask denied iframe to focus</button>
     </div>
     <div class="stat-card">
       <div class="stat-row"><span class="stat-label">Last focus attempt result</span><span class="stat-value" id="focus-result">—</span></div>
@@ -96,13 +113,17 @@ console.log('hasBeenActive:', ua.hasBeenActive); // true after any ever
 
 // When focus-without-user-activation policy denies the iframe:
 // This focus() call at load time is silently ignored:
-window.addEventListener('load', () => {
-  someInput.focus(); // ignored — no user activation yet
-});
+// Parent page:
+iframe.allow = "focus-without-user-activation 'none'";
+iframe.contentWindow.postMessage({ type: 'focus-delayed' }, '*');
 
-// But this works because it runs inside a click handler:
-button.addEventListener('click', () => {
-  someInput.focus(); // allowed — transient user activation is present
+// Inside the iframe:
+window.addEventListener('message', () => {
+  targetInput.focus();
+  parent.postMessage({
+    type: 'focus-policy-result',
+    focused: document.activeElement === targetInput
+  }, '*');
 });
 
 // Feature-detect policy support:
@@ -156,21 +177,36 @@ const allowed = fp ? fp.allowedFeatures().includes('focus-without-user-activatio
       el ? (el.id ? '#' + el.id : el.tagName.toLowerCase()) : 'none';
   }
 
-  document.getElementById('btn-focus-now').addEventListener('click', () => {
-    // Defer to simulate a non-activation context (like iframe load)
-    setTimeout(() => {
-      const target = document.getElementById('focus-target');
-      target.focus();
-      setVal('focus-result', 'focus() called via setTimeout (no transient activation)');
-      updateActiveEl();
-    }, 0);
+  function askFrame(frameId, action) {
+    const frame = document.getElementById(frameId);
+    frame.contentWindow.postMessage({
+      type: 'focus-delayed',
+      delay: 0,
+      action,
+    }, '*');
+    setVal('focus-result', `Requested ${action}; waiting for iframe result...`);
+  }
+
+  document.getElementById('btn-focus-allow').addEventListener('click', () => {
+    askFrame('allow-frame', 'allowed parent-triggered focus');
   });
 
-  document.getElementById('btn-focus-click').addEventListener('click', () => {
-    // Directly in click handler — user activation is present
-    const target = document.getElementById('focus-target');
-    target.focus();
-    setVal('focus-result', 'focus() called directly in click handler (user activation present)', 'ok');
+  document.getElementById('btn-focus-deny').addEventListener('click', () => {
+    askFrame('deny-frame', 'denied parent-triggered focus');
+  });
+
+  window.addEventListener('message', event => {
+    const data = event.data || {};
+    if (data.type === 'focus-policy-ready') {
+      setVal('focus-result', `${data.channel} ready`);
+      return;
+    }
+    if (data.type !== 'focus-policy-result') return;
+    setVal(
+      'focus-result',
+      `${data.channel}: focus() ${data.focused ? 'focused iframe input' : 'was blocked'}`,
+      data.focused ? 'warn' : 'ok',
+    );
     updateActiveEl();
   });
 

@@ -116,18 +116,13 @@
       margin-bottom: 0.6rem;
       line-height: 1.5;
     }
-    .embed-target {
+    .probe-frame {
       width: 100%;
-      padding: 0.4rem 0.65rem;
-      font-size: 0.8rem;
-      font-family: monospace;
       border: 2px solid var(--border-black);
       background: var(--bg-paper);
-      cursor: default;
-      box-sizing: border-box;
-      color: var(--text-charcoal);
+      min-height: 170px;
+      display: block;
     }
-    .embed-target:focus { outline: 3px solid var(--accent-rose); outline-offset: 2px; }
 
     .embed-stats {
       margin-top: 0.6rem;
@@ -217,7 +212,7 @@
   <header class="lede-block">
     <p class="eyebrow">v151 · Web APIs · Permissions Policy</p>
     <h1>Typing Interrupt</h1>
-    <p class="lede">A simulated embedded widget fires <code>element.focus()</code> every few seconds — the classic focus-stealing pattern that disrupts users typing in forms. Toggle <code>focus-without-user-activation</code> to <em>allow</em> or <em>deny</em> and watch whether the widget can steal focus from your typing field.</p>
+    <p class="lede">A real iframe fires <code>element.focus()</code> every few seconds — the classic focus-stealing pattern that disrupts users typing in forms. Toggle <code>focus-without-user-activation</code> to <em>allow</em> or <em>deny</em> and watch whether the iframe can steal focus from your typing field.</p>
   </header>
 
   <div class="note" id="support-note">Checking Permissions Policy support…</div>
@@ -241,11 +236,11 @@
 
     <div class="embed-pane">
       <div class="pane-title">
-        <span>embedded widget (simulated)</span>
+        <span>embedded widget iframe</span>
         <span class="pane-badge" id="embed-badge">focus-without-user-activation: allow</span>
       </div>
-      <div class="embed-desc">This widget calls <code>focus()</code> on its input without user activation every 3 seconds, simulating a focus-stealing ad or tracker.</div>
-      <input class="embed-target" id="embed-target" readonly value="← embed target" tabindex="-1">
+      <div class="embed-desc">This iframe calls <code>focus()</code> on its own input without user activation every 3 seconds, matching the focus-stealing pattern used by disruptive embeds.</div>
+      <div id="probe-slot"></div>
       <div class="embed-stats">
         <div class="embed-stat">
           <span>focus() attempts:</span>
@@ -280,7 +275,7 @@
     <ul>
       <li><strong>allow (default)</strong>: embedded code can call <code>element.focus()</code> at any time — including during the user's keystrokes in an unrelated field</li>
       <li><strong>deny</strong>: <code>focus()</code> calls from the embed are silently ignored unless they occur <em>inside</em> a user-activation handler (click, keypress)</li>
-      <li>The demo simulates the iframe boundary using a <code>setTimeout</code>-driven focus attempt; in a real embed this would be iframe code calling focus on its own elements</li>
+      <li>This page drives a real iframe with the <code>allow</code> attribute changed between <code>focus-without-user-activation</code> and <code>focus-without-user-activation 'none'</code></li>
     </ul>
   </section>
 
@@ -322,7 +317,7 @@ button.addEventListener('click', () => inputEl.focus());</code></pre>
 <script>
   const supportNote = document.getElementById('support-note');
   const userInput = document.getElementById('user-input');
-  const embedTarget = document.getElementById('embed-target');
+  const probeSlot = document.getElementById('probe-slot');
   const attackFill = document.getElementById('attack-fill');
   const statAttempts = document.getElementById('stat-attempts');
   const statStolen = document.getElementById('stat-stolen');
@@ -332,15 +327,14 @@ button.addEventListener('click', () => inputEl.focus());</code></pre>
   const embedBadge = document.getElementById('embed-badge');
   const userBadge = document.getElementById('user-badge');
 
-  // Permissions Policy for focus-without-user-activation can't be checked
-  // via CSS.supports; we simulate its effect based on the toggle.
-  supportNote.innerHTML = '<strong>Simulation mode</strong> — the actual Permissions Policy directive requires server-side headers; this demo simulates the allow/deny behavior client-side so you can see the effect interactively.';
+  supportNote.innerHTML = '<strong>Live iframe probe</strong> — the embedded frame is reloaded with a real <code>allow</code> attribute whenever the policy toggle changes. Focus results are reported from inside the iframe.';
 
   let policyAllows = false; // Start with deny (Chrome 151 recommendation)
   let attempts = 0, stolen = 0, blocked = 0;
   let attackInterval;
   let fillInterval;
   let fillPct = 0;
+  let probeFrame = null;
   const INTERVAL_MS = 3000;
 
   function log(msg, cls) {
@@ -354,28 +348,17 @@ button.addEventListener('click', () => inputEl.focus());</code></pre>
   }
 
   function attemptFocusSteal() {
+    if (!probeFrame?.contentWindow) {
+      log('iframe not ready; focus() attempt skipped', 'blocked');
+      return;
+    }
     attempts++;
     statAttempts.textContent = attempts;
-
-    if (policyAllows) {
-      // Simulate allowed: actually call focus
-      embedTarget.focus();
-      stolen++;
-      statStolen.textContent = stolen;
-      log('focus() called → STOLEN (policy: allow)', 'stolen');
-      // Give user feedback
-      userFocusStatus.textContent = '⚠ focus stolen by embed widget!';
-      userFocusStatus.style.color = 'var(--accent-rose)';
-      setTimeout(() => {
-        userFocusStatus.textContent = '—';
-        userFocusStatus.style.color = '';
-      }, 1000);
-    } else {
-      // Simulate blocked: do NOT call focus
-      blocked++;
-      statBlocked.textContent = blocked;
-      log('focus() called → BLOCKED (policy: deny)', 'blocked');
-    }
+    probeFrame.contentWindow.postMessage({
+      type: 'focus-delayed',
+      delay: 0,
+      action: policyAllows ? 'allowed timer focus' : 'denied timer focus',
+    }, '*');
 
     fillPct = 0;
     attackFill.style.width = '0%';
@@ -401,6 +384,20 @@ button.addEventListener('click', () => inputEl.focus());</code></pre>
     embedBadge.textContent = allow ? 'focus-without-user-activation: allow' : 'focus-without-user-activation: deny';
     embedBadge.className = 'pane-badge ' + (allow ? 'allowed' : 'blocked');
     log(`policy changed to: ${allow ? 'allow' : 'deny'}`, allow ? 'stolen' : 'blocked');
+    buildProbeFrame();
+  }
+
+  function buildProbeFrame() {
+    const channel = policyAllows ? 'typing-allow' : 'typing-deny';
+    const frame = document.createElement('iframe');
+    frame.className = 'probe-frame';
+    frame.title = 'Embedded focus probe';
+    frame.src = `../probe-frame.html?channel=${channel}&label=typing-widget`;
+    frame.allow = policyAllows
+      ? 'focus-without-user-activation'
+      : "focus-without-user-activation 'none'";
+    probeSlot.replaceChildren(frame);
+    probeFrame = frame;
   }
 
   document.querySelectorAll('.policy-btn').forEach(btn => {
@@ -419,11 +416,34 @@ button.addEventListener('click', () => inputEl.focus());</code></pre>
     log('user focused the typing field', 'user');
   });
   userInput.addEventListener('blur', () => {
-    const active = document.activeElement;
     userFocusStatus.textContent = '— typing field lost focus';
     userFocusStatus.style.color = '';
     userBadge.textContent = 'typing here';
     userBadge.className = 'pane-badge';
+  });
+
+  window.addEventListener('message', event => {
+    const data = event.data || {};
+    if (data.type === 'focus-policy-ready' && data.channel?.startsWith('typing-')) {
+      log(`iframe ready (${data.channel})`, 'user');
+      return;
+    }
+    if (data.type !== 'focus-policy-result' || !data.channel?.startsWith('typing-')) return;
+    if (data.focused) {
+      stolen++;
+      statStolen.textContent = stolen;
+      log(`focus() called in iframe → STOLEN (${data.channel})`, 'stolen');
+      userFocusStatus.textContent = 'focus stolen by embedded iframe';
+      userFocusStatus.style.color = 'var(--accent-rose)';
+      setTimeout(() => {
+        userFocusStatus.textContent = '—';
+        userFocusStatus.style.color = '';
+      }, 1000);
+    } else {
+      blocked++;
+      statBlocked.textContent = blocked;
+      log(`focus() called in iframe → BLOCKED (${data.channel})`, 'blocked');
+    }
   });
 
   applyPolicy(false);
