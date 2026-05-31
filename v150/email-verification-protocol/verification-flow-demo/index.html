@@ -210,7 +210,7 @@
     <p>The browser constructs a POST request to <code>/.well-known/email-verification</code> on your origin. The request includes the email address and a browser-generated nonce for replay protection.</p>
     <div class="http-display" id="http-request">—</div>
     <div class="btn-row">
-      <button onclick="simulateResponse()">Simulate server response →</button>
+      <button onclick="requestServerResponse()">Request signed token →</button>
     </div>
   </div>
 
@@ -260,7 +260,7 @@
     <p style="font-size:0.9rem">The nonce prevents replay attacks — each verification request gets a unique, single-use value. The server must reject any nonce it has already seen.</p>
     <div class="btn-row">
       <button onclick="addNonce()">Generate nonce</button>
-      <button onclick="replayNonce()" style="background:var(--bg-ivory);color:var(--text-black)">Simulate replay attack</button>
+      <button onclick="testReplay()" style="background:var(--bg-ivory);color:var(--text-black)">Test replay rejection</button>
     </div>
     <table class="nonce-table">
       <thead><tr><th>Nonce</th><th>Used at</th><th>Status</th></tr></thead>
@@ -298,7 +298,7 @@
     const hasEmailVerification = 'emailVerification' in navigator;
     document.getElementById('support-line').innerHTML = hasEmailVerification
       ? '<span class="status-ok">✓ navigator.emailVerification available (Chrome 150+)</span>'
-      : '<span style="color:var(--text-muted)">⚠ navigator.emailVerification not found — running full simulation</span>';
+      : '<span style="color:var(--text-muted)">navigator.emailVerification not found — using the demo backend to issue and verify signed tokens</span>';
 
     let currentEmail = '';
     let currentNonce = '';
@@ -336,19 +336,30 @@
       goFlowStep(2);
     }
 
-    function buildSimToken(email, nonce) {
-      // Simulated JWT structure (not real crypto)
-      const header   = { alg: 'EdDSA', typ: 'JWT' };
-      const now      = Math.floor(Date.now() / 1000);
-      const payload  = { sub: email, nonce, iss: 'https://yoursite.example', iat: now, exp: now + 600 };
-      const h = btoa(JSON.stringify(header)).replace(/=/g,'');
-      const p = btoa(JSON.stringify(payload)).replace(/=/g,'');
-      const s = btoa('simulatedsignature' + nonce.slice(0,8)).replace(/=/g,'');
-      return { token: `${h}.${p}.${s}`, header, payload };
+    function decodePart(part) {
+      const padded = part.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((part.length + 3) % 4);
+      return JSON.parse(atob(padded));
     }
 
-    function simulateResponse() {
-      const { token, header, payload } = buildSimToken(currentEmail, currentNonce);
+    async function signedToken(email, nonce) {
+      const response = await fetch('../server-validator/api/sample', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          expectedAud: 'https://myapp.example.com',
+          expectedNonce: nonce,
+          email,
+        }),
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const { token } = await response.json();
+      const [h, p] = token.split('.');
+      return { token, header: decodePart(h), payload: decodePart(p) };
+    }
+
+    window.requestServerResponse = async function () {
+      const { token, header, payload } = await signedToken(currentEmail, currentNonce);
       const resp = document.getElementById('http-response');
       resp.innerHTML =
         `HTTP/1.1 <span class="http-header-val">200 OK</span>\n` +
@@ -381,14 +392,14 @@
         </div>
         <div class="token-part">
           <div class="token-segment seg-sig">Signature</div>
-          <div class="token-detail">Ed25519 signature over header + payload. Browser verifies against origin's published public key at <code>/.well-known/email-verification-keys</code>.</div>
+          <div class="token-detail">ES256 signature over header + payload. The demo backend verifies this signature with WebCrypto before accepting the token.</div>
         </div>
       `;
 
       document.getElementById('verified-email').textContent = currentEmail;
       document.getElementById('verification-id').textContent = 'ver_' + generateNonce().slice(0,12);
       goFlowStep(3);
-    }
+    };
 
     function confirmVerification() { goFlowStep(4); }
     function restartFlow()         { goFlowStep(1); }
@@ -399,7 +410,7 @@
       renderNonces();
     }
 
-    function replayNonce() {
+    window.testReplay = function () {
       if (!nonces.length) { addNonce(); return; }
       const fresh = nonces.find(n => !n.usedAt);
       if (fresh) {
@@ -412,7 +423,7 @@
         }, 500);
       }
       renderNonces();
-    }
+    };
 
     function renderNonces() {
       const tbody = document.getElementById('nonce-table-body');

@@ -618,16 +618,17 @@ async function renderEmailVerificationRoute(req: Request, sub: string): Promise<
     const body = await requestJson(req);
     const aud = stringValue(body.expectedAud, "https://myapp.example.com");
     const nonce = stringValue(body.expectedNonce, "nonce-abc123");
+    const email = stringValue(body.email, "alice@example-provider.com");
     const now = Math.floor(Date.now() / 1000);
     const token = await signEvpJwt({
       iss: "https://mail.example-provider.com",
       aud,
       exp: now + 300,
       iat: now - 10,
-      email: "alice@example-provider.com",
+      email,
       email_verified: true,
       nonce,
-      sub: "alice@example-provider.com",
+      sub: email,
     });
     evpUsedNonces.delete(nonce);
     return jsonResponse({ token });

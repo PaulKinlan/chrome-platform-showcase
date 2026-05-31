@@ -190,7 +190,7 @@
   </header>
 
   <div class="warn-block">
-    <strong>Simulated flow.</strong> EVP requires Chrome 150 origin trial + a participating mail provider. This demo simulates every browser UI element and API call so you can understand the flow before the origin trial is available.
+    <strong>Origin trial flow.</strong> EVP requires Chrome 150 origin trial + a participating mail provider. This demo uses the local backend to issue and validate a signed token, while the browser consent UI is represented inline because the origin-trial API may be unavailable.
   </div>
 
   <div class="step-nav">
@@ -358,6 +358,24 @@ await db.createUser({ email, name: payload.sub });</div>
 <script>
 (function () {
   let userEmail = 'alice@gmail.com';
+  let currentNonce = 'nonce-abc123';
+  let currentToken = '';
+
+  function decodePart(part) {
+    const padded = part.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((part.length + 3) % 4);
+    return JSON.parse(atob(padded));
+  }
+
+  async function postJson(path, body) {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  }
 
   window.showStep = function (idx, btn) {
     document.querySelectorAll('.step-tab').forEach(t => t.classList.remove('active'));
@@ -368,20 +386,42 @@ await db.createUser({ email, name: payload.sub });</div>
 
   window.goToStep1 = function () {
     userEmail = document.getElementById('regEmail').value || 'alice@gmail.com';
+    currentNonce = crypto.randomUUID ? crypto.randomUUID() : 'nonce-' + Date.now();
     document.getElementById('promptEmail').textContent = userEmail;
     showStep(1, document.querySelectorAll('.step-tab')[1]);
   };
 
-  window.goToStep2 = function (allowed) {
+  window.goToStep2 = async function (allowed) {
     if (!allowed) {
       alert('User denied — no token issued. The registration page should fall back to standard email OTP.');
       return;
     }
+    const { token } = await postJson('../server-validator/api/sample', {
+      expectedAud: 'https://myapp.example.com',
+      expectedNonce: currentNonce,
+      email: userEmail,
+    });
+    currentToken = token;
+    const [headerPart, payloadPart] = token.split('.');
+    const header = decodePart(headerPart);
+    const payload = decodePart(payloadPart);
+    document.getElementById('tokenBlock').textContent =
+      '// Server-signed token structure (decoded):\n' +
+      JSON.stringify({ header, payload }, null, 2);
     showStep(2, document.querySelectorAll('.step-tab')[2]);
   };
 
-  window.finishFlow = function () {
-    document.getElementById('successEmail').textContent = userEmail;
+  window.finishFlow = async function () {
+    const result = await postJson('../server-validator/api/validate', {
+      token: currentToken,
+      expectedAud: 'https://myapp.example.com',
+      expectedNonce: currentNonce,
+    });
+    if (!result.valid) {
+      alert('Server validation failed. The token was not accepted.');
+      return;
+    }
+    document.getElementById('successEmail').textContent = result.payload.email;
     document.getElementById('successBanner').style.display = '';
   };
 })();
