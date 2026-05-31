@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Compositor Latency Inspector — paintTime/presentationTime — Chrome 145</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    .lane {
+      display: grid;
+      grid-template-columns: 8.5rem 1fr 6rem;
+      gap: 0.5rem;
+      align-items: center;
+      font-family: monospace;
+      font-size: 0.75rem;
+      padding: 0.3rem 0;
+      border-bottom: 1px dashed color-mix(in srgb, var(--border-black) 25%, transparent);
+    }
+    .lane:last-child { border-bottom: none; }
+    .lane .lbl { color: var(--text-muted); }
+    .lane .val { color: var(--text-charcoal); text-align: right; }
+    .bar-track {
+      position: relative;
+      height: 1.1rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      overflow: hidden;
+    }
+    .bar-seg {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      border-right: 1px solid var(--text-black);
+    }
+    .seg-start { background: var(--accent-blue); }
+    .seg-paint { background: var(--accent-emerald); }
+    .seg-pres { background: var(--accent-rose); }
+    .legend {
+      display: flex;
+      gap: 1rem;
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+      margin: 0.5rem 0 1rem;
+    }
+    .legend-sw {
+      display: inline-block;
+      width: 0.85rem;
+      height: 0.85rem;
+      border: 1px solid var(--border-black);
+      margin-right: 0.35rem;
+      vertical-align: middle;
+    }
+    .scenario-row {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+    }
+    .scenario-row button { font-size: 0.75rem; }
+    .delta {
+      display: inline-block;
+      padding: 0.1rem 0.45rem;
+      font-family: monospace;
+      font-size: 0.7rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+    }
+    .delta.warn { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .target {
+      display: inline-block;
+      width: 12rem;
+      height: 9rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      vertical-align: top;
+      margin-right: 1rem;
+      overflow: hidden;
+    }
+    .target.heavy {
+      background: linear-gradient(135deg, var(--accent-blue), var(--accent-emerald));
+      filter: blur(0px);
+    }
+    .target.heavy.blurry { filter: blur(8px); }
+    .target.transform { transform: translateZ(0); }
+    .status {
+      font-size: 0.78rem;
+      color: var(--text-charcoal);
+    }
+    .status.ok { color: var(--accent-emerald); }
+    .status.warn { color: var(--accent-rose); }
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs">
+    <a href="/v145/">&larr; Chrome 145</a> /
+    <a href="/v145/add-presentationtime-painttime-to-performance-entries/">presentationTime / paintTime</a>
+  </p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v145 · Web APIs · Compositor Latency Inspector</p>
+    <h1>Compositor latency inspector</h1>
+    <p class="lede">A timeline visualiser that triggers a real LCP candidate, captures every timing field on the entry, and draws each as a horizontal bar so you can see exactly how long the browser spent in each phase — and where compositor latency lives.</p>
+  </header>
+
+  <section>
+    <h2>scenario</h2>
+    <p class="status" id="probe-status">Press a scenario button to trigger a new LCP candidate and record the timing entry.</p>
+    <div class="scenario-row">
+      <button id="btn-plain">Plain element</button>
+      <button id="btn-heavy">Heavy paint (gradient + blur)</button>
+      <button id="btn-transform">GPU-composited transform</button>
+      <button id="btn-reset">Reset</button>
+    </div>
+    <div>
+      <div class="target" id="t-canvas"></div>
+      <div style="display:inline-block;vertical-align:top;">
+        <p style="font-size:0.85rem;color:var(--text-charcoal);margin:0 0 0.5rem;">
+          The element above gets swapped for a fresh LCP candidate. The browser then reports
+          <code>startTime</code>, <code>renderTime</code>, <code>paintTime</code>, and
+          <code>presentationTime</code> — all in the same entry.
+        </p>
+        <p class="status" id="entry-info">No entry captured yet.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>timeline</h2>
+    <div class="legend">
+      <span><span class="legend-sw" style="background:var(--accent-blue);"></span>start &rarr; renderTime</span>
+      <span><span class="legend-sw" style="background:var(--accent-emerald);"></span>renderTime &rarr; paintTime</span>
+      <span><span class="legend-sw" style="background:var(--accent-rose);"></span>paintTime &rarr; presentationTime</span>
+    </div>
+    <div class="stage" id="lanes">
+      <div class="lane">
+        <span class="lbl">startTime</span>
+        <span></span>
+        <span class="val" id="v-start">—</span>
+      </div>
+      <div class="lane">
+        <span class="lbl">renderTime</span>
+        <span></span>
+        <span class="val" id="v-render">—</span>
+      </div>
+      <div class="lane">
+        <span class="lbl">paintTime</span>
+        <span></span>
+        <span class="val" id="v-paint">—</span>
+      </div>
+      <div class="lane">
+        <span class="lbl">presentationTime</span>
+        <span></span>
+        <span class="val" id="v-pres">—</span>
+      </div>
+      <div class="lane">
+        <span class="lbl">timeline</span>
+        <div class="bar-track" id="bar-track"></div>
+        <span class="val" id="v-total">—</span>
+      </div>
+    </div>
+    <p style="font-size:0.85rem;color:var(--text-charcoal);">
+      <strong>CPU paint window:</strong> <span class="delta" id="d-paint">—</span>
+      <strong style="margin-left:1rem;">Compositor latency:</strong> <span class="delta" id="d-comp">—</span>
+    </p>
+  </section>
+
+  <section>
+    <h2>code</h2>
+    <pre><code>// Each scenario forces a new LCP candidate by swapping a large element.
+// The PerformanceObserver captures the entry — all four time fields populate.
+
+const obs = new PerformanceObserver((list) =&gt; {
+  const entry = list.getEntries().at(-1);
+  if (!entry) return;
+  const cpuPaintWindow = entry.paintTime - entry.renderTime;        // CPU rasterise
+  const compositorLatency = entry.presentationTime - entry.paintTime; // GPU/display
+  render({
+    startTime: entry.startTime,
+    renderTime: entry.renderTime,
+    paintTime: entry.paintTime,
+    presentationTime: entry.presentationTime,
+    cpuPaintWindow,
+    compositorLatency,
+  });
+});
+obs.observe({ type: 'largest-contentful-paint', buffered: true });</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../paint-timing-demo/">Paint Timing Demo</a></li>
+      <li><a href="../timing-comparison/">Timing Comparison</a></li>
+      <li><a href="https://w3c.github.io/largest-contentful-paint/" target="_blank" rel="noopener">LCP spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probeStatus = document.getElementById('probe-status');
+  const entryInfo = document.getElementById('entry-info');
+  const canvas = document.getElementById('t-canvas');
+  const vStart = document.getElementById('v-start');
+  const vRender = document.getElementById('v-render');
+  const vPaint = document.getElementById('v-paint');
+  const vPres = document.getElementById('v-pres');
+  const vTotal = document.getElementById('v-total');
+  const dPaint = document.getElementById('d-paint');
+  const dComp = document.getElementById('d-comp');
+  const barTrack = document.getElementById('bar-track');
+
+  if (typeof PerformanceObserver === 'undefined') {
+    probeStatus.textContent = 'PerformanceObserver is not supported in this browser.';
+    probeStatus.className = 'status warn';
+  } else if (!PerformanceObserver.supportedEntryTypes.includes('largest-contentful-paint')) {
+    probeStatus.textContent = 'largest-contentful-paint entry type is not supported here.';
+    probeStatus.className = 'status warn';
+  } else {
+    probeStatus.textContent = 'LCP observer ready. Pick a scenario to trigger an entry.';
+    probeStatus.className = 'status ok';
+
+    const obs = new PerformanceObserver((list) => {
+      const entries = list.getEntries();
+      const e = entries[entries.length - 1];
+      if (!e) return;
+      renderEntry(e);
+    });
+    try {
+      obs.observe({ type: 'largest-contentful-paint', buffered: true });
+    } catch (err) {
+      probeStatus.textContent = 'Could not observe LCP: ' + err.message;
+      probeStatus.className = 'status warn';
+    }
+  }
+
+  function fmt(n) {
+    return (n === undefined || n === null || Number.isNaN(n)) ? '—' : n.toFixed(2) + ' ms';
+  }
+
+  function renderEntry(e) {
+    const start = e.startTime || 0;
+    const render = e.renderTime || start;
+    const paint = e.paintTime || render;
+    const pres = e.presentationTime || paint;
+    const min = start;
+    const max = Math.max(pres, paint, render, start) || start + 1;
+    const span = (max - min) || 1;
+
+    vStart.textContent = fmt(start);
+    vRender.textContent = fmt(render);
+    vPaint.textContent = fmt(paint);
+    vPres.textContent = fmt(pres);
+    vTotal.textContent = fmt(pres - start);
+
+    const cpuWindow = paint - render;
+    const compLat = pres - paint;
+    dPaint.textContent = fmt(cpuWindow);
+    dComp.textContent = fmt(compLat);
+    dComp.className = compLat > 16 ? 'delta warn' : 'delta';
+    dPaint.className = cpuWindow > 16 ? 'delta warn' : 'delta';
+
+    entryInfo.innerHTML = 'Captured <code>largest-contentful-paint</code> entry. Bar shows each phase relative to <code>startTime</code>.';
+
+    barTrack.innerHTML = '';
+    function seg(from, to, cls) {
+      const left = ((from - min) / span) * 100;
+      const w = ((to - from) / span) * 100;
+      const d = document.createElement('span');
+      d.className = 'bar-seg ' + cls;
+      d.style.left = left + '%';
+      d.style.width = Math.max(w, 0.5) + '%';
+      barTrack.appendChild(d);
+    }
+    seg(start, render, 'seg-start');
+    seg(render, paint, 'seg-paint');
+    seg(paint, pres, 'seg-pres');
+  }
+
+  function swap(cls) {
+    canvas.className = 'target ' + cls;
+    canvas.innerHTML = '<p style="margin:0;padding:0.5rem;color:var(--text-black);font-size:0.85rem;">' +
+      'Scenario: ' + cls + ' — ' + Date.now() + '</p>';
+  }
+
+  document.getElementById('btn-plain').onclick = () => { swap(''); };
+  document.getElementById('btn-heavy').onclick = () => { swap('heavy blurry'); };
+  document.getElementById('btn-transform').onclick = () => { swap('heavy transform'); };
+  document.getElementById('btn-reset').onclick = () => {
+    canvas.className = 'target';
+    canvas.innerHTML = '';
+  };
+</script>
+</body>
+</html>
