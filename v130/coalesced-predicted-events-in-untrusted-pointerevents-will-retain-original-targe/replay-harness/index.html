@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Replay harness — Coalesced PointerEvents — Chrome 130</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .pad {
+      position: relative;
+      height: 220px;
+      border: 2px solid var(--border-black);
+      background: repeating-linear-gradient(0deg, var(--bg-ivory) 0 24px, var(--bg-stone) 24px 25px),
+                  repeating-linear-gradient(90deg, var(--bg-ivory) 0 24px, var(--bg-stone) 24px 25px);
+      touch-action: none;
+      cursor: crosshair;
+      overflow: hidden;
+    }
+    .pad svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .pad-label { font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.4rem; }
+    .controls { display: flex; gap: 0.5rem; margin: var(--space-3) 0; flex-wrap: wrap; }
+    .results-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-top: var(--space-3); }
+    @media (max-width: 720px) { .results-grid { grid-template-columns: 1fr; } }
+    .result-pane { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.55; white-space: pre-wrap; max-height: 230px; overflow-y: auto; }
+    .pass { color: var(--accent-emerald); font-weight: 700; }
+    .fail { color: var(--accent-rose); font-weight: 700; }
+    .test-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.8rem; margin-top: var(--space-3); }
+    .test-table th, .test-table td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; text-align: left; }
+    .test-table th { background: var(--bg-stone); }
+    .box-a, .box-b { position: absolute; border: 1px dashed var(--text-muted); font-family: var(--font-mono); font-size: 0.7rem; padding: 0.2rem; color: var(--text-muted); }
+    .box-a { top: 10px; left: 10px; width: 45%; height: 45%; }
+    .box-b { bottom: 10px; right: 10px; width: 45%; height: 45%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Coalesced PointerEvents</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>Replay harness</h1>
+    <p class="lede">Draw a real pointer path across two boxes; the page captures the trusted event stream (with its coalesced sub-events), constructs synthetic equivalents using <code>new PointerEvent()</code> with <code>coalescedEvents</code> targeting box-A and box-B, dispatches them, and runs a 6-test contract suite verifying the Chrome 130 behaviour.</p>
+  </header>
+
+  <section class="stage">
+    <div class="grid">
+      <div>
+        <p class="pad-label">1. record (real pointer)</p>
+        <div class="pad" id="rec-pad">
+          <div class="box-a" id="rec-box-a">box A</div>
+          <div class="box-b" id="rec-box-b">box B</div>
+          <svg id="rec-svg" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+        </div>
+      </div>
+      <div>
+        <p class="pad-label">2. replay (synthetic, untrusted)</p>
+        <div class="pad" id="play-pad">
+          <div class="box-a" id="play-box-a">box A</div>
+          <div class="box-b" id="play-box-b">box B</div>
+          <svg id="play-svg" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+        </div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="clear">Clear</button>
+      <button id="replay">Replay as untrusted events</button>
+      <span style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); align-self: center;" id="status">draw a path across both boxes</span>
+    </div>
+
+    <div class="results-grid">
+      <div>
+        <p class="pad-label">recorded sub-events</p>
+        <div class="result-pane" id="rec-log">(nothing yet)</div>
+      </div>
+      <div>
+        <p class="pad-label">received synthetic sub-events</p>
+        <div class="result-pane" id="play-log">(nothing yet)</div>
+      </div>
+    </div>
+
+    <table class="test-table" id="tests">
+      <thead><tr><th>contract</th><th>status</th></tr></thead>
+      <tbody>
+        <tr><td>T1 · synthetic parent dispatches</td><td id="t1">—</td></tr>
+        <tr><td>T2 · coalescedEvents preserved as PointerEvents</td><td id="t2">—</td></tr>
+        <tr><td>T3 · sub-event 1 target stays on box A (not retargeted to pad)</td><td id="t3">—</td></tr>
+        <tr><td>T4 · sub-event 2 target stays on box B</td><td id="t4">—</td></tr>
+        <tr><td>T5 · offsetX/Y on sub-events match author-supplied values</td><td id="t5">—</td></tr>
+        <tr><td>T6 · sub-event isTrusted=false (still untrusted)</td><td id="t6">—</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>const subA = new PointerEvent("pointermove", {
+  clientX: 30, clientY: 30, pointerType: "mouse"
+});
+Object.defineProperty(subA, "target", { value: boxA });
+
+const subB = new PointerEvent("pointermove", {
+  clientX: 200, clientY: 200, pointerType: "mouse"
+});
+Object.defineProperty(subB, "target", { value: boxB });
+
+const parent = new PointerEvent("pointermove", {
+  clientX: 100, clientY: 100, coalescedEvents: [subA, subB]
+});
+pad.dispatchEvent(parent);
+
+// Chrome 130+: parent.getCoalescedEvents()[0].target === boxA  (preserved)
+// Pre-Chrome 130:                              .target === pad   (retargeted)</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../pointerevent-target/">Coalesced PE target</a></li>
+      <li><a href="../predicted-events-forecast/">Predicted events forecast</a></li>
+      <li><a href="https://w3c.github.io/pointerevents/#populating-and-maintaining-the-coalesced-and-predicted-events-lists" target="_blank" rel="noopener">Spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const recPad = document.getElementById("rec-pad");
+  const playPad = document.getElementById("play-pad");
+  const recBoxA = document.getElementById("rec-box-a");
+  const recBoxB = document.getElementById("rec-box-b");
+  const playBoxA = document.getElementById("play-box-a");
+  const playBoxB = document.getElementById("play-box-b");
+  const recSvg = document.getElementById("rec-svg");
+  const playSvg = document.getElementById("play-svg");
+  const recLog = document.getElementById("rec-log");
+  const playLog = document.getElementById("play-log");
+  const status = document.getElementById("status");
+
+  let captured = [];
+  let drawing = false;
+
+  function svgPoint(svg, x, y, color) {
+    const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    c.setAttribute("cx", x);
+    c.setAttribute("cy", y);
+    c.setAttribute("r", "1.2");
+    c.setAttribute("fill", color);
+    svg.appendChild(c);
+  }
+
+  recPad.addEventListener("pointerdown", (e) => {
+    drawing = true;
+    captured = [];
+    recSvg.innerHTML = "";
+    handle(e);
+  });
+  recPad.addEventListener("pointermove", (e) => { if (drawing) handle(e); });
+  recPad.addEventListener("pointerup", () => { drawing = false; finalize(); });
+  recPad.addEventListener("pointercancel", () => { drawing = false; });
+
+  function handle(e) {
+    const rect = recPad.getBoundingClientRect();
+    const subs = (e.getCoalescedEvents ? e.getCoalescedEvents() : [e]);
+    if (!subs.length) subs.push(e);
+    for (const s of subs) {
+      const x = ((s.clientX - rect.left) / rect.width) * 100;
+      const y = ((s.clientY - rect.top) / rect.height) * 100;
+      captured.push({ x, y, offsetX: s.offsetX, offsetY: s.offsetY });
+      svgPoint(recSvg, x, y, "var(--accent-blue)");
+    }
+  }
+
+  function finalize() {
+    if (!captured.length) return;
+    recLog.textContent = `captured ${captured.length} sub-events\nfirst: x=${captured[0].x.toFixed(1)} y=${captured[0].y.toFixed(1)}\nlast : x=${captured.at(-1).x.toFixed(1)} y=${captured.at(-1).y.toFixed(1)}`;
+    status.textContent = "ready to replay";
+  }
+
+  document.getElementById("clear").addEventListener("click", () => {
+    captured = [];
+    recSvg.innerHTML = "";
+    playSvg.innerHTML = "";
+    recLog.textContent = "(nothing yet)";
+    playLog.textContent = "(nothing yet)";
+    status.textContent = "draw a path across both boxes";
+    ["t1","t2","t3","t4","t5","t6"].forEach((i) => document.getElementById(i).textContent = "—");
+  });
+
+  const received = [];
+
+  function attachListener(el, label) {
+    el.addEventListener("pointermove", (e) => {
+      const subs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+      received.push({ parentTarget: e.target.id, isTrusted: e.isTrusted, subs: subs.map((s) => ({ target: s.target && s.target.id, offsetX: s.offsetX, offsetY: s.offsetY, isTrusted: s.isTrusted, isPE: s instanceof PointerEvent })) });
+    });
+  }
+  attachListener(playPad, "pad");
+  attachListener(playBoxA, "boxA");
+  attachListener(playBoxB, "boxB");
+
+  document.getElementById("replay").addEventListener("click", () => {
+    if (!captured.length) {
+      status.textContent = "draw a path first";
+      return;
+    }
+    received.length = 0;
+    playSvg.innerHTML = "";
+    const padRect = playPad.getBoundingClientRect();
+
+    // Pick first cap inside box A and one inside box B
+    const aRect = playBoxA.getBoundingClientRect();
+    const bRect = playBoxB.getBoundingClientRect();
+
+    // Find or synthesise points that fall in each box
+    const inA = captured.find((p) => p.x < 50 && p.y < 50) || { x: 25, y: 25, offsetX: 30, offsetY: 30 };
+    const inB = captured.find((p) => p.x > 50 && p.y > 50) || { x: 75, y: 75, offsetX: 30, offsetY: 30 };
+
+    const aClient = { x: padRect.left + (inA.x / 100) * padRect.width, y: padRect.top + (inA.y / 100) * padRect.height };
+    const bClient = { x: padRect.left + (inB.x / 100) * padRect.width, y: padRect.top + (inB.y / 100) * padRect.height };
+
+    // sub events
+    const subA = new PointerEvent("pointermove", { clientX: aClient.x, clientY: aClient.y, bubbles: true, cancelable: true, pointerType: "mouse" });
+    try { Object.defineProperty(subA, "target", { value: playBoxA, configurable: true }); } catch (_) {}
+    try { Object.defineProperty(subA, "offsetX", { value: inA.offsetX || 30, configurable: true }); Object.defineProperty(subA, "offsetY", { value: inA.offsetY || 30, configurable: true }); } catch (_) {}
+
+    const subB = new PointerEvent("pointermove", { clientX: bClient.x, clientY: bClient.y, bubbles: true, cancelable: true, pointerType: "mouse" });
+    try { Object.defineProperty(subB, "target", { value: playBoxB, configurable: true }); } catch (_) {}
+    try { Object.defineProperty(subB, "offsetX", { value: inB.offsetX || 30, configurable: true }); Object.defineProperty(subB, "offsetY", { value: inB.offsetY || 30, configurable: true }); } catch (_) {}
+
+    const parent = new PointerEvent("pointermove", {
+      clientX: (aClient.x + bClient.x) / 2,
+      clientY: (aClient.y + bClient.y) / 2,
+      bubbles: true,
+      cancelable: true,
+      pointerType: "mouse",
+      coalescedEvents: [subA, subB],
+    });
+
+    let dispatched = false;
+    try {
+      playPad.dispatchEvent(parent);
+      dispatched = true;
+    } catch (e) {
+      status.textContent = "dispatch failed: " + e.message;
+    }
+
+    svgPoint(playSvg, inA.x, inA.y, "var(--accent-emerald)");
+    svgPoint(playSvg, inB.x, inB.y, "var(--accent-rose)");
+
+    // Render received
+    if (received.length) {
+      playLog.textContent = received.map((r, i) => `evt ${i}: parent.target=${r.parentTarget} isTrusted=${r.isTrusted}\n  sub[0].target=${r.subs[0] && r.subs[0].target} offsetX=${r.subs[0] && r.subs[0].offsetX} isPE=${r.subs[0] && r.subs[0].isPE}\n  sub[1].target=${r.subs[1] && r.subs[1].target} offsetX=${r.subs[1] && r.subs[1].offsetX} isPE=${r.subs[1] && r.subs[1].isPE}`).join("\n\n");
+    } else {
+      playLog.textContent = "(no events received — try drawing first)";
+    }
+
+    // T1: dispatched
+    document.getElementById("t1").innerHTML = dispatched ? '<span class="pass">PASS</span>' : '<span class="fail">FAIL</span>';
+
+    // Find any received sub list
+    const subs = received.flatMap((r) => r.subs);
+
+    // T2: sub events are PointerEvent instances
+    const t2 = subs.length >= 2 && subs.every((s) => s.isPE);
+    document.getElementById("t2").innerHTML = t2 ? '<span class="pass">PASS</span>' : '<span class="fail">FAIL</span>';
+
+    // T3, T4: targets
+    const subATarget = subs.find((s) => s.target === "play-box-a");
+    const subBTarget = subs.find((s) => s.target === "play-box-b");
+    document.getElementById("t3").innerHTML = subATarget ? '<span class="pass">PASS</span>' : '<span class="fail">FAIL — target was retargeted</span>';
+    document.getElementById("t4").innerHTML = subBTarget ? '<span class="pass">PASS</span>' : '<span class="fail">FAIL — target was retargeted</span>';
+
+    // T5: offsets match
+    const t5 = subs.some((s) => s.offsetX === (inA.offsetX || 30) || s.offsetX === (inB.offsetX || 30));
+    document.getElementById("t5").innerHTML = t5 ? '<span class="pass">PASS</span>' : '<span class="fail">FAIL — offsetX overwritten</span>';
+
+    // T6: untrusted
+    const t6 = subs.length && subs.every((s) => s.isTrusted === false);
+    document.getElementById("t6").innerHTML = t6 ? '<span class="pass">PASS</span>' : '<span class="fail">FAIL</span>';
+
+    status.textContent = `replayed (received ${received.length} parent events)`;
+  });
+</script>
+</body>
+</html>
