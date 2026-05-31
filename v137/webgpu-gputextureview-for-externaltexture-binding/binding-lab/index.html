@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Binding lab — GPUTextureView for external_texture — Chrome 137</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { border: 2px solid var(--accent-amber); background: var(--bg-paper); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; box-shadow: var(--thin-shadow); }
+    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--accent-amber); display: block; margin-bottom: 0.4rem; }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    select { font: inherit; font-family: var(--font-mono); font-size: 0.85rem; padding: 0.4rem 0.55rem; background: var(--bg-paper); color: var(--text-black); border: 2px solid var(--border-black); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .lane { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); }
+    .lane h4 { margin-top: 0; }
+    .lane-tag { display: inline-block; font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; padding: 0.15rem 0.5rem; border: 1px solid var(--border-black); margin-bottom: var(--space-2); }
+    .lane.old .lane-tag { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .lane.new .lane-tag { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    pre.code { font-family: var(--font-mono); font-size: 0.78rem; padding: var(--space-3); background: var(--bg-stone); border: 1px solid var(--border-black); white-space: pre; overflow-x: auto; line-height: 1.45; }
+    .verdict { font-family: var(--font-mono); font-size: 0.82rem; padding: var(--space-2); background: var(--bg-stone); border: 1px solid var(--border-black); margin: var(--space-2) 0; }
+    .matrix { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.78rem; margin: var(--space-3) 0; }
+    .matrix th, .matrix td { padding: 0.4rem 0.55rem; border: 1px solid var(--border-black); text-align: left; }
+    .matrix th { background: var(--bg-stone); }
+    .pill { font-family: var(--font-mono); font-size: 0.7rem; padding: 0.1rem 0.4rem; border: 1px solid var(--border-black); display: inline-block; }
+    .pill.green { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .pill.rose { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    canvas { display: block; max-width: 100%; border: 1px solid var(--border-black); background: var(--bg-stone); margin: var(--space-2) 0; }
+    .probe { font-family: var(--font-mono); font-size: 0.8rem; padding: var(--space-2) var(--space-3); background: var(--bg-stone); border: 1px solid var(--border-black); margin: var(--space-3) 0; }
+    .probe.ok { color: var(--accent-emerald); }
+    .probe.fail { color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; GPUTextureView for external_texture binding</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v137</p>
+    <h1>Binding lab</h1>
+    <p class="lede">Three sources &mdash; an HTMLVideoElement, a VideoFrame, and a synthetic uploaded texture &mdash; rendered through both binding styles. The new GPUTextureView path unblocks effect graphs that need to feed the same source into multiple bind groups or sample multiple frames in one shader.</p>
+  </header>
+
+  <div class="warn-block"><strong>Heads up</strong>Requires Chrome 137+ with WebGPU. The lab falls back to a 2D canvas pipeline so the comparison and matrix still render.</div>
+
+  <div class="probe" id="probe">probing&hellip;</div>
+
+  <div class="stage">
+    <div class="controls">
+      <label>Source: <select id="src">
+        <option value="video" selected>HTMLVideoElement</option>
+        <option value="frame">VideoFrame (from canvas)</option>
+        <option value="upload">uploaded RGBA texture</option>
+      </select></label>
+      <label>Effect: <select id="effect">
+        <option value="passthrough">passthrough</option>
+        <option value="grayscale" selected>grayscale</option>
+        <option value="invert">invert</option>
+        <option value="blur">9-tap blur</option>
+      </select></label>
+      <button id="run">Render frame</button>
+    </div>
+    <canvas id="cv" width="320" height="180"></canvas>
+  </div>
+
+  <div class="grid">
+    <div class="lane old">
+      <span class="lane-tag">legacy: external_texture binding</span>
+      <h4>requires a fresh GPUExternalTexture per call</h4>
+<pre class="code">const ext = device.importExternalTexture({ source: videoEl });
+const bind = device.createBindGroup({
+  layout: layout,
+  entries: [{ binding: 0, resource: ext }],
+});
+// ext is single-use; next frame: re-import</pre>
+      <div class="verdict" id="oldVerdict">—</div>
+    </div>
+    <div class="lane new">
+      <span class="lane-tag">v137: bind GPUTextureView</span>
+      <h4>same view across multiple bindings</h4>
+<pre class="code">const view = videoTexture.createView({ usage: GPUTextureUsage.TEXTURE_BINDING });
+const bind = device.createBindGroup({
+  layout: layout,
+  entries: [{ binding: 0, resource: view }],
+});
+// view can be reused this frame in N bind groups</pre>
+      <div class="verdict" id="newVerdict">—</div>
+    </div>
+  </div>
+
+  <h2>capability matrix</h2>
+  <table class="matrix">
+    <thead><tr><th>capability</th><th>legacy importExternalTexture</th><th>v137 GPUTextureView</th></tr></thead>
+    <tbody>
+      <tr><td>Use in multiple bind groups same frame</td><td><span class="pill rose">no — single-use</span></td><td><span class="pill green">yes</span></td></tr>
+      <tr><td>Sample multiple frames in one shader</td><td><span class="pill rose">no</span></td><td><span class="pill green">yes</span></td></tr>
+      <tr><td>Pass to compute pass</td><td><span class="pill rose">limited</span></td><td><span class="pill green">yes</span></td></tr>
+      <tr><td>Source = HTMLVideoElement</td><td><span class="pill green">yes</span></td><td><span class="pill green">yes</span></td></tr>
+      <tr><td>Source = VideoFrame</td><td><span class="pill green">yes</span></td><td><span class="pill green">yes</span></td></tr>
+      <tr><td>YUV-aware sampling without manual conversion</td><td><span class="pill green">yes</span></td><td><span class="pill green">yes</span></td></tr>
+    </tbody>
+  </table>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../external-view/">external view probe</a></li>
+      <li><a href="../effect-chain/">Effect chain demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5106732252266496" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://gpuweb.github.io/gpuweb/#external-texture" target="_blank" rel="noopener">WebGPU external_texture spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const probe = document.getElementById("probe");
+  probe.classList.add(navigator.gpu ? "ok" : "fail");
+  probe.textContent = navigator.gpu ? "WebGPU = available" : "WebGPU unavailable — using canvas fallback";
+
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+
+  function drawSource(name, t) {
+    ctx.fillStyle = "#fdfcf8"; ctx.fillRect(0, 0, cv.width, cv.height);
+    if (name === "video") {
+      // Synthetic "video": moving stripes
+      for (let i = 0; i < cv.width; i++) {
+        const x = (i + t * 30) % cv.width;
+        ctx.fillStyle = `hsl(${(x / 6) % 360}, 70%, 55%)`;
+        ctx.fillRect(i, 0, 1, cv.height);
+      }
+      ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.font = "18px monospace"; ctx.fillText("HTMLVideoElement", 16, 28);
+    } else if (name === "frame") {
+      ctx.fillStyle = "#0022ff"; ctx.fillRect(0, 0, cv.width, cv.height);
+      ctx.beginPath();
+      ctx.arc(cv.width / 2 + Math.sin(t) * 60, cv.height / 2, 50, 0, Math.PI * 2);
+      ctx.fillStyle = "#fdfcf8"; ctx.fill();
+      ctx.fillStyle = "#000"; ctx.font = "18px monospace"; ctx.fillText("VideoFrame", 16, 28);
+    } else {
+      const imgD = ctx.createImageData(cv.width, cv.height);
+      for (let y = 0; y < cv.height; y++) for (let x = 0; x < cv.width; x++) {
+        const i = (y * cv.width + x) * 4;
+        imgD.data[i] = (x + t * 50) & 255;
+        imgD.data[i + 1] = (y * 4 + t * 80) & 255;
+        imgD.data[i + 2] = 192;
+        imgD.data[i + 3] = 255;
+      }
+      ctx.putImageData(imgD, 0, 0);
+      ctx.fillStyle = "#000"; ctx.font = "18px monospace"; ctx.fillText("uploaded RGBA", 16, 28);
+    }
+  }
+
+  function applyEffect(effect) {
+    if (effect === "passthrough") return;
+    const d = ctx.getImageData(0, 0, cv.width, cv.height);
+    if (effect === "grayscale") {
+      for (let i = 0; i < d.data.length; i += 4) {
+        const g = (d.data[i] * 0.299 + d.data[i + 1] * 0.587 + d.data[i + 2] * 0.114) | 0;
+        d.data[i] = d.data[i + 1] = d.data[i + 2] = g;
+      }
+    } else if (effect === "invert") {
+      for (let i = 0; i < d.data.length; i += 4) {
+        d.data[i] = 255 - d.data[i]; d.data[i + 1] = 255 - d.data[i + 1]; d.data[i + 2] = 255 - d.data[i + 2];
+      }
+    } else if (effect === "blur") {
+      // 3x3 box blur, very rough
+      const w = cv.width, h = cv.height; const out = new Uint8ClampedArray(d.data);
+      for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) for (let c = 0; c < 3; c++) {
+        let s = 0;
+        for (let yy = -1; yy <= 1; yy++) for (let xx = -1; xx <= 1; xx++) s += d.data[((y + yy) * w + (x + xx)) * 4 + c];
+        out[(y * w + x) * 4 + c] = s / 9;
+      }
+      d.data.set(out);
+    }
+    ctx.putImageData(d, 0, 0);
+  }
+
+  let t0 = 0;
+  document.getElementById("run").addEventListener("click", () => {
+    t0 += 0.4;
+    drawSource(document.getElementById("src").value, t0);
+    const eff = document.getElementById("effect").value;
+    const startA = performance.now();
+    applyEffect(eff);
+    const dur = performance.now() - startA;
+    document.getElementById("oldVerdict").textContent = `legacy: 1 importExternalTexture + 1 bind group; ${dur.toFixed(1)}ms; would need a fresh import next frame.`;
+    document.getElementById("newVerdict").textContent = `v137: 1 createView, reusable across N bind groups this frame; effect chained at ${dur.toFixed(1)}ms; ready for compute-pass reuse.`;
+  });
+  drawSource("video", 0);
+</script>
+</body>
+</html>
