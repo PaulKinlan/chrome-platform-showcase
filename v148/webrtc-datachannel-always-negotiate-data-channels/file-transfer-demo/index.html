@@ -53,7 +53,7 @@
   <header class="lede-block">
     <p class="eyebrow">v148 · WebRTC · DataChannel</p>
     <h1>File Transfer Demo</h1>
-    <p class="lede">P2P file transfer over a loopback <code>RTCPeerConnection</code> using <code>alwaysNegotiateDataChannels: true</code>. The toggle lets you simulate the pre-Chrome 148 race where a channel was created before the remote peer was ready to receive it.</p>
+    <p class="lede">P2P file transfer over a loopback <code>RTCPeerConnection</code> using <code>alwaysNegotiateDataChannels: true</code>. The toggle compares the Chrome 148 late-channel flow against the timing-sensitive default flow.</p>
   </header>
 
   <section>
@@ -62,12 +62,12 @@
     <div class="toggle-row">
       <input type="checkbox" id="always-negotiate" checked>
       <label for="always-negotiate">
-        <code>alwaysNegotiateDataChannels: true</code> <span style="font-size:0.72rem;color:var(--text-muted);">(Chrome 148 fix — uncheck to simulate the race condition)</span>
+        <code>alwaysNegotiateDataChannels: true</code> <span style="font-size:0.72rem;color:var(--text-muted);">(Chrome 148 fix — uncheck to run the late-channel failure case)</span>
       </label>
     </div>
 
     <div class="negotiation-note" id="neg-note">
-      ⚠ alwaysNegotiateDataChannels disabled — simulating pre-148 race condition where channel creation before negotiation could fail silently.
+      ⚠ alwaysNegotiateDataChannels disabled — this run creates the data channel after offer/answer, so the default flow needs renegotiation before it can open.
     </div>
 
     <div class="peers">
@@ -139,8 +139,9 @@ channel.onopen = () => console.log('channel open — no race');
   const note = document.getElementById('support-note');
   note.textContent = supported
     ? '✓ RTCPeerConnection available. Demo uses a loopback connection (both peers in the same page).'
-    : 'RTCPeerConnection not available. Demo is fully simulated.';
+    : 'RTCPeerConnection not available in this browser/context.';
   if (supported) note.style.borderLeftColor = 'var(--accent-emerald)';
+  document.getElementById('btn-connect').disabled = !supported;
 
   let pcA = null, pcB = null, channelA = null;
   let connected = false;
@@ -199,13 +200,9 @@ channel.onopen = () => console.log('channel open — no race');
       pcA.onicecandidate = e => { if (e.candidate) pcB.addIceCandidate(e.candidate); };
       pcB.onicecandidate = e => { if (e.candidate) pcA.addIceCandidate(e.candidate); };
 
-      channelA = pcA.createDataChannel('files', { ordered: true });
-      if (!alwaysNeg) {
-        log('⚠ alwaysNegotiateDataChannels off — channel created before negotiation (race simulation)', 'warn');
-      }
-
-      channelA.onopen = () => { log('DataChannel open — ready to send', 'ok'); setDot('a', 'connected'); setDot('b', 'connected'); connected = true; };
-      channelA.onerror = e => log('Channel error: ' + e.message, 'err');
+      pcA.onnegotiationneeded = () => {
+        log('Peer A: negotiationneeded fired — default flow needs another offer/answer for the late channel', 'warn');
+      };
 
       pcB.ondatachannel = e => {
         const ch = e.channel;
@@ -235,15 +232,39 @@ channel.onopen = () => console.log('channel open — no race');
       const answer = await pcB.createAnswer();
       await pcB.setLocalDescription(answer);
       await pcA.setRemoteDescription(answer);
-      log('SDP exchange complete — waiting for ICE…');
-    } else {
-      // Simulate
-      await delay(400);
-      setDot('a', 'connected'); setDot('b', 'connected');
-      connected = true;
-      log('Simulated connection established', 'ok');
+      log('Initial SDP exchange complete.');
+
+      channelA = pcA.createDataChannel('files', { ordered: true });
+      wireSenderChannel(channelA, alwaysNeg);
+      log(alwaysNeg
+        ? 'Created data channel after offer/answer. Chrome 148+ should open it without renegotiation.'
+        : 'Created data channel after offer/answer in default mode. Watch for negotiationneeded.');
+
+      setTimeout(() => {
+        if (!connected) {
+          setDot('a', 'waiting');
+          setDot('b', 'waiting');
+          log('DataChannel is still not open. In default mode this late channel requires renegotiation.', 'warn');
+        }
+      }, 2500);
     }
   });
+
+  function wireSenderChannel(channel, alwaysNeg) {
+    channel.onopen = () => {
+      log('DataChannel open — ready to send', 'ok');
+      setDot('a', 'connected');
+      setDot('b', 'connected');
+      connected = true;
+    };
+    channel.onerror = e => log('Channel error: ' + (e.message || 'unknown error'), 'err');
+    channel.onclose = () => {
+      connected = false;
+      setDot('a', 'disconnected');
+      setDot('b', 'waiting');
+      log(alwaysNeg ? 'DataChannel closed' : 'Late DataChannel closed before opening', alwaysNeg ? '' : 'warn');
+    };
+  }
 
   const recvItems = {};
 
@@ -297,7 +318,7 @@ channel.onopen = () => console.log('channel open — no race');
 
     const meta = JSON.stringify({ name: file.name, size: file.size });
 
-    if (supported && channelA && channelA.readyState === 'open') {
+    if (channelA && channelA.readyState === 'open') {
       channelA.send(meta);
       let offset = 0;
       while (offset < file.size) {
@@ -310,20 +331,10 @@ channel.onopen = () => console.log('channel open — no race');
         await delay(1);
       }
     } else {
-      // Simulate
-      channelA = channelA || { readyState: 'simulated' };
-      let sent = 0;
-      const interval = setInterval(() => {
-        sent = Math.min(file.size, sent + CHUNK * 4);
-        const pct = (sent / file.size) * 100;
-        document.getElementById('sprog-' + eid).style.width = pct + '%';
-        if (sent >= file.size) {
-          clearInterval(interval);
-          addRecvItem(file.name, file.size);
-          setTimeout(() => markRecvDone(file.name), 200);
-        }
-      }, 30);
-      await new Promise(r => setTimeout(r, (file.size / (CHUNK * 4)) * 30 + 300));
+      document.getElementById('sstat-' + eid).textContent = 'blocked';
+      document.getElementById('sstat-' + eid).className = 'fi-status queued';
+      log('DataChannel is not open; file was not sent. Enable alwaysNegotiateDataChannels and reconnect.', 'warn');
+      return;
     }
 
     document.getElementById('sstat-' + eid).textContent = '✓ sent';
