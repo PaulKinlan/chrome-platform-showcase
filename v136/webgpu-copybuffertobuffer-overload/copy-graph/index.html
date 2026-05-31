@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Copy Graph — WebGPU copyBufferToBuffer — Chrome 136 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: var(--space-3); margin-bottom: var(--space-4); }
+    .ctrl { display: flex; flex-direction: column; gap: 0.25rem; }
+    .ctrl label { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
+    .ctrl input, .ctrl select { font-family: var(--font-mono); font-size: 0.85rem; padding: 0.35rem 0.4rem; border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); }
+    .graph { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-4); margin-bottom: var(--space-3); }
+    .buffers { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    .buf { padding: var(--space-3); background: var(--bg-paper); border: 1px solid var(--border-black); font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); }
+    .buf h4 { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); margin: 0 0 0.4rem; text-transform: uppercase; letter-spacing: 0.08em; }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 0.4rem; padding: 0.15rem 0; }
+    .bytes { font-family: var(--font-mono); font-size: 0.72rem; word-break: break-all; }
+    .toolbar { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    .toolbar button { padding: 0.45rem 0.85rem; font-size: 0.85rem; }
+    .out { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); color: var(--text-charcoal); }
+    .warn-block { border: 2px solid var(--accent-amber); background: color-mix(in srgb, var(--accent-amber) 8%, var(--bg-ivory)); padding: var(--space-3); margin-bottom: var(--space-4); font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebGPU copyBufferToBuffer overload</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v136</p>
+    <h1>Copy Graph</h1>
+    <p class="lede">Chain three buffers and copy through them with the new overload. The graph editor lets you set source offset, dest offset, and size per edge &mdash; or leave any of them <code>undefined</code> to use the whole-buffer shortcut. The output panel prints the final bytes per buffer and the WebGPU-validated copy ranges.</p>
+  </header>
+
+  <div id="featWarn" class="warn-block" hidden>
+    <strong>Note:</strong> WebGPU support is required. On unsupported platforms the graph still validates the arguments client-side but no GPU copy happens.
+  </div>
+
+  <div class="stage">
+    <div class="controls">
+      <div class="ctrl"><label>buffer size (bytes)</label><input id="size" type="number" value="32" min="4" max="256"></div>
+      <div class="ctrl"><label>edge 1: A → B src-offset</label><input id="e1so" type="number" value=""></div>
+      <div class="ctrl"><label>edge 1: A → B dst-offset</label><input id="e1do" type="number" value=""></div>
+      <div class="ctrl"><label>edge 1: A → B size</label><input id="e1sz" type="number" value=""></div>
+      <div class="ctrl"><label>edge 2: B → C src-offset</label><input id="e2so" type="number" value="4"></div>
+      <div class="ctrl"><label>edge 2: B → C dst-offset</label><input id="e2do" type="number" value="8"></div>
+      <div class="ctrl"><label>edge 2: B → C size</label><input id="e2sz" type="number" value="16"></div>
+    </div>
+
+    <div class="toolbar"><button id="run">Run pipeline</button></div>
+
+    <div class="graph">
+      <div class="buffers">
+        <div class="buf"><h4>buffer A (init)</h4><div class="bytes" id="aB">—</div></div>
+        <div class="buf"><h4>buffer B (after A → B)</h4><div class="bytes" id="bB">—</div></div>
+        <div class="buf"><h4>buffer C (after B → C)</h4><div class="bytes" id="cB">—</div></div>
+        <div class="buf"><h4>copy summary</h4><div class="bytes" id="logB">—</div></div>
+      </div>
+    </div>
+
+    <div class="out" id="out">Click "Run pipeline" to execute.</div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../copy-overload/">Copy Overload</a></li>
+      <li><a href="../migration-diff/">Migration diff</a></li>
+      <li><a href="../">copyBufferToBuffer feature index</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+async function run() {
+  const $out = document.getElementById('out');
+  const num = id => { const v = document.getElementById(id).value; return v === '' ? undefined : +v; };
+  const size = +document.getElementById('size').value;
+
+  // Build initial bytes 0,1,2,3,...
+  const init = new Uint8Array(size);
+  for (let i = 0; i < size; i++) init[i] = i;
+
+  const e1 = { so: num('e1so'), do_: num('e1do'), sz: num('e1sz') };
+  const e2 = { so: num('e2so'), do_: num('e2do'), sz: num('e2sz') };
+
+  let logs = [];
+  let bufA = new Uint8Array(init), bufB = new Uint8Array(size), bufC = new Uint8Array(size);
+
+  if (!navigator.gpu) {
+    document.getElementById('featWarn').hidden = false;
+    // CPU emulation matching spec semantics
+    const sz1 = e1.sz ?? size;
+    const so1 = e1.so ?? 0;
+    const do1 = e1.do_ ?? 0;
+    bufB.set(bufA.subarray(so1, so1 + sz1), do1);
+    const sz2 = e2.sz ?? size;
+    const so2 = e2.so ?? 0;
+    const do2 = e2.do_ ?? 0;
+    bufC.set(bufB.subarray(so2, so2 + sz2), do2);
+    logs.push(`edge 1: A[${so1}..${so1+sz1}) → B[${do1}..${do1+sz1}) (CPU emulation, no WebGPU)`);
+    logs.push(`edge 2: B[${so2}..${so2+sz2}) → C[${do2}..${do2+sz2})`);
+  } else {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+      const create = () => device.createBuffer({ size, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      const A = create(), B = create(), C = create();
+      const readback = device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+
+      device.queue.writeBuffer(A, 0, init);
+      const enc = device.createCommandEncoder();
+      // Use overload — pass undefined for missing args
+      enc.copyBufferToBuffer(A, e1.so ?? 0, B, e1.do_ ?? 0, e1.sz ?? size);
+      enc.copyBufferToBuffer(B, e2.so ?? 0, C, e2.do_ ?? 0, e2.sz ?? size);
+      const encB = device.createCommandEncoder();
+      encB.copyBufferToBuffer(B, 0, readback, 0, size);
+      const encC = device.createCommandEncoder();
+      encC.copyBufferToBuffer(C, 0, readback, 0, size);
+
+      device.queue.submit([enc.finish()]);
+      // Read B
+      device.queue.submit([encB.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      bufB = new Uint8Array(readback.getMappedRange().slice(0));
+      readback.unmap();
+      // Read C
+      device.queue.submit([encC.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      bufC = new Uint8Array(readback.getMappedRange().slice(0));
+      readback.unmap();
+
+      logs.push(`real WebGPU run on adapter "${adapter.info?.description || 'unknown'}"`);
+    } catch (e) {
+      logs.push('WebGPU error: ' + e.message);
+    }
+  }
+
+  const hex = arr => [...arr].map(b => b.toString(16).padStart(2,'0')).join(' ');
+  document.getElementById('aB').textContent = hex(bufA);
+  document.getElementById('bB').textContent = hex(bufB);
+  document.getElementById('cB').textContent = hex(bufC);
+  document.getElementById('logB').innerHTML = logs.join('<br>');
+  $out.textContent = 'Two copyBufferToBuffer() calls executed with overload semantics. Undefined arguments use whole-buffer defaults.';
+}
+
+document.getElementById('run').addEventListener('click', run);
+run();
+</script>
+</body>
+</html>
