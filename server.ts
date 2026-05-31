@@ -1062,6 +1062,46 @@ async function renderFetchLaterRoute(req: Request, sub: string): Promise<Respons
   return null;
 }
 
+function renderWebSocketBfcacheRoute(req: Request, sub: string): Response | null {
+  if (sub !== "/disconnect-websockets-on-bfcache-entry/ws") return null;
+  if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    return jsonResponse({ error: "Expected WebSocket upgrade." }, { status: 426 });
+  }
+
+  const { socket, response } = Deno.upgradeWebSocket(req);
+  const id = randomBase64Url(6);
+  let heartbeat: number | undefined;
+
+  socket.onopen = () => {
+    socket.send(JSON.stringify({
+      type: "hello",
+      id,
+      at: new Date().toISOString(),
+      message: "Showcase WebSocket connected.",
+    }));
+    heartbeat = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "heartbeat", id, at: new Date().toISOString() }));
+      }
+    }, 3000);
+  };
+  socket.onmessage = (event) => {
+    socket.send(JSON.stringify({
+      type: "echo",
+      id,
+      at: new Date().toISOString(),
+      data: event.data,
+    }));
+  };
+  socket.onclose = () => {
+    if (heartbeat !== undefined) clearInterval(heartbeat);
+  };
+  socket.onerror = () => {
+    if (heartbeat !== undefined) clearInterval(heartbeat);
+  };
+  return response;
+}
+
 const FEDCM_BASE = "/v148/agentic-federated-login/fedcm";
 const FEDCM_IDP_COOKIE = "showcase_fedcm_idp";
 const FEDCM_CLIENT_ID = "chrome-platform-showcase";
@@ -2890,6 +2930,10 @@ Deno.serve({ port: PORT }, async (req) => {
     if (release === "v148") {
       const fedCmResponse = await renderFedCmRoute(req, sub);
       if (fedCmResponse) return fedCmResponse;
+    }
+    if (release === "v149") {
+      const wsBfcacheResponse = renderWebSocketBfcacheRoute(req, sub);
+      if (wsBfcacheResponse) return wsBfcacheResponse;
     }
     if (release === "v151" && sub === "/cpu-performance-api/capability-echo") {
       return renderV151CapabilityEcho(req);

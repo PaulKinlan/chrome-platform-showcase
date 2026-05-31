@@ -93,7 +93,7 @@
     .log-warn { color: #fde68a; }
     .log-info { color: #d1d5db; }
 
-    .sim-controls {
+    .drill-controls {
       display: flex;
       gap: 0.5rem;
       flex-wrap: wrap;
@@ -221,14 +221,14 @@
 
   <div class="bfcache-state state-live" id="pageStateBox">PAGE STATE: LIVE (active)</div>
 
-  <div class="sim-controls">
-    <button class="action-btn primary" onclick="simFreeze()">Simulate pagehide (BFCache freeze)</button>
-    <button class="action-btn" onclick="simRestore()" id="btnRestore" disabled>Simulate pageshow (BFCache restore)</button>
-    <button class="action-btn" onclick="simReset()">Reset</button>
+  <div class="drill-controls">
+    <button class="action-btn primary" onclick="runFreeze()">Run pagehide drill (BFCache freeze)</button>
+    <button class="action-btn" onclick="runRestore()" id="btnRestore" disabled>Run pageshow drill (BFCache restore)</button>
+    <button class="action-btn" onclick="runReset()">Reset</button>
   </div>
 
   <div class="event-log" id="eventLog">
-    <p class="log-info">// Events will appear here as you simulate page lifecycle…</p>
+    <p class="log-info">// Events will appear here as you run the page lifecycle drill…</p>
   </div>
 
   <section>
@@ -236,7 +236,7 @@
     <ul>
       <li><a href="../connection-lifecycle/">Connection Lifecycle Observer</a> — WebSocket events through BFCache</li>
       <li><a href="../reconnect-on-restore/">Reconnect on Restore</a> — reconnect pattern implementation</li>
-      <li><a href="../navigation-simulator/">Navigation Simulator</a> — step through BFCache navigation</li>
+      <li><a href="../navigation-walkthrough/">Navigation Walkthrough</a> — step through BFCache navigation</li>
     </ul>
   </section>
 
@@ -263,38 +263,59 @@
     if (dot) { dot.className = 'status-dot ' + cls; }
   }
 
+  function wsEndpoint() {
+    const wsUrl = new URL('/v149/disconnect-websockets-on-bfcache-entry/ws', location.href);
+    wsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return wsUrl;
+  }
+
   window.connectWS = function () {
     if (ws && ws.readyState <= 1) return;
     try {
-      ws = new WebSocket('wss://echo.websocket.org');
+      const socket = new WebSocket(wsEndpoint());
+      ws = socket;
       document.getElementById('wsStatus').textContent = 'Connecting…';
-      ws.onopen = () => {
+      socket.onopen = () => {
         document.getElementById('wsStatus').textContent = 'Connected (readyState: OPEN)';
         document.getElementById('btnConnectWS').disabled = true;
         document.getElementById('btnDisconnectWS').disabled = false;
         setDot('ws', 'dot-ok');
-        log('WebSocket opened (readyState=OPEN)', 'log-ws');
-        ws.send('Hello from BFCache State Audit demo');
+        log('WebSocket opened against showcase endpoint (readyState=OPEN)', 'log-ws');
+        socket.send('Hello from BFCache State Audit demo');
       };
-      ws.onmessage = (e) => {
+      socket.onmessage = (e) => {
         msgCounter++;
-        log(`WS message #${msgCounter} received: "${e.data.slice(0,50)}"`, 'log-ws');
+        let summary = e.data;
+        try {
+          const data = JSON.parse(e.data);
+          summary = data.type === 'heartbeat'
+            ? `heartbeat ${data.at}`
+            : `${data.type}: ${data.data ?? data.message ?? data.id}`;
+        } catch {
+          summary = e.data.slice(0, 80);
+        }
+        log(`WS message #${msgCounter} received: "${summary}"`, 'log-ws');
       };
-      ws.onclose = (e) => {
-        document.getElementById('wsStatus').textContent = 'Closed (code: ' + e.code + (e.reason ? ', reason: ' + e.reason : '') + ')';
-        document.getElementById('btnConnectWS').disabled = false;
-        document.getElementById('btnDisconnectWS').disabled = true;
-        setDot('ws', 'dot-lost');
+      socket.onclose = (e) => {
         log('WebSocket closed — code: ' + e.code + (frozen ? ' (closed by BFCache entry)' : ''), 'log-ws');
+        if (ws === socket) {
+          ws = null;
+          document.getElementById('wsStatus').textContent = 'Closed (code: ' + e.code + (e.reason ? ', reason: ' + e.reason : '') + ')';
+          document.getElementById('btnConnectWS').disabled = false;
+          document.getElementById('btnDisconnectWS').disabled = true;
+          setDot('ws', 'dot-lost');
+        }
       };
-      ws.onerror = () => {
-        document.getElementById('wsStatus').textContent = 'Connection failed (echo server may be unreachable)';
-        log('WebSocket connection error — using simulated events for demo', 'log-warn');
-        setDot('ws', 'dot-warn');
+      socket.onerror = () => {
+        log('WebSocket connection error from showcase endpoint', 'log-warn');
+        if (ws === socket) {
+          document.getElementById('wsStatus').textContent = 'Connection failed (showcase endpoint unavailable)';
+          setDot('ws', 'dot-warn');
+        }
       };
     } catch (e) {
-      log('WebSocket creation error: ' + e.message + ' — simulating instead', 'log-warn');
-      document.getElementById('wsStatus').textContent = 'Simulated (no real connection)';
+      log('WebSocket creation error: ' + e.message, 'log-warn');
+      document.getElementById('wsStatus').textContent = 'Connection failed';
       setDot('ws', 'dot-warn');
     }
   };
@@ -303,7 +324,7 @@
     if (ws) { ws.close(); ws = null; }
   };
 
-  window.simFreeze = function () {
+  window.runFreeze = function () {
     frozen = true;
     document.getElementById('pageStateBox').textContent = 'PAGE STATE: FROZEN (BFCache — pagehide persisted:true)';
     document.getElementById('pageStateBox').className = 'bfcache-state state-frozen';
@@ -319,7 +340,7 @@
     log('setTimeout/setInterval: timers frozen, will resume on restore', 'log-warn');
   };
 
-  window.simRestore = function () {
+  window.runRestore = function () {
     frozen = false;
     document.getElementById('pageStateBox').textContent = 'PAGE STATE: RESTORED (pageshow persisted:true)';
     document.getElementById('pageStateBox').className = 'bfcache-state state-restored';
@@ -328,8 +349,9 @@
     log('DOM state, scroll position, JS variables: all restored to frozen state', 'log-page');
     log('Overdue timers may fire immediately', 'log-warn');
     if (!ws || ws.readyState > 1) {
-      log('WebSocket is closed — reconnect needed (Chrome 149+ pattern):', 'log-page');
-      log('  if (event.persisted) { reconnect(); }', 'log-ws');
+      log('WebSocket is closed — reconnecting with a fresh backend connection', 'log-page');
+      log('  if (event.persisted) { connectWS(); }', 'log-ws');
+      window.connectWS();
     }
     setTimeout(() => {
       document.getElementById('pageStateBox').textContent = 'PAGE STATE: LIVE (active after restore)';
@@ -337,11 +359,11 @@
     }, 1500);
   };
 
-  window.simReset = function () {
+  window.runReset = function () {
     frozen = false;
     document.getElementById('pageStateBox').textContent = 'PAGE STATE: LIVE (active)';
     document.getElementById('pageStateBox').className = 'bfcache-state state-live';
-    document.getElementById('eventLog').innerHTML = '<p class="log-info">// Reset. Simulate BFCache lifecycle above…</p>';
+    document.getElementById('eventLog').innerHTML = '<p class="log-info">// Reset. Run the BFCache lifecycle drill above…</p>';
     document.getElementById('btnRestore').disabled = true;
     if (ws) { ws.close(); ws = null; }
     document.getElementById('wsStatus').textContent = 'Not connected';
@@ -359,7 +381,7 @@
     if (e.persisted) log('[REAL pageshow] persisted=true — restored from BFCache', 'log-page');
   });
 
-  log('Demo ready. Connect a WebSocket then simulate freeze/restore.', 'log-info');
+  log('Demo ready. Connect a WebSocket, then run the freeze/restore drill.', 'log-info');
 })();
 </script>
 </body>
