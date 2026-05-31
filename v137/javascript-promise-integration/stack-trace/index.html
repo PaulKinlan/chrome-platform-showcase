@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stack-switching trace — JSPI — Chrome 137</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { border: 2px solid var(--accent-amber); background: var(--bg-paper); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; box-shadow: var(--thin-shadow); }
+    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--accent-amber); display: block; margin-bottom: 0.4rem; }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .scope { display: grid; grid-template-columns: 80px 1fr 160px; gap: var(--space-2); font-family: var(--font-mono); font-size: 0.78rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-black); margin: var(--space-2) 0; background: var(--bg-stone); }
+    .scope.suspended { background: var(--accent-amber); color: var(--bg-ivory); }
+    .scope.resumed { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .scope.entered { background: var(--text-black); color: var(--bg-ivory); }
+    .scope .when { opacity: 0.7; }
+    .scope .who { font-weight: 600; }
+    .stacks { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .stacks { grid-template-columns: 1fr; } }
+    .stack { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-3); min-height: 240px; }
+    .stack h4 { margin-top: 0; font-family: var(--font-display); }
+    .frame { font-family: var(--font-mono); font-size: 0.82rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-black); margin-bottom: -1px; background: var(--bg-stone); display: flex; justify-content: space-between; }
+    .frame.top { background: #fff7d1; }
+    .frame.wasm { background: var(--bg-paper); }
+    .arrow { font-family: var(--font-mono); font-size: 1.2rem; color: var(--accent-blue); }
+    .legend { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); padding: var(--space-2); border: 1px dashed var(--border-black); background: var(--bg-stone); margin: var(--space-3) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; JavaScript Promise Integration</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v137</p>
+    <h1>Stack-switching trace</h1>
+    <p class="lede">Step through a JSPI call by hand. Two stacks render side-by-side &mdash; the JS stack and the suspendable Wasm stack &mdash; with a chronological event log of when each frame is entered, suspended (handed back to the JS event loop), and resumed.</p>
+  </header>
+
+  <div class="warn-block"><strong>Educational simulator</strong>The trace replays a representative call. Real V8 stack switching has the same shape but more bookkeeping (continuation objects, on-stack replacement). Spec link below.</div>
+
+  <div class="stage">
+    <div class="controls">
+      <button id="step">Step ▸</button>
+      <button id="play">▶ play</button>
+      <button id="reset">⟲ reset</button>
+    </div>
+
+    <div class="stacks">
+      <div class="stack">
+        <h4>JS stack</h4>
+        <div id="jsStack"></div>
+      </div>
+      <div class="stack">
+        <h4>suspendable Wasm stack</h4>
+        <div id="wasmStack"></div>
+      </div>
+    </div>
+
+    <div class="legend">scopes below are the chronological events. dark = entered, amber = suspended (yielded), green = resumed.</div>
+    <div id="log"></div>
+  </div>
+
+  <section>
+    <h2>the call shape</h2>
+<pre><code>// JS side
+const fetchAsync = async (url) =&gt; (await fetch(url)).text();
+const promising = WebAssembly.promising(instance.exports.run);
+
+// Wasm side calls a "blocking" import that is a Suspending wrapper
+// around an async JS function. The wasm stack is suspended on await
+// then resumed when the Promise settles.
+const importObj = { env: { fetch_text: new WebAssembly.Suspending(fetchAsync) } };
+
+await promising();  // suspends and resumes invisibly</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../jspi/">JSPI probe</a></li>
+      <li><a href="../wasm-fetch/">Wasm fetch</a></li>
+      <li><a href="../c-loop-unblocker/">C-loop unblocker</a></li>
+      <li><a href="https://chromestatus.com/feature/5674874568704000" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/WebAssembly/js-promise-integration" target="_blank" rel="noopener">JSPI proposal</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  // Scripted trace
+  const STEPS = [
+    { t: 0,    kind: "entered",   stack: "js",   frame: "promising()",         note: "JS calls the promising-wrapped export" },
+    { t: 12,   kind: "entered",   stack: "wasm", frame: "run()",                note: "Wasm body begins on a fresh suspendable stack" },
+    { t: 18,   kind: "entered",   stack: "wasm", frame: "fetch_text() import",  note: "Wasm calls a Suspending import" },
+    { t: 22,   kind: "entered",   stack: "js",   frame: "fetchAsync(url)",      note: "Hop into the JS import implementation" },
+    { t: 23,   kind: "suspended", stack: "wasm", frame: "(suspended)",          note: "JS returns a Promise; wasm stack parks" },
+    { t: 23,   kind: "suspended", stack: "js",   frame: "(yielded to loop)",    note: "promising() returns its outer Promise to caller" },
+    { t: 245,  kind: "entered",   stack: "js",   frame: "Promise resolves",     note: "Network completed; microtask scheduled" },
+    { t: 246,  kind: "resumed",   stack: "wasm", frame: "fetch_text() return",  note: "Wasm stack resumes with the resolved value" },
+    { t: 247,  kind: "entered",   stack: "wasm", frame: "run() (cont.)",        note: "Continues processing past the await" },
+    { t: 260,  kind: "resumed",   stack: "js",   frame: "promising() settle",   note: "Outer Promise resolves with run()'s return value" },
+  ];
+
+  let idx = 0;
+  const $log = document.getElementById("log");
+  const $js = document.getElementById("jsStack");
+  const $wasm = document.getElementById("wasmStack");
+  let js = [], wasm = [];
+
+  function render() {
+    function lay(stack, arr) {
+      stack.innerHTML = "";
+      arr.forEach((f, i) => {
+        const div = document.createElement("div");
+        div.className = "frame" + (i === arr.length - 1 ? " top" : "") + (stack === $wasm ? " wasm" : "");
+        div.innerHTML = `<span>${i}: ${f}</span><span class="arrow">${i === arr.length - 1 ? "▸" : ""}</span>`;
+        stack.appendChild(div);
+      });
+      if (!arr.length) { const div = document.createElement("div"); div.className = "frame"; div.innerHTML = "<em>empty</em>"; stack.appendChild(div); }
+    }
+    lay($js, js); lay($wasm, wasm);
+  }
+
+  function step() {
+    if (idx >= STEPS.length) return;
+    const s = STEPS[idx++];
+    const target = s.stack === "js" ? js : wasm;
+    if (s.kind === "entered") target.push(s.frame);
+    if (s.kind === "suspended") {
+      // mark top frame as suspended
+    }
+    if (s.kind === "resumed") {
+      // top frame resumed
+    }
+    const div = document.createElement("div");
+    div.className = "scope " + s.kind;
+    div.innerHTML = `<span class="when">${s.t.toString().padStart(3, "0")} ms</span><span class="who">${s.stack.toUpperCase()} · ${s.frame}</span><span>${s.kind}</span>`;
+    $log.appendChild(div);
+    render();
+  }
+
+  document.getElementById("step").addEventListener("click", step);
+  document.getElementById("play").addEventListener("click", async () => {
+    while (idx < STEPS.length) {
+      step();
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  });
+  document.getElementById("reset").addEventListener("click", () => { idx = 0; js = []; wasm = []; $log.innerHTML = ""; render(); });
+
+  render();
+</script>
+</body>
+</html>
