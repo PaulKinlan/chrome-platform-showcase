@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Freeze Budget Explainer — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .scenarios { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 760px) { .scenarios { grid-template-columns: 1fr; } }
+    .scenario { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); }
+    .scenario h3 { margin: 0 0 var(--space-2); font-family: var(--font-mono); font-size: 0.92rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .timeline { position: relative; background: var(--bg-stone); border: 2px solid var(--border-black); height: 60px; margin: var(--space-3) 0; }
+    .tick { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border-black); }
+    .tick-label { position: absolute; top: -18px; font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-muted); transform: translateX(-50%); }
+    .seg { position: absolute; top: 8px; bottom: 8px; }
+    .seg.active { background: var(--accent-emerald); border: 1px solid var(--border-black); }
+    .seg.warning { background: var(--accent-amber); border: 1px solid var(--border-black); }
+    .seg.frozen { background: var(--accent-rose); border: 1px solid var(--border-black); }
+    .legend { display: flex; gap: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; flex-wrap: wrap; margin-top: var(--space-2); }
+    .chip { width: 14px; height: 14px; border: 1px solid var(--border-black); display: inline-block; vertical-align: middle; margin-right: 4px; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-4) 0; }
+    .row { display: flex; gap: var(--space-2); align-items: center; font-family: var(--font-mono); font-size: 0.82rem; }
+    input[type=range] { width: 140px; accent-color: var(--text-black); }
+    pre.snippet { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); font-family: var(--font-mono); font-size: 0.82rem; overflow-x: auto; }
+    .impact { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; line-height: 1.7; margin-top: var(--space-3); }
+    .impact strong { color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Faster background freezing on Android</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>Freeze Budget Explainer</h1>
+    <p class="lede">Side-by-side timelines: the same backgrounded tab on Chrome 138 (5-min budget) and Chrome 139 (1-min budget on Android). Pick a workload — a polling timer, an open WebSocket, a Service Worker fetch — and see exactly when it gets killed.</p>
+  </header>
+
+  <div class="controls">
+    <div class="row">
+      <label>workload</label>
+      <select id="workload">
+        <option value="timer">setInterval polling (60s tick)</option>
+        <option value="ws">open WebSocket (keepalive)</option>
+        <option value="sw">Service Worker fetch loop</option>
+        <option value="audio">silent &lt;audio&gt; (lock screen)</option>
+        <option value="visible">visible (foreground)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>backgrounded at</label><span id="bgt-val">10s</span>
+      <input type="range" id="bgt" min="0" max="60" value="10">
+    </div>
+  </div>
+
+  <div class="scenarios">
+    <div class="scenario">
+      <h3>Chrome 138 (Android) — 5 min budget</h3>
+      <div class="timeline" id="t138"></div>
+      <div class="legend">
+        <span><span class="chip" style="background: var(--accent-emerald);"></span>active</span>
+        <span><span class="chip" style="background: var(--accent-amber);"></span>throttled</span>
+        <span><span class="chip" style="background: var(--accent-rose);"></span>frozen</span>
+      </div>
+    </div>
+    <div class="scenario">
+      <h3>Chrome 139 (Android) — 1 min budget</h3>
+      <div class="timeline" id="t139"></div>
+      <div class="legend">
+        <span><span class="chip" style="background: var(--accent-emerald);"></span>active</span>
+        <span><span class="chip" style="background: var(--accent-amber);"></span>throttled</span>
+        <span><span class="chip" style="background: var(--accent-rose);"></span>frozen</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="impact" id="impact"></div>
+
+  <section>
+    <h2>what to do</h2>
+    <ul>
+      <li><strong>Move long timers to a Service Worker.</strong> SW <code>setTimeout</code> is governed by the same budget, but Service Workers are designed for periodic wake (push, periodic sync).</li>
+      <li><strong>Persist state proactively.</strong> Treat any backgrounded event as &ldquo;might be the last thing you ever run&rdquo;. Use <code>visibilitychange</code> + <code>pagehide</code> as a save point.</li>
+      <li><strong>Use Background Sync</strong> for &ldquo;run when next online&rdquo; tasks instead of polling.</li>
+      <li><strong>Use <code>fetch(url, { keepalive: true })</code></strong> for departure beacons — they survive freeze. Pair with the new keepalive retry in v139.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>snippet</h2>
+    <pre class="snippet">// Save before the tab might freeze.
+document.addEventListener('visibilitychange', () =&gt; {
+  if (document.visibilityState === 'hidden') {
+    fetch('/save', {
+      method: 'POST',
+      body: JSON.stringify(draftState()),
+      keepalive: true,           // outlives the freeze
+      // Chrome 139 will retry this beacon if the network drops:
+      retryOptions: { maxAttempts: 3, initialDelay: 1000 },
+    });
+  }
+});
+
+// Replace setInterval polling with periodic sync.
+const reg = await navigator.serviceWorker.ready;
+await reg.periodicSync.register('refresh-feed', {
+  minInterval: 24 * 60 * 60 * 1000,  // 24h
+});</pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v139/faster-background-freezing-on-android/">Feature page</a></li>
+      <li><a href="/v139/faster-background-freezing-on-android/freeze-timeline/">Freeze Timeline</a></li>
+      <li><a href="/v139/faster-background-freezing-on-android/lifecycle-recorder/">Lifecycle Recorder</a></li>
+      <li><a href="https://chromestatus.com/feature/5060938762534912" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://wicg.github.io/page-lifecycle/" target="_blank" rel="noopener">Page Lifecycle spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(() =&gt; {
+  const wEl = document.getElementById('workload'), bgEl = document.getElementById('bgt');
+  const impact = document.getElementById('impact');
+  const TOTAL_SEC = 360; // 6 minutes
+
+  function render() {
+    const bg = +bgEl.value;
+    document.getElementById('bgt-val').textContent = bg + 's';
+    drawTimeline('t138', bg, 300, wEl.value); // 5 min budget
+    drawTimeline('t139', bg, 60, wEl.value);  // 1 min budget
+
+    const w = wEl.value;
+    const txt = ({
+      timer: 'A 60-second polling tick. On v138: makes ~5 ticks before freeze. On v139: <strong>makes at most one tick</strong>, sometimes zero. If you depended on a 5-minute heartbeat to refresh tokens, it now fires <strong>5× more rarely</strong>.',
+      ws: 'WebSocket connections close when the page freezes. v139 closes them <strong>4 minutes earlier</strong>. Reconnect logic on unfreeze must be cheap.',
+      sw: 'Service Worker <code>fetch</code>es initiated by the page stop when the page freezes; in-flight SW fetches finish, but no new SW work happens until unfreeze. v139 shortens the in-flight tail.',
+      audio: 'A silent &lt;audio&gt; element used as a lifecycle keepalive: still frozen. The freeze is page-state-based, not media-based.',
+      visible: 'Visible pages are <strong>never frozen</strong>. The whole budget conversation only applies to backgrounded tabs.',
+    })[w];
+    impact.innerHTML = txt;
+  }
+
+  function drawTimeline(id, bg, budget, workload) {
+    const el = document.getElementById(id);
+    el.innerHTML = '';
+    if (workload === 'visible') {
+      const s = document.createElement('div');
+      s.className = 'seg active';
+      s.style.left = '0%'; s.style.right = '0%';
+      el.appendChild(s);
+    } else {
+      const widthPct = (sec) =&gt; (sec / TOTAL_SEC) * 100;
+      // Active until backgrounded
+      const s1 = document.createElement('div'); s1.className = 'seg active';
+      s1.style.left = '0%'; s1.style.width = widthPct(bg) + '%';
+      // Throttled during budget
+      const s2 = document.createElement('div'); s2.className = 'seg warning';
+      s2.style.left = widthPct(bg) + '%'; s2.style.width = widthPct(budget) + '%';
+      // Frozen after
+      const s3 = document.createElement('div'); s3.className = 'seg frozen';
+      s3.style.left = widthPct(bg + budget) + '%'; s3.style.right = '0%';
+      el.appendChild(s1); el.appendChild(s2); el.appendChild(s3);
+    }
+    // Ticks at 0, 1, 5 min
+    for (const t of [0, 60, 180, 300, 360]) {
+      const tick = document.createElement('div'); tick.className = 'tick';
+      tick.style.left = (t / TOTAL_SEC) * 100 + '%';
+      const lbl = document.createElement('div'); lbl.className = 'tick-label';
+      lbl.style.left = (t / TOTAL_SEC) * 100 + '%';
+      lbl.textContent = (t === 0 ? '0' : `${Math.round(t/60)}m`);
+      el.appendChild(tick); el.appendChild(lbl);
+    }
+  }
+
+  [wEl, bgEl].forEach(el =&gt; el.addEventListener('input', render));
+  render();
+})();
+</script>
+</body>
+</html>
