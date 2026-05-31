@@ -45,7 +45,7 @@
   <header class="lede-block">
     <p class="eyebrow">v148 · Web APIs · Payments</p>
     <h1>Payment Flow Gate</h1>
-    <p class="lede">A checkout that calls <code>PaymentRequest.getSecurePaymentConfirmationCapabilities()</code> before rendering the payment sheet — showing the SPC passkey button only when the device supports it, and falling back gracefully to a standard payment form otherwise.</p>
+    <p class="lede">A checkout that calls the browser's SPC availability API before rendering the payment sheet — showing the SPC passkey button only when the device supports it, and falling back gracefully to a standard payment form otherwise.</p>
   </header>
 
   <section>
@@ -78,8 +78,8 @@
 
     <h3 style="font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted);margin:1.5rem 0 0.75rem;">How the gate works</h3>
     <ol class="flow-steps" id="flow-steps">
-      <li class="flow-step" id="step-1"><div class="flow-step-text"><strong>Call getSecurePaymentConfirmationCapabilities()</strong> — check if SPC is available before rendering any payment UI. This avoids constructing a <code>PaymentRequest</code> object and calling <code>canMakePayment()</code> which requires interaction.</div></li>
-      <li class="flow-step" id="step-2"><div class="flow-step-text"><strong>Inspect capabilities object</strong> — check <code>supportsSPC</code>, <code>supportsPasskey</code>, and whether any stored credentials match the RP ID. All synchronous, no network needed.</div></li>
+      <li class="flow-step" id="step-1"><div class="flow-step-text"><strong>Call the static SPC availability API</strong> — check if SPC is available before rendering any payment UI. Current browsers expose <code>securePaymentConfirmationAvailability()</code>; older trials exposed <code>getSecurePaymentConfirmationCapabilities()</code>.</div></li>
+      <li class="flow-step" id="step-2"><div class="flow-step-text"><strong>Inspect the returned value</strong> — <code>"available"</code> means the frame can start an SPC flow. Other values give a concrete non-availability reason.</div></li>
       <li class="flow-step" id="step-3"><div class="flow-step-text"><strong>Show appropriate UI</strong> — if SPC is available, render the passkey button prominently. Otherwise hide it and go straight to card form. No wasted clicks or confusing "not available on this device" errors.</div></li>
       <li class="flow-step" id="step-4"><div class="flow-step-text"><strong>Invoke payment</strong> — call <code>request.show()</code> only when the user clicks the button for the chosen path, ensuring the gesture requirement is met.</div></li>
     </ol>
@@ -87,10 +87,10 @@
 
   <section>
     <h2>API usage</h2>
-    <pre style="background:var(--bg-stone);border:1px solid var(--border-black);padding:1rem;overflow-x:auto;"><code style="font-size:0.8125rem;line-height:1.6;color:var(--text-charcoal);">// Chrome 148: query SPC capabilities before showing any UI
-const caps = await PaymentRequest.getSecurePaymentConfirmationCapabilities();
+<pre style="background:var(--bg-stone);border:1px solid var(--border-black);padding:1rem;overflow-x:auto;"><code style="font-size:0.8125rem;line-height:1.6;color:var(--text-charcoal);">// Query SPC availability before showing any UI
+const availability = await PaymentRequest.securePaymentConfirmationAvailability();
 
-if (caps.supportsSPC && caps.supportsPasskey) {
+if (availability === "available") {
   showSPCButton(); // passkey-authenticated payment
 } else {
   showCardForm();  // standard card entry fallback
@@ -123,16 +123,24 @@ const response = await request.show();</code></pre>
 
     await delay(400);
 
-    let spcSupported = false, passkeySupported = false;
+    let spcSupported = false, passkeySupported = false, availability = 'unavailable-feature-not-enabled';
 
     try {
-      if (typeof PaymentRequest !== 'undefined' && typeof PaymentRequest.getSecurePaymentConfirmationCapabilities === 'function') {
+      if (typeof PaymentRequest !== 'undefined' &&
+          typeof PaymentRequest.securePaymentConfirmationAvailability === 'function') {
+        availability = await PaymentRequest.securePaymentConfirmationAvailability();
+        spcSupported = availability === 'available';
+      } else if (typeof PaymentRequest !== 'undefined' &&
+          typeof PaymentRequest.getSecurePaymentConfirmationCapabilities === 'function') {
         const caps = await PaymentRequest.getSecurePaymentConfirmationCapabilities();
-        spcSupported = caps.supportsSPC !== false;
-        passkeySupported = caps.supportsPasskey !== false;
+        spcSupported = Boolean(caps.spcSupported);
+        availability = spcSupported ? 'available' : 'unavailable-unknown-reason';
       }
     } catch(e) {
-      // API not available — simulate
+      availability = `${e.name}: ${e.message}`;
+    }
+    if (typeof PublicKeyCredential?.isUserVerifyingPlatformAuthenticatorAvailable === 'function') {
+      passkeySupported = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().catch(() => false);
     }
 
     document.getElementById('step-1').className = 'flow-step done';
@@ -140,13 +148,13 @@ const response = await request.show();</code></pre>
 
     await delay(300);
 
-    capSpc.textContent = spcSupported ? 'Yes' : 'No (API unavailable)';
+    capSpc.textContent = spcSupported ? 'Yes' : availability;
     capSpc.className = 'badge ' + (spcSupported ? 'yes' : 'no');
 
-    capPasskey.textContent = passkeySupported ? 'Yes' : 'No (simulated)';
+    capPasskey.textContent = passkeySupported ? 'Yes' : 'No';
     capPasskey.className = 'badge ' + (passkeySupported ? 'yes' : 'no');
 
-    capVerified.textContent = 'No stored creds (demo)';
+    capVerified.textContent = spcSupported ? 'SPC frame available' : 'Not checked';
     capVerified.className = 'badge na';
 
     document.getElementById('step-2').className = 'flow-step done';
@@ -170,7 +178,7 @@ const response = await request.show();</code></pre>
     document.getElementById('step-4').className = 'flow-step active';
     await delay(300);
     document.getElementById('step-4').className = 'flow-step done';
-    showResult('SPC passkey payment initiated — browser would show the passkey authentication sheet.', 'success');
+    showResult('SPC path selected. In production this click would create a secure-payment-confirmation PaymentRequest using issuer-provided challenge and credential IDs.', 'success');
   });
 
   document.getElementById('btn-standard').addEventListener('click', () => {

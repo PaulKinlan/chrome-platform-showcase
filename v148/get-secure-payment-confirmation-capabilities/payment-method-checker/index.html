@@ -161,7 +161,7 @@
     .step-result.ok  { color: var(--accent-emerald); }
     .step-result.fail{ color: var(--accent-rose); }
 
-    .simulate-btn {
+    .run-btn {
       padding: 0.5rem 1.2rem;
       font-family: var(--font-mono);
       font-size: 0.78rem;
@@ -171,7 +171,7 @@
       cursor: pointer;
       margin-top: 0.5rem;
     }
-    .simulate-btn:hover { background: var(--text-black); color: var(--bg-paper); border-color: var(--text-black); }
+    .run-btn:hover { background: var(--text-black); color: var(--bg-paper); border-color: var(--text-black); }
   </style>
 </head>
 <body>
@@ -181,7 +181,7 @@
   <header class="lede-block">
     <p class="eyebrow">v148 · Web APIs · Payment</p>
     <h1>Payment Method Checker</h1>
-    <p class="lede">An e-commerce checkout that uses <code>getSecurePaymentConfirmationCapabilities()</code> to probe every available payment method before showing the UI — then simulates graceful degradation when SPC is unavailable.</p>
+    <p class="lede">An e-commerce checkout that probes SPC and Payment Request availability before showing payment UI, then records which real browser path is available on this device.</p>
   </header>
 
   <!-- ── Checkout card ── -->
@@ -251,17 +251,17 @@
 
   </div>
 
-  <!-- ── Checkout simulation ── -->
-  <p class="section-head">Simulate checkout flow</p>
-  <p style="font-size:0.85rem;color:var(--text-charcoal);margin-bottom:0.75rem;line-height:1.5;">Run capabilities check first, then simulate a checkout to see SPC used (or gracefully degraded to standard card form).</p>
-  <button class="simulate-btn" id="simulate-btn">Simulate checkout</button>
+  <!-- ── Checkout decision ── -->
+  <p class="section-head">Run checkout decision</p>
+  <p style="font-size:0.85rem;color:var(--text-charcoal);margin-bottom:0.75rem;line-height:1.5;">Run the capability checks first, then choose the payment path this browser actually supports.</p>
+  <button class="run-btn" id="run-btn">Run checkout decision</button>
 
   <ol class="flow-steps" id="flow-steps">
     <li class="flow-step" id="step-1">
       <span class="step-num"></span>
       <div class="step-body">
         <div class="step-title">Check SPC capabilities</div>
-        <div class="step-desc">Call <code>PaymentRequest.getSecurePaymentConfirmationCapabilities()</code></div>
+        <div class="step-desc">Call <code>securePaymentConfirmationAvailability()</code> or the older capabilities method when present.</div>
         <div class="step-result" id="sr-1"></div>
       </div>
     </li>
@@ -310,43 +310,52 @@
 
   function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  async function readSpcAvailability() {
+    const result = {
+      apiAvailable: false,
+      availability: 'unavailable-feature-not-enabled',
+      spcSupported: false,
+      uvpa: false,
+      raw: null,
+    };
+    if (typeof PaymentRequest !== 'undefined' &&
+        typeof PaymentRequest.securePaymentConfirmationAvailability === 'function') {
+      result.apiAvailable = true;
+      result.availability = await PaymentRequest.securePaymentConfirmationAvailability();
+      result.spcSupported = result.availability === 'available';
+    } else if (typeof PaymentRequest !== 'undefined' &&
+        typeof PaymentRequest.getSecurePaymentConfirmationCapabilities === 'function') {
+      result.apiAvailable = true;
+      result.raw = await PaymentRequest.getSecurePaymentConfirmationCapabilities();
+      result.spcSupported = Boolean(result.raw.spcSupported);
+      result.availability = result.spcSupported ? 'available' : 'unavailable-unknown-reason';
+    }
+    if (typeof PublicKeyCredential !== 'undefined' &&
+        typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function') {
+      result.uvpa = await PublicKeyCredential
+        .isUserVerifyingPlatformAuthenticatorAvailable()
+        .catch(() => false);
+    }
+    return result;
+  }
+
   /* ── Capabilities check ── */
   document.getElementById('check-btn').addEventListener('click', async () => {
     const btn = document.getElementById('check-btn');
     btn.disabled = true;
     btn.textContent = 'Checking…';
 
-    // Probe the API
-    const apiAvail = 'PaymentRequest' in window && 'getSecurePaymentConfirmationCapabilities' in PaymentRequest;
+    const spc = await readSpcAvailability();
+    const apiAvail = spc.apiAvailable;
     document.getElementById('cp-api').textContent = apiAvail ? 'yes' : 'no (not in this browser)';
     document.getElementById('cp-api').className   = 'caps-val ' + (apiAvail ? 'green' : 'red');
 
-    let spcSupported = false;
-    let authAttach = null;
-    let uvpa = false;
+    const spcSupported = spc.spcSupported;
+    const authAttach = spc.raw?.authenticatorAttachment || (spc.uvpa ? 'platform' : null);
+    const uvpa = spc.uvpa;
+    capsResult = spc;
 
-    if (apiAvail) {
-      try {
-        const caps = await PaymentRequest.getSecurePaymentConfirmationCapabilities();
-        spcSupported = caps.spcSupported;
-        authAttach   = caps.authenticatorAttachment || null;
-        uvpa = !!(caps.userVerifyingPlatformAuthenticatorAvailable);
-        capsResult = caps;
-      } catch (e) {
-        capsResult = null;
-      }
-    } else {
-      // Probe platform authenticator via PublicKeyCredential
-      if (window.PublicKeyCredential && PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) {
-        uvpa = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().catch(() => false);
-        if (uvpa) {
-          spcSupported = true;
-          authAttach = 'platform';
-        }
-      }
-    }
-
-    document.getElementById('cp-spc').textContent  = String(spcSupported);
+    document.getElementById('cp-spc').textContent  = spc.availability;
     document.getElementById('cp-spc').className    = 'caps-val ' + (spcSupported ? 'green' : 'red');
     document.getElementById('cp-auth').textContent = authAttach || 'null';
     document.getElementById('cp-auth').className   = 'caps-val ' + (authAttach ? 'green' : '');
@@ -360,7 +369,7 @@
     const prAvail = 'PaymentRequest' in window;
     probeMethod('mc-basic', 'ms-basic', prAvail, 'PaymentRequest API');
     await delay(300);
-    probeMethod('mc-gpay', 'ms-gpay', false, 'Not detectable without user gesture');
+    probeMethod('mc-gpay', 'ms-gpay', false, 'PaymentRequest availability not established for this method');
     await delay(300);
     probeMethod('mc-apay', 'ms-apay', false, 'Safari / iOS only — unavailable in Chrome');
 
@@ -382,8 +391,8 @@
     }
   }
 
-  /* ── Checkout simulation ── */
-  document.getElementById('simulate-btn').addEventListener('click', async () => {
+  /* ── Checkout decision ── */
+  document.getElementById('run-btn').addEventListener('click', async () => {
     if (!checked) {
       // Auto-check first
       document.getElementById('check-btn').click();
@@ -400,8 +409,8 @@
     document.getElementById('sr-1').textContent = '';
     await delay(700);
     document.getElementById('sr-1').textContent = spcOk
-      ? '✓ getSecurePaymentConfirmationCapabilities() → spcSupported: true'
-      : '→ spcSupported: false — will use fallback method';
+      ? '✓ securePaymentConfirmationAvailability() → available'
+      : `→ ${document.getElementById('cp-spc').textContent} — will use fallback method`;
     document.getElementById('sr-1').className = 'step-result ' + (spcOk ? 'ok' : 'fail');
     document.getElementById('step-1').classList.remove('active');
     document.getElementById('step-1').classList.add('done');
@@ -424,7 +433,7 @@
     document.getElementById('step-3').classList.add('active');
     await delay(900);
     document.getElementById('sr-3').textContent = spcOk
-      ? '→ Browser-native SPC dialog shown with transaction amount (£29.00) and merchant name'
+      ? '→ SPC is available; merchant can construct secure-payment-confirmation PaymentRequest with issuer challenge'
       : '→ Standard card entry form shown (no biometric prompt)';
     document.getElementById('sr-3').className = 'step-result ' + (spcOk ? 'ok' : '');
     document.getElementById('step-3').classList.remove('active');
@@ -435,7 +444,9 @@
     // Step 4
     document.getElementById('step-4').classList.add('active');
     await delay(700);
-    document.getElementById('sr-4').textContent = '✓ Payment complete — order confirmed (simulated)';
+    document.getElementById('sr-4').textContent = spcOk
+      ? '✓ SPC-capable path selected; server should now mint a payment challenge'
+      : '✓ Fallback card path selected for this browser';
     document.getElementById('sr-4').className = 'step-result ok';
     document.getElementById('step-4').classList.remove('active');
     document.getElementById('step-4').classList.add('done');
