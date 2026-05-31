@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Passkey Cleanup Flow — WebAuthn Signal API — Chrome 132 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    /* ── state ── */
+    .state-display {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      margin: var(--space-4) 0;
+      padding: var(--space-4);
+    }
+    .sd-title {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: var(--space-3);
+    }
+    .cred-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+    .cred-row {
+      display: flex;
+      gap: var(--space-3);
+      align-items: center;
+      padding: var(--space-2) var(--space-3);
+      border: 2px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      background: var(--bg-stone);
+      flex-wrap: wrap;
+    }
+    .cred-id { flex: 1; min-width: 140px; color: var(--text-charcoal); }
+    .cred-state-badge {
+      padding: 0.15rem 0.45rem;
+      font-size: 0.7rem;
+    }
+    .state-valid    { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .state-invalid  { background: var(--accent-rose); color: var(--bg-ivory); }
+    .state-unknown  { background: #b87b00; color: var(--bg-ivory); }
+    .state-deleted  { background: var(--bg-stone); color: var(--text-muted); text-decoration: line-through; border: 1px solid var(--border-black); }
+    .cred-user { color: var(--text-muted); }
+
+    /* ── control panel ── */
+    .controls {
+      display: flex;
+      gap: var(--space-3);
+      flex-wrap: wrap;
+      margin: var(--space-4) 0;
+    }
+    .ctrl-btn {
+      padding: 0.45rem 0.9rem;
+      border: 2px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+    .ctrl-btn.primary  { background: var(--text-black); color: var(--bg-ivory); }
+    .ctrl-btn.danger   { background: var(--accent-rose); color: var(--bg-ivory); }
+    .ctrl-btn.secondary{ background: var(--bg-ivory); color: var(--text-black); }
+
+    /* ── event log ── */
+    .event-log {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.7;
+      max-height: 200px;
+      overflow-y: auto;
+      margin: var(--space-3) 0;
+    }
+    .log-entry { border-bottom: 1px solid var(--border-black); padding: 2px 0; }
+    .log-time { color: var(--text-muted); }
+    .log-ok { color: var(--accent-emerald); }
+    .log-err { color: var(--accent-rose); }
+    .log-info { color: var(--text-charcoal); }
+    .log-signal { color: var(--accent-blue); font-weight: 600; }
+
+    /* ── server sync ── */
+    .sync-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    @media (max-width: 600px) { .sync-grid { grid-template-columns: 1fr; } }
+    .sync-panel {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+    }
+    .sync-header {
+      padding: var(--space-2) var(--space-3);
+      background: var(--bg-stone);
+      border-bottom: 2px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .sync-body {
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.7;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebAuthn Signal API</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo · v132</p>
+    <h1>Passkey Cleanup Flow</h1>
+    <p class="lede">The WebAuthn Signal API lets servers tell the browser which passkeys are still valid. When a credential is deleted server-side, calling <code>PublicKeyCredential.signalUnknownCredential()</code> tells Chrome's password manager to remove the stale passkey from the OS keystore — no user interaction needed. Simulate the full cleanup lifecycle below.</p>
+  </header>
+
+  <!-- Credential list -->
+  <div class="state-display">
+    <div class="sd-title">Simulated passkey store (browser OS keystore)</div>
+    <div class="cred-list" id="credList"></div>
+  </div>
+
+  <div class="controls">
+    <button class="ctrl-btn primary" id="btnRegister">+ Register new passkey</button>
+    <button class="ctrl-btn danger"  id="btnDelete">Delete selected from server</button>
+    <button class="ctrl-btn secondary" id="btnSignalUnknown">Signal unknown (cleanup)</button>
+    <button class="ctrl-btn secondary" id="btnSignalAll">Signal all valid</button>
+    <button class="ctrl-btn secondary" id="btnReset">Reset</button>
+  </div>
+
+  <div class="event-log" id="eventLog"><span style="color:var(--text-muted)">Register a passkey to start…</span></div>
+
+  <h3 style="font-family:var(--font-mono);font-size:0.85rem;text-transform:uppercase;letter-spacing:0.08em;margin:var(--space-5) 0 var(--space-2)">Server-side sync state</h3>
+  <div class="sync-grid">
+    <div class="sync-panel">
+      <div class="sync-header">Server credential database</div>
+      <div class="sync-body" id="serverDb"><span style="color:var(--text-muted)">(empty)</span></div>
+    </div>
+    <div class="sync-panel">
+      <div class="sync-header">Signal API calls made</div>
+      <div class="sync-body" id="signalLog"><span style="color:var(--text-muted)">(none)</span></div>
+    </div>
+  </div>
+
+  <pre><code>// Server: user deleted their passkey from account settings
+// → Tell the browser to clean up
+async function notifyBrowserOfDeletion(credentialId) {
+  await PublicKeyCredential.signalUnknownCredential({
+    rpId: window.location.hostname,
+    credentialId: credentialId
+  });
+  // Browser's OS keystore now removes this passkey
+  // User won't be offered a broken passkey on next sign-in
+}
+
+// Server: list all valid credentials after sign-in
+// → Sync the full set so browser can prune stale entries
+async function syncAllCredentials(userCredentials) {
+  await PublicKeyCredential.signalAllAcceptedCredentials({
+    rpId: window.location.hostname,
+    userId: new Uint8Array(btoa(userId).split('').map(c => c.charCodeAt(0))),
+    allAcceptedCredentialIds: userCredentials.map(c => c.id)
+  });
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../webauthn-signal/">WebAuthn Signal</a></li>
+      <li><a href="../credential-lifecycle/">Credential lifecycle</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  let credentials = [];   // { id, userId, userName, state: 'valid'|'invalid'|'unknown' }
+  let selectedId  = null;
+  let signalCalls = [];
+  let logCount    = 0;
+  let credCounter = 0;
+
+  function ts() { return new Date().toLocaleTimeString([], { hour12: false }); }
+
+  function addLog(cls, msg) {
+    const log = document.getElementById('eventLog');
+    if (logCount === 0) log.innerHTML = '';
+    logCount++;
+    const e = document.createElement('div');
+    e.className = 'log-entry';
+    e.innerHTML = `<span class="log-time">[${ts()}]</span> <span class="log-${cls}">${msg}</span>`;
+    log.appendChild(e);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function renderCreds() {
+    const list = document.getElementById('credList');
+    if (!credentials.length) {
+      list.innerHTML = '<div style="font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted)">No passkeys registered yet.</div>';
+      return;
+    }
+    list.innerHTML = credentials.map(c => {
+      const stateClass = {
+        valid: 'state-valid', invalid: 'state-invalid',
+        unknown: 'state-unknown', deleted: 'state-deleted'
+      }[c.state];
+      const selected = c.id === selectedId ? 'outline:3px solid var(--text-black);outline-offset:-3px;' : '';
+      return `<div class="cred-row" style="${selected}cursor:pointer" onclick="selectCred('${c.id}')">
+        <span class="cred-id">${c.id}</span>
+        <span class="cred-user">${c.userName}</span>
+        <span class="cred-state-badge ${stateClass}">${c.state}</span>
+      </div>`;
+    }).join('');
+  }
+
+  function renderServerDb() {
+    const validCreds = credentials.filter(c => c.state !== 'deleted');
+    const el = document.getElementById('serverDb');
+    if (!validCreds.length) {
+      el.innerHTML = '<span style="color:var(--text-muted)">(empty)</span>';
+      return;
+    }
+    el.innerHTML = validCreds.map(c =>
+      `<div style="font-family:var(--font-mono);font-size:0.75rem;margin-bottom:4px">
+        <span style="color:var(--text-muted)">${c.state === 'invalid' ? '❌' : '✓'}</span>
+        ${c.id} <span style="color:var(--text-muted)">(${c.userName})</span>
+      </div>`
+    ).join('');
+  }
+
+  function renderSignalLog() {
+    const el = document.getElementById('signalLog');
+    if (!signalCalls.length) {
+      el.innerHTML = '<span style="color:var(--text-muted)">(none)</span>';
+      return;
+    }
+    el.innerHTML = signalCalls.map(s =>
+      `<div style="font-family:var(--font-mono);font-size:0.75rem;margin-bottom:4px;color:var(--accent-blue)">${s}</div>`
+    ).join('');
+  }
+
+  function renderAll() {
+    renderCreds();
+    renderServerDb();
+    renderSignalLog();
+  }
+
+  window.selectCred = function(id) {
+    selectedId = id;
+    renderAll();
+  };
+
+  document.getElementById('btnRegister').addEventListener('click', () => {
+    credCounter++;
+    const id = 'cred-' + Math.random().toString(36).slice(2, 8).toUpperCase();
+    const userName = ['alice@example.com', 'bob@example.com', 'carol@example.com'][credCounter % 3];
+    credentials.push({ id, userId: 'user-' + credCounter, userName, state: 'valid' });
+    addLog('ok', `Registered passkey ${id} for ${userName}`);
+    selectedId = id;
+    renderAll();
+  });
+
+  document.getElementById('btnDelete').addEventListener('click', () => {
+    if (!selectedId) { addLog('err', 'Select a credential first'); return; }
+    const cred = credentials.find(c => c.id === selectedId);
+    if (!cred) return;
+    cred.state = 'invalid';
+    addLog('info', `Server deleted ${cred.id} — now in invalid state (browser not yet notified)`);
+    renderAll();
+  });
+
+  document.getElementById('btnSignalUnknown').addEventListener('click', async () => {
+    const invalidCreds = credentials.filter(c => c.state === 'invalid');
+    if (!invalidCreds.length) {
+      addLog('err', 'No invalid (server-deleted) credentials to signal');
+      return;
+    }
+    for (const cred of invalidCreds) {
+      const call = `signalUnknownCredential({ rpId: "...", credentialId: "${cred.id}" })`;
+      signalCalls.push(call);
+      addLog('signal', `PublicKeyCredential.signalUnknownCredential(${cred.id})`);
+
+      if (typeof PublicKeyCredential !== 'undefined' &&
+          typeof PublicKeyCredential.signalUnknownCredential === 'function') {
+        try {
+          await PublicKeyCredential.signalUnknownCredential({
+            rpId: window.location.hostname,
+            credentialId: cred.id
+          });
+          addLog('ok', `Browser notified — passkey ${cred.id} will be removed from OS keystore`);
+        } catch (e) {
+          addLog('err', `Signal failed: ${e.message}`);
+        }
+      } else {
+        addLog('info', `(Simulated — real signalUnknownCredential not available here)`);
+      }
+      cred.state = 'deleted';
+    }
+    renderAll();
+  });
+
+  document.getElementById('btnSignalAll').addEventListener('click', async () => {
+    const validIds = credentials.filter(c => c.state === 'valid').map(c => c.id);
+    const call = `signalAllAcceptedCredentials({ credentialIds: [${validIds.join(', ')}] })`;
+    signalCalls.push(call);
+    addLog('signal', `PublicKeyCredential.signalAllAcceptedCredentials([${validIds.length} IDs])`);
+    addLog('info', `Browser will remove any passkeys NOT in this list from the OS keystore`);
+
+    if (typeof PublicKeyCredential !== 'undefined' &&
+        typeof PublicKeyCredential.signalAllAcceptedCredentials === 'function') {
+      try {
+        await PublicKeyCredential.signalAllAcceptedCredentials({
+          rpId: window.location.hostname,
+          userId: new Uint8Array(8),
+          allAcceptedCredentialIds: validIds
+        });
+      } catch (e) {
+        addLog('err', 'Signal failed: ' + e.message);
+      }
+    }
+    renderAll();
+  });
+
+  document.getElementById('btnReset').addEventListener('click', () => {
+    credentials = [];
+    selectedId  = null;
+    signalCalls = [];
+    logCount    = 0;
+    document.getElementById('eventLog').innerHTML = '<span style="color:var(--text-muted)">Register a passkey to start…</span>';
+    renderAll();
+  });
+
+  renderAll();
+</script>
+</body>
+</html>
