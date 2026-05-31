@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Protocol Decoder — BYOB min — Chrome 140 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .frames { display: grid; gap: var(--space-2); }
+    .frame { display: grid; grid-template-columns: 60px 100px 1fr; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--border-black); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.82rem; }
+    .frame .len { color: var(--accent-blue); font-weight: bold; }
+    .frame .type { color: var(--accent-emerald); }
+    .frame.bad { background: color-mix(in srgb, var(--accent-rose) 14%, transparent); }
+    .controls { display: flex; gap: var(--space-2); margin: var(--space-3) 0; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; BYOB min option</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v140</p>
+    <h1>Protocol Decoder</h1>
+    <p class="lede">A length-prefixed binary protocol — every frame starts with a 4-byte big-endian length, then a 4-byte type, then payload. With <code>min</code> you can read the header in a single call: <code>read(buf, {min: 8})</code>. Then read exactly the payload bytes the header announced. No fragment reassembly.</p>
+  </header>
+
+  <div class="stage">
+    <div class="controls">
+      <button id="run">Decode 6 frames</button>
+    </div>
+    <div class="frames" id="out"></div>
+  </div>
+
+  <pre><code>// Length-prefixed frame decoder using min.
+async function readFrame(reader) {
+  const hdr = new Uint8Array(8);
+  await reader.read(hdr, { min: 8 });          // single header read
+  const len = new DataView(hdr.buffer).getUint32(0, false);
+  const type = new DataView(hdr.buffer).getUint32(4, false);
+  const body = new Uint8Array(len);
+  await reader.read(body, { min: len });        // single body read
+  return { type, body };
+}
+</code></pre>
+
+  <section>
+    <h2>pre-140 pain</h2>
+    <p>Without <code>min</code> you'd build a "fill exactly N bytes" helper around a while loop — handling partial reads, leftover bytes, EOF mid-read. Cute the first time. Annoying when you have ten protocol types and each one needs custom unwinding for the EOF case.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">BYOB min option</a> — feature index</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  function buildFrame(type, payload) {
+    const buf = new Uint8Array(8 + payload.length);
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(0, payload.length, false);
+    dv.setUint32(4, type, false);
+    buf.set(payload, 8);
+    return buf;
+  }
+
+  function decoderStream() {
+    const frames = [
+      buildFrame(0x01, new TextEncoder().encode('hello there')),
+      buildFrame(0x02, new TextEncoder().encode('binary payload here that is bigger and contains slightly more bytes than the others to demonstrate variable lengths')),
+      buildFrame(0x03, new Uint8Array([0xde, 0xad, 0xbe, 0xef])),
+      buildFrame(0x01, new TextEncoder().encode('second hello')),
+      buildFrame(0xff, new TextEncoder().encode('keepalive ping')),
+      buildFrame(0x02, new Uint8Array(64)),
+    ];
+    const wire = new Uint8Array(frames.reduce((a, b) => a + b.length, 0));
+    let off = 0;
+    for (const f of frames) { wire.set(f, off); off += f.length; }
+    // Chunk into random sizes.
+    let i = 0;
+    return new ReadableStream({
+      pull(c) {
+        if (i >= wire.length) { c.close(); return; }
+        const size = 6 + Math.floor(Math.random() * 24);
+        c.enqueue(wire.subarray(i, Math.min(wire.length, i + size)));
+        i += size;
+      },
+      type: 'bytes',
+    });
+  }
+
+  async function readFrame(reader) {
+    const hdr = new Uint8Array(8);
+    let res = await reader.read(hdr, { min: 8 });
+    if (res.done) return null;
+    const dv = new DataView(res.value.buffer, res.value.byteOffset, res.value.byteLength);
+    const len = dv.getUint32(0, false);
+    const type = dv.getUint32(4, false);
+    if (len > 0) {
+      const body = new Uint8Array(len);
+      res = await reader.read(body, { min: len });
+      return { type, body: res.value };
+    }
+    return { type, body: new Uint8Array(0) };
+  }
+
+  document.getElementById('run').addEventListener('click', async () => {
+    const stream = decoderStream();
+    const reader = stream.getReader({ mode: 'byob' });
+    const out = document.getElementById('out');
+    out.innerHTML = '';
+    let n = 0;
+    while (true) {
+      try {
+        const f = await readFrame(reader);
+        if (!f) break;
+        n++;
+        const decoded = new TextDecoder().decode(f.body).replace(/[\x00-\x1f]/g, '·');
+        const div = document.createElement('div');
+        div.className = 'frame';
+        div.innerHTML = `<span>#${n}</span><span class="type">0x${f.type.toString(16).padStart(8, '0')}</span><span><b class="len">${f.body.byteLength}B</b> ${decoded.slice(0, 80)}</span>`;
+        out.appendChild(div);
+      } catch (e) {
+        const div = document.createElement('div');
+        div.className = 'frame bad';
+        div.textContent = 'decode error: ' + e.message;
+        out.appendChild(div);
+        break;
+      }
+    }
+  });
+</script>
+</body>
+</html>
