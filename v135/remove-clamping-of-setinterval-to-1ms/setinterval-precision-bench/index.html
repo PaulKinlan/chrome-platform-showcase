@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>setInterval precision bench — sub-ms clamp removal — Chrome 135</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; }
+    .pill { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; padding: 0.2rem 0.55rem; border: 1px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); }
+    .pill.ok { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .pill.bad { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0; }
+    @media (max-width: 640px) { .controls { grid-template-columns: 1fr; } }
+    label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); display: flex; flex-direction: column; gap: 0.3rem; }
+    input[type=range] { width: 100%; }
+    canvas { width: 100%; height: 200px; background: var(--bg-paper); border: 2px solid var(--border-black); display: block; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-3); margin: var(--space-3) 0; }
+    .stats div { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; }
+    .stats strong { display: block; font-size: 1.2rem; color: var(--text-black); }
+    @media (max-width: 640px) { .stats { grid-template-columns: 1fr 1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; setInterval clamp removal</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v135</p>
+    <h1>setInterval precision bench</h1>
+    <p class="lede">Pick a target interval below 1ms and let the bench fire <code>setInterval</code> for two seconds. The histogram shows how close to your target the browser actually delivered &mdash; with the legacy 1ms clamp, every sub-ms request gets rounded up; with the Chrome 135 removal, the bucket peak shifts to 0&ndash;0.9ms.</p>
+  </header>
+
+  <div class="stage">
+    <div class="row">
+      <span class="pill" id="cap">setInterval: yes (always)</span>
+      <span class="pill" id="cap-clamp">1ms clamp removed: ?</span>
+    </div>
+    <div class="controls">
+      <label>target interval (ms)
+        <input type="range" id="target" min="0" max="3" step="0.1" value="0.5">
+        <span style="font-family:var(--font-mono);font-size:0.78rem;" id="targetVal">0.5 ms</span>
+      </label>
+      <label>run length (ms)
+        <input type="range" id="dur" min="500" max="3000" step="100" value="2000">
+        <span style="font-family:var(--font-mono);font-size:0.78rem;" id="durVal">2000 ms</span>
+      </label>
+    </div>
+    <div class="row">
+      <button id="run">run bench</button>
+    </div>
+    <canvas id="hist" width="600" height="200"></canvas>
+    <div class="stats">
+      <div><strong id="reqs">0</strong> ticks recorded</div>
+      <div><strong id="med">&mdash;</strong> median Δ ms</div>
+      <div><strong id="min">&mdash;</strong> minimum Δ ms</div>
+      <div><strong id="max">&mdash;</strong> maximum Δ ms</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../setinterval-clamp/">Clamp basics</a></li>
+      <li><a href="../sub-ms-loop/">Sub-ms loop</a></li>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="https://chromestatus.com/feature/5128576792182784" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+const target = document.getElementById("target");
+const dur = document.getElementById("dur");
+const targetVal = document.getElementById("targetVal");
+const durVal = document.getElementById("durVal");
+target.addEventListener("input", () => targetVal.textContent = target.value + " ms");
+dur.addEventListener("input", () => durVal.textContent = dur.value + " ms");
+
+// detect clamp removal: run a quick probe at 0.1ms
+const capClamp = document.getElementById("cap-clamp");
+let probeMin = Infinity;
+let probeLast = performance.now();
+const probeId = setInterval(() => {
+  const now = performance.now();
+  const d = now - probeLast;
+  if (d > 0) probeMin = Math.min(probeMin, d);
+  probeLast = now;
+}, 0.1);
+setTimeout(() => {
+  clearInterval(probeId);
+  const removed = probeMin < 0.95;
+  capClamp.textContent = "1ms clamp removed: " + (removed ? "yes" : "no");
+  capClamp.classList.add(removed ? "ok" : "bad");
+}, 400);
+
+const canvas = document.getElementById("hist");
+const ctx = canvas.getContext("2d");
+
+document.getElementById("run").addEventListener("click", () => {
+  const t = parseFloat(target.value);
+  const d = parseFloat(dur.value);
+  const deltas = [];
+  let last = performance.now();
+  const id = setInterval(() => {
+    const now = performance.now();
+    deltas.push(now - last);
+    last = now;
+  }, t);
+  setTimeout(() => {
+    clearInterval(id);
+    render(deltas, t);
+  }, d);
+});
+
+function pct(arr, p) { return arr[Math.floor((arr.length - 1) * p)]; }
+
+function render(deltas, target) {
+  document.getElementById("reqs").textContent = deltas.length;
+  if (!deltas.length) return;
+  const sorted = deltas.slice().sort((a, b) => a - b);
+  document.getElementById("med").textContent = pct(sorted, 0.5).toFixed(2);
+  document.getElementById("min").textContent = sorted[0].toFixed(2);
+  document.getElementById("max").textContent = sorted[sorted.length - 1].toFixed(2);
+
+  const max = 4, bins = 40, step = max / bins;
+  const bk = new Array(bins).fill(0);
+  for (const v of deltas) {
+    const i = Math.min(bins - 1, Math.floor(v / step));
+    bk[i]++;
+  }
+  const W = canvas.width, H = canvas.height;
+  ctx.fillStyle = "#fdfcf8";
+  ctx.fillRect(0, 0, W, H);
+  const peak = Math.max(...bk);
+  bk.forEach((b, i) => {
+    const x = (i / bins) * W;
+    const w = W / bins;
+    const h = (b / peak) * (H - 30);
+    ctx.fillStyle = (i * step >= 1) ? "#d11a2a" : "#0a8f5c";
+    ctx.fillRect(x + 1, H - 20 - h, w - 2, h);
+  });
+  // target marker
+  ctx.strokeStyle = "#0022ff";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo((target / max) * W, 0);
+  ctx.lineTo((target / max) * W, H);
+  ctx.stroke();
+  ctx.fillStyle = "#000";
+  ctx.font = "11px JetBrains Mono, monospace";
+  ctx.fillText("0", 2, H - 5);
+  ctx.fillText("1ms (legacy clamp)", (1 / max) * W + 6, 12);
+  ctx.fillText("target " + target + "ms", (target / max) * W + 4, 26);
+  ctx.fillText("4ms", W - 24, H - 5);
+}
+</script>
+</body>
+</html>
