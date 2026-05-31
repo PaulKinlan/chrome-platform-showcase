@@ -49,7 +49,7 @@
   <header class="lede-block">
     <p class="eyebrow">v148 · Origin Trial · Identity</p>
     <h1>Session State Inspector</h1>
-    <p class="lede">Simulate the full FedCM agentic-login token lifecycle — IdP discovery, account selection, token issuance, silent token refresh, and session revocation — to understand how an agentic browser manages federated identity state without DOM actuation.</p>
+    <p class="lede">Inspect a live FedCM-shaped token lifecycle against the showcase backend — IdP session setup, config discovery, accounts endpoint, assertion token issuance, server-side validation, refresh, and revocation.</p>
   </header>
 
   <section>
@@ -66,18 +66,17 @@
         <div class="token-visual" id="token-visual">No token.</div>
 
         <div class="btn-row" style="margin-top:1rem;">
-          <button class="primary" id="btn-login">Sign in (FedCM)</button>
-          <button id="btn-refresh" disabled>Silent refresh</button>
+          <button class="primary" id="btn-login">Get identity token</button>
+          <button id="btn-refresh" disabled>Refresh token</button>
           <button class="danger" id="btn-revoke" disabled>Revoke session</button>
         </div>
       </div>
 
       <div class="session-panel">
-        <h3>Choose Identity Provider</h3>
+        <h3>Choose IdP account</h3>
         <div class="provider-select" id="provider-select">
-          <button class="provider-btn selected" data-idp="accounts.google.com">Google</button>
-          <button class="provider-btn" data-idp="accounts.facebook.com">Facebook</button>
-          <button class="provider-btn" data-idp="idp.example.com">Example IdP</button>
+          <button class="provider-btn selected" data-account="alice-001">Alice</button>
+          <button class="provider-btn" data-account="casey-002">Casey</button>
         </div>
 
         <h3 style="margin-top:1rem;">Token Lifecycle</h3>
@@ -96,12 +95,12 @@
         </div>
 
         <h3 style="margin-top:1rem;">What an agent does</h3>
-        <p style="font-size:0.82rem;color:var(--text-charcoal);line-height:1.5;">Rather than scripting clicks on an IdP's login button, an agentic browser calls <code>navigator.credentials.get({ identity: { providers: [...] } })</code> — the browser handles account picking, token issuance, and mediation. The agent only sees the resulting <code>IdentityCredential.token</code>.</p>
+        <p style="font-size:0.82rem;color:var(--text-charcoal);line-height:1.5;">The primary button first tries <code>navigator.credentials.get({ identity: ... })</code>. If this browser or origin cannot run FedCM, it calls the same IdP endpoints directly and clearly labels the endpoint trace.</p>
       </div>
     </div>
 
     <h3 style="font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted);margin-bottom:0.5rem;">Event Log</h3>
-    <div class="event-log" id="event-log"><div class="entry"><span class="ts">[ready]</span> Inspector loaded. Click "Sign in" to begin.</div></div>
+    <div class="event-log" id="event-log"><div class="entry"><span class="ts">[ready]</span> Inspector loaded. Click "Get identity token" to begin.</div></div>
   </section>
 
   <section>
@@ -110,11 +109,12 @@
 const cred = await navigator.credentials.get({
   identity: {
     providers: [{
-      configURL: 'https://accounts.google.com/fedcm.json',
-      clientId: 'CLIENT_ID',
-      nonce: crypto.randomUUID(),
+      configURL: location.origin + '/v148/agentic-federated-login/fedcm/config.json',
+      clientId: 'chrome-platform-showcase',
+      fields: ['name', 'email', 'picture'],
+      params: { nonce: crypto.randomUUID(), scope: 'openid email profile' },
+      mode: 'active',
     }],
-    mode: 'active',   // allow without prior gesture in agentic context
   }
 });
 
@@ -135,16 +135,14 @@ console.log(cred.token);  // eyJhbGci...</code></pre>
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 <script>
-  const ACCOUNTS = {
-    'accounts.google.com': { name: 'alex@gmail.com', sub: 'g-1829374' },
-    'accounts.facebook.com': { name: 'alex.smith@fb.com', sub: 'fb-9283746' },
-    'idp.example.com': { name: 'alex@example.com', sub: 'ex-5647382' },
-  };
+  const FEDCM_BASE = '/v148/agentic-federated-login/fedcm';
+  const CLIENT_ID = 'chrome-platform-showcase';
 
-  let selectedIdp = 'accounts.google.com';
+  let selectedAccount = 'alice-001';
   let state = 'signed-out';
   let refreshCount = 0;
-  let tokenExpiry = null;
+  let currentToken = null;
+  let currentPayload = null;
 
   const statusBadge = document.getElementById('status-badge');
   const fieldIdp = document.getElementById('field-idp');
@@ -167,24 +165,44 @@ console.log(cred.token);  // eyJhbGci...</code></pre>
     eventLog.scrollTop = eventLog.scrollHeight;
   }
 
+  async function readJson(response) {
+    const data = await response.json();
+    return { ok: response.ok, status: response.status, data };
+  }
+
+  async function postJson(path, body = {}) {
+    const response = await fetch(`${FEDCM_BASE}${path}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return await readJson(response);
+  }
+
+  async function getJson(path) {
+    const response = await fetch(`${FEDCM_BASE}${path}`, { credentials: 'same-origin' });
+    return await readJson(response);
+  }
+
+  function decodeJwtPayload(token) {
+    const payload = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = payload + '==='.slice((payload.length + 3) % 4);
+    return JSON.parse(atob(padded));
+  }
+
+  function tokenFromCredential(credential) {
+    if (!credential) return null;
+    if (typeof credential.token === 'string') return credential.token;
+    if (credential.token?.access_token) return credential.token.access_token;
+    return credential.token ? JSON.stringify(credential.token) : null;
+  }
+
   function setLcStep(active) {
     for (let i = 1; i <= 6; i++) {
       const dot = document.getElementById('lc-' + i);
       dot.className = 'lc-dot' + (i < active ? ' done' : i === active ? ' active' : '');
     }
-  }
-
-  function makeToken(idp, sub) {
-    const header = btoa(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).replace(/=/g, '');
-    const payload = btoa(JSON.stringify({
-      iss: 'https://' + idp,
-      sub,
-      aud: 'demo-client',
-      iat: Math.floor(Date.now() / 1000),
-      exp: Math.floor(Date.now() / 1000) + 3600,
-      nonce: Math.random().toString(36).slice(2)
-    })).replace(/=/g, '');
-    return `${header}.${payload}.SIG_SIMULATED`;
   }
 
   function setBadge(s) {
@@ -197,72 +215,138 @@ console.log(cred.token);  // eyJhbGci...</code></pre>
     btnRevoke.disabled = s !== 'active';
   }
 
+  async function applyToken(token, source) {
+    const validation = await postJson('/validate', { token });
+    if (!validation.ok) throw new Error(validation.data.error || 'Token validation failed.');
+    currentToken = token;
+    currentPayload = validation.data.payload || decodeJwtPayload(token);
+    refreshCount = Number(currentPayload.refresh_count || refreshCount || 0);
+
+    fieldIdp.textContent = currentPayload.iss;
+    fieldAccount.textContent = currentPayload.email || currentPayload.sub;
+    fieldIssued.textContent = new Date(Number(currentPayload.iat) * 1000).toLocaleTimeString();
+    fieldExpires.textContent = new Date(Number(currentPayload.exp) * 1000).toLocaleTimeString();
+    fieldRefreshes.textContent = String(refreshCount);
+    tokenVisual.textContent = token.slice(0, 96) + '...';
+
+    setBadge('active');
+    setLcStep(4);
+    log(`${source} token validated by /fedcm/validate`, 'success');
+  }
+
+  async function runEndpointTrace() {
+    log('FedCM API unavailable or rejected. Running direct endpoint trace against the same IdP backend.', 'error');
+    setLcStep(1);
+    const login = await postJson(`/login?account=${encodeURIComponent(selectedAccount)}`);
+    if (!login.ok) throw new Error(login.data.error || 'IdP login failed.');
+    log(`IdP session established for ${login.data.account.email}`, 'success');
+
+    const config = await getJson('/config.json');
+    if (!config.ok) throw new Error('Config endpoint failed.');
+    log('Fetched /fedcm/config.json', 'success');
+    setLcStep(2);
+
+    const accounts = await getJson('/accounts');
+    if (!accounts.ok) throw new Error(accounts.data.error || 'Accounts endpoint failed.');
+    const account = accounts.data.accounts[0];
+    log(`Accounts endpoint returned ${account.email}`, 'success');
+
+    const metadata = await getJson('/client-metadata?client_id=' + encodeURIComponent(CLIENT_ID));
+    if (!metadata.ok) throw new Error('Client metadata endpoint failed.');
+    log('Client metadata endpoint returned policy URLs', 'success');
+    setLcStep(3);
+
+    const params = new URLSearchParams({
+      account_id: account.id,
+      client_id: CLIENT_ID,
+      disclosure_text_shown: 'true',
+      disclosure_shown_for: 'name,email,picture',
+      is_auto_selected: 'false',
+      fields: 'name,email,picture',
+      params: JSON.stringify({ nonce: crypto.randomUUID(), scope: 'openid email profile', agent: 'showcase' }),
+    });
+    const assertionResponse = await fetch(`${FEDCM_BASE}/assertion`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: params,
+    });
+    const assertion = await readJson(assertionResponse);
+    if (!assertion.ok) throw new Error(assertion.data.error || 'Assertion endpoint failed.');
+    log('Assertion endpoint issued a signed JWT', 'success');
+    await applyToken(assertion.data.token, 'Endpoint trace');
+  }
+
+  async function runFedCm() {
+    if (!('IdentityCredential' in window) || !navigator.credentials?.get) {
+      await runEndpointTrace();
+      return;
+    }
+    try {
+      await postJson(`/login?account=${encodeURIComponent(selectedAccount)}`);
+      log('Prepared same-origin IdP session cookie for FedCM endpoints');
+      setLcStep(1);
+      const credential = await navigator.credentials.get({
+        identity: {
+          providers: [{
+            configURL: new URL(`${FEDCM_BASE}/config.json`, location.origin).href,
+            clientId: CLIENT_ID,
+            fields: ['name', 'email', 'picture'],
+            params: { nonce: crypto.randomUUID(), scope: 'openid email profile', agent: 'showcase' },
+            mode: 'active',
+          }],
+        },
+      });
+      const token = tokenFromCredential(credential);
+      if (!token) throw new Error('FedCM returned no token.');
+      log('navigator.credentials.get() resolved with an IdentityCredential', 'success');
+      await applyToken(token, 'FedCM');
+    } catch (error) {
+      log(`FedCM rejected: ${error.message || String(error)}`, 'error');
+      await runEndpointTrace();
+    }
+  }
+
   document.querySelectorAll('.provider-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.provider-btn').forEach(b => b.classList.remove('selected'));
       btn.classList.add('selected');
-      selectedIdp = btn.dataset.idp;
-      log(`IdP selection changed to ${selectedIdp}`);
+      selectedAccount = btn.dataset.account;
+      log(`IdP account selection changed to ${selectedAccount}`);
     });
   });
 
   btnLogin.addEventListener('click', async () => {
-    setBadge('signing-in');
-    setLcStep(1);
-    log('navigator.credentials.get() called with identity provider ' + selectedIdp);
-
-    await delay(400);
-    log('Step 1: IdP config fetched from ' + selectedIdp + '/fedcm.json', 'success');
-    setLcStep(2);
-    await delay(500);
-
-    const account = ACCOUNTS[selectedIdp];
-    log(`Step 2: Account "${account.name}" selected from IdP account list`, 'success');
-    setLcStep(3);
-    await delay(400);
-
-    const token = makeToken(selectedIdp, account.sub);
-    const now = new Date();
-    tokenExpiry = new Date(now.getTime() + 3600 * 1000);
-    refreshCount = 0;
-
-    log('Step 3: Token issued (JWT, 1-hour TTL)', 'success');
-    setLcStep(4);
-    await delay(200);
-
-    fieldIdp.textContent = selectedIdp;
-    fieldAccount.textContent = account.name;
-    fieldIssued.textContent = now.toLocaleTimeString();
-    fieldExpires.textContent = tokenExpiry.toLocaleTimeString();
-    fieldRefreshes.textContent = '0';
-    tokenVisual.textContent = token.slice(0, 80) + '…';
-
-    setBadge('active');
-    log('Session active — IdentityCredential.token available to agent', 'success');
-    setLcStep(4);
+    try {
+      setBadge('signing-in');
+      log('Starting FedCM request against showcase IdP endpoints');
+      await runFedCm();
+    } catch (error) {
+      log(error.message || String(error), 'error');
+      setBadge('signed-out');
+      setLcStep(0);
+    }
   });
 
   btnRefresh.addEventListener('click', async () => {
-    log('Silent token refresh requested (no user gesture needed)');
-    setLcStep(5);
-    await delay(600);
-
-    refreshCount++;
-    const account = ACCOUNTS[selectedIdp];
-    const token = makeToken(selectedIdp, account.sub);
-    tokenExpiry = new Date(Date.now() + 3600 * 1000);
-
-    fieldExpires.textContent = tokenExpiry.toLocaleTimeString();
-    fieldRefreshes.textContent = String(refreshCount);
-    tokenVisual.textContent = token.slice(0, 80) + '…';
-    log(`Refresh #${refreshCount} complete — new token with extended expiry`, 'success');
-    setLcStep(4);
+    if (!currentToken) return;
+    try {
+      log('Calling backend /fedcm/refresh with the current signed JWT');
+      setLcStep(5);
+      const refreshed = await postJson('/refresh', { token: currentToken });
+      if (!refreshed.ok) throw new Error(refreshed.data.error || 'Refresh failed.');
+      refreshCount++;
+      await applyToken(refreshed.data.token, 'Refresh');
+    } catch (error) {
+      log(error.message || String(error), 'error');
+      setLcStep(4);
+    }
   });
 
   btnRevoke.addEventListener('click', async () => {
-    log('Revoking session via IdentityCredential.disconnect()');
+    log('Revoking session via backend disconnect endpoint');
     setLcStep(6);
-    await delay(500);
+    await postJson('/disconnect');
 
     fieldIdp.textContent = '—';
     fieldAccount.textContent = '—';
@@ -271,14 +355,13 @@ console.log(cred.token);  // eyJhbGci...</code></pre>
     fieldRefreshes.textContent = '0';
     tokenVisual.textContent = 'No token.';
     refreshCount = 0;
-    tokenExpiry = null;
+    currentToken = null;
+    currentPayload = null;
 
     setBadge('revoked');
-    log('Session revoked — IdP notified via back-channel', 'error');
-    setTimeout(() => { setBadge('signed-out'); setLcStep(0); log('Ready for new sign-in'); }, 1200);
+    log('Session revoked — IdP cookie cleared and token discarded', 'error');
+    setTimeout(() => { setBadge('signed-out'); setLcStep(0); log('Ready for new sign-in'); }, 900);
   });
-
-  function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 </script>
 </body>
 </html>
