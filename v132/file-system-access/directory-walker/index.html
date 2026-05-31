@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Directory walker &mdash; File System Access &mdash; Chrome 132</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; font-family: var(--font-mono); font-size: 0.85rem; }
+    .controls input { font-family: var(--font-mono); border: 2px solid var(--border-black); background: var(--bg-paper); padding: 0.35rem 0.6rem; }
+    .tree { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; max-height: 320px; overflow-y: auto; line-height: 1.6; }
+    .tree .node { padding: 0.1rem 0; cursor: pointer; }
+    .tree .node:hover { background: var(--bg-paper); }
+    .tree .dir { color: var(--accent-blue); font-weight: 700; }
+    .tree .file { color: var(--text-charcoal); }
+    .tree .size { color: var(--text-muted); font-size: 0.72rem; margin-left: 0.5rem; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--space-3); margin: var(--space-3) 0; }
+    .stats .cell { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); }
+    .stats .cell .lbl { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; }
+    .stats .cell .v { font-family: var(--font-display); font-size: 1.5rem; font-weight: 400; }
+    .probe { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.85rem; margin: var(--space-3) 0; }
+    .probe.yes { background: #e8f5ed; border-color: var(--accent-emerald); }
+    .probe.no { background: #fde7e9; border-color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; File System Access</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v132</p>
+    <h1>Walk a directory, recursively, with totals</h1>
+    <p class="lede">Pick a directory. The page recursively walks the tree using <code>for await (const entry of dir.values())</code>, builds a tree view, and totals up file count and bytes &mdash; all client-side, no upload.</p>
+  </header>
+
+  <div id="probe" class="probe">checking support&hellip;</div>
+
+  <section class="stage">
+    <div class="controls">
+      <button id="open">pick a directory</button>
+      <label>filter ext: <input id="filter" value="" placeholder=".md, .ts, etc.">  </label>
+      <label>max depth: <input id="depth" type="number" min="1" max="10" value="3" style="width: 60px;"></label>
+    </div>
+
+    <div class="stats">
+      <div class="cell"><div class="lbl">root</div><div class="v" id="s-root">&mdash;</div></div>
+      <div class="cell"><div class="lbl">files seen</div><div class="v" id="s-files">0</div></div>
+      <div class="cell"><div class="lbl">directories</div><div class="v" id="s-dirs">0</div></div>
+      <div class="cell"><div class="lbl">total bytes</div><div class="v" id="s-bytes">0</div></div>
+    </div>
+
+    <div class="tree" id="tree"><div>pick a directory to walk</div></div>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">File System Access</a> &mdash; feature index</li>
+      <li><a href="../fs-access/">File System Access demo</a></li>
+      <li><a href="../streaming-write/">streaming write</a></li>
+      <li><a href="../handle-permission-flow/">handle permission flow</a></li>
+      <li><a href="https://wicg.github.io/file-system-access/" target="_blank" rel="noopener">spec</a></li>
+      <li><a href="https://chromestatus.com/feature/6284708426022912" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const has = "showDirectoryPicker" in window;
+  document.getElementById("probe").className = "probe " + (has ? "yes" : "no");
+  document.getElementById("probe").textContent = has
+    ? "showDirectoryPicker available; pick a directory to begin"
+    : "showDirectoryPicker missing in this browser; directory walk demo will not work";
+
+  let files = 0, dirs = 0, bytes = 0;
+  const tree = document.getElementById("tree");
+  function row(text, kind, indent, size) {
+    const d = document.createElement("div");
+    d.className = "node " + kind;
+    d.style.paddingLeft = (indent * 18) + "px";
+    d.innerHTML = (kind === "dir" ? "&#x1F4C2; " : "&#x1F4C4; ") + text +
+                  (size != null ? ' <span class="size">' + size.toLocaleString() + ' B</span>' : "");
+    tree.appendChild(d);
+  }
+  async function walk(dir, depth, max) {
+    if (depth > max) return;
+    for await (const entry of dir.values()) {
+      if (entry.kind === "directory") {
+        dirs++;
+        row(entry.name + "/", "dir", depth);
+        await walk(entry, depth + 1, max);
+      } else {
+        const filter = document.getElementById("filter").value;
+        if (filter && !entry.name.endsWith(filter)) continue;
+        try {
+          const f = await entry.getFile();
+          files++;
+          bytes += f.size;
+          row(entry.name, "file", depth, f.size);
+        } catch (_) {}
+      }
+      document.getElementById("s-files").textContent = files;
+      document.getElementById("s-dirs").textContent = dirs;
+      document.getElementById("s-bytes").textContent = bytes.toLocaleString();
+    }
+  }
+  document.getElementById("open").addEventListener("click", async () => {
+    if (!has) return;
+    try {
+      const dir = await showDirectoryPicker();
+      document.getElementById("s-root").textContent = dir.name;
+      tree.innerHTML = "";
+      files = dirs = bytes = 0;
+      const max = parseInt(document.getElementById("depth").value, 10) || 3;
+      row(dir.name + "/", "dir", 0);
+      dirs = 1;
+      await walk(dir, 1, max);
+    } catch (e) { tree.innerHTML = '<div>error: ' + e.message + '</div>'; }
+  });
+</script>
+</body>
+</html>
