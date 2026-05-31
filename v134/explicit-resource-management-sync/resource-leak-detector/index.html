@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Resource Leak Detector — Explicit Resource Management (sync) — Chrome 134</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .comparison-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin-bottom: var(--space-3);
+    }
+    @media (max-width: 640px) { .comparison-grid { grid-template-columns: 1fr; } }
+    .compare-panel {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .compare-panel.bad { border-color: var(--accent-rose); }
+    .compare-panel.good { border-color: var(--accent-emerald); }
+    .compare-panel h3 { margin: 0 0 var(--space-2); font-size: 0.88rem; }
+    .resource-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--space-2); }
+    .res-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.8rem;
+      padding: 5px 8px;
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+    }
+    .res-item.leaked { background: #fff5f5; border-color: var(--accent-rose); }
+    .res-item.clean { background: #f0fdf4; border-color: var(--accent-emerald); }
+    .res-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .res-dot.leaked { background: var(--accent-rose); }
+    .res-dot.clean { background: var(--accent-emerald); }
+    .res-dot.open { background: #b45309; }
+    .res-dot.idle { background: var(--border-black); }
+    .leak-count {
+      font-family: var(--font-mono);
+      font-size: 1.4rem;
+      font-weight: 700;
+      text-align: center;
+      padding: var(--space-2) 0;
+    }
+    .leak-count.bad { color: var(--accent-rose); }
+    .leak-count.good { color: var(--accent-emerald); }
+    .section-title { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: var(--space-3) 0 var(--space-2); }
+    .probe-row { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .probe { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border-black); font-size: 0.8rem; }
+    .probe.fail { background: var(--accent-rose); color: var(--bg-ivory); }
+    .probe.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .probe.warn { background: #b45309; color: var(--bg-ivory); }
+    .info-box { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-size: 0.82rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+    .controls-row { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: flex-end; margin-bottom: var(--space-3); }
+    .field-group { display: flex; flex-direction: column; gap: 4px; }
+    .field-group label { font-size: 0.8rem; color: var(--text-muted); }
+    select { padding: 6px 8px; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); font-size: 0.82rem; }
+    button.primary {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      border: none;
+      padding: 8px 16px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    button.primary:hover { opacity: 0.85; }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.76rem; min-height: 80px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; margin-bottom: var(--space-3); }
+    .log-open { color: #b45309; }
+    .log-close { color: var(--accent-emerald); }
+    .log-leak { color: var(--accent-rose); font-weight: 700; }
+    .log-info { color: var(--text-muted); }
+    .code-block { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; overflow-x: auto; white-space: pre; line-height: 1.5; }
+    code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-stone); padding: 1px 4px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v134/explicit-resource-management-sync/">&larr; Explicit Resource Management (sync)</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v134 · javascript</p>
+    <h1>Resource Leak Detector</h1>
+    <p class="lede">Run the same scenario with <em>manual try/finally</em> vs <em><code>using</code></em> and compare leaked vs cleaned resources. When a function throws mid-way, <code>using</code> still disposes every resource in scope — try/finally requires remembering each one individually.</p>
+  </header>
+
+  <section>
+    <div class="probe-row">
+      <span class="probe fail" id="probeUsing">checking using keyword…</span>
+    </div>
+
+    <div class="info-box">
+      The problem: code that opens multiple resources often leaks some on the throw path. <code>try/finally</code> works but only if every resource is referenced in the finally block. <code>using r = openResource()</code> automatically calls <code>r[Symbol.dispose]()</code> on exit — even if the scope throws before the resource is explicitly closed.
+    </div>
+
+    <p class="section-title">Run scenario</p>
+    <div class="controls-row">
+      <div class="field-group">
+        <label>Failure mode</label>
+        <select id="failSel">
+          <option value="clean">No failure — all resources return normally</option>
+          <option value="mid">Throw after 2nd resource open</option>
+          <option value="early">Throw after 1st resource open</option>
+          <option value="dispose-throw">Disposer throws (SuppressedError test)</option>
+        </select>
+      </div>
+      <button class="primary" id="runBtn">Run both approaches</button>
+    </div>
+
+    <div class="comparison-grid">
+      <div class="compare-panel bad" id="manualPanel">
+        <h3>Without <code>using</code> (manual)</h3>
+        <div class="resource-list" id="manualList"></div>
+        <div class="leak-count bad" id="manualLeaks">—</div>
+        <div style="font-size:0.75rem;color:var(--text-muted);text-align:center">leaked resources</div>
+      </div>
+      <div class="compare-panel good" id="usingPanel">
+        <h3>With <code>using</code></h3>
+        <div class="resource-list" id="usingList"></div>
+        <div class="leak-count good" id="usingLeaks">—</div>
+        <div style="font-size:0.75rem;color:var(--text-muted);text-align:center">leaked resources</div>
+      </div>
+    </div>
+
+    <p class="section-title">Execution log</p>
+    <div class="log" id="execLog">Click "Run both approaches" to start.</div>
+
+    <p class="section-title">The difference</p>
+    <div class="code-block">// Without using — easy to miss resources in finally
+function processFile(path) {
+  const handle = openFile(path);
+  const lock = acquireLock(path);
+  const logger = openLogger();
+  try {
+    doWork(handle, lock, logger); // may throw
+    return result;
+  } finally {
+    handle.close(); // if lock.release() above throws, logger leaks
+    lock.release();
+    // ← forgot logger.close() !
+  }
+}
+
+// With using — every resource disposed automatically, LIFO
+function processFile(path) {
+  using handle = openFile(path);
+  using lock = acquireLock(path);
+  using logger = openLogger();
+  doWork(handle, lock, logger); // throws? all three close
+  return result;
+  // ← Symbol.dispose called on logger, lock, handle (LIFO)
+}</div>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const probe = document.getElementById('probeUsing');
+  let hasUsing = false;
+  try {
+    // Test if using keyword is available
+    eval('"use strict"; const r = { [Symbol.dispose]() {} }; { using x = r; }');
+    hasUsing = true;
+  } catch {}
+  if (hasUsing) {
+    probe.textContent = 'using keyword supported (Chrome 134+)';
+    probe.classList.replace('fail', 'ok');
+  } else {
+    probe.textContent = 'using keyword not supported — simulation mode';
+    probe.classList.replace('fail', 'warn');
+  }
+
+  const RESOURCES = [
+    { name: 'File handle', icon: '📄' },
+    { name: 'DB lock', icon: '🔒' },
+    { name: 'Logger', icon: '📋' },
+    { name: 'Cache entry', icon: '⚡' },
+  ];
+
+  const logEl = document.getElementById('execLog');
+  let logLines = [];
+
+  function addLog(msg, cls) {
+    const span = document.createElement('span');
+    span.className = cls || '';
+    span.textContent = msg + '\n';
+    logEl.appendChild(span);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function clearLog() { logEl.innerHTML = ''; }
+
+  function renderList(elId, states) {
+    const el = document.getElementById(elId);
+    el.innerHTML = '';
+    states.forEach((s, i) => {
+      const r = RESOURCES[i];
+      const div = document.createElement('div');
+      div.className = 'res-item ' + (s === 'leaked' ? 'leaked' : s === 'clean' ? 'clean' : '');
+      div.innerHTML = `
+        <div class="res-dot ${s}"></div>
+        <span>${r.icon} ${r.name}</span>
+        <span style="margin-left:auto;font-family:var(--font-mono);font-size:0.72rem;font-weight:700">${s}</span>
+      `;
+      el.appendChild(div);
+    });
+  }
+
+  function run() {
+    clearLog();
+    const mode = document.getElementById('failSel').value;
+    addLog('━━ Manual try/finally approach ━━', 'log-info');
+
+    let manualStates = ['idle', 'idle', 'idle', 'idle'];
+    let usingStates = ['idle', 'idle', 'idle', 'idle'];
+    let manualLeaked = 0;
+    let usingLeaked = 0;
+
+    if (mode === 'clean') {
+      RESOURCES.forEach((r, i) => {
+        addLog(`  open: ${r.name}`, 'log-open');
+        manualStates[i] = 'open';
+      });
+      addLog('  … doing work …', 'log-info');
+      addLog('  finally: closing all resources', 'log-info');
+      RESOURCES.forEach((r, i) => {
+        addLog(`  close: ${r.name}`, 'log-close');
+        manualStates[i] = 'clean';
+      });
+      addLog('  ✓ All closed (no failure)', 'log-info');
+    } else if (mode === 'mid') {
+      addLog('  open: File handle', 'log-open'); manualStates[0] = 'open';
+      addLog('  open: DB lock', 'log-open'); manualStates[1] = 'open';
+      addLog('  ✗ THROW — "lock acquisition failed"', 'log-leak');
+      addLog('  finally: closing File handle (only one in scope)', 'log-close');
+      addLog('  ✗ DB lock LEAKED (not yet in finally scope)', 'log-leak');
+      addLog('  ✗ Logger never opened — but correctly absent', 'log-info');
+      manualStates[0] = 'clean';
+      manualStates[1] = 'leaked';
+      manualLeaked = 1;
+    } else if (mode === 'early') {
+      addLog('  open: File handle', 'log-open'); manualStates[0] = 'open';
+      addLog('  ✗ THROW — "file not found"', 'log-leak');
+      addLog('  finally: closing File handle ✓', 'log-close');
+      addLog('  DB lock, Logger, Cache: never opened', 'log-info');
+      manualStates[0] = 'clean';
+    } else if (mode === 'dispose-throw') {
+      RESOURCES.forEach((r, i) => {
+        addLog(`  open: ${r.name}`, 'log-open');
+        manualStates[i] = 'open';
+      });
+      addLog('  ✗ THROW in body — "work failed"', 'log-leak');
+      addLog('  finally: closing File handle ✓', 'log-close'); manualStates[0] = 'clean';
+      addLog('  ✗ THROW in DB lock close — "release failed"', 'log-leak');
+      addLog('  ✗ Logger and Cache LEAKED (finally aborted by second throw)', 'log-leak');
+      manualStates[1] = 'leaked'; manualStates[2] = 'leaked'; manualStates[3] = 'leaked';
+      manualLeaked = 3;
+    }
+
+    document.getElementById('manualLeaks').textContent = manualLeaked;
+    renderList('manualList', manualStates);
+
+    addLog('', '');
+    addLog('━━ using keyword approach ━━', 'log-info');
+
+    if (mode === 'clean') {
+      RESOURCES.forEach((r, i) => {
+        addLog(`  using ${r.name} (registered for disposal)`, 'log-open');
+        usingStates[i] = 'open';
+      });
+      addLog('  … doing work …', 'log-info');
+      addLog('  ← scope exit — runtime disposes LIFO', 'log-info');
+      for (let i = RESOURCES.length - 1; i >= 0; i--) {
+        addLog(`  [Symbol.dispose]: ${RESOURCES[i].name} ✓`, 'log-close');
+        usingStates[i] = 'clean';
+      }
+      addLog('  ✓ All disposed', 'log-info');
+    } else if (mode === 'mid') {
+      addLog('  using File handle (registered)', 'log-open'); usingStates[0] = 'open';
+      addLog('  using DB lock (registered)', 'log-open'); usingStates[1] = 'open';
+      addLog('  ✗ THROW — "lock acquisition failed"', 'log-leak');
+      addLog('  ← scope throw — runtime disposes LIFO', 'log-info');
+      addLog('  [Symbol.dispose]: DB lock ✓', 'log-close'); usingStates[1] = 'clean';
+      addLog('  [Symbol.dispose]: File handle ✓', 'log-close'); usingStates[0] = 'clean';
+      addLog('  ✓ No leaks', 'log-info');
+    } else if (mode === 'early') {
+      addLog('  using File handle (registered)', 'log-open'); usingStates[0] = 'open';
+      addLog('  ✗ THROW — "file not found"', 'log-leak');
+      addLog('  [Symbol.dispose]: File handle ✓', 'log-close'); usingStates[0] = 'clean';
+      addLog('  ✓ No leaks', 'log-info');
+    } else if (mode === 'dispose-throw') {
+      RESOURCES.forEach((r, i) => {
+        addLog(`  using ${r.name} (registered)`, 'log-open');
+        usingStates[i] = 'open';
+      });
+      addLog('  ✗ THROW in body — "work failed"', 'log-leak');
+      addLog('  ← scope throw — runtime disposes LIFO (even if disposers throw)', 'log-info');
+      for (let i = RESOURCES.length - 1; i >= 0; i--) {
+        if (i === 1) addLog(`  [Symbol.dispose]: ${RESOURCES[i].name} ✗ throws — but disposal continues`, 'log-leak');
+        else addLog(`  [Symbol.dispose]: ${RESOURCES[i].name} ✓`, 'log-close');
+        usingStates[i] = i === 1 ? 'leaked' : 'clean';
+      }
+      usingLeaked = 1;
+      addLog('  SuppressedError: body error + disposer error preserved', 'log-info');
+      addLog('  ✓ Only 1 leaked (the throwing disposer itself — not the others)', 'log-info');
+    }
+
+    document.getElementById('usingLeaks').textContent = usingLeaked;
+    renderList('usingList', usingStates);
+  }
+
+  document.getElementById('runBtn').addEventListener('click', run);
+
+  renderList('manualList', ['idle','idle','idle','idle']);
+  renderList('usingList', ['idle','idle','idle','idle']);
+})();
+</script>
+</body>
+</html>
