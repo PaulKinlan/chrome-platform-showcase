@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Render Pass Inspector — WebGPU Transient Attachments — Chrome 146</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .pipeline-layout {
+      margin-bottom: var(--space-5);
+    }
+    .pass-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-3);
+    }
+    .pass-card {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      box-shadow: var(--flat-shadow);
+      overflow: hidden;
+      cursor: pointer;
+      transition: box-shadow 0.1s;
+    }
+    .pass-card.active {
+      box-shadow: 4px 4px 0 var(--border-black);
+      border-color: var(--text-black);
+    }
+    .pass-card-head {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      padding: var(--space-3) var(--space-4);
+      background: var(--bg-stone);
+      border-bottom: 1px solid var(--border-black);
+    }
+    .pass-card.active .pass-card-head { background: var(--text-black); }
+    .pass-num {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      padding: 2px 8px;
+      border: 1px solid currentColor;
+      color: var(--text-muted);
+    }
+    .pass-card.active .pass-num { color: var(--bg-stone); }
+    .pass-title {
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      color: var(--text-charcoal);
+    }
+    .pass-card.active .pass-title { color: var(--bg-ivory); }
+    .pass-body {
+      padding: var(--space-4);
+    }
+
+    .attachment-list {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+    }
+    .attachment-row {
+      display: grid;
+      grid-template-columns: 160px 80px 80px 1fr;
+      gap: var(--space-2);
+      align-items: center;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      padding: var(--space-2) var(--space-3);
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+    }
+    .att-name { font-weight: bold; color: var(--text-black); }
+    .att-transient {
+      text-align: center;
+      font-size: 0.65rem;
+      padding: 1px 6px;
+      border: 1px solid var(--border-black);
+    }
+    .att-transient.yes { background: var(--accent-emerald); color: var(--text-black); border-color: var(--accent-emerald); }
+    .att-transient.no { background: var(--bg-stone); color: var(--text-muted); }
+    .att-size { color: var(--text-charcoal); }
+    .att-note { color: var(--text-muted); font-size: 0.68rem; }
+
+    .memory-bar-outer {
+      height: 18px;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      position: relative;
+      margin-top: var(--space-2);
+    }
+    .memory-bar-inner {
+      height: 100%;
+      background: var(--accent-blue);
+      transition: width 0.35s ease;
+      display: flex;
+      align-items: center;
+      padding: 0 6px;
+    }
+    .memory-bar-inner.saved { background: var(--accent-emerald); }
+    .memory-bar-label {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: var(--text-muted);
+      margin-top: 3px;
+    }
+
+    .detail-panel {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: var(--space-4);
+      margin-top: var(--space-5);
+    }
+    .detail-panel h3 {
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      margin-bottom: var(--space-3);
+    }
+    .wgpu-code {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      line-height: 1.6;
+      overflow-x: auto;
+    }
+    .kw { color: #93c5fd; }
+    .cm { color: #6ee7b7; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v146/">&larr; Chrome 146</a> / <a href="../">WebGPU Transient Attachments</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v146 · Render Pass Inspector</p>
+    <h1>Render Pass Inspector</h1>
+    <p class="lede">Step through a 3-pass rendering pipeline and see which render attachments can be declared <code>transient</code> — stored in on-chip tile memory instead of main GPU memory. Click each pass to inspect its attachment table and memory footprint.</p>
+  </header>
+
+  <div class="pipeline-layout">
+    <div class="pass-list" id="pass-list"></div>
+  </div>
+
+  <div class="detail-panel" id="detail-panel">
+    <h3 id="detail-title">Click a render pass above to inspect</h3>
+    <div id="detail-content"></div>
+  </div>
+</main>
+
+<script>
+const W = 1920, H = 1080; // render target resolution
+
+const passes = [
+  {
+    num: 1,
+    title: 'Depth Pre-pass',
+    desc: 'Renders scene geometry depth only. The depth buffer is read by later passes.',
+    attachments: [
+      { name: 'depth buffer', transient: false, fmt: 'depth24plus', w: W, h: H, note: 'Read by pass 2 → must persist in memory' },
+    ],
+    totalMB: (W * H * 4 / 1024 / 1024).toFixed(1),
+    savedMB: 0,
+    codeComment: '// Depth pre-pass: NOT transient — depth is read later',
+    code: `encoder.beginRenderPass({\n  depthStencilAttachment: {\n    view: depthTexture.createView(),\n    <span class="kw">depthLoadOp</span>: 'clear',\n    <span class="kw">depthStoreOp</span>: 'store', <span class="cm">// must persist</span>\n  }\n});`,
+  },
+  {
+    num: 2,
+    title: 'Geometry / Lighting Pass',
+    desc: 'Renders albedo, normal, and intermediate lighting buffers. The intermediate buffers are only consumed within this pass by subsequent sub-passes.',
+    attachments: [
+      { name: 'depth buffer',   transient: false, fmt: 'depth24plus',   w: W, h: H, note: 'Read from pass 1' },
+      { name: 'albedo',         transient: false, fmt: 'rgba8unorm',     w: W, h: H, note: 'Output to final pass' },
+      { name: 'normals (interm)', transient: true, fmt: 'rgba16float',  w: W, h: H, note: 'Consumed same pass — transient saves ~16 MB' },
+      { name: 'lighting (interm)', transient: true, fmt: 'rgba16float', w: W, h: H, note: 'Consumed same pass — transient saves ~16 MB' },
+    ],
+    totalMB: ((W * H * (4 + 4 + 8 + 8)) / 1024 / 1024).toFixed(1),
+    savedMB: ((W * H * (8 + 8)) / 1024 / 1024).toFixed(1),
+    code: `encoder.beginRenderPass({\n  colorAttachments: [\n    { view: albedo.createView(), <span class="kw">storeOp</span>: 'store' },\n    {\n      view: normals.createView(),\n      <span class="kw">storeOp</span>: 'discard', <span class="cm">// transient: tile memory only</span>\n    },\n    {\n      view: lighting.createView(),\n      <span class="kw">storeOp</span>: 'discard', <span class="cm">// transient: tile memory only</span>\n    },\n  ],\n  ...\n});`,
+  },
+  {
+    num: 3,
+    title: 'Post-Processing / Tonemap',
+    desc: 'Reads the albedo buffer and writes the final swapchain image. All intermediate work is done on-chip.',
+    attachments: [
+      { name: 'albedo (input)', transient: false, fmt: 'rgba8unorm',  w: W, h: H, note: 'Read from pass 2' },
+      { name: 'bloom temp',     transient: true,  fmt: 'rgba16float', w: W, h: H / 2, note: 'Half-res ping-pong — transient saves ~8 MB' },
+      { name: 'swapchain',      transient: false, fmt: 'bgra8unorm',  w: W, h: H, note: 'Final output — must persist' },
+    ],
+    totalMB: ((W * H * (4 + 4) + W * (H/2) * 8) / 1024 / 1024).toFixed(1),
+    savedMB: ((W * (H/2) * 8) / 1024 / 1024).toFixed(1),
+    code: `encoder.beginRenderPass({\n  colorAttachments: [\n    {\n      view: bloomTemp.createView(),\n      <span class="kw">storeOp</span>: 'discard', <span class="cm">// transient: on-chip</span>\n    },\n    {\n      view: swapchain.getCurrentTexture().createView(),\n      <span class="kw">storeOp</span>: 'store', <span class="cm">// final output</span>\n    },\n  ],\n  ...\n});`,
+  },
+];
+
+function fmtMB(mb) { return parseFloat(mb).toFixed(1) + ' MB'; }
+
+function renderPasses() {
+  const list = document.getElementById('pass-list');
+  list.innerHTML = '';
+  passes.forEach((pass, i) => {
+    const card = document.createElement('div');
+    card.className = 'pass-card';
+    card.onclick = () => selectPass(i);
+
+    const transientCount = pass.attachments.filter(a => a.transient).length;
+    const totalCount = pass.attachments.length;
+
+    card.innerHTML = `
+      <div class="pass-card-head">
+        <span class="pass-num">Pass ${pass.num}</span>
+        <span class="pass-title">${pass.title}</span>
+        <span style="font-family:var(--font-mono);font-size:0.68rem;color:inherit;margin-left:auto">${transientCount}/${totalCount} transient</span>
+      </div>
+      <div class="pass-body">
+        <p style="font-size:0.82rem;color:var(--text-charcoal);margin-bottom:var(--space-3)">${pass.desc}</p>
+        <div class="attachment-list">
+          ${pass.attachments.map(a => `
+            <div class="attachment-row">
+              <span class="att-name">${a.name}</span>
+              <span class="att-transient ${a.transient ? 'yes' : 'no'}">${a.transient ? 'transient' : 'persistent'}</span>
+              <span class="att-size">${(a.w * a.h * bytesPerFmt(a.fmt) / 1024 / 1024).toFixed(1)} MB</span>
+              <span class="att-note">${a.note}</span>
+            </div>`).join('')}
+        </div>
+        <div class="memory-bar-label">Memory footprint</div>
+        <div class="memory-bar-outer">
+          <div class="memory-bar-inner" style="width:${Math.min(100, (pass.totalMB / 120) * 100).toFixed(1)}%">
+            <span style="font-size:0.65rem;color:#fff">${fmtMB(pass.totalMB)}</span>
+          </div>
+        </div>
+        ${parseFloat(pass.savedMB) > 0 ? `
+        <div class="memory-bar-label" style="color:var(--accent-emerald)">Transient savings</div>
+        <div class="memory-bar-outer">
+          <div class="memory-bar-inner saved" style="width:${Math.min(100, (pass.savedMB / 120) * 100).toFixed(1)}%">
+            <span style="font-size:0.65rem;color:#111">-${fmtMB(pass.savedMB)}</span>
+          </div>
+        </div>` : ''}
+      </div>`;
+    list.appendChild(card);
+  });
+}
+
+function bytesPerFmt(fmt) {
+  if (fmt.includes('rgba16float')) return 8;
+  if (fmt.includes('rgba8') || fmt.includes('bgra8')) return 4;
+  if (fmt.includes('depth24plus')) return 4;
+  return 4;
+}
+
+function selectPass(idx) {
+  document.querySelectorAll('.pass-card').forEach((c, i) => c.classList.toggle('active', i === idx));
+  const pass = passes[idx];
+  document.getElementById('detail-title').textContent = `Pass ${pass.num}: ${pass.title} — WebGPU descriptor`;
+  document.getElementById('detail-content').innerHTML = `<div class="wgpu-code">${pass.code}</div>`;
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  renderPasses();
+  selectPass(1); // default to pass 2 with transients
+});
+</script>
+</body>
+</html>
