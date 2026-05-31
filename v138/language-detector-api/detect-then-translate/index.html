@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Detect-then-translate pipeline — Language Detector API — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3) var(--space-4); margin: 0 0 var(--space-5); font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: 0 0 var(--space-5); }
+    .chat-thread { display: flex; flex-direction: column; gap: var(--space-3); margin: var(--space-3) 0; }
+    .msg { border: 2px solid var(--border-black); padding: var(--space-3); background: var(--bg-stone); }
+    .msg .meta { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: var(--space-2); display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+    .msg .meta b { color: var(--text-black); background: var(--text-black); color: var(--bg-ivory); padding: 0.1rem 0.4rem; font-size: 0.7rem; }
+    .msg .meta .conf { color: var(--text-charcoal); }
+    .msg .meta .lang-tag { color: var(--text-black); border: 1px solid var(--border-black); padding: 0.05rem 0.4rem; background: var(--bg-paper); }
+    .msg .src { font-family: var(--font-serif); font-size: 1.02rem; line-height: 1.5; margin-bottom: var(--space-2); }
+    .msg .arrow { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); text-align: center; padding: 0.3rem 0; }
+    .msg .out { font-family: var(--font-serif); font-style: italic; color: var(--text-charcoal); padding: var(--space-2); background: var(--bg-paper); border-left: 3px solid var(--accent-blue); }
+    .msg .skipped { color: var(--text-muted); font-family: var(--font-mono); font-size: 0.78rem; }
+    .msg.low-conf { border-style: dashed; }
+    .compose { display: grid; grid-template-columns: 1fr; gap: var(--space-2); margin: var(--space-3) 0; }
+    .compose textarea { width: 100%; box-sizing: border-box; font-family: var(--font-serif); font-size: 1rem; padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); min-height: 5rem; }
+    .compose .row { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
+    .compose select, .compose input[type=number] { font-family: var(--font-mono); font-size: 0.82rem; padding: 0.4rem 0.6rem; border: 2px solid var(--border-black); background: var(--bg-stone); }
+    .compose label { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+    .preset-row { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
+    .preset-row button { font-size: 0.74rem; padding: 0.25rem 0.55rem; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-3); margin: var(--space-4) 0; }
+    @media (max-width: 600px) { .stats { grid-template-columns: 1fr 1fr; } }
+    .stat { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); }
+    .stat .v { font-family: var(--font-display); font-size: 1.6rem; }
+    .stat .l { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; }
+    .support { font-family: var(--font-mono); font-size: 0.78rem; padding: 0.4rem 0.7rem; border: 1px solid var(--border-black); display: inline-block; margin-bottom: var(--space-3); }
+    .support.yes { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .support.no { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .support.warn { background: var(--accent-amber); color: var(--bg-ivory); border-color: var(--accent-amber); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Language Detector API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>Detect-then-translate pipeline</h1>
+    <p class="lede">The classic real-world combo: messages arrive in any language, the detector probabilistically labels each one, and only messages above a confidence threshold get auto-translated into the reader's locale. This is the canonical pipeline the spec was designed for.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>On-device.</strong> Uses <code>LanguageDetector</code> + <code>Translator</code>. If either is missing the page falls back to a tiny heuristic detector so the UI surface still demos. First call may download model packs.
+  </div>
+
+  <div id="support-detect" class="support warn">checking detector&hellip;</div>
+  <div id="support-translate" class="support warn">checking translator&hellip;</div>
+
+  <div class="stage">
+    <h3 style="margin-top:0">Inbox simulator</h3>
+    <div class="preset-row">
+      <button data-preset="mixed">load mixed inbox</button>
+      <button data-preset="short">short snippets (low confidence)</button>
+      <button data-preset="emoji">emoji-heavy noise</button>
+      <button data-preset="quotes">multilingual quotes</button>
+      <button data-preset="clear">clear thread</button>
+    </div>
+
+    <div class="compose">
+      <textarea id="composer" placeholder="paste or type a message in any language…"></textarea>
+      <div class="row">
+        <label>reader locale
+          <select id="target">
+            <option value="en">English</option>
+            <option value="fr">Français</option>
+            <option value="de">Deutsch</option>
+            <option value="es">Español</option>
+            <option value="ja">日本語</option>
+            <option value="zh">中文</option>
+            <option value="ar">العربية</option>
+          </select>
+        </label>
+        <label>confidence threshold
+          <input type="number" id="threshold" min="0" max="1" step="0.05" value="0.65">
+        </label>
+        <button id="send">send</button>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="v" id="s-total">0</div><div class="l">messages</div></div>
+      <div class="stat"><div class="v" id="s-detected">0</div><div class="l">detected ≥ threshold</div></div>
+      <div class="stat"><div class="v" id="s-translated">0</div><div class="l">auto-translated</div></div>
+      <div class="stat"><div class="v" id="s-skipped">0</div><div class="l">skipped (low conf)</div></div>
+    </div>
+
+    <div class="chat-thread" id="thread"></div>
+  </div>
+
+  <h3>What's happening</h3>
+  <ol class="how">
+    <li>For each incoming message, call <code>detector.detect(text)</code> — returns a ranked list of <code>{ detectedLanguage, confidence }</code>.</li>
+    <li>If the top candidate's confidence is below the configured threshold, mark the message <em>uncertain</em> and skip translation. (You don't want to translate "ok 👍" or "hi" — they're meaningless to detect.)</li>
+    <li>If the detected language equals the reader's target locale, mark it <em>native</em> and skip translation.</li>
+    <li>Otherwise, look up or create a <code>Translator</code> for that exact pair and translate. Sessions are cached so subsequent messages in the same language are warm.</li>
+    <li>Per-message: render the source, the detected language tag, the confidence, and (if translated) the output.</li>
+  </ol>
+
+  <pre><code>const detector = await LanguageDetector.create();
+const translators = new Map();
+
+async function handleMessage(text, targetLang, threshold) {
+  const [top] = await detector.detect(text);
+  if (top.confidence &lt; threshold)           return { skip: 'low-confidence', top };
+  if (top.detectedLanguage === targetLang)    return { skip: 'already-native', top };
+
+  const key = top.detectedLanguage + '|' + targetLang;
+  if (!translators.has(key)) {
+    translators.set(key, await Translator.create({
+      sourceLanguage: top.detectedLanguage,
+      targetLanguage: targetLang,
+    }));
+  }
+  return { top, output: await translators.get(key).translate(text) };
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Language Detector API feature page</a></li>
+      <li><a href="../lang-detect/">Language Detect demo</a></li>
+      <li><a href="../confidence-ranking/">Confidence ranking demo</a></li>
+      <li><a href="../../translator-api/">Translator API</a></li>
+      <li><a href="https://webmachinelearning.github.io/translation-api/#language-detector-api" target="_blank" rel="noopener">Spec</a></li>
+      <li><a href="https://chromestatus.com/feature/6494349985841152" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const supportDet = document.getElementById('support-detect');
+  const supportTr = document.getElementById('support-translate');
+  const composer = document.getElementById('composer');
+  const targetEl = document.getElementById('target');
+  const thresholdEl = document.getElementById('threshold');
+  const sendBtn = document.getElementById('send');
+  const thread = document.getElementById('thread');
+  const sTotal = document.getElementById('s-total');
+  const sDetected = document.getElementById('s-detected');
+  const sTranslated = document.getElementById('s-translated');
+  const sSkipped = document.getElementById('s-skipped');
+
+  const supportsDet = typeof self !== 'undefined' && 'LanguageDetector' in self;
+  const supportsTr = typeof self !== 'undefined' && 'Translator' in self;
+
+  let detector = null;
+  const translatorCache = new Map();
+  const counts = {total: 0, detected: 0, translated: 0, skipped: 0};
+
+  const samples = {
+    mixed: [
+      'Bonjour à tous, où en est-on sur la PR de spéculation rules ?',
+      'Buenos días equipo, ¿alguien revisó el ticket de Clear-Site-Data?',
+      '皆さん、おはようございます。今日のスタンドアップ参加できます。',
+      'Habe gerade den letzten Commit zur Cache-Sharing-Feature gepusht.',
+      'Anyone seeing the same flake on the Linux runner?',
+    ],
+    short: ['ok', 'thx 👍', 'lol', 'sí', 'はい', 'ja', '+1', '😅'],
+    emoji: [
+      '🚀🔥 ship it',
+      '👀👀 looking',
+      'oof 😬 broken on android',
+      '✨ joli boulot ✨',
+    ],
+    quotes: [
+      'لا تسير أمامي... قد لا أتبعك. لا تسر خلفي... قد لا أقودك. سر بجانبي وكن صديقي.',
+      'The only way to do great work is to love what you do.',
+      'Le seul moyen de se délivrer d\'une tentation, c\'est d\'y céder.',
+      'जीवन में सबसे महत्वपूर्ण चीज़ है: रुकना मत।',
+    ],
+  };
+
+  function setSupport(el, text, cls) {
+    el.className = 'support ' + cls;
+    el.textContent = text;
+  }
+
+  async function initDetector() {
+    if (!supportsDet) { setSupport(supportDet, 'detector unavailable — using heuristic', 'no'); return; }
+    try {
+      const a = await self.LanguageDetector.availability();
+      if (a === 'unavailable') { setSupport(supportDet, 'detector unavailable on this device', 'no'); return; }
+      setSupport(supportDet, 'detector: ' + a + ' — instantiating…', 'warn');
+      detector = await self.LanguageDetector.create();
+      setSupport(supportDet, 'detector ready', 'yes');
+    } catch (e) {
+      setSupport(supportDet, 'detector error: ' + e.message, 'no');
+    }
+  }
+
+  async function checkTranslator() {
+    if (!supportsTr) setSupport(supportTr, 'translator unavailable — passthrough fallback', 'no');
+    else setSupport(supportTr, 'translator API present', 'yes');
+  }
+
+  function heuristicDetect(text) {
+    const s = text.trim();
+    if (!s) return [{detectedLanguage: 'und', confidence: 0}];
+    if (/[一-鿿]/.test(s)) return [{detectedLanguage: 'zh', confidence: 0.9}];
+    if (/[぀-ヿ]/.test(s)) return [{detectedLanguage: 'ja', confidence: 0.92}];
+    if (/[가-힯]/.test(s)) return [{detectedLanguage: 'ko', confidence: 0.92}];
+    if (/[؀-ۿ]/.test(s)) return [{detectedLanguage: 'ar', confidence: 0.9}];
+    if (/[ऀ-ॿ]/.test(s)) return [{detectedLanguage: 'hi', confidence: 0.9}];
+    const tokens = s.toLowerCase().split(/[\s.,!?;:¡¿]+/).filter(Boolean);
+    const dict = {
+      en: ['the','a','of','and','to','is','i','that','it','for','anyone','seeing'],
+      fr: ['le','la','les','de','et','à','que','pour','est','tous','où','en'],
+      es: ['el','la','los','las','de','que','y','con','para','equipo','alguien'],
+      de: ['der','die','das','und','ist','nicht','habe','gerade','den','letzten'],
+    };
+    const scores = {};
+    for (const [lang, words] of Object.entries(dict)) {
+      scores[lang] = tokens.filter((t) => words.includes(t)).length;
+    }
+    let best = 'und', bestScore = 0;
+    for (const [l, s] of Object.entries(scores)) if (s > bestScore) { best = l; bestScore = s; }
+    const total = Object.values(scores).reduce((a, b) => a + b, 0) || 1;
+    const confidence = tokens.length < 4 ? Math.min(0.45, bestScore / total) : Math.min(0.95, 0.4 + bestScore / total * 0.6);
+    return [{detectedLanguage: best === 'und' ? (tokens.length < 3 ? 'und' : 'en') : best, confidence}];
+  }
+
+  async function detect(text) {
+    if (detector) {
+      try { return await detector.detect(text); }
+      catch (e) { return heuristicDetect(text); }
+    }
+    return heuristicDetect(text);
+  }
+
+  const heuristicMap = {
+    fr: { en: { 'bonjour': 'hello', 'à': 'to', 'tous': 'everyone', 'où': 'where', 'sur': 'on' } },
+  };
+
+  async function translate(text, src, tgt) {
+    const key = src + '|' + tgt;
+    if (supportsTr) {
+      try {
+        if (!translatorCache.has(key)) {
+          translatorCache.set(key, await self.Translator.create({sourceLanguage: src, targetLanguage: tgt}));
+        }
+        return await translatorCache.get(key).translate(text);
+      } catch (e) {
+        return '[translate ' + src + '→' + tgt + ' failed: ' + e.message + ']';
+      }
+    }
+    return '[' + src + '→' + tgt + ' would translate: "' + text.slice(0, 80) + '"]';
+  }
+
+  function renderCounts() {
+    sTotal.textContent = counts.total;
+    sDetected.textContent = counts.detected;
+    sTranslated.textContent = counts.translated;
+    sSkipped.textContent = counts.skipped;
+  }
+
+  async function processMessage(text) {
+    counts.total++;
+    const target = targetEl.value;
+    const threshold = parseFloat(thresholdEl.value);
+    const ranked = await detect(text);
+    const top = ranked[0] || {detectedLanguage: 'und', confidence: 0};
+
+    const msg = document.createElement('div');
+    msg.className = 'msg';
+    let result;
+    let translated = '';
+    if (top.confidence < threshold) {
+      msg.classList.add('low-conf');
+      result = { kind: 'skipped-low', reason: 'confidence ' + top.confidence.toFixed(2) + ' &lt; ' + threshold.toFixed(2) };
+      counts.skipped++;
+    } else if (top.detectedLanguage === target) {
+      result = { kind: 'native' };
+      counts.detected++;
+    } else if (top.detectedLanguage === 'und') {
+      msg.classList.add('low-conf');
+      result = { kind: 'skipped-und' };
+      counts.skipped++;
+    } else {
+      counts.detected++;
+      translated = await translate(text, top.detectedLanguage, target);
+      counts.translated++;
+      result = { kind: 'translated', translated };
+    }
+
+    msg.innerHTML =
+      '<div class="meta">' +
+        '<b>incoming</b>' +
+        '<span class="lang-tag">detected: ' + top.detectedLanguage + '</span>' +
+        '<span class="conf">conf ' + top.confidence.toFixed(2) + '</span>' +
+        (ranked.length > 1 ? '<span class="conf">runners-up: ' + ranked.slice(1, 3).map((r) => r.detectedLanguage + ' ' + r.confidence.toFixed(2)).join(', ') + '</span>' : '') +
+      '</div>' +
+      '<div class="src">' + text.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</div>' +
+      (result.kind === 'translated' ?
+        '<div class="arrow">↓ auto-translated to ' + target + '</div>' +
+        '<div class="out">' + translated.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</div>' :
+       result.kind === 'native' ?
+        '<div class="skipped">already in reader\'s locale — no translation needed.</div>' :
+       result.kind === 'skipped-low' ?
+        '<div class="skipped">skipped: ' + result.reason + ' — too short or ambiguous to translate confidently.</div>' :
+        '<div class="skipped">skipped: detector returned "und" — language unknown.</div>');
+    thread.appendChild(msg);
+    thread.scrollTop = thread.scrollHeight;
+    renderCounts();
+  }
+
+  sendBtn.addEventListener('click', () => {
+    const v = composer.value.trim();
+    if (!v) return;
+    composer.value = '';
+    processMessage(v);
+  });
+  composer.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) sendBtn.click();
+  });
+
+  document.querySelectorAll('.preset-row button').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const preset = b.dataset.preset;
+      if (preset === 'clear') {
+        thread.innerHTML = '';
+        counts.total = counts.detected = counts.translated = counts.skipped = 0;
+        renderCounts();
+        return;
+      }
+      for (const m of samples[preset]) {
+        await processMessage(m);
+        await new Promise((r) => setTimeout(r, 90));
+      }
+    });
+  });
+
+  initDetector();
+  checkTranslator();
+</script>
+</body>
+</html>
