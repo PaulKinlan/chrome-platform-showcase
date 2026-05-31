@@ -73,7 +73,7 @@
     }
     .btn:hover { box-shadow: var(--flat-shadow); }
     .btn-primary { background: var(--text-black); color: var(--bg-ivory); }
-    .render-sim {
+    .render-preview {
       border: 2px solid var(--border-black);
       background: var(--bg-stone);
       padding: var(--space-4);
@@ -83,7 +83,7 @@
       color: var(--text-charcoal);
       min-height: 100px;
     }
-    .sim-canvas {
+    .preview-canvas {
       border: 1px solid var(--border-black);
       display: block;
       margin: var(--space-2) 0;
@@ -113,7 +113,7 @@
     <p class="lede"><code>ClipboardItem.delayed()</code> registers a data callback that only runs on paste. This spy visualises the timeline: copy → <em>nothing rendered yet</em> → paste → <em>callback fires and generates data</em>. Contrast with eager rendering that fires at copy time.</p>
   </header>
 
-  <p style="font-size:0.88rem;color:var(--text-charcoal);margin-bottom:var(--space-3)">A simulated "canvas snapshot" costs 50ms to render. With eager copy, that 50ms fires when you press Copy. With deferred copy, it fires only if you paste — and is completely skipped if you never paste.</p>
+  <p style="font-size:0.88rem;color:var(--text-charcoal);margin-bottom:var(--space-3)">A canvas snapshot has to be rendered into a PNG blob. With eager copy, that rendering work happens when you press Copy. With deferred copy, it happens only if the clipboard item is actually read on paste.</p>
 
   <div class="stat-row">
     <div class="stat"><strong id="s-copies">0</strong><small>copy operations</small></div>
@@ -129,7 +129,7 @@
     <button class="btn" id="btn-clear">Clear log</button>
   </div>
 
-  <div class="render-sim" id="render-sim">
+  <div class="render-preview" id="render-preview">
     <em style="color:var(--text-muted)">Copy something to see the render area…</em>
   </div>
 
@@ -177,6 +177,9 @@ let copies = 0, renders = 0, pastes = 0, saved = 0;
 let lastMode = null; // 'eager' | 'deferred'
 let lastBlob = null;
 let tlCount = 0;
+const hasClipboardWrite = Boolean(navigator.clipboard?.write);
+const hasClipboardRead = Boolean(navigator.clipboard?.read);
+const hasDelayed = typeof ClipboardItem !== 'undefined' && 'delayed' in ClipboardItem;
 
 function ts() { return new Date().toLocaleTimeString('en', { hour12: false }); }
 function updateStats() {
@@ -205,32 +208,39 @@ function addEntry(text, phase, cost) {
 }
 
 async function expensiveRender() {
-  // Simulate expensive canvas rendering
   const canvas = document.createElement('canvas');
-  canvas.width = 400; canvas.height = 100;
+  canvas.width = 960; canvas.height = 240;
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#fdfcf8';
-  ctx.fillRect(0, 0, 400, 100);
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  for (let i = 0; i < 120; i++) {
+    ctx.fillStyle = i % 2 ? '#d1fae5' : '#bfdbfe';
+    ctx.fillRect((i * 37) % canvas.width, (i * 17) % canvas.height, 80, 24);
+  }
   ctx.fillStyle = '#000';
-  ctx.font = 'bold 28px Georgia';
-  ctx.fillText(`Snapshot at ${ts()}`, 20, 60);
+  ctx.font = 'bold 48px Georgia';
+  ctx.fillText(`Snapshot at ${ts()}`, 36, 132);
   ctx.strokeStyle = '#000';
-  ctx.strokeRect(5, 5, 390, 90);
-  await new Promise(r => setTimeout(r, 50)); // simulate 50ms work
+  ctx.lineWidth = 6;
+  ctx.strokeRect(12, 12, canvas.width - 24, canvas.height - 24);
   return new Promise(r => canvas.toBlob(r, 'image/png'));
 }
 
 function showRenderResult(blob, label) {
-  const sim = document.getElementById('render-sim');
+  const sim = document.getElementById('render-preview');
   const url = URL.createObjectURL(blob);
-  sim.innerHTML = `<div style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);margin-bottom:var(--space-1)">${label}</div><img src="${url}" class="sim-canvas" style="max-width:100%" alt="clipboard render">`;
+  sim.innerHTML = `<div style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);margin-bottom:var(--space-1)">${label}</div><img src="${url}" class="preview-canvas" style="max-width:100%" alt="clipboard render">`;
 }
 
 document.getElementById('btn-eager-copy').addEventListener('click', async () => {
+  if (!hasClipboardWrite) {
+    addEntry('Clipboard write API unavailable in this context.', 'copy', null);
+    return;
+  }
   copies++;
   lastMode = 'eager';
   addEntry('navigator.clipboard.write() called with eager ClipboardItem', 'copy', null);
-  addEntry('expensiveRender() firing NOW (at copy time)…', 'generate', { cls: 'expensive', label: '~50ms render' });
+  addEntry('expensiveRender() firing NOW (at copy time)…', 'generate', { cls: 'expensive', label: 'rendering' });
   renders++;
   updateStats();
 
@@ -239,45 +249,70 @@ document.getElementById('btn-eager-copy').addEventListener('click', async () => 
   const elapsed = (performance.now() - t0).toFixed(0);
   addEntry(`Render complete in ${elapsed}ms. Data ready in clipboard memory.`, 'deferred', { cls: 'expensive', label: `${elapsed}ms spent` });
   showRenderResult(lastBlob, `Eager render fired at copy time (${elapsed}ms)`);
+  await navigator.clipboard.write([
+    new ClipboardItem({ 'image/png': lastBlob }),
+  ]);
+  addEntry('Clipboard written with eager image/png data.', 'copy', null);
   updateStats();
 });
 
-document.getElementById('btn-deferred-copy').addEventListener('click', () => {
+document.getElementById('btn-deferred-copy').addEventListener('click', async () => {
+  if (!hasClipboardWrite || !hasDelayed) {
+    addEntry('ClipboardItem.delayed() unavailable in this browser/context.', 'copy', null);
+    return;
+  }
   copies++;
   lastMode = 'deferred';
   lastBlob = null;
   addEntry('ClipboardItem.delayed() registered — callback stored, NOT called', 'copy', { cls: 'free', label: '0ms cost' });
   addEntry('Nothing rendered. Callback will fire only on paste.', 'deferred', null);
 
-  const sim = document.getElementById('render-sim');
-  sim.innerHTML = `<div style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted)">⏳ Deferred: callback registered. Render fires only on paste.</div>`;
+  document.getElementById('render-preview').innerHTML = `<div style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted)">⏳ Deferred: callback registered. Render fires only on paste/read.</div>`;
+  await navigator.clipboard.write([
+    ClipboardItem.delayed({
+      'image/png': async () => {
+        addEntry('Deferred callback fired by clipboard read.', 'generate', { cls: 'expensive', label: 'rendering' });
+        renders++;
+        updateStats();
+        const t0 = performance.now();
+        lastBlob = await expensiveRender();
+        const elapsed = (performance.now() - t0).toFixed(0);
+        addEntry(`Render complete in ${elapsed}ms — paste can resolve.`, 'paste', { cls: 'expensive', label: `${elapsed}ms` });
+        return lastBlob;
+      },
+    }),
+  ]);
   updateStats();
 });
 
 document.getElementById('btn-paste').addEventListener('click', async () => {
   if (!lastMode) { addEntry('Copy something first.', 'paste', null); return; }
+  if (!hasClipboardRead) {
+    addEntry('Clipboard read API unavailable in this context.', 'paste', null);
+    return;
+  }
   pastes++;
   addEntry('navigator.clipboard.read() called (paste)', 'paste', null);
 
-  if (lastMode === 'eager') {
-    addEntry('Eager: data already rendered — returning cached blob immediately', 'paste', { cls: 'free', label: '0ms' });
-    if (lastBlob) showRenderResult(lastBlob, 'Pasted (eager — data was pre-rendered)');
-  } else {
-    addEntry('Deferred: ClipboardItem.delayed() callback fires NOW', 'generate', { cls: 'expensive', label: '~50ms render' });
-    renders++;
+  const items = await navigator.clipboard.read();
+  const imageItem = items.find(item => item.types.includes('image/png'));
+  if (!imageItem) {
+    addEntry('Clipboard did not contain image/png data.', 'paste', null);
     updateStats();
-    const t0 = performance.now();
-    lastBlob = await expensiveRender();
-    const elapsed = (performance.now() - t0).toFixed(0);
-    addEntry(`Render complete in ${elapsed}ms — paste resolved`, 'paste', { cls: 'expensive', label: `${elapsed}ms` });
-    if (lastBlob) showRenderResult(lastBlob, `Pasted (deferred — rendered ${elapsed}ms ago)`);
+    return;
   }
+  const blob = await imageItem.getType('image/png');
+  lastBlob = blob;
+  addEntry('image/png read from the real clipboard.', 'paste', { cls: 'free', label: 'read' });
+  showRenderResult(blob, lastMode === 'eager'
+    ? 'Pasted from real clipboard (eager data was pre-rendered)'
+    : 'Pasted from real clipboard (deferred callback rendered on read)');
   updateStats();
 });
 
 document.getElementById('btn-clear').addEventListener('click', () => {
   document.getElementById('timeline').innerHTML = '<div style="color:var(--text-muted);font-family:var(--font-mono);font-size:0.82rem">Log cleared.</div>';
-  document.getElementById('render-sim').innerHTML = '<em style="color:var(--text-muted)">Log cleared.</em>';
+  document.getElementById('render-preview').innerHTML = '<em style="color:var(--text-muted)">Log cleared.</em>';
   copies = renders = pastes = saved = 0; tlCount = 0;
   lastMode = null; lastBlob = null;
   updateStats();
