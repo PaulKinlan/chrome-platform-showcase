@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subscription Lifecycle — pushsubscriptionchange — Chrome 138 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    /* ── State machine diagram ── */
+    .state-machine {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .sm-row {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      flex-wrap: wrap;
+    }
+    .sm-state {
+      padding: 0.55rem 1.1rem;
+      border: 2px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      font-weight: 600;
+      background: var(--bg-paper);
+      cursor: pointer;
+      transition: background 0.15s;
+      min-width: 140px;
+      text-align: center;
+    }
+    .sm-state.active { background: var(--text-black); color: var(--bg-ivory); }
+    .sm-state.reachable { background: var(--bg-stone); }
+    .sm-arrow {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+    }
+    .sm-arrow .arrow-label {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: 0.15rem 0.4rem;
+      font-size: 0.7rem;
+    }
+    .sm-arrow .arrow-line { font-size: 1.1rem; color: var(--text-charcoal); }
+
+    /* ── Detail panel ── */
+    .state-detail {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      margin: var(--space-4) 0;
+    }
+    .sd-header {
+      padding: var(--space-2) var(--space-3);
+      border-bottom: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .sd-body {
+      padding: var(--space-4);
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-4);
+    }
+    @media (max-width: 600px) { .sd-body { grid-template-columns: 1fr; } }
+    .sd-col-title {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: var(--space-2);
+    }
+    .sd-desc {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      line-height: 1.6;
+      color: var(--text-charcoal);
+    }
+    .sd-code {
+      background: var(--bg-stone);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      line-height: 1.6;
+      white-space: pre;
+      overflow-x: auto;
+    }
+
+    /* ── Event log simulator ── */
+    .sim-controls {
+      display: flex;
+      gap: var(--space-3);
+      flex-wrap: wrap;
+      margin: var(--space-4) 0;
+    }
+    .sim-btn {
+      padding: 0.5rem 0.9rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      cursor: pointer;
+    }
+    .sim-btn:hover { background: var(--bg-stone); }
+    .sim-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .sim-btn.primary { background: var(--text-black); color: var(--bg-ivory); }
+
+    .event-log {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.7;
+      min-height: 100px;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+    .log-entry { border-bottom: 1px solid var(--border-black); padding: var(--space-1) 0; }
+    .log-entry:last-child { border-bottom: none; }
+    .log-time { color: var(--text-muted); }
+    .log-event { color: var(--accent-blue); font-weight: 600; }
+    .log-new { color: var(--accent-emerald); }
+    .log-warn { color: #b87b00; }
+    .log-err  { color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; pushsubscriptionchange</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>Subscription Lifecycle</h1>
+    <p class="lede">A Web Push subscription moves through several states during its life — active, expired, permission-revoked, and (Chrome 138+) resubscribed. Click through each state transition below to see what events fire in the service worker, what the old and new subscription objects look like, and what your service worker needs to do.</p>
+  </header>
+
+  <!-- State machine -->
+  <h3 style="font-family:var(--font-mono);font-size:0.85rem;text-transform:uppercase;letter-spacing:0.08em;margin:var(--space-4) 0 var(--space-2)">Lifecycle state machine</h3>
+  <div class="state-machine">
+    <div class="sm-row">
+      <div class="sm-state active" id="state-none" data-state="none">No subscription</div>
+      <div class="sm-arrow"><span class="arrow-label">subscribe()</span><span class="arrow-line">→</span></div>
+      <div class="sm-state reachable" id="state-active" data-state="active">Active</div>
+      <div class="sm-arrow"><span class="arrow-label">key rotation</span><span class="arrow-line">→</span></div>
+      <div class="sm-state" id="state-rotated" data-state="rotated">Key rotated</div>
+    </div>
+    <div class="sm-row">
+      <div class="sm-state" id="state-expired" data-state="expired">Expired</div>
+      <div class="sm-arrow" style="transform:rotate(180deg)"><span class="arrow-line">↑</span></div>
+      <div class="sm-state" id="state-revoked" data-state="revoked">Permission revoked</div>
+      <div class="sm-arrow"><span class="arrow-label">permission re-granted (Chrome 138+)</span><span class="arrow-line">→</span></div>
+      <div class="sm-state" id="state-resubscribed" data-state="resubscribed">Resubscribed</div>
+    </div>
+  </div>
+
+  <div class="state-detail">
+    <div class="sd-header" id="detailTitle">Select a state above to see details</div>
+    <div class="sd-body">
+      <div>
+        <div class="sd-col-title">What happens</div>
+        <div class="sd-desc" id="detailDesc">Click any state in the diagram above.</div>
+      </div>
+      <div>
+        <div class="sd-col-title">Service worker code</div>
+        <div class="sd-code" id="detailCode"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Simulator -->
+  <h3 style="font-family:var(--font-mono);font-size:0.85rem;text-transform:uppercase;letter-spacing:0.08em;margin:var(--space-5) 0 var(--space-2)">Event log simulator</h3>
+  <div class="sim-controls">
+    <button class="sim-btn primary" id="btnSubscribe">1. Subscribe</button>
+    <button class="sim-btn" id="btnRevoke" disabled>2. Revoke permission</button>
+    <button class="sim-btn" id="btnResubscribe" disabled>3. Re-grant permission</button>
+    <button class="sim-btn" id="btnClear">Clear log</button>
+  </div>
+  <div class="event-log" id="eventLog"><span style="color:var(--text-muted)">Click "Subscribe" to start the simulation…</span></div>
+
+  <pre><code>// service-worker.js — Chrome 138+
+self.addEventListener('pushsubscriptionchange', async (event) => {
+  // oldSubscription: the expired/revoked endpoint
+  // newSubscription: the fresh endpoint (may be null if subscribe failed)
+  const { oldSubscription, newSubscription } = event;
+
+  event.waitUntil(async function() {
+    if (!newSubscription) {
+      // Resubscription failed — notify your server endpoint is dead
+      await fetch('/api/push/unregister', {
+        method: 'POST',
+        body: JSON.stringify({ endpoint: oldSubscription.endpoint })
+      });
+      return;
+    }
+
+    // Send new endpoint to your server so it can deliver future pushes
+    await fetch('/api/push/update', {
+      method: 'POST',
+      body: JSON.stringify({
+        old: oldSubscription.endpoint,
+        new: newSubscription.toJSON()
+      })
+    });
+  }());
+});</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../psc-resubscribe/">Resubscribe Event</a></li>
+      <li><a href="../server-sync-flow/">Server-sync flow</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const stateData = {
+    none: {
+      title: 'State: No subscription',
+      desc: 'The user has not subscribed to push notifications, or has previously unsubscribed. No endpoint exists on the push service.',
+      code: `// Check current subscription
+const reg = await navigator.serviceWorker.ready;
+const sub = await reg.pushManager.getSubscription();
+// sub === null
+
+// Subscribe
+const newSub = await reg.pushManager.subscribe({
+  userVisibleOnly: true,
+  applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY)
+});
+// Send newSub.toJSON() to your server`
+    },
+    active: {
+      title: 'State: Active subscription',
+      desc: 'The user granted notification permission and a push endpoint exists. Your server sends push messages to this endpoint. The subscription may expire or be revoked at any time.',
+      code: `// In the page
+const reg = await navigator.serviceWorker.ready;
+const sub = await reg.pushManager.getSubscription();
+// sub.endpoint = "https://fcm.googleapis.com/fcm/send/..."
+// sub.expirationTime = null (most subscriptions don't expire)
+
+// When delivering a push from your server:
+const payload = JSON.stringify({ title: 'Hello!', body: '...' });
+webpush.sendNotification(sub.toJSON(), payload);`
+    },
+    rotated: {
+      title: 'State: Key rotated (pushsubscriptionchange)',
+      desc: 'The push service rotated the subscription keys. The old endpoint is now invalid. Chrome fires pushsubscriptionchange with both the old and new PushSubscription so your service worker can update the server.',
+      code: `// service-worker.js
+self.addEventListener('pushsubscriptionchange', (event) => {
+  const { oldSubscription, newSubscription } = event;
+  // oldSubscription.endpoint → stale, will bounce messages
+  // newSubscription.endpoint → fresh endpoint
+
+  event.waitUntil(
+    fetch('/api/push/rotate', {
+      method: 'POST',
+      body: JSON.stringify({
+        old: oldSubscription?.endpoint,
+        new: newSubscription?.toJSON()
+      })
+    })
+  );
+});`
+    },
+    revoked: {
+      title: 'State: Permission revoked',
+      desc: 'The user revoked notification permission (via browser settings). The push subscription is automatically cancelled. Before Chrome 138, if the user later re-granted permission your server would never learn about the new endpoint — a silent failure.',
+      code: `// Before Chrome 138:
+// 1. User revokes permission → subscription deleted
+// 2. User re-grants permission → browser creates new subscription
+// 3. BUT pushsubscriptionchange did NOT fire → server still has stale endpoint
+// 4. Next push attempt → 410 Gone from push service
+
+// You had to detect this by polling getSubscription()
+// every time the page loaded — fragile and unreliable.`
+    },
+    resubscribed: {
+      title: 'State: Resubscribed (Chrome 138+ fix)',
+      desc: 'Chrome 138 fires pushsubscriptionchange when the user re-grants notification permission after it was revoked. The event includes the old (now-stale) subscription and the newly-created subscription. Your service worker can immediately sync the new endpoint with your server without any page-load polling.',
+      code: `// service-worker.js — Chrome 138+
+// This now fires after permission revoke → re-grant cycle!
+self.addEventListener('pushsubscriptionchange', async (event) => {
+  const { oldSubscription, newSubscription } = event;
+
+  if (!newSubscription) return; // subscribe failed
+
+  event.waitUntil(
+    fetch('/api/push/update', {
+      method: 'POST',
+      body: JSON.stringify({
+        old: oldSubscription?.endpoint ?? null,
+        new: newSubscription.toJSON()
+      })
+    })
+  );
+});`
+    },
+    expired: {
+      title: 'State: Subscription expired',
+      desc: 'Some push services set an expirationTime on subscriptions. When it passes, the subscription silently becomes invalid. pushsubscriptionchange fires so your service worker can renew and update the server endpoint.',
+      code: `// service-worker.js
+self.addEventListener('pushsubscriptionchange', (event) => {
+  const { oldSubscription, newSubscription } = event;
+
+  // Check if this is an expiry (expirationTime was set)
+  const wasExpired = oldSubscription?.expirationTime != null &&
+                     oldSubscription.expirationTime < Date.now();
+
+  console.log('Reason: expiry?', wasExpired);
+  // Same re-registration flow: send newSubscription to server
+});`
+    },
+  };
+
+  // State diagram click
+  document.querySelectorAll('.sm-state').forEach(el => {
+    el.addEventListener('click', () => {
+      const s = el.dataset.state;
+      if (!stateData[s]) return;
+      document.querySelectorAll('.sm-state').forEach(e => {
+        e.classList.remove('active');
+        e.classList.add('reachable');
+      });
+      el.classList.remove('reachable');
+      el.classList.add('active');
+      const d = stateData[s];
+      document.getElementById('detailTitle').textContent = d.title;
+      document.getElementById('detailDesc').textContent  = d.desc;
+      document.getElementById('detailCode').textContent  = d.code;
+    });
+  });
+
+  // Simulator
+  let simState = 'unsubscribed'; // unsubscribed | subscribed | revoked
+  let simEndpoint = null;
+  let logCount = 0;
+
+  function timestamp() {
+    return new Date().toLocaleTimeString([], { hour12: false });
+  }
+  function addLog(type, text) {
+    const log = document.getElementById('eventLog');
+    if (log.querySelector('span[style]')) log.innerHTML = '';
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    entry.innerHTML = `<span class="log-time">[${timestamp()}]</span> <span class="log-${type}">${text}</span>`;
+    log.appendChild(entry);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function fakeEndpoint() {
+    return 'https://fcm.googleapis.com/fcm/send/' + Math.random().toString(36).slice(2, 14);
+  }
+
+  document.getElementById('btnSubscribe').addEventListener('click', () => {
+    if (simState !== 'unsubscribed') return;
+    simEndpoint = fakeEndpoint();
+    simState = 'subscribed';
+    addLog('new', 'pushManager.subscribe() called — permission granted');
+    addLog('event', `subscription.endpoint = ${simEndpoint.slice(0,40)}…`);
+    addLog('new', 'Server notified: POST /api/push/register → 200 OK');
+    document.getElementById('btnSubscribe').disabled = true;
+    document.getElementById('btnRevoke').disabled = false;
+    document.getElementById('btnResubscribe').disabled = true;
+  });
+
+  document.getElementById('btnRevoke').addEventListener('click', () => {
+    if (simState !== 'subscribed') return;
+    simState = 'revoked';
+    addLog('warn', 'User revoked notification permission');
+    addLog('warn', 'Browser cancelled subscription → endpoint invalid');
+    addLog('warn', '(Before Chrome 138: no event fired — server has stale endpoint)');
+    document.getElementById('btnRevoke').disabled = true;
+    document.getElementById('btnResubscribe').disabled = false;
+  });
+
+  document.getElementById('btnResubscribe').addEventListener('click', () => {
+    if (simState !== 'revoked') return;
+    const oldEndpoint = simEndpoint;
+    simEndpoint = fakeEndpoint();
+    simState = 'resubscribed';
+    addLog('new', 'User re-granted notification permission');
+    addLog('event', 'SW event: pushsubscriptionchange fired! (Chrome 138+)');
+    addLog('event', `  event.oldSubscription.endpoint = ${oldEndpoint.slice(0,40)}…`);
+    addLog('event', `  event.newSubscription.endpoint = ${simEndpoint.slice(0,40)}…`);
+    addLog('new', 'Server notified: POST /api/push/update → 200 OK');
+    addLog('new', '✓ Server now has valid endpoint — push delivery restored');
+    document.getElementById('btnResubscribe').disabled = true;
+    document.getElementById('btnRevoke').disabled = false;
+  });
+
+  document.getElementById('btnClear').addEventListener('click', () => {
+    simState = 'unsubscribed';
+    simEndpoint = null;
+    document.getElementById('eventLog').innerHTML = '<span style="color:var(--text-muted)">Click "Subscribe" to start the simulation…</span>';
+    document.getElementById('btnSubscribe').disabled = false;
+    document.getElementById('btnRevoke').disabled = true;
+    document.getElementById('btnResubscribe').disabled = true;
+  });
+</script>
+</body>
+</html>
