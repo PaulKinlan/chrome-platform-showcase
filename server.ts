@@ -16,6 +16,7 @@ import {
 } from "./lib/chromestatus.ts";
 
 const PORT = Number(Deno.env.get("PORT") ?? 3000);
+const CHROMIUM_DASH_BASE = "https://chromiumdash.appspot.com";
 
 const MIME: Record<string, string> = {
   html: "text/html; charset=utf-8",
@@ -105,6 +106,44 @@ function relativeTime(d: Date): string {
   if (hr < 24) return `${hr}h ago`;
   const day = Math.floor(hr / 24);
   return `${day}d ago`;
+}
+
+// ----- Milestone schedule info (fetched from Chromium Dash, cached for 1 hour) -----
+
+interface MilestoneSchedule {
+  mstone: number;
+  stable_date?: string;
+  late_stable_date?: string;
+  stable_refresh_first?: string;
+}
+
+interface MilestoneScheduleResponse {
+  mstones?: MilestoneSchedule[];
+}
+
+const MILESTONE_SCHEDULE_TTL_MS = 60 * 60 * 1000;
+const milestoneScheduleCache = new Map<number, {
+  at: number;
+  value: MilestoneSchedule | null;
+}>();
+
+async function getMilestoneSchedule(milestone: number): Promise<MilestoneSchedule | null> {
+  const hit = milestoneScheduleCache.get(milestone);
+  if (hit && Date.now() - hit.at < MILESTONE_SCHEDULE_TTL_MS) return hit.value;
+
+  try {
+    const url = new URL("/fetch_milestone_schedule", CHROMIUM_DASH_BASE);
+    url.searchParams.set("mstone", String(milestone));
+    const res = await fetch(url, { headers: { accept: "application/json" } });
+    if (!res.ok) throw new Error(`chromiumdash ${milestone} returned ${res.status}`);
+    const data = await res.json() as MilestoneScheduleResponse;
+    const value = data.mstones?.find((m) => m.mstone === milestone) ?? null;
+    milestoneScheduleCache.set(milestone, { at: Date.now(), value });
+    return value;
+  } catch {
+    milestoneScheduleCache.set(milestone, { at: Date.now(), value: null });
+    return null;
+  }
 }
 
 async function readPublicAsset(path: string): Promise<Response> {
@@ -2729,10 +2768,13 @@ function datePart(date: Date, part: "day" | "month" | "year"): string {
   return date.toLocaleDateString("en-GB", { [part]: "numeric" });
 }
 
-function stableDateRange(channel: Channel): string {
-  const start = parseDate(channel.stable_date);
+function stableDateRangeFromDates(
+  stableDate: string | undefined,
+  finalStableDate: string | undefined,
+): string {
+  const start = parseDate(stableDate);
   if (!start) return "";
-  const end = parseDate(channel.late_stable_date ?? channel.stable_refresh_first);
+  const end = parseDate(finalStableDate);
   if (!end || end.getTime() === start.getTime()) {
     return start.toLocaleDateString("en-GB", {
       day: "numeric",
@@ -2757,6 +2799,13 @@ function stableDateRange(channel: Channel): string {
   return `${startDay} ${startMonth} ${startYear}-${endDay} ${endMonth} ${endYear}`;
 }
 
+function stableDateRange(channel: Channel | MilestoneSchedule): string {
+  return stableDateRangeFromDates(
+    channel.stable_date,
+    channel.late_stable_date ?? channel.stable_refresh_first,
+  );
+}
+
 async function renderIndex(channels: Channels): Promise<string> {
   const commit = await getLatestCommit();
   // Chromestatus's "stable.mstone" is the *next* stable cut, even when its
@@ -2764,15 +2813,15 @@ async function renderIndex(channels: Channels): Promise<string> {
   // the cut lands. Show that release too so the issue stream and the catalogue
   // line up with what's actually deployed.
   const prevStable = channels.stable.mstone - 1;
-  const releases: { mstone: number; status: string; date: string }[] = [
-    { mstone: channels.dev.mstone, status: "Dev", date: stableDateRange(channels.dev) },
-    { mstone: channels.beta.mstone, status: "Beta", date: stableDateRange(channels.beta) },
+  const releases: { mstone: number; status: string; stableRange: string }[] = [
+    { mstone: channels.dev.mstone, status: "Dev", stableRange: stableDateRange(channels.dev) },
+    { mstone: channels.beta.mstone, status: "Beta", stableRange: stableDateRange(channels.beta) },
     {
       mstone: channels.stable.mstone,
       status: "Stable (rolling out)",
-      date: stableDateRange(channels.stable),
+      stableRange: stableDateRange(channels.stable),
     },
-    { mstone: prevStable, status: "Stable (live)", date: "" },
+    { mstone: prevStable, status: "Stable (live)", stableRange: "" },
   ];
 
   // Surface older releases that have v<N>/ folders too, so a
@@ -2784,7 +2833,7 @@ async function renderIndex(channels: Channels): Promise<string> {
       if (entry.isDirectory && /^v\d+$/.test(entry.name)) {
         const m = Number(entry.name.slice(1));
         if (!seen.has(m)) {
-          releases.push({ mstone: m, status: "Archive", date: "" });
+          releases.push({ mstone: m, status: "Archive", stableRange: "" });
           seen.add(m);
         }
       }
@@ -2792,14 +2841,21 @@ async function renderIndex(channels: Channels): Promise<string> {
   } catch {
     // ignore — Deno Deploy can refuse the readDir at root in some isolates.
   }
+
+  await Promise.all(releases.map(async (release) => {
+    if (release.stableRange) return;
+    const schedule = await getMilestoneSchedule(release.mstone);
+    if (schedule) release.stableRange = stableDateRange(schedule);
+  }));
+
   releases.sort((a, b) => b.mstone - a.mstone);
 
   const cards = releases.map((r) => {
     let note: string;
-    if (r.date) {
-      note = `Stable date range: ${r.date}`;
+    if (r.stableRange) {
+      note = `Stable date range: ${r.stableRange}`;
     } else if (r.status === "Archive") {
-      note = "Archive release";
+      note = "Stable date unavailable";
     } else {
       note = "Most users are here";
     }
@@ -2834,7 +2890,7 @@ async function renderIndex(channels: Channels): Promise<string> {
     <section>
       <h2>releases</h2>
       <ol class="release-list">${cards}</ol>
-      <p class="note">Or jump straight to <a href="/features">the full feature catalogue</a> to search across every release at once. Release cards show ChromeStatus stable rollout ranges when the channel schedule exposes them.</p>
+      <p class="note">Or jump straight to <a href="/features">the full feature catalogue</a> to search across every release at once. Release cards show stable rollout ranges from ChromeStatus and Chromium Dash schedules when available.</p>
     </section>
 
     <section class="how">
