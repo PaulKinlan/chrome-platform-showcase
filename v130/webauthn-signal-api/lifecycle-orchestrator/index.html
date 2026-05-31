@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lifecycle orchestrator — WebAuthn Signal API — Chrome 130</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .timeline { display: grid; grid-template-columns: 40px 1fr 220px; gap: 0.5rem 0.8rem; }
+    .t-row { display: contents; }
+    .t-row .step { background: var(--bg-stone); border: 2px solid var(--border-black); width: 32px; height: 32px; font-family: var(--font-mono); font-weight: 700; display: flex; align-items: center; justify-content: center; }
+    .t-row .body { padding: 0.6rem 0.8rem; border: 2px solid var(--border-black); background: var(--bg-ivory); font-family: var(--font-mono); font-size: 0.85rem; line-height: 1.55; }
+    .t-row.active .body { box-shadow: 4px 4px 0 var(--border-black); background: var(--bg-paper); }
+    .t-row .action { padding: 0.5rem; background: var(--text-black); color: var(--bg-ivory); font-family: var(--font-mono); font-size: 0.74rem; }
+
+    .scenarios { display: flex; gap: 0.4rem; margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .scen-btn { padding: 0.35rem 0.7rem; font-family: var(--font-mono); font-size: 0.76rem; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); cursor: pointer; }
+    .scen-btn[aria-pressed="true"] { background: var(--text-black); color: var(--bg-ivory); }
+    .code-out { background: var(--text-black); color: var(--bg-ivory); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; white-space: pre-wrap; margin-top: var(--space-3); }
+    .verdict { background: var(--bg-ivory); border-left: 4px solid var(--accent-blue); padding: var(--space-3); font-family: var(--font-serif); font-size: 1rem; line-height: 1.55; margin-top: var(--space-3); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebAuthn Signal API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>Lifecycle orchestrator</h1>
+    <p class="lede">Four canonical credential lifecycle events at a relying-party. For each one — the page emits the right Signal API call, the matching server-side state change, and a written rationale. The timeline below shows the user-visible effect.</p>
+  </header>
+
+  <section class="stage">
+    <div class="scenarios">
+      <button class="scen-btn" data-s="rotate" aria-pressed="true">User rotated their username</button>
+      <button class="scen-btn" data-s="revoke">RP revoked the credential server-side</button>
+      <button class="scen-btn" data-s="multi-device">User dropped a device from their account</button>
+      <button class="scen-btn" data-s="account-merge">Two accounts merged — credentials need re-tagging</button>
+    </div>
+
+    <pre class="code-out" id="snippet"></pre>
+
+    <div class="timeline" id="timeline"></div>
+
+    <div class="verdict" id="rationale"></div>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../webauthn-signal/">Signal API basics</a></li>
+      <li><a href="../unknown-credential/">Unknown credential signal</a></li>
+      <li><a href="https://w3c.github.io/webauthn/#sctn-signal-methods" target="_blank" rel="noopener">Signal methods spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const SCENARIOS = {
+    rotate: {
+      code: `// User updated their display name on the account settings page
+await PublicKeyCredential.signalCurrentUserDetails({
+  rpId: "rp.example",
+  userId: base64ToArr(user.userIdB64),
+  name: "frances.eka@new.example",
+  displayName: "Frances Eka Anderson-Curtis"
+});`,
+      timeline: [
+        ["1", "User changes display name in /account settings", "POST /api/user → server updates user record"],
+        ["2", "RP calls signalCurrentUserDetails", "no authenticator interaction needed"],
+        ["3", "Browser propagates new name to platform credential metadata", "passkey manager updates locally"],
+        ["4", "Next Save / Autofill UI shows the new name", "no re-enrollment, no user prompt"],
+      ],
+      rationale: "<strong>Why signalCurrentUserDetails:</strong> previously, when a user renamed their account, the platform passkey manager still showed the old name forever. Users had to delete + re-enroll the passkey to update. The signal API lets you push the new name without any user action — invisible to the end user, the correct DX.",
+    },
+    revoke: {
+      code: `// Admin revoked credential cred-id-abc in the back-office UI
+await PublicKeyCredential.signalUnknownCredential({
+  rpId: "rp.example",
+  credentialId: base64ToArr("cred-id-abc")
+});`,
+      timeline: [
+        ["1", "Admin clicks 'revoke key' in the back-office for a stolen device", "DB: credential.revoked_at = now"],
+        ["2", "RP calls signalUnknownCredential with the revoked credential id", "browser-side hint, no fetch"],
+        ["3", "Browser marks the credential entry as orphaned in the passkey manager", "user's saved passkey list shows it greyed out"],
+        ["4", "If user tries to sign in with it, they see a clear 'remove from device' prompt", "no mysterious 401 with no explanation"],
+      ],
+      rationale: "<strong>Why signalUnknownCredential:</strong> the server revoked, but the user's device still thinks the credential is valid. Without this signal, the user sees an authentication attempt fail and has no way to clean it up. Sending the signal causes the platform UI to mark the credential as removable.",
+    },
+    "multi-device": {
+      code: `// User dropped their work laptop from the account; remove its credential from
+// every other device's passkey manager.
+await PublicKeyCredential.signalAllAcceptedCredentials({
+  rpId: "rp.example",
+  userId: base64ToArr(user.userIdB64),
+  allAcceptedCredentialIds: [
+    base64ToArr("phone-cred-id"),
+    base64ToArr("desktop-cred-id"),
+  ]
+});`,
+      timeline: [
+        ["1", "User clicks 'sign out of work laptop' in security settings", "server-side: revoke credential id 'laptop-cred-id'"],
+        ["2", "Server returns updated list of valid credentials for this user", "phone + desktop only"],
+        ["3", "RP calls signalAllAcceptedCredentials with the full new list", "single round-trip; browser reconciles"],
+        ["4", "All passkey managers (phone, desktop, etc.) update their list of valid IDs", "laptop credential greys out everywhere"],
+      ],
+      rationale: "<strong>Why signalAllAcceptedCredentials:</strong> this is the all-at-once version. The RP says 'here is the authoritative list of credentials for this user' and the browser reconciles. Useful after multi-device deletion, or after migrating a user account.",
+    },
+    "account-merge": {
+      code: `// User merged account A and account B. Credentials previously tied to userId=A
+// are re-tagged as belonging to userId=A+B (the merged account).
+await PublicKeyCredential.signalCurrentUserDetails({
+  rpId: "rp.example",
+  userId: base64ToArr(mergedUserIdB64),
+  name: "frances.eka@example",
+  displayName: "Frances Eka (merged account)"
+});
+// And, for credentials that previously pointed to the OLD userId:
+await PublicKeyCredential.signalUnknownCredential({
+  rpId: "rp.example",
+  credentialId: base64ToArr("old-account-cred-id")
+});`,
+      timeline: [
+        ["1", "User triggers 'merge accounts' in profile settings", "server moves data from B → A; deletes B"],
+        ["2", "RP iterates credentials previously bound to B; for each, fires signalUnknownCredential", "credential entries marked orphaned"],
+        ["3", "RP calls signalCurrentUserDetails on the surviving A credentials with the new display name", "merged identity propagated"],
+        ["4", "User can sign in with any of A's credentials, sees the merged name everywhere", "no orphaned passkey clutter"],
+      ],
+      rationale: "<strong>Why the combination:</strong> merges are the most delicate case. Use unknownCredential to clean up B's orphaned credentials, and currentUserDetails to update A's metadata. Both calls are required; missing either leaves users with mysterious passkey manager entries.",
+    },
+  };
+
+  const snippet = document.getElementById("snippet");
+  const tEl = document.getElementById("timeline");
+  const rationale = document.getElementById("rationale");
+
+  function render(key) {
+    document.querySelectorAll(".scen-btn").forEach((b) => b.setAttribute("aria-pressed", b.dataset.s === key ? "true" : "false"));
+    const s = SCENARIOS[key];
+    snippet.textContent = s.code;
+    tEl.innerHTML = s.timeline.map((r, i) => `<div class="t-row ${i === 1 || i === 2 ? "active" : ""}"><div class="step">${r[0]}</div><div class="body">${r[1]}</div><div class="action">${r[2]}</div></div>`).join("");
+    rationale.innerHTML = s.rationale;
+  }
+
+  document.querySelectorAll(".scen-btn").forEach((b) => b.addEventListener("click", () => render(b.dataset.s)));
+  render("rotate");
+</script>
+</body>
+</html>
