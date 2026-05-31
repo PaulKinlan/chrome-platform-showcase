@@ -1006,6 +1006,62 @@ async function renderSpcBbkRoute(
   return null;
 }
 
+// ----- fetchLater receiver demos -----
+
+interface FetchLaterEvent {
+  id: string;
+  receivedAt: string;
+  method: string;
+  path: string;
+  body: unknown;
+  bodyBytes: number;
+  userAgent: string;
+}
+
+const fetchLaterEvents: FetchLaterEvent[] = [];
+
+async function renderFetchLaterRoute(req: Request, sub: string): Promise<Response | null> {
+  if (!sub.startsWith("/fetchlater-api/")) return null;
+  const route = sub.slice("/fetchlater-api".length);
+
+  if ((route === "/log" || route === "/echo") && req.method === "POST") {
+    const text = await req.text();
+    let body: unknown = text;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = text;
+    }
+    const event: FetchLaterEvent = {
+      id: randomBase64Url(9),
+      receivedAt: new Date().toISOString(),
+      method: req.method,
+      path: new URL(req.url).pathname,
+      body,
+      bodyBytes: new TextEncoder().encode(text).byteLength,
+      userAgent: req.headers.get("user-agent") ?? "",
+    };
+    fetchLaterEvents.unshift(event);
+    fetchLaterEvents.splice(50);
+    return jsonResponse({
+      accepted: true,
+      event,
+      recent: fetchLaterEvents.slice(0, 10),
+    });
+  }
+
+  if (route === "/events") {
+    return jsonResponse({ events: fetchLaterEvents.slice(0, 25) });
+  }
+
+  if (route === "/reset" && req.method === "POST") {
+    fetchLaterEvents.splice(0);
+    return jsonResponse({ reset: true, events: [] });
+  }
+
+  return null;
+}
+
 const FEDCM_BASE = "/v148/agentic-federated-login/fedcm";
 const FEDCM_IDP_COOKIE = "showcase_fedcm_idp";
 const FEDCM_CLIENT_ID = "chrome-platform-showcase";
@@ -2822,6 +2878,10 @@ Deno.serve({ port: PORT }, async (req) => {
       if (webAuthnSignalResponse) return webAuthnSignalResponse;
     }
     if (release === "v135" || release === "v145") {
+      if (release === "v135") {
+        const fetchLaterResponse = await renderFetchLaterRoute(req, sub);
+        if (fetchLaterResponse) return fetchLaterResponse;
+      }
       const spcBbkResponse = await renderSpcBbkRoute(req, release, sub);
       if (spcBbkResponse) return spcBbkResponse;
       const dbscResponse = await renderDbscRoute(req, sub);

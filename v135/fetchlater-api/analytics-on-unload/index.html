@@ -33,12 +33,12 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v135</p>
     <h1>Analytics that survives an unload</h1>
-    <p class="lede">The original WICG pending-beacon design centred on this scenario: pages want to send a closing analytics ping reliably, but <code>sendBeacon</code> and <code>fetch(keepalive)</code> both leak the request the moment the user hits the back button. <code>fetchLater()</code> queues each event with a long <code>activateAfter</code>; if the user leaves first, the browser flushes the queue. Click any event below and a real pending request is added. "Simulate page hidden" triggers an early flush.</p>
+    <p class="lede">The original WICG pending-beacon design centred on this scenario: pages want to send a closing analytics ping reliably, but <code>sendBeacon</code> and <code>fetch(keepalive)</code> both leak the request the moment the user hits the back button. <code>fetchLater()</code> queues each event with a long <code>activateAfter</code>; if the user leaves first, the browser flushes the queue. Click any event below to queue a native request or send a real fallback request to the backend receiver.</p>
   </header>
 
   <div class="warn-block">
     <strong>Behind a flag</strong>
-    fetchLater requires <code>chrome://flags/#fetch-later-api</code>. Without it, the demo simulates the queue and flushes events on a JS-side <code>visibilitychange</code>.
+    fetchLater requires <code>chrome://flags/#fetch-later-api</code>. Without it, this page sends the analytics event immediately with a real <code>sendBeacon()</code> or <code>fetch({ keepalive: true })</code> fallback and labels it as fallback delivery.
   </div>
 
   <div class="stage">
@@ -62,7 +62,7 @@
     </div>
 
     <div class="row">
-      <button id="flush">Simulate page hidden &amp; flush</button>
+      <button id="flush">Record visibilitychange</button>
       <button id="cancel-all">Cancel all pending</button>
     </div>
   </div>
@@ -96,7 +96,7 @@
 <script>
 const cap = document.getElementById("cap");
 const real = typeof window.fetchLater === "function";
-cap.textContent = real ? "fetchLater: yes" : "fetchLater: no (simulated)";
+cap.textContent = real ? "fetchLater: yes" : "fetchLater: no";
 cap.classList.add(real ? "ok" : "bad");
 
 const logEl = document.getElementById("log");
@@ -134,12 +134,13 @@ document.querySelectorAll("[data-event]").forEach((b) => b.addEventListener("cli
   const ev = b.dataset.event;
   const id = nextId++;
   const payload = { ts: Date.now(), nav: location.pathname };
+  const body = JSON.stringify({ event: ev, payload, id });
   if (real) {
     try {
-      const handle = window.fetchLater("/log", {
+      const handle = window.fetchLater("/v135/fetchlater-api/log", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ event: ev, payload }),
+        body,
         activateAfter: 60_000,
       });
       pending.push({ id, ev, handle });
@@ -149,30 +150,23 @@ document.querySelectorAll("[data-event]").forEach((b) => b.addEventListener("cli
       log(`fetchLater threw: ${e.message}`);
     }
   } else {
-    const t = setTimeout(() => {
-      log(`#${id} flushed after 60s (simulated)`);
-      const i = pending.findIndex((p) => p.id === id);
-      if (i >= 0) pending.splice(i, 1);
-      pendingEl.querySelector(`[data-id="${id}"]`)?.remove();
-    }, 60_000);
-    pending.push({ id, ev, timer: t });
-    makePendingRow(id, ev);
-    log(`#${id} queued ${ev} (simulated, 60s)`);
+    const sent = navigator.sendBeacon?.("/v135/fetchlater-api/log", new Blob([body], { type: "application/json" }));
+    if (sent) {
+      log(`#${id} sent ${ev} with sendBeacon fallback`);
+    } else {
+      fetch("/v135/fetchlater-api/log", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        keepalive: true,
+      }).then((res) => log(`#${id} sent ${ev} with fetch keepalive fallback (${res.status})`))
+        .catch((error) => log(`#${id} fallback delivery failed: ${error.message}`));
+    }
   }
 }));
 
 document.getElementById("flush").addEventListener("click", () => {
-  const n = pending.length;
-  pending.splice(0).forEach((p) => {
-    if (p.timer) clearTimeout(p.timer);
-    if (p.handle?.activated !== undefined) {
-      log(`#${p.id} would flush on real unload (cannot trigger from script)`);
-    } else {
-      log(`#${p.id} flushed (simulated visibilitychange)`);
-    }
-    pendingEl.querySelector(`[data-id="${p.id}"]`)?.remove();
-  });
-  log(`page-hidden simulated, ${n} request(s) processed`);
+  log(`visibilitychange observed: ${document.visibilityState}. Native fetchLater flush is browser-owned.`);
 });
 
 document.getElementById("cancel-all").addEventListener("click", () => {

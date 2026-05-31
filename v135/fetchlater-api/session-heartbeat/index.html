@@ -163,7 +163,7 @@
     <div class="controls-row">
       <div class="field-group">
         <label>Endpoint URL</label>
-        <input type="text" id="endpointUrl" value="/api/session/heartbeat" style="width:220px">
+        <input type="text" id="endpointUrl" value="/v135/fetchlater-api/log" style="width:220px">
       </div>
       <div class="field-group">
         <label>activateAfter (deadline)</label>
@@ -181,7 +181,7 @@
       </div>
       <button class="primary" id="queueBtn">Queue heartbeat</button>
       <button class="secondary" id="abortBtn" disabled>Abort</button>
-      <button class="secondary" id="simulateUnload">Simulate unload</button>
+      <button class="secondary" id="sendUnload">Send unload heartbeat now</button>
     </div>
 
     <p class="section-title">Timeline</p>
@@ -204,7 +204,7 @@
     probe.textContent = 'fetchLater API available (Chrome 135+)';
     probe.className = 'probe ok';
   } else {
-    probe.textContent = 'fetchLater not available — simulation mode';
+    probe.textContent = 'fetchLater not available — using real keepalive fallback';
     probe.className = 'probe warn';
   }
 
@@ -285,12 +285,23 @@
       }
     } else {
       if (deadlineMs > 0) {
-        deadlineTimer = setTimeout(() => {
+        deadlineTimer = setTimeout(async () => {
           tlEvent('sent', 'deadline');
           beat();
           hbStatus.textContent = 'SENT — deadline reached';
-          hbDetail.textContent = `Simulated POST to ${url}`;
-          addLog(`Deadline reached — heartbeat sent to ${url}`, 'l-send');
+          try {
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ sessionId, source: 'timer-fallback', t: Date.now() }),
+              keepalive: true,
+            });
+            hbDetail.textContent = `Fallback POST to ${url}: ${res.status}`;
+            addLog(`Deadline reached — fallback heartbeat sent to ${url} (${res.status})`, 'l-send');
+          } catch (error) {
+            hbDetail.textContent = `Fallback POST failed: ${error.message}`;
+            addLog(`Deadline fallback failed: ${error.message}`, 'l-abort');
+          }
           document.getElementById('abortBtn').disabled = true;
           deferred = null;
         }, deadlineMs);
@@ -314,14 +325,30 @@
     document.getElementById('abortBtn').disabled = true;
   });
 
-  document.getElementById('simulateUnload').addEventListener('click', () => {
+  document.getElementById('sendUnload').addEventListener('click', () => {
     if (deadlineTimer) { clearTimeout(deadlineTimer); deadlineTimer = null; }
     if (hasFetchLater && deferred) { deferred = null; }
     tlEvent('unload', 'unload');
     beat();
-    hbStatus.textContent = 'SENT — page unloaded';
-    hbDetail.textContent = 'Browser fired pending fetchLater request on unload';
-    addLog('Page unload simulated — browser fires queued heartbeat', 'l-unload');
+    const url = document.getElementById('endpointUrl').value;
+    const sessionId = document.getElementById('sessionId').value;
+    const body = JSON.stringify({ sessionId, source: 'manual-unload-control', t: Date.now() });
+    const sent = navigator.sendBeacon?.(url, new Blob([body], { type: 'application/json' }));
+    hbStatus.textContent = sent ? 'SENT — beacon fallback accepted' : 'SENDING — fetch keepalive fallback';
+    hbDetail.textContent = hasFetchLater
+      ? 'Native fetchLater unload delivery is browser-owned; this control sends a separate backend heartbeat.'
+      : 'Sent a real unload-style fallback heartbeat to the backend.';
+    if (!sent) {
+      fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+        keepalive: true,
+      }).then((res) => addLog(`Manual unload heartbeat sent (${res.status})`, 'l-unload'))
+        .catch((error) => addLog(`Manual unload heartbeat failed: ${error.message}`, 'l-abort'));
+    } else {
+      addLog('Manual unload heartbeat sent with sendBeacon', 'l-unload');
+    }
     document.getElementById('abortBtn').disabled = true;
   });
 
