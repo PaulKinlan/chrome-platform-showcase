@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hint Inspector — Compile hints — Chrome 136 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .editor { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-4); }
+    @media (max-width: 700px) { .editor { grid-template-columns: 1fr; } }
+    .panel { border: 2px solid var(--border-black); background: var(--bg-stone); display: flex; flex-direction: column; }
+    .panel h3 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; color: var(--text-muted); margin: 0; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border-black); }
+    .panel textarea { flex: 1; min-height: 260px; font-family: var(--font-mono); font-size: 0.82rem; padding: var(--space-3); border: none; background: var(--bg-paper); color: var(--text-black); resize: vertical; }
+    .summary { font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); margin-bottom: var(--space-3); }
+    .row { display: grid; grid-template-columns: 200px 1fr; gap: 0.5rem; padding: 0.2rem 0; border-bottom: 1px dashed var(--border-black); }
+    .row:last-child { border-bottom: none; }
+    .row .v { color: var(--text-black); font-weight: 500; }
+    .verdict { font-family: var(--font-mono); font-size: 0.85rem; padding: var(--space-3); border: 2px solid var(--border-black); margin-top: var(--space-3); }
+    .verdict.ok { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .verdict.warn { background: var(--accent-amber); color: var(--text-black); border-color: var(--accent-amber); }
+    .verdict.err { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .toolbar { display: flex; gap: var(--space-2); margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .toolbar button { font-size: 0.78rem; padding: 0.35rem 0.7rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Explicit compile hints</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v136</p>
+    <h1>Hint Inspector</h1>
+    <p class="lede">Paste a bundle, place magic comments, and watch the inspector parse the v8 compile-hint shape: which functions are tagged <code>%CompileBaseline()</code> / <code>%PrepareLazyDeoptimization()</code>, which use the new <code>//# allFunctionsCalledOnLoad</code> annotation, and what the resulting eager-compile budget will be.</p>
+  </header>
+
+  <div class="stage">
+    <div class="toolbar">
+      <button data-example="critical">// allFunctionsCalledOnLoad</button>
+      <button data-example="selective">// %CompileBaseline per fn</button>
+      <button data-example="mixed">mixed: critical + selective</button>
+      <button data-example="legacy">legacy: no hints</button>
+    </div>
+
+    <div class="editor">
+      <div class="panel">
+        <h3>bundle.js</h3>
+        <textarea id="src"></textarea>
+      </div>
+      <div class="panel">
+        <h3>inspector output</h3>
+        <textarea id="out" readonly></textarea>
+      </div>
+    </div>
+
+    <div class="summary">
+      <div class="row"><span>magic-comment header</span><span class="v" id="header">—</span></div>
+      <div class="row"><span>functions detected</span><span class="v" id="fns">—</span></div>
+      <div class="row"><span>per-fn baseline hints</span><span class="v" id="hits">—</span></div>
+      <div class="row"><span>eager-compile coverage</span><span class="v" id="cov">—</span></div>
+    </div>
+
+    <div id="verdict" class="verdict"></div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../compile-hints/">Compile Hints</a></li>
+      <li><a href="../critical-bundle/">Critical bundle annotator</a></li>
+      <li><a href="../">Compile hints feature index</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+const EXAMPLES = {
+  critical: `//# allFunctionsCalledOnLoad
+import { renderHero } from './hero.js';
+import { renderNav } from './nav.js';
+
+function bootstrap() { renderNav(); renderHero(); }
+function trackPageview() { navigator.sendBeacon('/rum', '1'); }
+
+bootstrap();
+trackPageview();`,
+  selective: `import { handleClick } from './handlers.js';
+
+function setup() { /* %CompileBaseline */
+  document.addEventListener('click', handleClick);
+}
+
+function lazyModal() {  // not tagged, will compile lazily
+  return import('./modal.js');
+}
+
+setup();`,
+  mixed: `//# allFunctionsCalledOnLoad
+function bootstrap() { /* %CompileBaseline */ initLayout(); }
+function initLayout() { /* %CompileBaseline */ /* … */ }
+function maybeAnalytics() { /* not eagerly compiled */ }
+
+bootstrap();
+queueMicrotask(maybeAnalytics);`,
+  legacy: `function bootstrap() { initLayout(); }
+function initLayout() {}
+function maybeAnalytics() {}
+
+bootstrap();`
+};
+
+const $src = document.getElementById('src');
+const $out = document.getElementById('out');
+
+function parse(code) {
+  const header = /^[ \t]*\/\/#\s*allFunctionsCalledOnLoad/m.test(code);
+  const fnRegex = /\b(?:function|const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?:\([^)]*\)|=\s*(?:async\s*)?(?:function|\([^)]*\)\s*=>))/g;
+  const allFns = [];
+  let m;
+  while ((m = fnRegex.exec(code)) !== null) allFns.push({ name: m[1], idx: m.index });
+  // Find baseline hints adjacent to a function.
+  const hintRegex = /\/\*\s*%CompileBaseline\s*\*\//g;
+  const tagged = new Set();
+  while ((m = hintRegex.exec(code)) !== null) {
+    // Find closest function within next 200 chars.
+    const nearby = allFns.filter(f => Math.abs(f.idx - m.index) < 200);
+    nearby.forEach(f => tagged.add(f.name));
+  }
+  return { header, fns: allFns.map(f => f.name), tagged };
+}
+
+function render() {
+  const code = $src.value;
+  const r = parse(code);
+  document.getElementById('header').textContent = r.header ? 'allFunctionsCalledOnLoad ✓' : 'not present';
+  document.getElementById('fns').textContent = r.fns.length + ' (' + r.fns.join(', ') + ')';
+  document.getElementById('hits').textContent = r.tagged.size + ' (' + [...r.tagged].join(', ') + ')';
+  const coverage = r.fns.length === 0
+    ? 0
+    : r.header ? 1 : (r.tagged.size / r.fns.length);
+  document.getElementById('cov').textContent = (coverage * 100).toFixed(0) + '%';
+  $out.value = JSON.stringify({
+    magicCommentHeader: r.header,
+    functions: r.fns,
+    baselineTagged: [...r.tagged],
+    eagerCompileCoverage: coverage,
+  }, null, 2);
+  const v = document.getElementById('verdict');
+  if (r.header) {
+    v.className = 'verdict ok';
+    v.textContent = 'Every function in this file will eager-compile. Best for critical, always-run code.';
+  } else if (r.tagged.size > 0) {
+    v.className = 'verdict ok';
+    v.textContent = `${r.tagged.size}/${r.fns.length} function(s) opt in to baseline compile. Lazy compile for the rest — good balance.`;
+  } else if (r.fns.length > 0) {
+    v.className = 'verdict warn';
+    v.textContent = 'No hints. V8 will use its default lazy heuristic. Add a header or per-function tags to reclaim cold-start time.';
+  } else {
+    v.className = 'verdict err';
+    v.textContent = 'No functions detected. Paste a bundle to analyse.';
+  }
+}
+
+document.querySelectorAll('[data-example]').forEach(b => {
+  b.addEventListener('click', () => { $src.value = EXAMPLES[b.dataset.example]; render(); });
+});
+
+$src.addEventListener('input', render);
+$src.value = EXAMPLES.mixed;
+render();
+</script>
+</body>
+</html>
