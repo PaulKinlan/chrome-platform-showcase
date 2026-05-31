@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Retry Policy Builder — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .lab { display: grid; grid-template-columns: 300px 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 760px) { .lab { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; font-family: var(--font-mono); font-size: 0.85rem; }
+    input[type=range], input[type=number] { font-family: var(--font-mono); font-size: 0.78rem; }
+    input[type=range] { width: 130px; accent-color: var(--text-black); }
+    input[type=number] { width: 80px; border: 2px solid var(--border-black); background: var(--bg-ivory); padding: 0.3rem; }
+    select { width: 140px; border: 2px solid var(--border-black); background: var(--bg-ivory); padding: 0.3rem; font-family: var(--font-mono); font-size: 0.78rem; }
+    .chart { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); height: 220px; position: relative; overflow: hidden; }
+    .bar { position: absolute; bottom: 22px; background: var(--accent-blue); border: 1px solid var(--border-black); width: 40px; transition: height 200ms ease; display: flex; align-items: flex-start; justify-content: center; color: var(--bg-ivory); font-family: var(--font-mono); font-size: 0.72rem; padding-top: 4px; }
+    .bar.fail { background: var(--accent-rose); }
+    .bar.success { background: var(--accent-emerald); }
+    .axis { position: absolute; left: 8px; right: 8px; bottom: 4px; height: 18px; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); border-top: 1px solid var(--border-black); padding-top: 2px; }
+    .axis span { display: inline-block; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-2); margin-top: var(--space-3); }
+    .stat { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-2); }
+    .stat-l { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); }
+    .stat-v { font-family: var(--font-mono); font-size: 1.2rem; font-weight: 600; margin-top: 4px; }
+    pre.snippet { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); font-family: var(--font-mono); font-size: 0.82rem; overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Fetch retry for keepalive fetches</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>Retry Policy Builder</h1>
+    <p class="lede">Dial in <code>maxAttempts</code>, <code>initialDelay</code>, and <code>maxAge</code>. The simulator runs 100 synthetic beacons against a configurable network-failure rate and shows the actual retry timeline, success rate, and how many attempts ended up &ldquo;wasted&rdquo; past <code>maxAge</code>.</p>
+  </header>
+
+  <div class="lab">
+    <div class="panel">
+      <div class="row"><label>network failure rate</label><span id="fail-val">35%</span></div>
+      <div class="row"><input type="range" id="fail" min="0" max="100" value="35"></div>
+
+      <div class="row"><label>maxAttempts</label><input type="number" id="max-attempts" value="3" min="1" max="10"></div>
+      <div class="row"><label>initialDelay (ms)</label><input type="number" id="init-delay" value="1000" min="100" max="10000" step="100"></div>
+      <div class="row"><label>backoff</label>
+        <select id="backoff"><option value="2">exponential ×2</option><option value="1.5">×1.5</option><option value="1">linear</option></select>
+      </div>
+      <div class="row"><label>maxAge (sec)</label><input type="number" id="max-age" value="30" min="5" max="120"></div>
+
+      <button class="ctl-btn" id="run" style="background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; box-shadow: var(--flat-shadow); margin-top: var(--space-3);">Run 100 beacons</button>
+    </div>
+
+    <div>
+      <div class="chart" id="chart">
+        <div class="axis"><span>← attempt # over time →</span></div>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="stat-l">delivered</div><div class="stat-v" id="s-ok">—</div></div>
+        <div class="stat"><div class="stat-l">dropped</div><div class="stat-v" id="s-fail">—</div></div>
+        <div class="stat"><div class="stat-l">avg attempts</div><div class="stat-v" id="s-avg">—</div></div>
+        <div class="stat"><div class="stat-l">avg delivery</div><div class="stat-v" id="s-time">—</div></div>
+        <div class="stat"><div class="stat-l">past-maxAge drops</div><div class="stat-v" id="s-aged">—</div></div>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <h2>request snippet</h2>
+    <pre class="snippet" id="snippet"></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v139/fetch-retry-for-keepalive-fetches/">Feature page</a></li>
+      <li><a href="/v139/fetch-retry-for-keepalive-fetches/beacon-survival/">Beacon Survival</a></li>
+      <li><a href="/v139/fetch-retry-for-keepalive-fetches/retry-options/">Retry Options</a></li>
+      <li><a href="https://wicg.github.io/fetch-retry/" target="_blank" rel="noopener">Fetch retry explainer</a></li>
+      <li><a href="https://chromestatus.com/feature/5067391421054976" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(() =&gt; {
+  const failEl = document.getElementById('fail');
+  const maEl = document.getElementById('max-attempts');
+  const idEl = document.getElementById('init-delay');
+  const bEl = document.getElementById('backoff');
+  const ageEl = document.getElementById('max-age');
+  const chart = document.getElementById('chart');
+  const snippet = document.getElementById('snippet');
+
+  function updateLabels() {
+    document.getElementById('fail-val').textContent = failEl.value + '%';
+    snippet.textContent = `// outlives the page; retries up to ${maEl.value} times if network fails
+fetch('/log', {
+  method: 'POST',
+  body: payload,
+  keepalive: true,
+  retryOptions: {
+    maxAttempts: ${maEl.value},
+    initialDelay: ${idEl.value},  // ms
+    backoffFactor: ${bEl.value},
+    maxAge: ${ageEl.value * 1000},        // ms (drop after this even if attempts left)
+  },
+});`;
+  }
+  [failEl, maEl, idEl, bEl, ageEl].forEach(el =&gt; el.addEventListener('input', updateLabels));
+
+  function run() {
+    const fail = +failEl.value / 100;
+    const maxAttempts = +maEl.value;
+    const initDelay = +idEl.value;
+    const backoff = +bEl.value;
+    const maxAge = +ageEl.value * 1000;
+
+    chart.innerHTML = '&lt;div class="axis"&gt;&lt;span&gt;← attempt # over time →&lt;/span&gt;&lt;/div&gt;';
+
+    let delivered = 0, dropped = 0, agedOut = 0;
+    let totalAttempts = 0, totalDeliveryMs = 0;
+    const attemptHistogram = new Array(maxAttempts + 1).fill(0); // count delivered at attempt n
+    const failedAt = new Array(maxAttempts + 1).fill(0);
+
+    for (let i = 0; i &lt; 100; i++) {
+      let t = 0;
+      let attempt = 1;
+      while (attempt &lt;= maxAttempts) {
+        totalAttempts++;
+        const ok = Math.random() &gt; fail;
+        if (ok) {
+          delivered++;
+          attemptHistogram[attempt]++;
+          totalDeliveryMs += t;
+          break;
+        } else {
+          failedAt[attempt]++;
+          const wait = initDelay * Math.pow(backoff, attempt - 1);
+          if (t + wait &gt; maxAge) {
+            agedOut++;
+            dropped++;
+            break;
+          }
+          t += wait;
+          attempt++;
+        }
+      }
+      if (attempt &gt; maxAttempts) dropped++;
+    }
+
+    // Render bars: one per attempt slot
+    const w = chart.clientWidth - 16;
+    const bw = Math.max(20, Math.min(60, w / (maxAttempts + 1) - 8));
+    for (let a = 1; a &lt;= maxAttempts; a++) {
+      const sH = (attemptHistogram[a] / 100) * 170;
+      const fH = (failedAt[a] / 100) * 170;
+      const sBar = document.createElement('div');
+      sBar.className = 'bar success';
+      sBar.style.left = (8 + (a - 1) * (bw + 12)) + 'px';
+      sBar.style.width = bw + 'px';
+      sBar.style.height = sH + 'px';
+      sBar.textContent = attemptHistogram[a] ? attemptHistogram[a] + '✓' : '';
+      chart.appendChild(sBar);
+    }
+    document.getElementById('s-ok').textContent = delivered;
+    document.getElementById('s-fail').textContent = dropped;
+    document.getElementById('s-avg').textContent = (totalAttempts / 100).toFixed(2);
+    document.getElementById('s-time').textContent = (delivered ? Math.round(totalDeliveryMs / delivered) : 0) + 'ms';
+    document.getElementById('s-aged').textContent = agedOut;
+  }
+
+  document.getElementById('run').addEventListener('click', run);
+  updateLabels();
+  setTimeout(run, 200);
+})();
+</script>
+</body>
+</html>

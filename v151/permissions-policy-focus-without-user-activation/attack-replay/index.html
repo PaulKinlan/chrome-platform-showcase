@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Focus-Steal Attack Replay — focus-without-user-activation — Chrome 151</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { background: var(--bg-stone); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); margin: 0 0 var(--space-5); }
+    .warn-block strong { color: var(--accent-rose); }
+    .scenario {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+    .scenario h3 { font-family: var(--font-display); font-size: 1.2rem; margin: 0 0 var(--space-3); }
+    .stage {
+      border: 1px dashed var(--text-muted); background: var(--bg-ivory);
+      padding: var(--space-4); margin: var(--space-3) 0;
+      position: relative; min-height: 110px;
+    }
+    .stage textarea, .stage input {
+      width: 100%; box-sizing: border-box; font-family: var(--font-mono); font-size: 0.95rem;
+      background: var(--bg-paper); border: 1px solid var(--border-black);
+      padding: 0.6rem 0.8rem;
+    }
+    .fake-embed {
+      background: var(--bg-stone); border: 1px solid var(--border-black);
+      padding: var(--space-3); margin-top: var(--space-3); position: relative;
+      font-family: var(--font-mono); font-size: 0.85rem;
+    }
+    .fake-embed input {
+      width: 100%; box-sizing: border-box; font-family: var(--font-mono); font-size: 0.85rem;
+      background: var(--bg-ivory); border: 1px solid var(--border-black);
+      padding: 0.4rem 0.6rem; margin-top: var(--space-2);
+    }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; }
+    .ctl-btn {
+      background: var(--text-black); color: var(--bg-ivory);
+      border: 2px solid var(--border-black); box-shadow: var(--flat-shadow);
+      padding: 0.5rem 1.2rem; font-family: var(--font-sans); font-weight: 600;
+      cursor: pointer;
+    }
+    .ctl-btn.alt { background: var(--bg-paper); color: var(--text-black); }
+    .ctl-btn[aria-pressed=true] { background: var(--accent-blue); border-color: var(--accent-blue); color: var(--bg-ivory); }
+    .ctl-btn:hover { transform: translate(-2px,-2px); box-shadow: var(--flat-shadow-hover); }
+    .log {
+      background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow);
+      padding: var(--space-3) var(--space-4); margin: var(--space-3) 0;
+      font-family: var(--font-mono); font-size: 0.8rem;
+      max-height: 200px; overflow-y: auto;
+    }
+    .log .line { padding: 0.2rem 0; border-bottom: 1px dashed var(--text-muted); }
+    .log .line:last-child { border-bottom: none; }
+    .log .ts { color: var(--text-muted); }
+    .log .stolen { color: var(--accent-rose); font-weight: 700; }
+    .log .blocked { color: var(--accent-emerald); font-weight: 700; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-3); margin: var(--space-4) 0; }
+    .stat { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-2) var(--space-3); }
+    .stat .label { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+    .stat .v { font-family: var(--font-display); font-size: 1.6rem; color: var(--text-black); font-variant-numeric: tabular-nums; line-height: 1; margin-top: 0.3rem; }
+    .stat.bad .v { color: var(--accent-rose); }
+    .stat.ok .v  { color: var(--accent-emerald); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v151/">&larr; Chrome 151</a> / <a href="/v151/permissions-policy-focus-without-user-activation/">focus-without-user-activation</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v151</p>
+    <h1>Focus-Steal Attack Replay</h1>
+    <p class="lede">Three classic focus-steal scenarios that the new policy was designed to defeat — a fake login overlay, a polled-poll embed, and an ad iframe yanking focus mid-typing. Replay each, then enable the policy and confirm the attack falls flat.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>For research / education.</strong> The page simulates the iframe behavior in-process. In production the policy gates real cross-origin focus calls; here we gate the simulated embeds with a flag so you can observe the difference without setting up nested origins.
+  </div>
+
+  <section>
+    <h2>controls</h2>
+    <div class="controls">
+      <button class="ctl-btn" id="enable" aria-pressed="false">Enable policy: focus-without-user-activation=()</button>
+      <button class="ctl-btn alt" id="reset">Reset all scenarios</button>
+    </div>
+    <div class="stats">
+      <div class="stat bad"><div class="label">attempts</div><div class="v" id="sAtt">0</div></div>
+      <div class="stat bad"><div class="label">stolen</div><div class="v" id="sSto">0</div></div>
+      <div class="stat ok"><div class="label">blocked</div><div class="v" id="sBlo">0</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>scenario 1 — fake login overlay</h2>
+    <div class="scenario">
+      <h3>setup</h3>
+      <p>You're typing your bank password. A "promo" embed loads and tries to focus its own password field every 4 seconds, intercepting any keystrokes you'd otherwise direct at the legitimate field.</p>
+      <div class="stage">
+        <input type="password" placeholder="(your bank password — type something)" data-target="bank">
+        <div class="fake-embed">
+          [embed.example] enter promo code:
+          <input type="password" data-embed="bank" placeholder="(fake password input)">
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>scenario 2 — polled poll</h2>
+    <div class="scenario">
+      <h3>setup</h3>
+      <p>An ad polls every 2.5 seconds and re-focuses its CTA button. While reading your own form, the cursor and ⌘+F search jump there.</p>
+      <div class="stage">
+        <input type="text" placeholder="(article search — try ⌘+F-style typing here)" data-target="article">
+        <div class="fake-embed">
+          [ads.example] CTA target →
+          <input type="text" data-embed="article" placeholder="(competing focus target)">
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>scenario 3 — sandwich attack</h2>
+    <div class="scenario">
+      <h3>setup</h3>
+      <p>Two embeds compete for focus every 1.5 seconds. Without the policy, your draft is unwritable. With the policy, the embeds give up and your textarea wins.</p>
+      <div class="stage">
+        <textarea placeholder="(compose tweet — type freely)" rows="2" data-target="tweet"></textarea>
+        <div class="fake-embed">
+          [embedA] poll target →
+          <input type="text" data-embed="tweet" placeholder="(embed A)">
+        </div>
+        <div class="fake-embed">
+          [embedB] another poll target →
+          <input type="text" data-embed="tweet" placeholder="(embed B)">
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>event log</h2>
+    <div class="log" id="log"></div>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">focus-without-user-activation</a> — feature index</li>
+      <li><a href="../typing-interrupt/">Typing Interrupt</a></li>
+      <li><a href="../focus-demo/">Focus Demo</a></li>
+      <li><a href="../policy-reference/">Policy Reference</a></li>
+      <li><a href="https://www.w3.org/TR/permissions-policy-1/" target="_blank" rel="noopener">Permissions Policy spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  let policyEnabled = false;
+  let attempts = 0, stolen = 0, blocked = 0;
+  const log = document.getElementById("log");
+  function logEvent(msg, cls) {
+    const ts = new Date().toLocaleTimeString();
+    log.innerHTML = `<div class="line"><span class="ts">${ts}</span> · <span class="${cls}">${msg}</span></div>` + log.innerHTML;
+    while (log.children.length > 30) log.removeChild(log.lastChild);
+  }
+  function updateStats() {
+    document.getElementById("sAtt").textContent = attempts;
+    document.getElementById("sSto").textContent = stolen;
+    document.getElementById("sBlo").textContent = blocked;
+  }
+  document.getElementById("enable").addEventListener("click", e => {
+    policyEnabled = !policyEnabled;
+    e.currentTarget.setAttribute("aria-pressed", String(policyEnabled));
+    logEvent(`policy ${policyEnabled ? "enabled" : "disabled"}`, "ts");
+  });
+  document.getElementById("reset").addEventListener("click", () => {
+    attempts = stolen = blocked = 0;
+    log.innerHTML = "";
+    updateStats();
+  });
+
+  // Track real user activation for honest simulation
+  let lastActivation = 0;
+  ["click","keydown","pointerdown"].forEach(t => window.addEventListener(t, () => lastActivation = Date.now()));
+
+  function attempt(label, embedInput) {
+    attempts++;
+    const hasActivation = (Date.now() - lastActivation) < 5000;
+    if (policyEnabled && !hasActivation) {
+      blocked++;
+      logEvent(`${label} attempted focus() — blocked by policy`, "blocked");
+    } else {
+      embedInput.focus();
+      stolen++;
+      logEvent(`${label} stole focus`, "stolen");
+    }
+    updateStats();
+  }
+
+  // Wire up scenarios
+  document.querySelectorAll(".scenario").forEach((sc, i) => {
+    const embeds = sc.querySelectorAll("[data-embed]");
+    const intervals = [4000, 2500, 1500];
+    const labels = ["fake-login", "polled-poll", "sandwich"];
+    let toggle = 0;
+    setInterval(() => {
+      const embed = embeds[toggle % embeds.length];
+      if (embed) attempt(`scenario-${i+1}/${labels[i]}`, embed);
+      toggle++;
+    }, intervals[i] ?? 3000);
+  });
+</script>
+</body>
+</html>

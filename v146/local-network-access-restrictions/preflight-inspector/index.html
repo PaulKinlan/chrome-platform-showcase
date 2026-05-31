@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Preflight inspector — Local Network Access — Chrome 146</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-5);
+      margin-bottom: var(--space-5);
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin-bottom: var(--space-4);
+    }
+    @media (max-width: 540px) { .controls { grid-template-columns: 1fr; } }
+    .field label {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-bottom: var(--space-1);
+    }
+    .field input, .field select {
+      width: 100%;
+      font: inherit;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      padding: 0.5rem 0.65rem;
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      border: 2px solid var(--border-black);
+    }
+
+    .seq {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: var(--space-4);
+      margin-bottom: var(--space-4);
+    }
+    .step {
+      display: grid;
+      grid-template-columns: 1.5rem 1fr;
+      gap: var(--space-3);
+      align-items: start;
+      padding: var(--space-3) 0;
+      border-bottom: 1px dashed var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+    }
+    .step:last-child { border-bottom: none; }
+    .step .pip {
+      width: 1.4rem;
+      height: 1.4rem;
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      text-align: center;
+      line-height: 1.05rem;
+      font-size: 0.78rem;
+    }
+    .step.run .pip { background: var(--accent-blue); color: var(--bg-ivory); }
+    .step.pass .pip { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .step.fail .pip { background: var(--accent-rose); color: var(--bg-ivory); }
+    .step.skip { color: var(--text-muted); }
+    .step .head {
+      font-weight: 600;
+      color: var(--text-black);
+    }
+    .step .det {
+      color: var(--text-charcoal);
+      margin-top: 0.3rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .verdict {
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      border: 2px solid var(--border-black);
+      margin-bottom: var(--space-4);
+    }
+    .verdict.allow { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .verdict.block { background: var(--accent-rose); color: var(--bg-ivory); }
+    .verdict.prompt { background: var(--accent-amber); color: var(--bg-ivory); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v146/local-network-access-restrictions/">&larr; Local Network Access restrictions</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v146</p>
+    <h1>Preflight inspector</h1>
+    <p class="lede">Pick an initiator (public site, private site, local file) and a target (public, private LAN, loopback). The inspector replays the full Local Network Access decision: address-space classification, preflight scheduling, the <code>Access-Control-Request-Private-Network</code> headers, the response check, and the final allow / prompt / block verdict.</p>
+  </header>
+
+  <p>This is the kind of tool you reach for when a fetch suddenly fails in production. Run it against your site shape, get a step-by-step rationale, and copy the headers your endpoint needs to set.</p>
+
+  <div class="stage">
+    <div class="controls">
+      <div class="field">
+        <label for="from">Initiator</label>
+        <select id="from">
+          <option value="public">public web (https://news.example)</option>
+          <option value="private">private (https://intranet.lan)</option>
+          <option value="loopback">loopback (http://localhost:8080)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="to">Target URL</label>
+        <input id="to" value="http://192.168.1.10/api/status">
+      </div>
+      <div class="field">
+        <label for="method">Method</label>
+        <select id="method">
+          <option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="resp">Server preflight response</label>
+        <select id="resp">
+          <option value="ok">200 + Access-Control-Allow-Private-Network: true</option>
+          <option value="no-pna">200 (no Allow-Private-Network header)</option>
+          <option value="no-cors">200 (no CORS headers at all)</option>
+          <option value="error">network error / 5xx</option>
+        </select>
+      </div>
+    </div>
+
+    <button id="run" style="margin-bottom:1rem">inspect</button>
+
+    <div class="verdict" id="verdict">Click "inspect" to evaluate.</div>
+
+    <div class="seq" id="seq"></div>
+  </div>
+
+  <pre><code>// The 146 contract:
+// 1. Classify request initiator and target by IP address space (public / private / local).
+// 2. If target's space is &quot;more private&quot; than initiator's → kick off a CORS preflight tagged
+//    with Access-Control-Request-Private-Network: true.
+// 3. Server MUST reply with Access-Control-Allow-Private-Network: true (alongside normal CORS
+//    Allow-Origin and Allow-Methods) within a secure context.
+// 4. From 146, even a stored permission isn't enough on its own — a missing PNA header still blocks.</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v146/local-network-access-restrictions/">Feature page</a></li>
+      <li><a href="/v146/local-network-access-restrictions/csrf-attack-simulator/">CSRF attack simulator</a></li>
+      <li><a href="/v146/local-network-access-restrictions/request-classifier/">Request classifier</a></li>
+      <li><a href="/v146/local-network-access-restrictions/permission-prompt-walkthrough/">Permission prompt walkthrough</a></li>
+      <li><a href="https://wicg.github.io/local-network-access/" target="_blank" rel="noopener">WICG Local Network Access spec</a></li>
+      <li><a href="https://chromestatus.com/feature/5152728072060928" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  function classify(urlStr, initiator) {
+    if (initiator === "from" && urlStr === "public") return "public";
+    try {
+      const u = new URL(urlStr);
+      const host = u.hostname;
+      if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") return "loopback";
+      if (/^10\./.test(host)) return "private";
+      if (/^192\.168\./.test(host)) return "private";
+      if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(host)) return "private";
+      if (/^169\.254\./.test(host)) return "private";
+      if (/\.lan$|\.local$/.test(host)) return "private";
+      return "public";
+    } catch { return "public"; }
+  }
+
+  function rank(space) {
+    return { public: 0, private: 1, loopback: 2 }[space] ?? 0;
+  }
+
+  const seq = document.getElementById("seq");
+  const verdict = document.getElementById("verdict");
+
+  function addStep(state, head, det) {
+    const wrap = document.createElement("div");
+    wrap.className = "step " + state;
+    wrap.innerHTML = `<div class="pip">${state === "skip" ? "—" : "✓"}</div><div><div class="head">${head}</div>${det ? `<div class="det">${det}</div>` : ""}</div>`;
+    seq.appendChild(wrap);
+  }
+
+  function inspect() {
+    seq.innerHTML = "";
+    verdict.className = "verdict";
+    verdict.textContent = "";
+
+    const from = document.getElementById("from").value;
+    const to = document.getElementById("to").value.trim();
+    const method = document.getElementById("method").value;
+    const resp = document.getElementById("resp").value;
+
+    const fromSpace = from === "public" ? "public" : from === "private" ? "private" : "loopback";
+    const toSpace = classify(to, "to");
+
+    addStep("run", "step 1 — classify spaces",
+      "initiator: " + fromSpace + "  ·  target: " + toSpace);
+
+    const needsPreflight = rank(toSpace) > rank(fromSpace);
+    if (!needsPreflight) {
+      addStep("pass", "step 2 — same / less private target",
+        "no preflight required. request proceeds under normal CORS rules.");
+      verdict.classList.add("allow");
+      verdict.textContent = "ALLOW — no LNA preflight needed.";
+      return;
+    }
+
+    addStep("run", "step 2 — target is more private",
+      "Chrome schedules a CORS preflight (OPTIONS) and sets Access-Control-Request-Private-Network: true.");
+
+    const secure = (from === "public") ? false : true;
+    if (from === "public" && to.startsWith("http://")) {
+      addStep("fail", "step 3 — secure-context guard",
+        "initiator is a secure context (https) but target is http://. Mixed-content blocks the request before LNA even fires.");
+      verdict.classList.add("block");
+      verdict.textContent = "BLOCK — mixed content. Use HTTPS for the local endpoint or serve over TLS.";
+      return;
+    }
+
+    addStep("run", "step 3 — send preflight",
+      "OPTIONS " + to + "\nOrigin: ...\nAccess-Control-Request-Method: " + method + "\nAccess-Control-Request-Private-Network: true");
+
+    if (resp === "ok") {
+      addStep("pass", "step 4 — server preflight ok",
+        "200\nAccess-Control-Allow-Origin: ...\nAccess-Control-Allow-Methods: " + method + "\nAccess-Control-Allow-Private-Network: true");
+      verdict.classList.add("allow");
+      verdict.textContent = "ALLOW — preflight succeeded, real " + method + " request now fires.";
+    } else if (resp === "no-pna") {
+      addStep("fail", "step 4 — missing Allow-Private-Network",
+        "server responded 200 with regular CORS headers but no Access-Control-Allow-Private-Network. Chrome blocks the request.");
+      verdict.classList.add("block");
+      verdict.textContent = "BLOCK — server must set Access-Control-Allow-Private-Network: true on the preflight.";
+    } else if (resp === "no-cors") {
+      addStep("fail", "step 4 — no CORS at all",
+        "server returned 200 but with neither standard CORS headers nor PNA. Both gates fail.");
+      verdict.classList.add("block");
+      verdict.textContent = "BLOCK — neither CORS nor PNA satisfied.";
+    } else {
+      addStep("fail", "step 4 — network error",
+        "preflight failed (network error / 5xx). No real request will be sent.");
+      verdict.classList.add("block");
+      verdict.textContent = "BLOCK — preflight error.";
+    }
+  }
+
+  document.getElementById("run").addEventListener("click", inspect);
+  inspect();
+</script>
+</body>
+</html>

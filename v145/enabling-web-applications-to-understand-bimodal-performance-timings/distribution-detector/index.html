@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Distribution Detector — bimodal timings — Chrome 145</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .histogram {
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 10rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: 0.5rem;
+    }
+    .bar {
+      flex: 1;
+      background: var(--accent-blue);
+      min-width: 4px;
+    }
+    .bar.mode-hot { background: var(--accent-emerald); }
+    .bar.mode-cold { background: var(--accent-rose); }
+    .scenario-row { display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:1rem; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+    .stat {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: 0.45rem 0.6rem;
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: var(--text-charcoal);
+    }
+    .stat .lbl { color: var(--text-muted); display: block; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .verdict { padding: 0.75rem 1rem; border: 1px solid var(--border-black); margin: 1rem 0; }
+    .verdict.bimodal { background: color-mix(in srgb, var(--accent-rose) 12%, var(--bg-paper)); }
+    .verdict.unimodal { background: color-mix(in srgb, var(--accent-emerald) 12%, var(--bg-paper)); }
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs">
+    <a href="/v145/">&larr; Chrome 145</a> /
+    <a href="/v145/enabling-web-applications-to-understand-bimodal-performance-timings/">Bimodal performance timings</a>
+  </p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v145 · Web APIs · Distribution Detector</p>
+    <h1>Distribution detector</h1>
+    <p class="lede">Run a workload, collect its <code>performance.measure()</code> samples, and detect whether they form one bell curve or two. Bimodal means cache hit/miss, cold/warm start, or fast/slow path — and median lies. Useful as a sanity check before you chart p95.</p>
+  </header>
+
+  <section>
+    <h2>scenario</h2>
+    <div class="scenario-row">
+      <button data-scn="fast">All cached (unimodal fast)</button>
+      <button data-scn="slow">All cold (unimodal slow)</button>
+      <button data-scn="mixed">70% cached, 30% cold (bimodal)</button>
+      <button data-scn="real">Real fetch loop</button>
+    </div>
+    <div class="stage">
+      <p style="font-size:0.85rem;color:var(--text-charcoal);">Histogram of 200 samples — bucket width auto.</p>
+      <div class="histogram" id="hist"></div>
+      <div class="stats" id="stats"></div>
+      <div class="verdict" id="verdict">Run a scenario to compute the distribution.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>code</h2>
+    <pre><code>// Collect 200 samples
+const samples = [];
+for (let i = 0; i &lt; 200; i++) {
+  performance.mark('s');
+  await workload();
+  performance.mark('e');
+  samples.push(performance.measure('m', 's', 'e').duration);
+}
+
+// Detect bimodality: dip test, or compare two-mode KMeans fit
+// against a single-mode Gaussian fit. If two modes are far apart
+// and both have meaningful mass, distribution is bimodal.
+const { mode, gap, isBimodal } = analyse(samples);
+if (isBimodal) {
+  console.warn('Bimodal — report p95 of both clusters, not the overall');
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../bimodal-demo/">Bimodal Demo</a></li>
+      <li><a href="../timing-analysis/">Timing Analysis</a></li>
+      <li><a href="https://wicg.github.io/observable-performance/" target="_blank" rel="noopener">Observable Performance proposal</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  function sampleFast(n) { return Array.from({length:n}, () => 4 + Math.random()*4); }
+  function sampleSlow(n) { return Array.from({length:n}, () => 120 + Math.random()*40); }
+  function sampleMixed(n) {
+    return Array.from({length:n}, () => Math.random() < 0.7 ? 4+Math.random()*4 : 120+Math.random()*40);
+  }
+
+  async function sampleReal(n) {
+    const samples = [];
+    for (let i = 0; i < n; i++) {
+      const s = performance.now();
+      // Fire a no-op fetch that the cache may serve.
+      try { await fetch('/public/styles.css?bust=' + (i % 5), { cache: i % 5 === 0 ? 'reload' : 'force-cache' }); } catch (e) { /* */ }
+      samples.push(performance.now() - s);
+    }
+    return samples;
+  }
+
+  function quantile(arr, q) {
+    const s = [...arr].sort((a, b) => a - b);
+    const i = Math.min(s.length - 1, Math.floor(q * s.length));
+    return s[i];
+  }
+
+  function detectBimodal(samples) {
+    // Cheap bimodality detection: 2-mean clustering, then compare gap to spread.
+    if (samples.length < 20) return { bimodal: false };
+    let lo = Math.min(...samples);
+    let hi = Math.max(...samples);
+    if (hi - lo < 1) return { bimodal: false, lo, hi };
+    let c1 = lo, c2 = hi;
+    for (let iter = 0; iter < 12; iter++) {
+      const a = []; const b = [];
+      for (const s of samples) {
+        if (Math.abs(s - c1) < Math.abs(s - c2)) a.push(s); else b.push(s);
+      }
+      if (a.length === 0 || b.length === 0) return { bimodal: false };
+      c1 = a.reduce((x, y) => x + y, 0) / a.length;
+      c2 = b.reduce((x, y) => x + y, 0) / b.length;
+    }
+    const gap = Math.abs(c2 - c1);
+    const meanSpread = (hi - lo) / 4;
+    return { bimodal: gap > meanSpread * 2.5, c1: Math.min(c1, c2), c2: Math.max(c1, c2), gap };
+  }
+
+  function render(samples) {
+    const hist = document.getElementById('hist');
+    hist.innerHTML = '';
+    const buckets = 40;
+    const min = Math.min(...samples);
+    const max = Math.max(...samples);
+    const w = (max - min) / buckets || 1;
+    const counts = new Array(buckets).fill(0);
+    for (const s of samples) {
+      const b = Math.min(buckets - 1, Math.floor((s - min) / w));
+      counts[b]++;
+    }
+    const maxC = Math.max(...counts);
+    const detection = detectBimodal(samples);
+    counts.forEach((c, i) => {
+      const div = document.createElement('div');
+      div.className = 'bar';
+      const center = min + (i + 0.5) * w;
+      if (detection.bimodal) {
+        const mid = (detection.c1 + detection.c2) / 2;
+        div.classList.add(center < mid ? 'mode-hot' : 'mode-cold');
+      }
+      div.style.height = (c / maxC * 100) + '%';
+      hist.appendChild(div);
+    });
+
+    const stats = document.getElementById('stats');
+    stats.innerHTML = '';
+    function stat(lbl, val) {
+      const d = document.createElement('div');
+      d.className = 'stat';
+      d.innerHTML = `<span class="lbl">${lbl}</span>${val}`;
+      stats.appendChild(d);
+    }
+    stat('p50', quantile(samples, 0.5).toFixed(1) + ' ms');
+    stat('p75', quantile(samples, 0.75).toFixed(1) + ' ms');
+    stat('p95', quantile(samples, 0.95).toFixed(1) + ' ms');
+    stat('p99', quantile(samples, 0.99).toFixed(1) + ' ms');
+    stat('min / max', min.toFixed(1) + ' / ' + max.toFixed(1));
+
+    const v = document.getElementById('verdict');
+    if (detection.bimodal) {
+      v.className = 'verdict bimodal';
+      v.innerHTML = `<strong>Bimodal.</strong> Cluster 1 centre &asymp; ${detection.c1.toFixed(1)} ms, cluster 2 &asymp; ${detection.c2.toFixed(1)} ms. p50/p95 of the combined distribution will mislead — report each cluster separately.`;
+    } else {
+      v.className = 'verdict unimodal';
+      v.innerHTML = `<strong>Unimodal.</strong> Single distribution; p50/p95 are valid summaries.`;
+    }
+  }
+
+  document.querySelectorAll('[data-scn]').forEach((b) => {
+    b.onclick = async () => {
+      const v = document.getElementById('verdict');
+      v.textContent = 'Running…';
+      let s;
+      if (b.dataset.scn === 'fast') s = sampleFast(200);
+      else if (b.dataset.scn === 'slow') s = sampleSlow(200);
+      else if (b.dataset.scn === 'mixed') s = sampleMixed(200);
+      else s = await sampleReal(40);
+      render(s);
+    };
+  });
+</script>
+</body>
+</html>

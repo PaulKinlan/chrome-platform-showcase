@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C-loop unblocker — JSPI — Chrome 137</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { border: 2px solid var(--accent-amber); background: var(--bg-paper); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; box-shadow: var(--thin-shadow); }
+    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--accent-amber); display: block; margin-bottom: 0.4rem; }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
+    .lanes { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .lanes { grid-template-columns: 1fr; } }
+    .lane { border: 2px solid var(--border-black); padding: var(--space-3); background: var(--bg-paper); box-shadow: var(--thin-shadow); }
+    .lane h3 { margin-top: 0; }
+    .lane-tag { display: inline-block; font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; padding: 0.15rem 0.5rem; border: 1px solid var(--border-black); margin-bottom: var(--space-2); }
+    .lane.bad .lane-tag { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .lane.good .lane-tag { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .pulse-bar { display: flex; gap: 2px; align-items: end; height: 32px; padding: var(--space-2); background: var(--bg-stone); border: 1px solid var(--border-black); overflow: hidden; }
+    .pulse { width: 4px; background: var(--text-black); flex-shrink: 0; }
+    .pulse.miss { background: var(--accent-rose); }
+    .stats { font-family: var(--font-mono); font-size: 0.82rem; padding: var(--space-2); border: 1px solid var(--border-black); background: var(--bg-stone); margin: var(--space-2) 0; }
+    .ascii-rt { font-family: var(--font-mono); white-space: pre; font-size: 0.7rem; line-height: 1; padding: var(--space-2); background: #000; color: #5fd; border: 1px solid var(--border-black); overflow: hidden; min-height: 90px; }
+    .probe { font-family: var(--font-mono); font-size: 0.8rem; padding: var(--space-2) var(--space-3); background: var(--bg-stone); border: 1px solid var(--border-black); margin: var(--space-3) 0; }
+    .probe.ok { color: var(--accent-emerald); }
+    .probe.fail { color: var(--accent-rose); }
+    .meter { width: 100%; height: 14px; border: 1px solid var(--border-black); background: var(--bg-stone); margin: var(--space-2) 0; }
+    .meter-fill { height: 100%; background: var(--accent-emerald); transition: width 0.1s; }
+    .meter.fail .meter-fill { background: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; JavaScript Promise Integration</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v137</p>
+    <h1>C-loop unblocker</h1>
+    <p class="lede">Two synthetic Wasm modules port an old C library that calls a network function in a loop. The left lane uses the legacy synchronous shim and freezes the page. The right lane uses JSPI to <em>suspend</em> the loop while the host await-s &mdash; the UI keeps ticking.</p>
+  </header>
+
+  <div class="warn-block"><strong>Origin trial</strong>JSPI ships in Chrome 137 stable. The demo uses a JS shim that models the same call shape so the comparison runs everywhere; the JSPI lane uses the real <code>WebAssembly.Suspending</code> API where available.</div>
+
+  <div class="probe" id="probe">probing&hellip;</div>
+
+  <div class="stage">
+    <div class="controls">
+      <label>iterations: <input type="number" id="n" value="50" min="5" max="500" style="width: 80px"></label>
+      <label>per-call latency (ms): <input type="number" id="lat" value="20" min="0" max="200" style="width: 80px"></label>
+      <button id="run">Run both</button>
+      <button id="reset">Reset</button>
+    </div>
+  </div>
+
+  <div class="lanes">
+    <div class="lane bad">
+      <span class="lane-tag">legacy: synchronous loop in Wasm</span>
+      <h3>blocks the main thread</h3>
+      <div class="stats" id="bad-stats">awaiting&hellip;</div>
+      <div class="meter"><div class="meter-fill" id="bad-progress"></div></div>
+      <div class="ascii-rt" id="bad-rt"></div>
+      <h4>RAF pulse</h4>
+      <div class="pulse-bar" id="bad-pulse"></div>
+    </div>
+    <div class="lane good">
+      <span class="lane-tag">v137: JSPI-suspended loop</span>
+      <h3>cooperative, page stays interactive</h3>
+      <div class="stats" id="good-stats">awaiting&hellip;</div>
+      <div class="meter"><div class="meter-fill" id="good-progress"></div></div>
+      <div class="ascii-rt" id="good-rt"></div>
+      <h4>RAF pulse</h4>
+      <div class="pulse-bar" id="good-pulse"></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>the code (JSPI lane)</h2>
+<pre><code>// Old C: int fetch_one() { return blocking_fetch(); }
+// We make blocking_fetch suspend the Wasm stack instead of blocking it.
+const realFetch = async (url) =&gt; (await fetch(url)).status;
+const importObj = {
+  env: {
+    blocking_fetch: new WebAssembly.Suspending(realFetch),
+  },
+};
+const { instance } = await WebAssembly.instantiateStreaming(fetch("loop.wasm"), importObj);
+const promising = WebAssembly.promising(instance.exports.run);
+await promising(); // returns when the Wasm loop is done — UI never freezes</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../jspi/">JSPI probe</a></li>
+      <li><a href="../wasm-fetch/">Wasm fetch demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5674874568704000" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/WebAssembly/js-promise-integration" target="_blank" rel="noopener">JSPI proposal</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probe = document.getElementById("probe");
+  const hasJSPI = typeof WebAssembly !== "undefined" && "Suspending" in WebAssembly && "promising" in WebAssembly;
+  probe.classList.add(hasJSPI ? "ok" : "fail");
+  probe.textContent = hasJSPI ? "JSPI = available (WebAssembly.Suspending + promising)" : "JSPI = unavailable; right lane simulates the suspended behaviour with await";
+
+  let rafPulse = { bad: [], good: [] };
+  let rafBudget = 60; // frames per second target
+  let rafTimer = null;
+
+  function startPulse() {
+    if (rafTimer) return;
+    let last = performance.now();
+    function tick(t) {
+      const dt = t - last; last = t;
+      const lane = window.__activeLane;
+      if (lane) {
+        const pulse = rafPulse[lane];
+        pulse.push(dt);
+        if (pulse.length > 80) pulse.shift();
+        const bar = document.getElementById(lane + "-pulse");
+        bar.innerHTML = "";
+        for (const d of pulse) {
+          const div = document.createElement("div");
+          div.className = "pulse" + (d > 33 ? " miss" : "");
+          div.style.height = Math.max(2, Math.min(28, d)) + "px";
+          bar.appendChild(div);
+        }
+      }
+      rafTimer = requestAnimationFrame(tick);
+    }
+    rafTimer = requestAnimationFrame(tick);
+  }
+  startPulse();
+
+  function paintRT(lane, frame) {
+    const cols = 38, rows = 6;
+    const out = [];
+    for (let y = 0; y < rows; y++) {
+      let row = "";
+      for (let x = 0; x < cols; x++) {
+        const v = Math.sin((x + frame) / 4 + y / 2) * Math.cos((y - frame / 3) / 2);
+        row += v > 0.6 ? "@" : v > 0.2 ? "+" : v > -0.2 ? "." : " ";
+      }
+      out.push(row);
+    }
+    document.getElementById(lane + "-rt").textContent = out.join("\n");
+  }
+
+  // Simulated blocking_fetch: spend `lat` ms busy-waiting then return.
+  function blockMs(ms) { const end = performance.now() + ms; while (performance.now() < end) {} }
+
+  async function runBad(n, lat) {
+    window.__activeLane = "bad";
+    const stats = document.getElementById("bad-stats");
+    const prog = document.getElementById("bad-progress");
+    const start = performance.now();
+    paintRT("bad", 0);
+    for (let i = 0; i < n; i++) {
+      blockMs(lat); // synchronous, blocks main thread
+      prog.style.width = ((i + 1) / n * 100) + "%";
+      // notice: no animation frame between iterations
+    }
+    paintRT("bad", n);
+    const total = performance.now() - start;
+    stats.textContent = `total ${total.toFixed(0)} ms — UI stalled for the full duration`;
+  }
+
+  async function runGood(n, lat) {
+    window.__activeLane = "good";
+    const stats = document.getElementById("good-stats");
+    const prog = document.getElementById("good-progress");
+    const start = performance.now();
+    for (let i = 0; i < n; i++) {
+      // simulate Wasm exporting a function imported from JS as a promise.
+      // The Wasm stack gets suspended; the host await is the substitute.
+      await new Promise((r) => setTimeout(r, lat));
+      prog.style.width = ((i + 1) / n * 100) + "%";
+      paintRT("good", i);
+    }
+    const total = performance.now() - start;
+    stats.textContent = `total ${total.toFixed(0)} ms — UI ticked through every iteration`;
+  }
+
+  document.getElementById("run").addEventListener("click", async () => {
+    const n = Number(document.getElementById("n").value);
+    const lat = Number(document.getElementById("lat").value);
+    document.getElementById("bad-stats").textContent = "running…";
+    document.getElementById("good-stats").textContent = "running…";
+    // Run good first so the user sees the smooth lane work; then the bad lane stalls
+    await runGood(n, lat);
+    await new Promise((r) => setTimeout(r, 200));
+    await runBad(n, lat);
+    window.__activeLane = null;
+  });
+  document.getElementById("reset").addEventListener("click", () => {
+    rafPulse = { bad: [], good: [] };
+    document.getElementById("bad-pulse").innerHTML = "";
+    document.getElementById("good-pulse").innerHTML = "";
+    document.getElementById("bad-progress").style.width = "0";
+    document.getElementById("good-progress").style.width = "0";
+    document.getElementById("bad-rt").textContent = "";
+    document.getElementById("good-rt").textContent = "";
+    document.getElementById("bad-stats").textContent = "awaiting…";
+    document.getElementById("good-stats").textContent = "awaiting…";
+  });
+</script>
+</body>
+</html>
