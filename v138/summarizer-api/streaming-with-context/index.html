@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Streaming + shared context — Summarizer API — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3) var(--space-4); margin: 0 0 var(--space-5); font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: 0 0 var(--space-5); }
+    label.field { display: block; font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em; margin-bottom: var(--space-1); }
+    textarea, input[type=text] { width: 100%; box-sizing: border-box; font-family: var(--font-serif); font-size: 1rem; padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-black); }
+    textarea#shared { min-height: 70px; }
+    textarea#article { min-height: 200px; }
+    .ctx-presets { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-2) 0 var(--space-4); }
+    .ctx-presets button { font-size: 0.75rem; padding: 0.3rem 0.6rem; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .status { font-family: var(--font-mono); font-size: 0.74rem; padding: 0.3rem 0.6rem; border: 1px solid var(--border-black); display: inline-block; }
+    .status.yes { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .status.no { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .status.dl { background: var(--accent-amber); color: var(--bg-ivory); border-color: var(--accent-amber); }
+    .stream-pane { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-4); min-height: 7rem; font-family: var(--font-serif); font-size: 1rem; line-height: 1.55; white-space: pre-wrap; }
+    .stream-pane.empty::before { content: "streaming output will appear here…"; color: var(--text-muted); font-style: italic; }
+    .stream-pane .caret { display: inline-block; width: 0.5em; background: var(--text-black); animation: blink 1s steps(2) infinite; }
+    @keyframes blink { to { visibility: hidden; } }
+    .timeline { display: grid; grid-template-columns: 6rem 1fr; gap: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; margin: var(--space-3) 0; }
+    .timeline .t { color: var(--text-muted); text-align: right; }
+    .timeline .m { color: var(--text-charcoal); word-break: break-word; }
+    .timeline .m.tok { color: var(--accent-blue); }
+    .timeline .m.dl { color: var(--accent-amber); }
+    .timeline .m.done { color: var(--accent-emerald); }
+    .row-two { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-3); }
+    @media (max-width: 720px) { .row-two { grid-template-columns: 1fr; } }
+    .row-two label.field { margin-bottom: var(--space-1); }
+    .row-two select { width: 100%; padding: 0.45rem 0.6rem; border: 2px solid var(--border-black); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.85rem; }
+    .progress { height: 12px; border: 2px solid var(--border-black); background: var(--bg-stone); margin: var(--space-2) 0; position: relative; overflow: hidden; }
+    .progress > span { display: block; height: 100%; background: var(--text-black); width: 0%; transition: width 0.2s linear; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Summarizer API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>Streaming + shared context</h1>
+    <p class="lede">The Summarizer takes a session-wide <code>sharedContext</code> at construction and a per-call <code>context</code> at <code>summarize()</code> — and exposes <code>summarizeStreaming()</code> for incremental output. This is the tool: watch the same article get re-summarised under different audience contexts, token-by-token.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>On-device model.</strong> First load downloads ~2GB. If the API is missing or the model isn't available, the demo emits a deterministic heuristic stream so the UX surface still demos.
+  </div>
+
+  <div id="support" class="status dl">checking availability&hellip;</div>
+  <div id="dl-wrap" hidden>
+    <div class="progress"><span id="dl-bar"></span></div>
+    <p class="note" id="dl-note">model not downloading</p>
+  </div>
+
+  <div class="stage">
+    <label class="field" for="shared">sharedContext (set once at construction)</label>
+    <textarea id="shared">A weekly product update written for a busy executive audience. Prefer numbered insights and avoid jargon.</textarea>
+
+    <div class="ctx-presets">
+      <button data-shared="A weekly product update written for a busy executive audience. Prefer numbered insights and avoid jargon.">executive</button>
+      <button data-shared="An accessibility-focused changelog written for assistive technology testers and a11y leads.">accessibility</button>
+      <button data-shared="A digest for new hires — explain references like 'OT' and 'CrUX' on first mention.">onboarding</button>
+      <button data-shared="A risk-and-mitigations brief for security reviewers.">security</button>
+    </div>
+
+    <label class="field" for="article">article text</label>
+    <textarea id="article">Chrome 138 ships moderate-eagerness improvements to Speculation Rules so that on mobile, pointerdown and touchstart now arm a prefetch the way mousedown does on desktop — closing a 50-80ms gap on warm taps. In the same release, link rel="prefetch" now sends the Sec-Purpose header so origin servers can branch their A/B and analytics logic without polluting metrics with speculative fetches. The Clear-Site-Data response header grows two new tokens, prefetchCache and prerenderCache, so logout and cart-mutation responses can invalidate speculative state without nuking the entire cache or cookie jar. The Summarizer, Translator, and Language Detector APIs leave origin trial and are exposed on-device. Together these changes make the speculative-loading pipeline observable and controllable end-to-end, and they ship the first batch of built-in AI primitives that don't require a network round-trip.</textarea>
+
+    <div class="row-two">
+      <div>
+        <label class="field" for="type">type</label>
+        <select id="type">
+          <option value="tldr" selected>tldr</option>
+          <option value="key-points">key-points</option>
+          <option value="teaser">teaser</option>
+          <option value="headline">headline</option>
+        </select>
+      </div>
+      <div>
+        <label class="field" for="length">length</label>
+        <select id="length">
+          <option value="short">short</option>
+          <option value="medium" selected>medium</option>
+          <option value="long">long</option>
+        </select>
+      </div>
+    </div>
+
+    <label class="field" for="callctx">per-call context (passed to summarize)</label>
+    <input type="text" id="callctx" value="Audience already knows what speculation rules are. Skip definitions.">
+
+    <div class="controls">
+      <button id="go">summarize (streaming)</button>
+      <button id="cancel" disabled>cancel</button>
+      <button id="repeat">re-run with same session</button>
+      <button id="newsession">new session</button>
+    </div>
+
+    <p class="note" id="session-meta">no session yet</p>
+  </div>
+
+  <h3>Streaming output</h3>
+  <div id="out" class="stream-pane empty"></div>
+
+  <h3>Token timeline</h3>
+  <div id="timeline" class="timeline"></div>
+
+  <h3>What's happening</h3>
+  <ol class="how">
+    <li><code>Summarizer.availability()</code> returns <code>available</code>, <code>downloadable</code>, <code>downloading</code>, or <code>unavailable</code>.</li>
+    <li><code>Summarizer.create({ sharedContext, type, length, format, monitor })</code> opens a session bound to that context. The monitor reports download progress for first use.</li>
+    <li><code>session.summarizeStreaming(text, { context, signal })</code> returns a <code>ReadableStream</code> of partial output. Each chunk is appended, not delta-applied — so render the latest chunk wholesale, not concatenated.</li>
+    <li>An <code>AbortSignal</code> cancels mid-stream. The session stays usable.</li>
+    <li>Re-running with the same session reuses the warm model and the sharedContext, but the per-call <code>context</code> can change tone, audience, or constraints each time.</li>
+  </ol>
+
+  <pre><code>const summarizer = await Summarizer.create({
+  sharedContext: 'weekly exec update, prefer numbered insights',
+  type: 'tldr', length: 'medium', format: 'plain-text',
+  monitor(m) { m.addEventListener('downloadprogress', e =&gt; render(e.loaded)); },
+});
+
+const stream = summarizer.summarizeStreaming(article, {
+  context: 'audience knows what speculation rules are',
+  signal: ac.signal,
+});
+
+for await (const chunk of stream) {
+  out.textContent = chunk;     // each chunk is the FULL partial, not a delta
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Summarizer API feature page</a></li>
+      <li><a href="../summarize/">Summarize demo</a></li>
+      <li><a href="../format-and-length/">Format and length demo</a></li>
+      <li><a href="https://webmachinelearning.github.io/writing-assistance-apis/#summarizer-api" target="_blank" rel="noopener">Writing-assistance APIs spec</a></li>
+      <li><a href="https://chromestatus.com/feature/5193953788559360" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const supportEl = document.getElementById('support');
+  const dlWrap = document.getElementById('dl-wrap');
+  const dlBar = document.getElementById('dl-bar');
+  const dlNote = document.getElementById('dl-note');
+  const sharedEl = document.getElementById('shared');
+  const articleEl = document.getElementById('article');
+  const callctxEl = document.getElementById('callctx');
+  const typeEl = document.getElementById('type');
+  const lengthEl = document.getElementById('length');
+  const out = document.getElementById('out');
+  const timeline = document.getElementById('timeline');
+  const goBtn = document.getElementById('go');
+  const cancelBtn = document.getElementById('cancel');
+  const repeatBtn = document.getElementById('repeat');
+  const newBtn = document.getElementById('newsession');
+  const meta = document.getElementById('session-meta');
+
+  const supportsApi = typeof self !== 'undefined' && 'Summarizer' in self;
+  let session = null;
+  let sessionParams = null;
+  let abortCtl = null;
+
+  function setSupport(text, cls) {
+    supportEl.className = 'status ' + cls;
+    supportEl.textContent = text;
+  }
+
+  function logRow(kind, msg) {
+    const t = document.createElement('div');
+    t.className = 't';
+    t.textContent = (performance.now() / 1000).toFixed(2) + 's';
+    const m = document.createElement('div');
+    m.className = 'm ' + (kind || '');
+    m.textContent = msg;
+    timeline.appendChild(t);
+    timeline.appendChild(m);
+    while (timeline.children.length > 60) {
+      timeline.firstChild.remove();
+      timeline.firstChild.remove();
+    }
+  }
+
+  async function checkAvailability() {
+    if (!supportsApi) {
+      setSupport('Summarizer not available — using heuristic fallback', 'no');
+      return 'unavailable';
+    }
+    try {
+      const a = await self.Summarizer.availability();
+      if (a === 'available') setSupport('available · on-device model warm', 'yes');
+      else if (a === 'downloadable') setSupport('downloadable · first use triggers download', 'dl');
+      else if (a === 'downloading') setSupport('downloading · model currently loading', 'dl');
+      else setSupport('unavailable on this device', 'no');
+      return a;
+    } catch (e) {
+      setSupport('availability check failed: ' + e.message, 'no');
+      return 'unavailable';
+    }
+  }
+
+  async function ensureSession() {
+    const params = {
+      sharedContext: sharedEl.value,
+      type: typeEl.value,
+      length: lengthEl.value,
+      format: 'plain-text',
+    };
+    const sig = JSON.stringify(params);
+    if (session && sessionParams === sig) return session;
+
+    if (session && typeof session.destroy === 'function') {
+      try { session.destroy(); } catch (_) {}
+    }
+    session = null;
+
+    if (!supportsApi) {
+      sessionParams = sig;
+      session = { _fake: true, params };
+      meta.textContent = 'session: heuristic fallback · ' + params.type + ' / ' + params.length;
+      return session;
+    }
+
+    logRow('', 'creating session');
+    try {
+      session = await self.Summarizer.create({
+        ...params,
+        monitor(m) {
+          dlWrap.hidden = false;
+          m.addEventListener('downloadprogress', (e) => {
+            const pct = Math.round((e.loaded || 0) * 100);
+            dlBar.style.width = pct + '%';
+            dlNote.textContent = 'downloading model: ' + pct + '%';
+            logRow('dl', 'downloadprogress ' + pct + '%');
+          });
+        },
+      });
+      sessionParams = sig;
+      meta.textContent = 'session: live · ' + params.type + ' / ' + params.length;
+      logRow('done', 'session ready');
+      return session;
+    } catch (e) {
+      logRow('', 'create() failed: ' + e.message + ' — falling back to heuristic');
+      sessionParams = sig;
+      session = { _fake: true, params };
+      meta.textContent = 'session: heuristic fallback (create failed)';
+      return session;
+    }
+  }
+
+  function heuristicStream(text, { context, type, length }) {
+    const sentences = text.replace(/\s+/g, ' ').split(/(?<=[.!?])\s+/).filter(Boolean);
+    const targetCount = length === 'short' ? 1 : length === 'long' ? 4 : 2;
+    let chosen = sentences.slice(0, targetCount);
+    let output;
+    if (type === 'key-points') {
+      output = chosen.map((s, i) => (i + 1) + '. ' + s.replace(/[.!?]+$/, '')).join('\n');
+    } else if (type === 'headline') {
+      output = chosen[0]?.split(' ').slice(0, 10).join(' ') + '…';
+    } else if (type === 'teaser') {
+      output = chosen[0] + ' (read on for the full picture.)';
+    } else {
+      output = chosen.join(' ');
+    }
+    if (context) {
+      output += '\n\n[context applied: ' + context + ']';
+    }
+    return output;
+  }
+
+  async function run() {
+    out.classList.remove('empty');
+    out.textContent = '';
+    timeline.innerHTML = '';
+    abortCtl = new AbortController();
+    goBtn.disabled = true;
+    cancelBtn.disabled = false;
+
+    const sess = await ensureSession();
+    const text = articleEl.value;
+    const context = callctxEl.value;
+
+    logRow('', 'summarizeStreaming() started · ctx=' + (context ? '"' + context.slice(0, 40) + '…"' : '∅'));
+
+    try {
+      if (sess._fake) {
+        const full = heuristicStream(text, { context, type: typeEl.value, length: lengthEl.value });
+        const tokens = full.split(/(\s+)/);
+        let acc = '';
+        for (const tok of tokens) {
+          if (abortCtl.signal.aborted) throw new DOMException('aborted', 'AbortError');
+          acc += tok;
+          out.textContent = acc;
+          logRow('tok', JSON.stringify(tok.slice(0, 30)));
+          await new Promise((r) => setTimeout(r, 35));
+        }
+      } else {
+        const stream = sess.summarizeStreaming(text, {
+          context,
+          signal: abortCtl.signal,
+        });
+        let i = 0;
+        for await (const chunk of stream) {
+          out.textContent = chunk;
+          logRow('tok', 'chunk ' + (++i) + ' · ' + chunk.length + ' chars');
+        }
+      }
+      logRow('done', 'stream closed');
+    } catch (e) {
+      logRow('', 'error: ' + e.name + ' — ' + e.message);
+    } finally {
+      abortCtl = null;
+      goBtn.disabled = false;
+      cancelBtn.disabled = true;
+    }
+  }
+
+  goBtn.addEventListener('click', run);
+  cancelBtn.addEventListener('click', () => {
+    if (abortCtl) {
+      abortCtl.abort();
+      logRow('', 'cancel requested');
+    }
+  });
+  repeatBtn.addEventListener('click', run);
+  newBtn.addEventListener('click', async () => {
+    if (session && typeof session.destroy === 'function') {
+      try { session.destroy(); } catch (_) {}
+    }
+    session = null;
+    sessionParams = null;
+    meta.textContent = 'session destroyed — next run will re-create';
+    logRow('', 'session destroyed');
+  });
+
+  document.querySelectorAll('.ctx-presets button').forEach((b) => {
+    b.addEventListener('click', () => {
+      sharedEl.value = b.dataset.shared;
+      session = null;
+      sessionParams = null;
+      meta.textContent = 'sharedContext changed — next run will create a new session';
+    });
+  });
+
+  checkAvailability();
+</script>
+</body>
+</html>
