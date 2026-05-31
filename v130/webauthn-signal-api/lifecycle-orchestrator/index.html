@@ -19,6 +19,7 @@
     .scen-btn[aria-pressed="true"] { background: var(--text-black); color: var(--bg-ivory); }
     .code-out { background: var(--text-black); color: var(--bg-ivory); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; white-space: pre-wrap; margin-top: var(--space-3); }
     .verdict { background: var(--bg-ivory); border-left: 4px solid var(--accent-blue); padding: var(--space-3); font-family: var(--font-serif); font-size: 1rem; line-height: 1.55; margin-top: var(--space-3); }
+    .probe { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; white-space: pre-wrap; margin: var(--space-3) 0; }
   </style>
 </head>
 <body>
@@ -40,6 +41,8 @@
     </div>
 
     <pre class="code-out" id="snippet"></pre>
+    <button id="runCall" type="button">Run selected Signal API call</button>
+    <pre class="probe" id="probe"></pre>
 
     <div class="timeline" id="timeline"></div>
 
@@ -61,10 +64,17 @@
 <script>
   const SCENARIOS = {
     rotate: {
+      method: "signalCurrentUserDetails",
+      payload: () => ({
+        rpId: currentRpId(),
+        userId: b64url("user-rotate"),
+        name: "frances.eka@new.example",
+        displayName: "Frances Eka Anderson-Curtis",
+      }),
       code: `// User updated their display name on the account settings page
 await PublicKeyCredential.signalCurrentUserDetails({
   rpId: "rp.example",
-  userId: base64ToArr(user.userIdB64),
+  userId: userIdBase64Url,
   name: "frances.eka@new.example",
   displayName: "Frances Eka Anderson-Curtis"
 });`,
@@ -77,10 +87,15 @@ await PublicKeyCredential.signalCurrentUserDetails({
       rationale: "<strong>Why signalCurrentUserDetails:</strong> previously, when a user renamed their account, the platform passkey manager still showed the old name forever. Users had to delete + re-enroll the passkey to update. The signal API lets you push the new name without any user action — invisible to the end user, the correct DX.",
     },
     revoke: {
+      method: "signalUnknownCredential",
+      payload: () => ({
+        rpId: currentRpId(),
+        credentialId: b64url("cred-id-abc"),
+      }),
       code: `// Admin revoked credential cred-id-abc in the back-office UI
 await PublicKeyCredential.signalUnknownCredential({
   rpId: "rp.example",
-  credentialId: base64ToArr("cred-id-abc")
+  credentialId: credentialIdBase64Url
 });`,
       timeline: [
         ["1", "Admin clicks 'revoke key' in the back-office for a stolen device", "DB: credential.revoked_at = now"],
@@ -91,14 +106,20 @@ await PublicKeyCredential.signalUnknownCredential({
       rationale: "<strong>Why signalUnknownCredential:</strong> the server revoked, but the user's device still thinks the credential is valid. Without this signal, the user sees an authentication attempt fail and has no way to clean it up. Sending the signal causes the platform UI to mark the credential as removable.",
     },
     "multi-device": {
+      method: "signalAllAcceptedCredentials",
+      payload: () => ({
+        rpId: currentRpId(),
+        userId: b64url("user-multi-device"),
+        allAcceptedCredentialIds: [b64url("phone-cred-id"), b64url("desktop-cred-id")],
+      }),
       code: `// User dropped their work laptop from the account; remove its credential from
 // every other device's passkey manager.
 await PublicKeyCredential.signalAllAcceptedCredentials({
   rpId: "rp.example",
-  userId: base64ToArr(user.userIdB64),
+  userId: userIdBase64Url,
   allAcceptedCredentialIds: [
-    base64ToArr("phone-cred-id"),
-    base64ToArr("desktop-cred-id"),
+    phoneCredentialIdBase64Url,
+    desktopCredentialIdBase64Url,
   ]
 });`,
       timeline: [
@@ -110,18 +131,23 @@ await PublicKeyCredential.signalAllAcceptedCredentials({
       rationale: "<strong>Why signalAllAcceptedCredentials:</strong> this is the all-at-once version. The RP says 'here is the authoritative list of credentials for this user' and the browser reconciles. Useful after multi-device deletion, or after migrating a user account.",
     },
     "account-merge": {
+      method: "signalUnknownCredential",
+      payload: () => ({
+        rpId: currentRpId(),
+        credentialId: b64url("old-account-cred-id"),
+      }),
       code: `// User merged account A and account B. Credentials previously tied to userId=A
 // are re-tagged as belonging to userId=A+B (the merged account).
 await PublicKeyCredential.signalCurrentUserDetails({
   rpId: "rp.example",
-  userId: base64ToArr(mergedUserIdB64),
+  userId: mergedUserIdB64,
   name: "frances.eka@example",
   displayName: "Frances Eka (merged account)"
 });
 // And, for credentials that previously pointed to the OLD userId:
 await PublicKeyCredential.signalUnknownCredential({
   rpId: "rp.example",
-  credentialId: base64ToArr("old-account-cred-id")
+  credentialId: oldAccountCredentialIdBase64Url
 });`,
       timeline: [
         ["1", "User triggers 'merge accounts' in profile settings", "server moves data from B → A; deletes B"],
@@ -136,16 +162,44 @@ await PublicKeyCredential.signalUnknownCredential({
   const snippet = document.getElementById("snippet");
   const tEl = document.getElementById("timeline");
   const rationale = document.getElementById("rationale");
+  const probe = document.getElementById("probe");
+  let currentKey = "rotate";
+
+  function currentRpId() {
+    return location.hostname === "0.0.0.0" ? "localhost" : location.hostname;
+  }
+
+  function b64url(value) {
+    let binary = "";
+    for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
 
   function render(key) {
     document.querySelectorAll(".scen-btn").forEach((b) => b.setAttribute("aria-pressed", b.dataset.s === key ? "true" : "false"));
     const s = SCENARIOS[key];
+    currentKey = key;
     snippet.textContent = s.code;
     tEl.innerHTML = s.timeline.map((r, i) => `<div class="t-row ${i === 1 || i === 2 ? "active" : ""}"><div class="step">${r[0]}</div><div class="body">${r[1]}</div><div class="action">${r[2]}</div></div>`).join("");
     rationale.innerHTML = s.rationale;
+    probe.textContent = `Ready to call ${s.method}() with:\n${JSON.stringify(s.payload(), null, 2)}`;
   }
 
   document.querySelectorAll(".scen-btn").forEach((b) => b.addEventListener("click", () => render(b.dataset.s)));
+  document.getElementById("runCall").addEventListener("click", async () => {
+    const s = SCENARIOS[currentKey];
+    if (typeof PublicKeyCredential === "undefined" || typeof PublicKeyCredential[s.method] !== "function") {
+      probe.textContent = `${s.method} is not available in this browser. No fallback success was generated.`;
+      return;
+    }
+    try {
+      const payload = s.payload();
+      await PublicKeyCredential[s.method](payload);
+      probe.textContent = `${s.method} resolved with undefined.\n\nPayload:\n${JSON.stringify(payload, null, 2)}`;
+    } catch (error) {
+      probe.textContent = `${s.method} threw ${error.name}: ${error.message}`;
+    }
+  });
   render("rotate");
 </script>
 </body>

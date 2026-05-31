@@ -157,7 +157,9 @@
 
   <div class="warn-block">
     <strong>requires Chrome 130 with WebAuthn signal flag</strong>
-    Enable <code>chrome://flags/#enable-experimental-web-platform-features</code> and reload. The page feature-detects the API; the journey walkthrough works even without a live authenticator.
+    Enable <code>chrome://flags/#enable-experimental-web-platform-features</code> and reload if the
+    method is missing. The buttons below use the backend credential store and only report success
+    when Chrome accepts the real call.
   </div>
 
   <h2>the user journey</h2>
@@ -223,6 +225,8 @@
   </div>
 
   <div class="controls">
+    <button id="createCredential">Create real passkey</button>
+    <button id="revokeCredential">Revoke stored credential</button>
     <button class="primary" id="callSignal">PublicKeyCredential.signalUnknownCredential(...)</button>
     <button id="callList">PublicKeyCredential.signalAllAcceptedCredentials(...)</button>
     <button id="callCurrent">PublicKeyCredential.signalCurrentUserDetails(...)</button>
@@ -278,6 +282,7 @@ if ("signalCurrentUserDetails" in PublicKeyCredential) {
 </main>
 <script>
   const probe = document.getElementById("probe");
+  let state = null;
 
   function probeAPI() {
     const out = [];
@@ -291,6 +296,78 @@ if ("signalCurrentUserDetails" in PublicKeyCredential) {
     probe.textContent = out.join("\n");
   }
   probeAPI();
+
+  function base64UrlToBytes(value) {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/") +
+      "===".slice((value.length + 3) % 4);
+    const binary = atob(padded);
+    return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  }
+
+  function bytesToBase64Url(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
+
+  function credentialToJSON(credential) {
+    if (typeof credential.toJSON === "function") return credential.toJSON();
+    return {
+      id: credential.id,
+      rawId: bytesToBase64Url(credential.rawId),
+      type: credential.type,
+      response: {
+        clientDataJSON: bytesToBase64Url(credential.response.clientDataJSON),
+        attestationObject: bytesToBase64Url(credential.response.attestationObject),
+      },
+      authenticatorAttachment: credential.authenticatorAttachment,
+    };
+  }
+
+  async function loadState() {
+    state = await fetch("../session-state").then((response) => response.json());
+    const lines = probe.textContent ? probe.textContent.split("\n\n")[0] : "";
+    probe.textContent = `${lines}\n\nBackend credentials: ${state.credentials.length}`;
+  }
+
+  async function createCredential() {
+    if (!navigator.credentials?.create) {
+      probe.textContent = "navigator.credentials.create is not available in this browser/context.";
+      return;
+    }
+    const options = await fetch("../register-options").then((response) => response.json());
+    options.publicKey.challenge = base64UrlToBytes(options.publicKey.challenge);
+    options.publicKey.user.id = base64UrlToBytes(options.publicKey.user.id);
+    try {
+      const credential = await navigator.credentials.create(options);
+      const response = await fetch("../register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(credentialToJSON(credential)),
+      });
+      state = await response.json();
+      if (!response.ok) throw new Error(state.error || "registration failed");
+      probe.textContent = `Created and stored credential:\n${credential.id}`;
+    } catch (error) {
+      probe.textContent = `Registration failed: ${error.name || "Error"} — ${error.message}`;
+    }
+  }
+
+  async function revokeCredential() {
+    await loadState();
+    const active = state.credentials.find((credential) => !credential.revokedAt);
+    if (!active) {
+      probe.textContent = "No active backend credential to revoke. Create a passkey first.";
+      return;
+    }
+    state = await fetch("../revoke", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: active.id }),
+    }).then((response) => response.json());
+    probe.textContent = `Server revoked credential:\n${active.id}`;
+  }
 
   async function tryCall(method, payload) {
     if (typeof PublicKeyCredential === "undefined" || typeof PublicKeyCredential[method] !== "function") {
@@ -306,10 +383,36 @@ if ("signalCurrentUserDetails" in PublicKeyCredential) {
       probe.textContent = method + "() threw: " + e.name + " — " + e.message;
     }
   }
-  const rpId = location.hostname || "demo.example";
-  document.getElementById("callSignal").addEventListener("click", () => tryCall("signalUnknownCredential", { rpId, credentialId: "00aa11bb22cc33dd" }));
-  document.getElementById("callList").addEventListener("click", () => tryCall("signalAllAcceptedCredentials", { rpId, userId: "user-101", allAcceptedCredentialIds: ["aa11", "bb22"] }));
-  document.getElementById("callCurrent").addEventListener("click", () => tryCall("signalCurrentUserDetails", { rpId, userId: "user-101", name: "paul@example.com", displayName: "Paul Kinlan" }));
+
+  document.getElementById("createCredential").addEventListener("click", createCredential);
+  document.getElementById("revokeCredential").addEventListener("click", revokeCredential);
+  document.getElementById("callSignal").addEventListener("click", async () => {
+    await loadState();
+    const revoked = state.credentials.find((credential) => credential.revokedAt);
+    if (!revoked) {
+      probe.textContent = "No revoked backend credential. Create and revoke a passkey first.";
+      return;
+    }
+    tryCall("signalUnknownCredential", { rpId: state.rpId, credentialId: revoked.id });
+  });
+  document.getElementById("callList").addEventListener("click", async () => {
+    await loadState();
+    tryCall("signalAllAcceptedCredentials", {
+      rpId: state.rpId,
+      userId: state.user.id,
+      allAcceptedCredentialIds: state.credentials.filter((credential) => !credential.revokedAt).map((credential) => credential.id),
+    });
+  });
+  document.getElementById("callCurrent").addEventListener("click", async () => {
+    await loadState();
+    tryCall("signalCurrentUserDetails", {
+      rpId: state.rpId,
+      userId: state.user.id,
+      name: state.user.name,
+      displayName: state.user.displayName,
+    });
+  });
+  loadState();
 </script>
 </body>
 </html>

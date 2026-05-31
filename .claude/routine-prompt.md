@@ -14,9 +14,9 @@ every feature across every release that the project knows about.
 This is NOT an issue-first flow. Per-feature work goes straight to code. Only the per-release Uber
 demo uses an issue gate.
 
-## CRITICAL RULES (READ ALL THREE)
+## CRITICAL RULES
 
-Three rules that must never be broken. Each has bitten the project before:
+Rules that must never be broken. Each has bitten the project before:
 
 1. **Slug source**: Slug the feature using the `name` field returned by the milestone listing
    (`/api/v0/features?milestone=N`), NOT the `name` field returned by the per-feature detail
@@ -28,6 +28,11 @@ Three rules that must never be broken. Each has bitten the project before:
 3. **Colour contrast**: Use CSS variables from public/styles.css. Do not write raw hex codes for
    text or background. Every text-on-background pair must hit WCAG AA (4.5:1 normal text, 3:1 large
    text). See "Colour and contrast" below.
+4. **No fake simulations when a working path exists**: Do not ship a demo that merely simulates,
+   mocks, pretends, or animates the API if the browser can make a real call, if a Deno route can
+   expose the real header/network behavior, or if a real feature-detection probe can show the
+   outcome. A fallback may explain unsupported/flag-required state, but it must be labelled as a
+   fallback and must not report "success" as if the platform feature ran.
 
 Every time you decide to write a folder, the path MUST be `v<N>/<slug(listing_name)>` where N is the
 milestone whose listing returned the feature.
@@ -99,6 +104,16 @@ the detail name.
 concept demo and is unacceptable. If you can't make the feature interactive on a page in 5 minutes,
 slow down and figure out how — don't ship a card. Use the right interaction for the feature type:
 
+**Prefer real execution over simulation.** The primary button should call the actual browser API,
+fetch the actual server route, inspect the real response/header/policy/timing entry, or run the real
+replacement API. Do not call a page a "simulator" unless the underlying platform surface is
+impossible to exercise from a static showcase page; in that case add a real capability probe first,
+show the exact missing prerequisite, and never log a fake success. For auth, payments, FedCM,
+WebAuthn, storage access, Privacy Sandbox, and permission-policy demos, this is especially strict:
+real `navigator.credentials.*`, `PublicKeyCredential.*`, `PaymentRequest`,
+`document.requestStorageAccess`, permissions-policy, and server-header probes first; explanatory
+state diagrams second.
+
 - **CSS features** → live stage + toggle/slider/before-after that changes the rendered output as the
   visitor interacts.
 - **DOM / JS features** → a try-it button that actually invokes the API and shows the result.
@@ -112,7 +127,8 @@ slow down and figure out how — don't ship a card. Use the right interaction fo
   in `server.ts`. Do NOT skip the feature and do NOT downgrade to a static card.
 - **Origin trial / behind-a-flag features** → ship the interactive demo, plus a visible warning
   banner at the top: "To run this for real, enable chrome://flags/#X or join the origin trial."
-  Don't skip. Don't downgrade.
+  Don't skip. Don't downgrade. If the API is absent, show "not available" and the attempted call
+  payload; do not run a fake success path.
 - **OS-specific / device-specific features** → feature-detection probe AND a before-vs-after
   rendered comparison where the difference is visual.
 - **Removals / deprecations** → feature-detection probe ("X removed in this browser? yes/no") paired
@@ -224,4 +240,4 @@ Log channels, per-milestone counts, features built (SHA + live URL), stop reason
 - Issues only for Uber demos.
 - Respect the 90-minute deadline.
 - **Slug from listing name. Milestone from listing position. CSS variables only. WCAG AA contrast.
-  All four inviolable.**
+  No fake simulations. All five inviolable.**

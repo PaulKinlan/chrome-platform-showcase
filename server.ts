@@ -164,6 +164,185 @@ function jsonResponse(payload: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(payload, null, 2), { ...init, headers });
 }
 
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlDecode(value: string): Uint8Array {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/") +
+    "===".slice((value.length + 3) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+function randomBase64Url(byteLength = 24): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return base64UrlEncode(bytes);
+}
+
+function parseCookies(req: Request): Map<string, string> {
+  const cookies = new Map<string, string>();
+  for (const part of (req.headers.get("cookie") ?? "").split(";")) {
+    const [rawName, ...rawValue] = part.trim().split("=");
+    if (!rawName) continue;
+    cookies.set(rawName, rawValue.join("="));
+  }
+  return cookies;
+}
+
+interface WebAuthnSignalCredential {
+  id: string;
+  createdAt: string;
+  revokedAt: string | null;
+  source: "webauthn-create";
+}
+
+interface WebAuthnSignalSession {
+  id: string;
+  userId: string;
+  name: string;
+  displayName: string;
+  challenge: string | null;
+  credentials: WebAuthnSignalCredential[];
+}
+
+const WEBAUTHN_SIGNAL_COOKIE = "showcase_webauthn_signal";
+const webAuthnSignalSessions = new Map<string, WebAuthnSignalSession>();
+
+function getWebAuthnSignalSession(req: Request): {
+  session: WebAuthnSignalSession;
+  setCookie?: string;
+} {
+  const cookies = parseCookies(req);
+  let id = cookies.get(WEBAUTHN_SIGNAL_COOKIE);
+  let setCookie: string | undefined;
+  if (!id || !webAuthnSignalSessions.has(id)) {
+    id = randomBase64Url(18);
+    setCookie = `${WEBAUTHN_SIGNAL_COOKIE}=${id}; Path=/v130/webauthn-signal-api; SameSite=Lax`;
+    webAuthnSignalSessions.set(id, {
+      id,
+      userId: base64UrlEncode(new TextEncoder().encode(`showcase-user-${id}`)),
+      name: "alice@example.com",
+      displayName: "Alice Example",
+      challenge: null,
+      credentials: [],
+    });
+  }
+  return { session: webAuthnSignalSessions.get(id)!, setCookie };
+}
+
+function webAuthnRpId(req: Request): string {
+  const host = new URL(req.url).hostname;
+  return host === "0.0.0.0" ? "localhost" : host;
+}
+
+function webAuthnSessionPayload(req: Request, session: WebAuthnSignalSession): unknown {
+  return {
+    rpId: webAuthnRpId(req),
+    user: {
+      id: session.userId,
+      name: session.name,
+      displayName: session.displayName,
+    },
+    credentials: session.credentials,
+  };
+}
+
+async function renderWebAuthnSignalRoute(req: Request, sub: string): Promise<Response | null> {
+  if (!sub.startsWith("/webauthn-signal-api/")) return null;
+  const route = sub.slice("/webauthn-signal-api".length);
+  const { session, setCookie } = getWebAuthnSignalSession(req);
+  const headers = new Headers();
+  if (setCookie) headers.set("set-cookie", setCookie);
+
+  if (route === "/session-state") {
+    return jsonResponse(webAuthnSessionPayload(req, session), { headers });
+  }
+
+  if (route === "/register-options") {
+    session.challenge = randomBase64Url(32);
+    const rpId = webAuthnRpId(req);
+    return jsonResponse({
+      publicKey: {
+        challenge: session.challenge,
+        rp: { name: "Chrome Platform Showcase", id: rpId },
+        user: {
+          id: session.userId,
+          name: session.name,
+          displayName: session.displayName,
+        },
+        pubKeyCredParams: [
+          { type: "public-key", alg: -7 },
+          { type: "public-key", alg: -257 },
+        ],
+        authenticatorSelection: {
+          residentKey: "preferred",
+          userVerification: "preferred",
+        },
+        attestation: "none",
+        timeout: 60000,
+      },
+    }, { headers });
+  }
+
+  if (route === "/register" && req.method === "POST") {
+    const body = await req.json();
+    const clientData = JSON.parse(
+      new TextDecoder().decode(base64UrlDecode(body.response?.clientDataJSON ?? "")),
+    );
+    const expectedOrigin = new URL(req.url).origin;
+    if (clientData.type !== "webauthn.create") {
+      return jsonResponse({ error: "Expected webauthn.create client data." }, {
+        status: 400,
+        headers,
+      });
+    }
+    if (!session.challenge || clientData.challenge !== session.challenge) {
+      return jsonResponse({ error: "Challenge did not match this server session." }, {
+        status: 400,
+        headers,
+      });
+    }
+    if (clientData.origin !== expectedOrigin) {
+      return jsonResponse({ error: `Origin mismatch: ${clientData.origin}` }, {
+        status: 400,
+        headers,
+      });
+    }
+    if (!session.credentials.some((credential) => credential.id === body.id)) {
+      session.credentials.unshift({
+        id: body.id,
+        createdAt: new Date().toISOString(),
+        revokedAt: null,
+        source: "webauthn-create",
+      });
+    }
+    session.challenge = null;
+    return jsonResponse(webAuthnSessionPayload(req, session), { headers });
+  }
+
+  if (route === "/revoke" && req.method === "POST") {
+    const body = await req.json();
+    const credential = session.credentials.find((item) => item.id === body.id);
+    if (!credential) {
+      return jsonResponse({ error: "Credential not found." }, { status: 404, headers });
+    }
+    credential.revokedAt = credential.revokedAt ? null : new Date().toISOString();
+    return jsonResponse(webAuthnSessionPayload(req, session), { headers });
+  }
+
+  if (route === "/reset" && req.method === "POST") {
+    session.challenge = null;
+    session.credentials = [];
+    return jsonResponse(webAuthnSessionPayload(req, session), { headers });
+  }
+
+  return null;
+}
+
 function renderV151CapabilityEcho(req: Request): Response {
   const url = new URL(req.url);
   const started = performance.now();
@@ -1613,6 +1792,10 @@ Deno.serve({ port: PORT }, async (req) => {
 
     if (release === "v150" && sub === "/css-url-request-modifiers/referrer-echo") {
       return renderReferrerEcho(req);
+    }
+    if (release === "v130") {
+      const webAuthnSignalResponse = await renderWebAuthnSignalRoute(req, sub);
+      if (webAuthnSignalResponse) return webAuthnSignalResponse;
     }
     if (release === "v151" && sub === "/cpu-performance-api/capability-echo") {
       return renderV151CapabilityEcho(req);
