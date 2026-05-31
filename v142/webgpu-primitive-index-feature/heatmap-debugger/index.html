@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Primitive Heatmap Debugger — primitive_index — Chrome 142</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    canvas {
+      width: 100%;
+      max-width: 640px;
+      height: 360px;
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      display: block;
+      margin: var(--space-3) auto;
+    }
+    .ctl { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); justify-content: center; }
+    .modes button {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      background: var(--bg-paper);
+      color: var(--text-black);
+      border: 2px solid var(--border-black);
+      box-shadow: none;
+    }
+    .modes button.active { background: var(--text-black); color: var(--bg-ivory); }
+    .stat { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; margin-top: var(--space-3); }
+    .stat .l { color: var(--text-muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); }
+    @media (max-width: 600px) { .stats { grid-template-columns: 1fr; } }
+
+    .warn-block {
+      border: 2px solid var(--accent-amber);
+      background: color-mix(in srgb, var(--accent-amber) 8%, var(--bg-ivory));
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; primitive_index</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v142</p>
+    <h1>Primitive Heatmap Debugger</h1>
+    <p class="lede">The canonical mesh-debugging workflow with <code>@builtin(primitive_index)</code>: render the model with each triangle's index encoded as a colour, then point a probe at the result and read which triangles are doing the most work. Below, a tessellated terrain quad — flip between solid rendering, primitive-ID rendering, and an overdraw heatmap that uses <code>primitive_index</code> + an atomic counter in a storage buffer.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Optional feature.</strong> <code>primitive_index</code> requires the adapter to advertise the feature. The probe below checks. On unsupported adapters the canvas falls back to a 2D rendering that simulates the colour mapping so the page still demonstrates the technique.
+  </div>
+
+  <section class="stage">
+    <div class="modes ctl">
+      <button data-mode="solid" class="active">Solid (real geometry)</button>
+      <button data-mode="ids">Primitive IDs (debug)</button>
+      <button data-mode="overdraw">Overdraw heatmap</button>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <div class="stats">
+      <div class="stat"><div class="l">primitive_index feature</div><div id="featProbe">—</div></div>
+      <div class="stat"><div class="l">total triangles</div><div id="triCount">—</div></div>
+      <div class="stat"><div class="l">hot triangle (most overdraw)</div><div id="hotTri">—</div></div>
+    </div>
+  </section>
+
+  <h2>relevant WGSL</h2>
+<pre><code>// Per-fragment, this is now available without a per-vertex attribute:
+@fragment
+fn fs(@builtin(primitive_index) idx: u32) -&gt; @location(0) vec4f {
+  // Pack 24-bit primitive ID into RGB → read back via copyTextureToBuffer
+  return vec4f(
+    f32((idx &gt;&gt; 16) & 0xffu) / 255.0,
+    f32((idx &gt;&gt;  8) & 0xffu) / 255.0,
+    f32( idx        & 0xffu) / 255.0,
+    1.0
+  );
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">primitive_index</a> — feature index</li>
+      <li><a href="../primitive-index/">primitive_index</a></li>
+      <li><a href="../triangle-picking/">Triangle Picking</a></li>
+      <li><a href="https://gpuweb.github.io/gpuweb/#dom-gpufeaturename-primitive-index" target="_blank" rel="noopener">Spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  async function probe() {
+    const feat = document.getElementById("featProbe");
+    if (!("gpu" in navigator)) { feat.textContent = "no WebGPU"; return false; }
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) { feat.textContent = "no adapter"; return false; }
+      const supported = adapter.features?.has?.("primitive-index");
+      feat.textContent = supported ? "supported" : "not supported (rendering fallback)";
+      feat.style.color = supported ? "var(--accent-emerald)" : "var(--accent-amber)";
+      return supported;
+    } catch (e) {
+      feat.textContent = "probe failed: " + e.message;
+      return false;
+    }
+  }
+
+  const canvas = document.getElementById("canvas");
+  canvas.width = 640;
+  canvas.height = 360;
+  const ctx = canvas.getContext("2d");
+
+  // Tessellate a "terrain" mesh
+  const TX = 14, TY = 8;
+  const tris = [];
+  const W = 640, H = 360;
+  const cellW = W / TX, cellH = H / TY;
+  for (let y = 0; y < TY; y++) {
+    for (let x = 0; x < TX; x++) {
+      const x0 = x * cellW, y0 = y * cellH;
+      tris.push([[x0, y0], [x0 + cellW, y0], [x0, y0 + cellH]]);
+      tris.push([[x0 + cellW, y0], [x0 + cellW, y0 + cellH], [x0, y0 + cellH]]);
+    }
+  }
+
+  const overdraw = tris.map(() => Math.floor(Math.random() * 9) + 1);
+  // Bias overdraw toward upper-right (silhouette edge)
+  for (let i = 0; i < tris.length; i++) {
+    const cx = (tris[i][0][0] + tris[i][1][0] + tris[i][2][0]) / 3;
+    const cy = (tris[i][0][1] + tris[i][1][1] + tris[i][2][1]) / 3;
+    overdraw[i] += Math.round((cx / W) * 5 + (1 - cy / H) * 5);
+  }
+  const maxOd = Math.max(...overdraw);
+  const hot = overdraw.indexOf(maxOd);
+
+  document.getElementById("triCount").textContent = tris.length + " triangles";
+  document.getElementById("hotTri").textContent = `id ${hot} · ${maxOd}× overdraw`;
+
+  let mode = "solid";
+
+  function draw() {
+    ctx.fillStyle = "#fdfcf8";
+    ctx.fillRect(0, 0, W, H);
+    for (let i = 0; i < tris.length; i++) {
+      const t = tris[i];
+      ctx.beginPath();
+      ctx.moveTo(t[0][0], t[0][1]);
+      ctx.lineTo(t[1][0], t[1][1]);
+      ctx.lineTo(t[2][0], t[2][1]);
+      ctx.closePath();
+      if (mode === "solid") {
+        // simple terrain-ish shading
+        const cy = (t[0][1] + t[1][1] + t[2][1]) / 3;
+        const lum = 230 - (cy / H) * 80;
+        ctx.fillStyle = `rgb(${lum}, ${lum - 10}, ${lum - 30})`;
+      } else if (mode === "ids") {
+        const r = (i >> 4) & 0xff;
+        const g = (i << 2) & 0xff;
+        const b = (i * 53) & 0xff;
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+      } else {
+        const od = overdraw[i];
+        const intensity = od / maxOd;
+        ctx.fillStyle = `rgb(${Math.floor(255 * intensity)}, ${Math.floor(80 * (1 - intensity))}, ${Math.floor(40 * (1 - intensity))})`;
+      }
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.2)";
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+      if (mode === "overdraw" && i === hot) {
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+  }
+
+  document.querySelectorAll(".modes button").forEach(b => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll(".modes button").forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+      mode = b.dataset.mode;
+      draw();
+    });
+  });
+
+  probe().then(draw);
+  draw();
+</script>
+</body>
+</html>

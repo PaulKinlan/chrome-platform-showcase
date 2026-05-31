@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Domain Dictation Lab — Speech bias — Chrome 142</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+
+    .preset-row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    .preset-row button {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      background: var(--bg-paper);
+      color: var(--text-black);
+      border: 2px solid var(--border-black);
+      box-shadow: none;
+    }
+    .preset-row button.active { background: var(--text-black); color: var(--bg-ivory); }
+
+    .editor {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      margin-bottom: var(--space-3);
+    }
+    .editor label { display: block; font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 0.3rem; }
+    .editor textarea {
+      width: 100%;
+      min-height: 90px;
+      font: inherit;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: 0.5rem;
+      resize: vertical;
+    }
+    .boost { display: flex; align-items: center; gap: var(--space-3); margin-top: 0.5rem; }
+    .boost input { flex: 1; accent-color: var(--accent-blue); }
+
+    .mic-row { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; margin-bottom: var(--space-3); }
+    .mic-row .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--accent-rose); display: inline-block; }
+    .mic-row .dot.on { background: var(--accent-emerald); animation: pulse 1s infinite; }
+    @keyframes pulse { 50% { opacity: 0.5; } }
+
+    .results {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+    }
+    @media (max-width: 700px) { .results { grid-template-columns: 1fr; } }
+    .col {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .col h4 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: var(--space-2); }
+    .transcript {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      min-height: 120px;
+      font-family: var(--font-serif);
+      font-size: 1rem;
+      line-height: 1.5;
+    }
+    .transcript .hit { background: color-mix(in srgb, var(--accent-emerald) 28%, transparent); padding: 0 0.2rem; }
+
+    .warn-block {
+      border: 2px solid var(--accent-amber);
+      background: color-mix(in srgb, var(--accent-amber) 8%, var(--bg-ivory));
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Speech bias</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v142</p>
+    <h1>Domain Dictation Lab</h1>
+    <p class="lede">Switch domains — medical, legal, software engineering — and the dictation bias list flips. Two transcripts run in parallel (one biased, one not) so you can hear the difference: "atrial fibrillation" stays atrial fibrillation, not "a treble fibulation". Add your own phrases per domain and tune the boost.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Note:</strong> requires <code>SpeechRecognition</code> and microphone permission. The bias-phrase API is shipping in Chrome 142; older versions accept the property but ignore it.
+  </div>
+
+  <section class="stage">
+    <div class="preset-row">
+      <button data-preset="medical" class="active">Medical (cardiology)</button>
+      <button data-preset="legal">Legal (contracts)</button>
+      <button data-preset="swe">Software engineering</button>
+      <button data-preset="cooking">Cooking</button>
+    </div>
+
+    <div class="editor">
+      <label>biased phrases (one per line)</label>
+      <textarea id="phrases"></textarea>
+      <div class="boost">
+        <label style="margin: 0; font-size: 0.7rem;">boost</label>
+        <input type="range" id="boost" min="0" max="20" value="10">
+        <span id="boostVal" style="font-family: var(--font-mono); font-size: 0.78rem;">10.0</span>
+      </div>
+    </div>
+
+    <div class="mic-row">
+      <button id="mic">Start mic</button>
+      <span class="dot" id="dot"></span>
+      <span id="status" style="font-family: var(--font-mono); font-size: 0.78rem;">stopped</span>
+    </div>
+
+    <div class="results">
+      <div class="col">
+        <h4>biased recogniser</h4>
+        <div class="transcript" id="bias">—</div>
+      </div>
+      <div class="col">
+        <h4>unbiased baseline</h4>
+        <div class="transcript" id="raw">—</div>
+      </div>
+    </div>
+  </section>
+
+  <h2>relevant markup</h2>
+<pre><code>const rec = new SpeechRecognition();
+rec.continuous = true;
+rec.interimResults = true;
+rec.phrases = [
+  new SpeechRecognitionPhrase("atrial fibrillation", 10),
+  new SpeechRecognitionPhrase("anticoagulant",       10),
+];
+rec.start();</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Speech bias</a> — feature index</li>
+      <li><a href="../context-phrases/">Context Phrases</a></li>
+      <li><a href="../voice-commands/">Voice Commands as Bias Grammar</a></li>
+      <li><a href="https://webaudio.github.io/web-speech-api/#speechreco-phraselist" target="_blank" rel="noopener">Spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const PRESETS = {
+    medical: ["atrial fibrillation", "anticoagulant", "ECG", "QRS complex", "ventricular tachycardia", "echocardiogram", "ejection fraction"],
+    legal: ["force majeure", "indemnification", "tortfeasor", "habeas corpus", "voir dire", "estoppel", "venue clause"],
+    swe: ["Kubernetes", "OAuth flow", "rebase onto main", "race condition", "memoization", "tree shaking", "WASM module"],
+    cooking: ["mise en place", "deglaze", "chiffonade", "beurre blanc", "bain-marie", "tempering", "Maillard reaction"]
+  };
+
+  const phrases = document.getElementById("phrases");
+  const boost = document.getElementById("boost");
+  const boostVal = document.getElementById("boostVal");
+  const mic = document.getElementById("mic");
+  const dot = document.getElementById("dot");
+  const status = document.getElementById("status");
+  const bias = document.getElementById("bias");
+  const raw = document.getElementById("raw");
+
+  function loadPreset(p) {
+    document.querySelectorAll("[data-preset]").forEach(b => b.classList.toggle("active", b.dataset.preset === p));
+    phrases.value = PRESETS[p].join("\n");
+  }
+  document.querySelectorAll("[data-preset]").forEach(b => b.addEventListener("click", () => loadPreset(b.dataset.preset)));
+  loadPreset("medical");
+
+  boost.addEventListener("input", () => boostVal.textContent = parseFloat(boost.value).toFixed(1));
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recBias, recRaw, running = false;
+
+  function highlightMatches(text, list) {
+    let out = text;
+    for (const p of list) {
+      const re = new RegExp("(" + p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "gi");
+      out = out.replace(re, '<span class="hit">$1</span>');
+    }
+    return out;
+  }
+
+  mic.addEventListener("click", async () => {
+    if (running) {
+      recBias?.stop?.(); recRaw?.stop?.();
+      running = false;
+      mic.textContent = "Start mic";
+      dot.classList.remove("on");
+      status.textContent = "stopped";
+      return;
+    }
+    if (!SR) {
+      status.textContent = "SpeechRecognition not supported";
+      return;
+    }
+    running = true;
+    mic.textContent = "Stop mic";
+    dot.classList.add("on");
+    status.textContent = "listening…";
+
+    const list = phrases.value.split("\n").map(s => s.trim()).filter(Boolean);
+    const b = parseFloat(boost.value);
+
+    recBias = new SR();
+    recBias.continuous = true; recBias.interimResults = true; recBias.lang = "en-US";
+    if ("phrases" in recBias && "SpeechRecognitionPhrase" in window) {
+      recBias.phrases = list.map(p => new SpeechRecognitionPhrase(p, b));
+    }
+    recRaw = new SR();
+    recRaw.continuous = true; recRaw.interimResults = true; recRaw.lang = "en-US";
+
+    let biasText = "", rawText = "";
+    recBias.onresult = e => {
+      let t = "";
+      for (const r of e.results) t += r[0].transcript;
+      biasText = t;
+      bias.innerHTML = highlightMatches(t, list);
+    };
+    recRaw.onresult = e => {
+      let t = "";
+      for (const r of e.results) t += r[0].transcript;
+      rawText = t;
+      raw.innerHTML = highlightMatches(t, list);
+    };
+    recBias.onerror = e => { status.textContent = "bias err: " + e.error; };
+    recRaw.onerror = e => { status.textContent = "raw err: " + e.error; };
+    try {
+      recBias.start();
+      recRaw.start();
+    } catch (e) {
+      status.textContent = "start failed: " + e.message;
+      running = false;
+      dot.classList.remove("on");
+      mic.textContent = "Start mic";
+    }
+  });
+</script>
+</body>
+</html>
