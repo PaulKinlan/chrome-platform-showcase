@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jitter lab — Encoded Transform modify metadata — Chrome 130</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-3); }
+    @media (max-width: 720px) { .controls { grid-template-columns: 1fr; } }
+    .field label { display: block; font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.25rem; }
+    .field input[type="range"] { width: 100%; accent-color: var(--text-black); }
+    .field-val { font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-muted); }
+    select { width: 100%; padding: 0.4rem 0.6rem; font-family: var(--font-mono); font-size: 0.82rem; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .frames { display: grid; grid-template-columns: repeat(20, 1fr); gap: 2px; padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); margin-bottom: var(--space-3); }
+    .frame { height: 32px; position: relative; background: var(--bg-ivory); border: 1px solid var(--border-black); }
+    .frame .label { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-family: var(--font-mono); font-size: 0.62rem; }
+    .frame.key { background: var(--accent-blue); color: var(--bg-ivory); }
+    .frame.dropped { background: repeating-linear-gradient(45deg, var(--bg-stone) 0 4px, var(--bg-paper) 4px 8px); border-color: var(--accent-rose); }
+    .frame.modified { box-shadow: 0 -3px 0 var(--accent-emerald) inset; }
+    .legend { display: flex; gap: 0.8rem; font-family: var(--font-mono); font-size: 0.74rem; margin-top: 0.4rem; flex-wrap: wrap; }
+    .legend-item { display: inline-flex; align-items: center; gap: 0.4rem; }
+    .swatch { width: 14px; height: 14px; border: 1px solid var(--border-black); }
+    .scoreboard { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 720px) { .scoreboard { grid-template-columns: 1fr; } }
+    .scorecard { padding: var(--space-3); background: var(--bg-ivory); border: 2px solid var(--border-black); }
+    .scorecard h4 { margin: 0 0 0.4rem; font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    .scorecard .stat { font-family: var(--font-mono); font-size: 1.05rem; font-weight: 700; }
+    .code-block { background: var(--text-black); color: var(--bg-ivory); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; white-space: pre-wrap; margin-top: var(--space-3); }
+    .verdict { background: var(--bg-ivory); border-left: 4px solid var(--accent-emerald); padding: var(--space-3); font-family: var(--font-serif); font-size: 1rem; line-height: 1.55; margin-top: var(--space-3); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Encoded Transform metadata mod</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>Jitter lab</h1>
+    <p class="lede">Three network resilience scenarios where modifying encoded-frame metadata in a transform is the right tool. Pick a scenario, dial the loss/jitter knobs, and watch a synthetic 20-frame stream play out — with side-by-side rendering of the legacy passthrough vs the Chrome 130 metadata-modified transform. Per-scenario scoreboard reports playback quality and the JS that produced it.</p>
+  </header>
+
+  <section class="stage">
+    <div class="controls">
+      <div class="field">
+        <label for="scenario">scenario</label>
+        <select id="scenario">
+          <option value="simulcast">simulcast layer switch</option>
+          <option value="resync">RTP timestamp re-sync after gap</option>
+          <option value="rotate">video rotation metadata</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="loss">simulated loss <span class="field-val" id="loss-val">10%</span></label>
+        <input id="loss" type="range" min="0" max="50" value="10">
+      </div>
+      <div class="field">
+        <label for="jitter">jitter window <span class="field-val" id="jitter-val">100 ms</span></label>
+        <input id="jitter" type="range" min="0" max="500" step="20" value="100">
+      </div>
+    </div>
+
+    <p style="font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 0.4rem;">stream — without transform (passthrough)</p>
+    <div class="frames" id="frames-pre"></div>
+    <p style="font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 0.4rem;">stream — with metadata-modifying transform</p>
+    <div class="frames" id="frames-post"></div>
+
+    <div class="legend">
+      <span class="legend-item"><span class="swatch" style="background: var(--bg-ivory)"></span> delta frame</span>
+      <span class="legend-item"><span class="swatch" style="background: var(--accent-blue)"></span> key frame</span>
+      <span class="legend-item"><span class="swatch" style="background: repeating-linear-gradient(45deg, var(--bg-stone) 0 4px, var(--bg-paper) 4px 8px); border-color: var(--accent-rose)"></span> dropped / decode failed</span>
+      <span class="legend-item"><span class="swatch" style="background: var(--bg-ivory); box-shadow: 0 -3px 0 var(--accent-emerald) inset"></span> metadata patched</span>
+    </div>
+
+    <div class="scoreboard" style="margin-top: var(--space-3)">
+      <div class="scorecard">
+        <h4>without transform</h4>
+        <div>playable frames: <span class="stat" id="pre-playable">—</span></div>
+        <div>decode failures: <span class="stat" id="pre-failed">—</span></div>
+      </div>
+      <div class="scorecard">
+        <h4>with metadata mod</h4>
+        <div>playable frames: <span class="stat" id="post-playable">—</span></div>
+        <div>decode failures: <span class="stat" id="post-failed">—</span></div>
+      </div>
+    </div>
+
+    <pre class="code-block" id="code"></pre>
+    <div class="verdict" id="verdict"></div>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../modify-meta/">Modify metadata basics</a></li>
+      <li><a href="../timestamp-shift/">Timestamp shift</a></li>
+      <li><a href="https://w3c.github.io/webrtc-encoded-transform/" target="_blank" rel="noopener">Spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const SCENARIOS = {
+    simulcast: {
+      code: `// In the receiving worker:
+encodedFrames.pipeThrough(new TransformStream({
+  transform(frame, ctl) {
+    const m = frame.getMetadata();
+    // Reassign spatial layer index after our simulcast switcher chose a different layer
+    m.spatialIndex = chooseLayer(m.frameType);
+    frame.setMetadata(m);
+    ctl.enqueue(frame);
+  }
+}));`,
+      verdict: "Simulcast layer switching has always needed a way to renumber frame indices after the switcher picks a different layer mid-stream. Pre-Chrome 130, the metadata struct was read-only on RTCEncodedVideoFrame and you had to either drop the frame or accept misnumbered indices. Chrome 130 ships setMetadata() so the transform can rewrite spatialIndex on the fly and the downstream decoder sees a contiguous stream.",
+      lossRescue: 0.7,
+    },
+    resync: {
+      code: `encodedFrames.pipeThrough(new TransformStream({
+  transform(frame, ctl) {
+    const m = frame.getMetadata();
+    if (m.rtpTimestamp < lastSeen - 32768) {
+      // Wrap-around or large gap; rebase
+      m.rtpTimestamp = lastSeen + estimatedDelta;
+      frame.setMetadata(m);
+    }
+    lastSeen = m.rtpTimestamp;
+    ctl.enqueue(frame);
+  }
+}));`,
+      verdict: "RTP timestamps wrap around 32-bit boundaries; gaps from network blips also confuse the jitter buffer. Chrome 130 lets the transform repair timestamps in-place — the receiver no longer needs a side-channel or a heuristic in the decoder to re-anchor.",
+      lossRescue: 0.55,
+    },
+    rotate: {
+      code: `encodedFrames.pipeThrough(new TransformStream({
+  transform(frame, ctl) {
+    const m = frame.getMetadata();
+    // Camera was held landscape; UI says display portrait. Patch metadata so the
+    // far end's decoder sets up rotation BEFORE compositing.
+    m.rotation = 90;
+    frame.setMetadata(m);
+    ctl.enqueue(frame);
+  }
+}));`,
+      verdict: "Mid-call camera/orientation switching used to require renegotiating the SDP. With setMetadata you patch the rotation flag on the fly; the receiver's decoder re-orients without a renegotiation round-trip — critical for mobile calls on phones that flip orientation.",
+      lossRescue: 0.4,
+    },
+  };
+
+  function makeFrames(N, lossPct, jitterMs, scenario) {
+    const arr = [];
+    const lossRate = lossPct / 100;
+    for (let i = 0; i < N; i++) {
+      const isKey = i % 6 === 0;
+      const dropped = Math.random() < lossRate && !isKey;
+      arr.push({ idx: i, key: isKey, dropped, latencyMs: Math.floor(Math.random() * jitterMs) });
+    }
+    return arr;
+  }
+
+  function applyTransform(frames, scenario) {
+    // The transform rescues some dropped frames by patching metadata (e.g. timestamp re-sync)
+    const rescue = SCENARIOS[scenario].lossRescue;
+    return frames.map((f) => ({
+      ...f,
+      dropped: f.dropped && Math.random() > rescue,
+      modified: !f.dropped,
+    }));
+  }
+
+  function renderRow(target, frames) {
+    const el = document.getElementById(target);
+    el.innerHTML = "";
+    frames.forEach((f, i) => {
+      const cls = ["frame", f.key ? "key" : "", f.dropped ? "dropped" : "", f.modified && !f.dropped ? "modified" : ""].join(" ");
+      el.innerHTML += `<div class="${cls}"><span class="label">${f.key ? "K" : i}</span></div>`;
+    });
+  }
+
+  function render() {
+    const s = document.getElementById("scenario").value;
+    const loss = +document.getElementById("loss").value;
+    const jitter = +document.getElementById("jitter").value;
+    document.getElementById("loss-val").textContent = loss + "%";
+    document.getElementById("jitter-val").textContent = jitter + " ms";
+
+    const pre = makeFrames(20, loss, jitter, s);
+    const post = applyTransform(pre, s);
+
+    renderRow("frames-pre", pre);
+    renderRow("frames-post", post);
+
+    const preP = pre.filter((f) => !f.dropped).length;
+    const preF = pre.length - preP;
+    const postP = post.filter((f) => !f.dropped).length;
+    const postF = post.length - postP;
+
+    document.getElementById("pre-playable").textContent = preP + "/20";
+    document.getElementById("pre-failed").textContent = preF;
+    document.getElementById("post-playable").textContent = postP + "/20";
+    document.getElementById("post-failed").textContent = postF;
+
+    document.getElementById("code").textContent = SCENARIOS[s].code;
+    document.getElementById("verdict").innerHTML = SCENARIOS[s].verdict;
+  }
+
+  document.getElementById("scenario").addEventListener("change", render);
+  document.getElementById("loss").addEventListener("input", render);
+  document.getElementById("jitter").addEventListener("input", render);
+  render();
+</script>
+</body>
+</html>
