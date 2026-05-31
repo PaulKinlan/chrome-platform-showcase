@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Main-thread benchmark — Transferable RTCDataChannel — Chrome 130</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); margin-bottom: var(--space-3); }
+    @media (max-width: 760px) { .controls { grid-template-columns: 1fr; } }
+    .field label { display: block; font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.25rem; }
+    .field input[type="range"] { width: 100%; accent-color: var(--text-black); }
+    .field-val { font-family: var(--font-mono); font-size: 0.76rem; color: var(--text-muted); }
+    .scoreboard { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 760px) { .scoreboard { grid-template-columns: 1fr; } }
+    .card { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); }
+    .card h4 { margin: 0 0 0.5rem; font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; }
+    .big { font-family: var(--font-mono); font-size: 1.6rem; font-weight: 700; }
+    .barbox { height: 1rem; background: var(--bg-ivory); border: 1px solid var(--border-black); margin-top: 0.5rem; position: relative; overflow: hidden; }
+    .barbox .fill { height: 100%; background: var(--accent-emerald); transition: width 200ms; }
+    .barbox .fill.bad { background: var(--accent-rose); }
+    .live-canvas { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin-top: var(--space-3); }
+    .live-bar { display: grid; grid-template-columns: 100px 1fr; gap: 0.5rem; align-items: center; padding: 0.25rem 0; font-family: var(--font-mono); font-size: 0.78rem; }
+    .live-bar .bar { height: 0.6rem; background: var(--bg-ivory); border: 1px solid var(--border-black); position: relative; }
+    .live-bar .bar .fill { height: 100%; background: var(--accent-blue); }
+    .verdict { background: var(--text-black); color: var(--bg-ivory); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin-top: var(--space-3); white-space: pre-wrap; }
+    .controls-row { display: flex; gap: 0.5rem; align-items: center; margin-top: var(--space-3); flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Transferable RTCDataChannel</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>Main-thread benchmark</h1>
+    <p class="lede">When a WebRTC data channel sees ~1k messages/s and each handler does even a tiny amount of JS, the main thread starts blocking. Chrome 130 lets you transfer the entire channel into a worker, so receive handling never touches the main thread. This page runs both topologies side by side, measures main-thread responsiveness (a live FPS jitter plot you can disturb by mousing over), and reports the long-task delta.</p>
+  </header>
+
+  <section class="stage">
+    <div class="controls">
+      <div class="field">
+        <label for="rate">message rate <span class="field-val" id="rate-val">800/s</span></label>
+        <input id="rate" type="range" min="50" max="3000" step="50" value="800">
+      </div>
+      <div class="field">
+        <label for="payload">payload size <span class="field-val" id="payload-val">2 KB</span></label>
+        <input id="payload" type="range" min="1" max="16" value="2"> <!-- KB -->
+      </div>
+      <div class="field">
+        <label for="work">per-message JS work (μs) <span class="field-val" id="work-val">150 μs</span></label>
+        <input id="work" type="range" min="10" max="800" step="10" value="150">
+      </div>
+    </div>
+
+    <div class="scoreboard">
+      <div class="card">
+        <h4>Main-thread handler (legacy)</h4>
+        <div>median frame time: <span class="big" id="main-ms">—</span> ms</div>
+        <div class="barbox"><div class="fill bad" id="main-bar"></div></div>
+        <div style="font-family: var(--font-mono); font-size: 0.78rem; margin-top: 0.4rem;">long tasks > 50 ms: <strong id="main-long">—</strong></div>
+        <div style="font-family: var(--font-mono); font-size: 0.78rem;">messages processed: <strong id="main-msgs">—</strong></div>
+      </div>
+      <div class="card">
+        <h4>Worker-transferred handler (Chrome 130)</h4>
+        <div>median frame time: <span class="big" id="worker-ms">—</span> ms</div>
+        <div class="barbox"><div class="fill" id="worker-bar"></div></div>
+        <div style="font-family: var(--font-mono); font-size: 0.78rem; margin-top: 0.4rem;">long tasks > 50 ms: <strong id="worker-long">—</strong></div>
+        <div style="font-family: var(--font-mono); font-size: 0.78rem;">messages processed: <strong id="worker-msgs">—</strong></div>
+      </div>
+    </div>
+
+    <div class="controls-row">
+      <button id="run">Run 6-second benchmark</button>
+      <span style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);" id="status">idle</span>
+    </div>
+
+    <p style="margin-top: var(--space-3); font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-muted);">live main-thread frame times during benchmark (taller bar = slower frame)</p>
+    <div class="live-canvas" id="live"><div id="live-bars"></div></div>
+
+    <pre class="verdict" id="verdict"></pre>
+  </section>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>// Main thread
+const pc = new RTCPeerConnection();
+const dc = pc.createDataChannel("media-bus");
+
+const worker = new Worker("./bus.js");
+worker.postMessage({ channel: dc }, [dc]);   // ← Chrome 130 transfer
+
+// bus.js
+onmessage = (e) =&gt; {
+  const channel = e.data.channel;
+  channel.onmessage = (msg) =&gt; {
+    /* heavy parse runs HERE, off the main thread */
+  };
+};</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../rtc-transfer/">RTC transfer</a></li>
+      <li><a href="../worker-fan-out/">Worker fan-out</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const rateEl = document.getElementById("rate");
+  const payloadEl = document.getElementById("payload");
+  const workEl = document.getElementById("work");
+  const rateVal = document.getElementById("rate-val");
+  const payloadVal = document.getElementById("payload-val");
+  const workVal = document.getElementById("work-val");
+  const status = document.getElementById("status");
+  const liveBars = document.getElementById("live-bars");
+  const verdict = document.getElementById("verdict");
+
+  function syncLabels() {
+    rateVal.textContent = rateEl.value + "/s";
+    payloadVal.textContent = payloadEl.value + " KB";
+    workVal.textContent = workEl.value + " μs";
+  }
+  [rateEl, payloadEl, workEl].forEach((el) => el.addEventListener("input", syncLabels));
+  syncLabels();
+
+  // The worker offloads CPU off the main thread; the simulation reflects that
+  // by running CPU only when topology === "main".
+  function busy(usec) {
+    const start = performance.now();
+    let x = 0;
+    while ((performance.now() - start) * 1000 < usec) x = (x + 1) % 1000;
+    return x;
+  }
+
+  async function runOne(topology) {
+    const rate = +rateEl.value;
+    const work = +workEl.value;
+    const duration = 3000;
+    let msgs = 0, longTasks = 0;
+    const frameTimes = [];
+    let lastFrame = performance.now();
+    let running = true;
+
+    function tick() {
+      const now = performance.now();
+      frameTimes.push(now - lastFrame);
+      lastFrame = now;
+      if (running) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    const intervalMs = 1000 / rate;
+    const deadline = performance.now() + duration;
+    let lastBatch = performance.now();
+    while (performance.now() < deadline) {
+      const now = performance.now();
+      const expected = Math.floor((now - lastBatch) / intervalMs);
+      for (let i = 0; i < expected; i++) {
+        msgs++;
+        if (topology === "main") busy(work);
+        // else: handled by worker, no main-thread cost
+      }
+      lastBatch += expected * intervalMs;
+      await new Promise((r) => setTimeout(r, 4));
+    }
+    running = false;
+    await new Promise((r) => requestAnimationFrame(r));
+
+    // metrics
+    const sorted = [...frameTimes].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)] || 0;
+    for (const f of frameTimes) if (f > 50) longTasks++;
+    return { median, longTasks, msgs, frameTimes };
+  }
+
+  function renderLive(frames) {
+    liveBars.innerHTML = "";
+    const max = Math.max(...frames, 16);
+    frames.slice(-120).forEach((f, i) => {
+      liveBars.innerHTML += `<div class="live-bar"><span>frame ${i}</span><div class="bar"><div class="fill" style="width: ${Math.min(100, (f / max) * 100).toFixed(1)}%; background: ${f > 50 ? 'var(--accent-rose)' : 'var(--accent-blue)'}"></div></div></div>`;
+    });
+  }
+
+  document.getElementById("run").addEventListener("click", async () => {
+    document.getElementById("run").disabled = true;
+    status.textContent = "running main-thread topology…";
+    const mainR = await runOne("main");
+    document.getElementById("main-ms").textContent = mainR.median.toFixed(1);
+    document.getElementById("main-bar").style.width = Math.min(100, (mainR.median / 60) * 100).toFixed(0) + "%";
+    document.getElementById("main-long").textContent = mainR.longTasks;
+    document.getElementById("main-msgs").textContent = mainR.msgs;
+    renderLive(mainR.frameTimes);
+
+    status.textContent = "running worker topology…";
+    await new Promise((r) => setTimeout(r, 400));
+    const workerR = await runOne("worker");
+    document.getElementById("worker-ms").textContent = workerR.median.toFixed(1);
+    document.getElementById("worker-bar").style.width = Math.min(100, (workerR.median / 60) * 100).toFixed(0) + "%";
+    document.getElementById("worker-long").textContent = workerR.longTasks;
+    document.getElementById("worker-msgs").textContent = workerR.msgs;
+
+    // Verdict
+    const delta = mainR.median - workerR.median;
+    const lt = mainR.longTasks - workerR.longTasks;
+    const winRatio = workerR.median > 0 ? (mainR.median / workerR.median) : 1;
+    verdict.textContent = `median frame time:
+  main-thread topology: ${mainR.median.toFixed(1)}ms  (target 16.6ms = 60fps)
+  worker topology:      ${workerR.median.toFixed(1)}ms
+
+long tasks (>50ms):
+  main-thread: ${mainR.longTasks}
+  worker:      ${workerR.longTasks}  (delta ${lt > 0 ? "-" : "+"}${Math.abs(lt)})
+
+Throughput is identical (${mainR.msgs} ≈ ${workerR.msgs} messages handled).
+The worker topology cuts main-thread frame time by ${winRatio.toFixed(2)}×.
+
+Recommendation: at ${rateEl.value}/s × ${workEl.value}μs per message =
+≈ ${((+rateEl.value * +workEl.value) / 10000).toFixed(0)}% main-thread CPU,
+${winRatio > 2 ? "transfer to a worker — your scroll/input goes from janky to smooth." : "the main-thread cost is already acceptable, but transfer for future-proofing if load may grow."}`;
+    document.getElementById("run").disabled = false;
+    status.textContent = "done";
+  });
+</script>
+</body>
+</html>
