@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lifecycle Tracer — Pause media on not-rendered iframes — Chrome 137</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .scene { position: relative; height: 280px; border: 2px dashed var(--border-black); background: var(--bg-stone); overflow: hidden; }
+    .scene iframe { position: absolute; width: 280px; height: 158px; border: 2px solid var(--border-black); background: var(--bg-paper); transition: top 0.5s ease, opacity 0.4s, transform 0.4s; }
+    .scene .scrollable { position: absolute; inset: 0; overflow-y: auto; }
+    .scene .pad { height: 800px; }
+    .timeline { font-family: var(--font-mono); font-size: 0.78rem; padding: var(--space-2) var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); margin: var(--space-3) 0; max-height: 220px; overflow-y: auto; }
+    .timeline .ev { display: grid; grid-template-columns: 80px 1fr 100px; gap: var(--space-2); padding: var(--space-1) 0; border-bottom: 1px dashed var(--text-muted); }
+    .timeline .ev.play { color: var(--accent-emerald); }
+    .timeline .ev.pause { color: var(--accent-rose); }
+    .timeline .ev.lifecycle { color: var(--accent-blue); }
+    .timeline .ev.dom { color: var(--text-muted); }
+    .iframe-stack { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .iframe-stack { grid-template-columns: 1fr; } }
+    .lane { border: 2px solid var(--border-black); padding: var(--space-3); background: var(--bg-paper); box-shadow: var(--thin-shadow); }
+    .lane h3 { margin-top: 0; }
+    .matrix { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.78rem; margin: var(--space-3) 0; }
+    .matrix th, .matrix td { padding: 0.4rem 0.55rem; border: 1px solid var(--border-black); text-align: left; }
+    .matrix th { background: var(--bg-stone); }
+    .pill { font-family: var(--font-mono); font-size: 0.72rem; padding: 0.1rem 0.4rem; border: 1px solid var(--border-black); display: inline-block; }
+    .pill.green { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .pill.rose { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Pause media playback on not-rendered iframes</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v137</p>
+    <h1>Lifecycle tracer</h1>
+    <p class="lede">A synthetic <code>&lt;audio&gt;</code>-emitting iframe inside a tall scroller. Drag it offscreen, toggle <code>display: none</code>, set <code>visibility: hidden</code>, swap the <code>hidden</code> attribute &mdash; the tracer logs every CSS state and every <code>play</code>/<code>pause</code> the new policy fires. Matrix at the bottom lists which states block playback in Chrome 137.</p>
+  </header>
+
+  <div class="stage">
+    <div class="controls">
+      <button data-act="display-none">Toggle display:none</button>
+      <button data-act="visibility-hidden">Toggle visibility:hidden</button>
+      <button data-act="hidden-attr">Toggle hidden attr</button>
+      <button data-act="scroll-off">Scroll iframe offscreen</button>
+      <button data-act="scroll-on">Scroll iframe onscreen</button>
+      <button data-act="play">Programmatic play()</button>
+      <button data-act="reset">Reset</button>
+    </div>
+
+    <div class="scene">
+      <div class="scrollable" id="scrollable">
+        <div class="pad"></div>
+        <iframe id="frame" srcdoc='<!doctype html><html><body style="margin:0;padding:8px;font-family:monospace;font-size:12px;background:#fdfcf8;color:#000;border:2px solid #000"><div id="state">state: idle</div><script>const a=new AudioContext();let o=null;function start(){if(o)return;o=a.createOscillator();const g=a.createGain();g.gain.value=0.001;o.connect(g);g.connect(a.destination);o.frequency.value=440;o.start();document.getElementById("state").textContent="state: playing (440Hz)";parent.postMessage({type:"play"},"*");}function stop(){if(!o)return;o.stop();o=null;document.getElementById("state").textContent="state: paused";parent.postMessage({type:"pause"},"*");}window.addEventListener("message",(e)=>{if(e.data&&e.data.cmd==="play")start();if(e.data&&e.data.cmd==="pause")stop();});document.addEventListener("visibilitychange",()=>{parent.postMessage({type:"lifecycle",state:document.visibilityState},"*");if(document.visibilityState==="hidden")stop();});<\/script></body></html>'></iframe>
+        <div class="pad"></div>
+      </div>
+    </div>
+
+    <div class="iframe-stack">
+      <div class="lane">
+        <h3>iframe paint state</h3>
+        <div class="timeline" id="paintTimeline"></div>
+      </div>
+      <div class="lane">
+        <h3>audio events</h3>
+        <div class="timeline" id="audioTimeline"></div>
+      </div>
+    </div>
+  </div>
+
+  <h2>state matrix</h2>
+  <table class="matrix">
+    <thead><tr><th>state on iframe</th><th>rendered?</th><th>Chrome 137 behaviour</th></tr></thead>
+    <tbody>
+      <tr><td><code>display: none</code></td><td>no</td><td><span class="pill rose">paused</span></td></tr>
+      <tr><td><code>visibility: hidden</code></td><td>yes (layout, no paint)</td><td><span class="pill green">keeps playing</span></td></tr>
+      <tr><td><code>hidden</code> attribute</td><td>no</td><td><span class="pill rose">paused</span></td></tr>
+      <tr><td>scrolled offscreen</td><td>yes</td><td><span class="pill green">keeps playing</span></td></tr>
+      <tr><td><code>content-visibility: hidden</code></td><td>no</td><td><span class="pill rose">paused</span></td></tr>
+      <tr><td>parent collapses to 0&times;0</td><td>no</td><td><span class="pill rose">paused</span></td></tr>
+    </tbody>
+  </table>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../iframe-pause/">Iframe pause demo</a></li>
+      <li><a href="../permission-allow/">Permission allow demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5082950457884672" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const frame = document.getElementById("frame");
+  const scrollable = document.getElementById("scrollable");
+  const audioT = document.getElementById("audioTimeline");
+  const paintT = document.getElementById("paintTimeline");
+
+  // Initial position
+  frame.style.left = "30px";
+  frame.style.top = "60px";
+
+  function ts() { return new Date().toLocaleTimeString().slice(0, 8); }
+  function log(timeline, cls, msg, detail) {
+    const div = document.createElement("div");
+    div.className = "ev " + cls;
+    div.innerHTML = `<span>${ts()}</span><span>${msg}</span><span>${detail || ""}</span>`;
+    timeline.prepend(div);
+  }
+
+  // Audio events from child
+  window.addEventListener("message", (e) => {
+    const d = e.data || {};
+    if (d.type === "play") log(audioT, "play", "play()", "from iframe");
+    if (d.type === "pause") log(audioT, "pause", "pause()", "from iframe");
+    if (d.type === "lifecycle") log(paintT, "lifecycle", "visibilitychange", d.state);
+  });
+
+  // Observe rendered state
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      log(paintT, "lifecycle", "intersection: " + (e.isIntersecting ? "in view" : "off-screen"), e.intersectionRatio.toFixed(2));
+    }
+  });
+  io.observe(frame);
+
+  // Buttons
+  document.querySelectorAll("[data-act]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const a = b.dataset.act;
+      if (a === "display-none") {
+        frame.style.display = frame.style.display === "none" ? "" : "none";
+        log(paintT, "dom", "display:", frame.style.display || "(default)");
+      } else if (a === "visibility-hidden") {
+        frame.style.visibility = frame.style.visibility === "hidden" ? "" : "hidden";
+        log(paintT, "dom", "visibility:", frame.style.visibility || "(default)");
+      } else if (a === "hidden-attr") {
+        if (frame.hasAttribute("hidden")) frame.removeAttribute("hidden");
+        else frame.setAttribute("hidden", "");
+        log(paintT, "dom", "hidden attr:", frame.hasAttribute("hidden"));
+      } else if (a === "scroll-off") {
+        scrollable.scrollTop = 0;
+        log(paintT, "dom", "scrolled to top — iframe out of view", "");
+      } else if (a === "scroll-on") {
+        scrollable.scrollTop = 700;
+        log(paintT, "dom", "scrolled iframe into view", "");
+      } else if (a === "play") {
+        frame.contentWindow.postMessage({ cmd: "play" }, "*");
+      } else if (a === "reset") {
+        frame.style.display = "";
+        frame.style.visibility = "";
+        frame.removeAttribute("hidden");
+        scrollable.scrollTop = 700;
+        frame.contentWindow.postMessage({ cmd: "pause" }, "*");
+        log(paintT, "dom", "reset", "");
+      }
+    });
+  });
+
+  // Auto-start: scroll into view & request play
+  setTimeout(() => {
+    scrollable.scrollTop = 700;
+    frame.contentWindow.postMessage({ cmd: "play" }, "*");
+  }, 600);
+</script>
+</body>
+</html>
