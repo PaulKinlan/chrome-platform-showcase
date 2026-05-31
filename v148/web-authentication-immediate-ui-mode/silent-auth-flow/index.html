@@ -45,17 +45,17 @@
   <header class="lede-block">
     <p class="eyebrow">v148 · Web Authentication · Security</p>
     <h1>Silent Auth Flow</h1>
-    <p class="lede">The full recommended authentication cascade: try <code>mediation: "immediate"</code> (instant reject if no credential), fall back to <code>mediation: "conditional"</code> (autofill), then modal if needed. Pick a scenario to see how the flow behaves.</p>
+    <p class="lede">Run the authentication cascade against the real Credential Management API: try <code>mediation: "immediate"</code>, fall back to <code>mediation: "conditional"</code>, then modal if needed. The result reflects this browser, origin, and saved credential state.</p>
   </header>
 
   <section>
     <div class="support-note" id="support-note">Checking navigator.credentials.get() support…</div>
 
-    <p style="font-size:0.82rem;color:var(--text-charcoal);margin:0.75rem 0 0.35rem;font-weight:700;">Simulate scenario:</p>
+    <p style="font-size:0.82rem;color:var(--text-charcoal);margin:0.75rem 0 0.35rem;font-weight:700;">Live request options:</p>
     <div class="scenario-row" id="scenario-row">
-      <button class="scenario-btn active" data-scenario="passkey">Passkey registered</button>
-      <button class="scenario-btn" data-scenario="none">No credential</button>
-      <button class="scenario-btn" data-scenario="password">Password only</button>
+      <button class="scenario-btn active" data-scenario="both">Passkeys + passwords</button>
+      <button class="scenario-btn" data-scenario="passkey">Passkeys only</button>
+      <button class="scenario-btn" data-scenario="password">Passwords only</button>
     </div>
 
     <div class="flow-diagram" id="flow-diagram">
@@ -90,7 +90,7 @@
       <button class="secondary" id="btn-reset">Reset</button>
     </div>
 
-    <div class="result-box idle" id="result-box">Select a scenario and click "Run auth flow".</div>
+    <div class="result-box idle" id="result-box">Choose request options and click "Run auth flow".</div>
   </section>
 
   <section>
@@ -139,14 +139,14 @@
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 <script>
-  const supported = typeof navigator.credentials !== 'undefined';
+  const supported = typeof navigator.credentials?.get === 'function';
   const note = document.getElementById('support-note');
   note.textContent = supported
-    ? '✓ navigator.credentials available. Chrome 148+ required for mediation: "immediate". Scenarios are simulated.'
-    : 'navigator.credentials not available. Scenarios are fully simulated.';
+    ? 'navigator.credentials.get() is available. This page will call the live API and report the actual browser result.'
+    : 'navigator.credentials.get() is not available in this browser.';
   if (supported) note.style.borderLeftColor = 'var(--accent-emerald)';
 
-  let scenario = 'passkey';
+  let scenario = 'both';
 
   document.querySelectorAll('.scenario-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -167,7 +167,55 @@
     ['immediate', 'conditional', 'modal', 'result'].forEach(s => setStep(s, '', 'idle'));
     const box = document.getElementById('result-box');
     box.className = 'result-box idle';
-    box.textContent = 'Select a scenario and click "Run auth flow".';
+    box.textContent = 'Choose request options and click "Run auth flow".';
+  }
+
+  function makeChallenge() {
+    const challenge = new Uint8Array(32);
+    crypto.getRandomValues(challenge);
+    return challenge;
+  }
+
+  function makeRequest(mediation, abortAfter = 0) {
+    const request = { mediation };
+    if (scenario !== 'password') {
+      request.publicKey = {
+        challenge: makeChallenge(),
+        rpId: location.hostname,
+        userVerification: 'preferred',
+        timeout: mediation === 'required' ? 10000 : 60000,
+      };
+    }
+    if (scenario !== 'passkey' && window.PasswordCredential) request.password = true;
+    if (abortAfter > 0) {
+      const controller = new AbortController();
+      request.signal = controller.signal;
+      request.abortTimer = setTimeout(() => controller.abort(), abortAfter);
+    }
+    return request;
+  }
+
+  async function attemptCredential(mediation, abortAfter = 0) {
+    const request = makeRequest(mediation, abortAfter);
+    const abortTimer = request.abortTimer;
+    delete request.abortTimer;
+    const started = performance.now();
+    try {
+      const credential = await navigator.credentials.get(request);
+      return {
+        ok: Boolean(credential),
+        elapsed: Math.round(performance.now() - started),
+        text: credential ? `${credential.type} credential returned` : 'resolved with null',
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        elapsed: Math.round(performance.now() - started),
+        text: `${error.name || 'Error'}${error.message ? ': ' + error.message : ''}`,
+      };
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer);
+    }
   }
 
   async function runFlow() {
@@ -176,55 +224,53 @@
     resetFlow();
 
     const box = document.getElementById('result-box');
+    if (!supported) {
+      setStep('result', 'failed', 'API unavailable');
+      box.className = 'result-box fail';
+      box.textContent = 'navigator.credentials.get() is not available.';
+      btn.disabled = false;
+      return;
+    }
 
-    // Step 1: immediate
-    setStep('immediate', 'active', 'trying…');
-    await delay(500);
-
-    if (scenario === 'passkey') {
-      setStep('immediate', 'done', '✓ passkey found');
+    setStep('immediate', 'active', 'calling API…');
+    const immediate = await attemptCredential('immediate');
+    setStep('immediate', immediate.ok ? 'done' : 'failed', `${immediate.elapsed} ms — ${immediate.text}`);
+    if (immediate.ok) {
       setStep('conditional', '', 'skipped');
       setStep('modal', '', 'skipped');
       setStep('result', 'done', 'signed in');
       box.className = 'result-box success';
-      box.textContent = '✓ Signed in via passkey (mediation: "immediate") — no UI shown, instant result.';
-    } else if (scenario === 'none') {
-      setStep('immediate', 'failed', '✗ NotAllowedError — no credential');
-
-      // Step 2: conditional
-      setStep('conditional', 'active', 'checking autofill…');
-      await delay(500);
-      setStep('conditional', 'failed', '✗ no autofill credential');
-
-      // Step 3: modal
-      setStep('modal', 'active', 'showing UI picker…');
-      await delay(800);
-      setStep('modal', 'failed', 'user dismissed');
-      setStep('result', 'failed', 'not signed in');
-
-      box.className = 'result-box fail';
-      box.textContent = '✗ No credential found at any stage. User dismissed the modal. Authentication failed.';
-    } else if (scenario === 'password') {
-      setStep('immediate', 'failed', '✗ NotAllowedError — passkey not found');
-
-      // Step 2: conditional
-      setStep('conditional', 'active', 'checking autofill…');
-      await delay(600);
-      setStep('conditional', 'done', '✓ password autofill shown');
-      setStep('modal', '', 'skipped');
-      setStep('result', 'done', 'signed in via password');
-
-      box.className = 'result-box fallback';
-      box.textContent = '⚠ Signed in via password autofill (conditional mediation). No passkey — fell back to password credential.';
+      box.textContent = `Signed in from the immediate request: ${immediate.text}.`;
+      btn.disabled = false;
+      return;
     }
+
+    setStep('conditional', 'active', 'calling API with abort…');
+    const conditional = await attemptCredential('conditional', 2200);
+    setStep('conditional', conditional.ok ? 'done' : 'failed', `${conditional.elapsed} ms — ${conditional.text}`);
+    if (conditional.ok) {
+      setStep('modal', '', 'skipped');
+      setStep('result', 'done', 'signed in');
+      box.className = 'result-box fallback';
+      box.textContent = `Signed in from the conditional request: ${conditional.text}.`;
+      btn.disabled = false;
+      return;
+    }
+
+    setStep('modal', 'active', 'calling API…');
+    const modal = await attemptCredential('required');
+    setStep('modal', modal.ok ? 'done' : 'failed', `${modal.elapsed} ms — ${modal.text}`);
+    setStep('result', modal.ok ? 'done' : 'failed', modal.ok ? 'signed in' : 'not signed in');
+    box.className = modal.ok ? 'result-box success' : 'result-box fail';
+    box.textContent = modal.ok
+      ? `Signed in from the modal request: ${modal.text}.`
+      : `No credential was returned. Final result: ${modal.text}.`;
 
     btn.disabled = false;
   }
 
   document.getElementById('btn-run').addEventListener('click', runFlow);
   document.getElementById('btn-reset').addEventListener('click', () => { resetFlow(); });
-
-  function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 </script>
 </body>
 </html>

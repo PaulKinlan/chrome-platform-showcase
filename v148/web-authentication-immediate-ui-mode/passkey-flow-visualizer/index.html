@@ -290,12 +290,12 @@
   <header class="lede-block">
     <p class="eyebrow">v148 · WebAuthn · passkeys · UX</p>
     <h1>Passkey Flow Visualizer</h1>
-    <p class="lede">Compare the three WebAuthn mediation modes — Modal, Conditional, and Immediate — side by side. Run the comparison and see time-to-UI, step-by-step flow, and UX improvement of Chrome 148's <code>mediation: "immediate"</code>.</p>
+    <p class="lede">Compare the three WebAuthn mediation modes — Modal, Conditional, and Immediate — side by side. Run live <code>navigator.credentials.get()</code> probes and inspect the actual browser result, rejection, or timeout for this origin.</p>
   </header>
 
   <section>
     <h2>flow comparison</h2>
-    <p>Each lane shows the steps for one mediation mode. "Run comparison" fires all three simultaneously.</p>
+    <p>Each lane shows the steps for one mediation mode. "Run comparison" calls the real Credential Management API for each mode and records the observed result.</p>
 
     <div class="run-row">
       <button id="run-btn">Run comparison</button>
@@ -370,7 +370,7 @@
   <!-- Timing chart -->
   <section>
     <h2>time-to-UI comparison</h2>
-    <p>Approximate time from page load or user click to passkey UI appearing. Immediate mode eliminates the click latency entirely.</p>
+    <p>Measured time from each live credential request to resolution, rejection, or an explicit timeout for pending conditional UI.</p>
     <div class="timing-chart">
       <div class="timing-row">
         <span class="timing-label">Modal</span>
@@ -387,7 +387,7 @@
         <div class="timing-bar-track"><div class="timing-bar-fill imm-fill" id="chart-imm" style="width:0%"></div></div>
         <span class="timing-ms" id="chart-ms-imm">—</span>
       </div>
-      <p class="chart-note">Times are simulated for demo. In production, immediate is fastest when credentials exist; conditional requires user focus on an input field; modal requires an explicit button click.</p>
+      <p class="chart-note">These values come from the live browser calls on this origin. Conditional UI is aborted after a short window if it remains pending.</p>
     </div>
   </section>
 
@@ -424,7 +424,7 @@
       <li><code>"required"</code> always shows the picker, regardless of whether credentials exist.</li>
       <li><code>"conditional"</code> waits passively; the browser inserts passkeys into autofill on <code>autocomplete="username webauthn"</code> inputs.</li>
       <li><code>"immediate"</code> (Chrome 148) resolves if credentials exist, rejects with <code>NotAllowedError</code> instantly if not — no UI delay, no click required.</li>
-      <li>The timing diagram is simulated; real latency depends on device authenticator and browser state.</li>
+      <li>This page reports actual API timing for the current browser, origin, authenticator state, and saved credentials.</li>
     </ol>
   </section>
 
@@ -432,52 +432,94 @@
 </main>
 
 <script>
-// Simulated flow timings (ms)
-const SIM_TIMINGS = {
-  modal:  { steps: [0, 80, 200, 400, null], total: 620 },
-  cond:   { steps: [0, 60, null, 1800, 2100], total: 2100 },
-  imm:    { steps: [0, 40, 120, 180, null], total: 195 },
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+const LAST_STEP_TEXT = {
+  modal: 'Promise resolves or rejects',
+  cond: 'User taps passkey from dropdown',
+  imm: 'If not found: rejects with NotAllowedError instantly',
 };
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function makeChallenge() {
+  const challenge = new Uint8Array(32);
+  crypto.getRandomValues(challenge);
+  return challenge;
+}
 
-async function animateLane(laneId, config) {
+function makeCredentialRequest(mediation, abortAfter = 0) {
+  const request = {
+    mediation,
+    publicKey: {
+      challenge: makeChallenge(),
+      rpId: location.hostname,
+      userVerification: 'preferred',
+      timeout: mediation === 'required' ? 10000 : 60000,
+    },
+  };
+  if (window.PasswordCredential) request.password = true;
+  if (abortAfter > 0) {
+    const controller = new AbortController();
+    request.signal = controller.signal;
+    request.abortTimer = setTimeout(() => controller.abort(), abortAfter);
+  }
+  return request;
+}
+
+async function probeCredential(mediation, abortAfter = 0) {
+  if (typeof navigator.credentials?.get !== 'function') {
+    return { ok: false, elapsed: 0, label: 'navigator.credentials.get unavailable' };
+  }
+
+  const request = makeCredentialRequest(mediation, abortAfter);
+  const abortTimer = request.abortTimer;
+  delete request.abortTimer;
+  const started = performance.now();
+  try {
+    const credential = await navigator.credentials.get(request);
+    return {
+      ok: Boolean(credential),
+      elapsed: Math.round(performance.now() - started),
+      label: credential ? `resolved with ${credential.type}` : 'resolved with null',
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      elapsed: Math.round(performance.now() - started),
+      label: `${error.name || 'Error'}${error.message ? ': ' + error.message : ''}`,
+    };
+  } finally {
+    if (abortTimer) clearTimeout(abortTimer);
+  }
+}
+
+async function runLiveLane(laneId, mediation, abortAfter = 0) {
   const steps = document.querySelectorAll(`#lane-${laneId} .flow-step`);
   const nums  = document.querySelectorAll(`#lane-${laneId} .step-num`);
-  const timings = SIM_TIMINGS[laneId];
-  const t0 = performance.now();
+  const mark = (index, state, symbol) => {
+    steps[index].classList.remove('active', 'done', 'error');
+    steps[index].classList.add(state);
+    nums[index].classList.remove('done', 'error');
+    if (state === 'done') nums[index].classList.add('done');
+    if (state === 'error') nums[index].classList.add('error');
+    nums[index].textContent = symbol;
+  };
 
-  for (let i = 0; i < steps.length; i++) {
-    const delay = timings.steps[i];
-    if (delay === null) {
-      steps[i].classList.add('error');
-      nums[i].classList.add('error');
-      nums[i].textContent = '✗';
-      break;
-    }
-    await sleep(Math.max(0, delay - (i > 0 ? timings.steps[i-1] || 0 : 0)));
-    if (i > 0) {
-      steps[i-1].classList.remove('active');
-      steps[i-1].classList.add('done');
-      nums[i-1].classList.add('done');
-      nums[i-1].textContent = '✓';
-    }
-    steps[i].classList.add('active');
+  mark(0, 'done', '✓');
+  mark(1, 'active', '…');
+  await sleep(120);
+  mark(1, 'done', '✓');
+  mark(2, 'active', '…');
+  const result = await probeCredential(mediation, abortAfter);
+  mark(2, result.ok ? 'done' : 'error', result.ok ? '✓' : '✗');
+  mark(3, result.ok ? 'done' : 'error', result.ok ? '✓' : '✗');
+  mark(4, result.ok ? 'done' : 'error', result.ok ? '✓' : '✗');
+
+  const timing = `${result.elapsed} ms`;
+  document.getElementById(`${laneId}-timing`).textContent = timing;
+  const lastStep = steps[4].querySelector('.step-desc');
+  if (lastStep) {
+    lastStep.textContent = result.label;
   }
-
-  await sleep(200);
-  // Mark last step done or it stays
-  const lastIdx = steps.length - 1;
-  if (!steps[lastIdx].classList.contains('error')) {
-    steps[lastIdx].classList.remove('active');
-    steps[lastIdx].classList.add('done');
-    nums[lastIdx].classList.add('done');
-    nums[lastIdx].textContent = '✓';
-  }
-
-  const elapsed = Math.round(performance.now() - t0);
-  document.getElementById(`${laneId}-timing`).textContent = elapsed + ' ms';
-  return elapsed;
+  return result.elapsed;
 }
 
 function resetLane(laneId) {
@@ -488,6 +530,8 @@ function resetLane(laneId) {
     nums[i].className = 'step-num';
     nums[i].textContent = String(i + 1);
   });
+  const lastDesc = steps[steps.length - 1]?.querySelector('.step-desc');
+  if (lastDesc) lastDesc.textContent = LAST_STEP_TEXT[laneId];
   document.getElementById(`${laneId}-timing`).textContent = '—';
 }
 
@@ -499,7 +543,7 @@ function resetChart() {
 }
 
 function updateChart(modalMs, condMs, immMs) {
-  const max = Math.max(modalMs, condMs, immMs);
+  const max = Math.max(1, modalMs, condMs, immMs);
   const data = [
     { id: 'modal', ms: modalMs, label: modalMs + ' ms (after click)' },
     { id: 'cond',  ms: condMs,  label: condMs + ' ms (after user focus)' },
@@ -513,26 +557,16 @@ function updateChart(modalMs, condMs, immMs) {
 
 document.getElementById('run-btn').addEventListener('click', async () => {
   document.getElementById('run-btn').disabled = true;
-  document.getElementById('status-line').textContent = 'Running comparison…';
-
-  // Try live API first, then simulate
-  const liveApiAvailable = typeof navigator.credentials?.get === 'function';
-
-  // Always animate UI — simulate timings since real API would require actual passkeys
+  document.getElementById('status-line').textContent = 'Running live credential requests…';
   ['modal','cond','imm'].forEach(resetLane);
   resetChart();
 
-  const [modalMs, condMs, immMs] = await Promise.all([
-    animateLane('modal', {}),
-    animateLane('cond', {}),
-    animateLane('imm', {}),
-  ]);
+  const immMs = await runLiveLane('imm', 'immediate');
+  const condMs = await runLiveLane('cond', 'conditional', 2200);
+  const modalMs = await runLiveLane('modal', 'required');
 
   updateChart(modalMs, condMs, immMs);
-
-  document.getElementById('status-line').textContent = liveApiAvailable
-    ? 'Comparison complete. Real WebAuthn API detected — timings are simulated for visualization.'
-    : 'Comparison complete (simulated — navigator.credentials not available or no passkeys registered).';
+  document.getElementById('status-line').textContent = 'Comparison complete from live API calls.';
 
   document.getElementById('run-btn').disabled = false;
 });
@@ -569,7 +603,7 @@ document.getElementById('detect-creds-btn').addEventListener('click', async () =
       navigator.credentials.get({
         publicKey: {
           challenge,
-          allowCredentials: [],
+          rpId: location.hostname,
           userVerification: 'preferred',
         },
         mediation: 'immediate',
@@ -622,13 +656,15 @@ const FEATURES = [
   },
   {
     name: 'mediation: "immediate"',
-    check: () => {
-      // mediation: "immediate" is Chrome 148+ — no direct feature detect possible
-      // Proxy: check if Chrome version suggests support
-      const m = navigator.userAgent.match(/Chrome\/(\d+)/);
-      return m && parseInt(m[1]) >= 148;
+    check: async () => {
+      try {
+        return typeof PublicKeyCredential?.getClientCapabilities === 'function' &&
+          Boolean((await PublicKeyCredential.getClientCapabilities()).immediateGet);
+      } catch {
+        return false;
+      }
     },
-    notes: 'Chrome 148+ required',
+    notes: 'PublicKeyCredential.getClientCapabilities().immediateGet',
   },
   {
     name: 'isConditionalMediationAvailable()',
