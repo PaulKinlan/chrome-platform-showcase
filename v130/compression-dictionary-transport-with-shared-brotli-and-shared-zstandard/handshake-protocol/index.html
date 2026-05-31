@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Handshake protocol — CDT — Chrome 130</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .stepper { display: flex; gap: 0; margin-bottom: var(--space-3); }
+    .step-btn { flex: 1; padding: 0.5rem; font-family: var(--font-mono); font-size: 0.78rem; border: 2px solid var(--border-black); border-right: none; background: var(--bg-ivory); color: var(--text-black); cursor: pointer; text-align: center; }
+    .step-btn:last-child { border-right: 2px solid var(--border-black); }
+    .step-btn[aria-current="step"] { background: var(--text-black); color: var(--bg-ivory); }
+    .ladder { display: grid; grid-template-columns: 1fr 80px 1fr; gap: 0.5rem; font-family: var(--font-mono); font-size: 0.78rem; align-items: stretch; }
+    .actor-col { display: flex; flex-direction: column; gap: 0.4rem; }
+    .actor-head { background: var(--text-black); color: var(--bg-ivory); padding: 0.5rem; text-align: center; }
+    .msg { background: var(--bg-stone); padding: 0.5rem 0.7rem; border: 1px solid var(--border-black); white-space: pre-wrap; min-height: 1rem; }
+    .msg.empty { background: transparent; border: 1px dashed #ccc; }
+    .msg.active { box-shadow: 4px 4px 0 var(--border-black); background: var(--bg-ivory); }
+    .arrow-col { display: flex; flex-direction: column; gap: 0.4rem; align-items: center; }
+    .arrow { font-family: var(--font-mono); font-size: 1.4rem; height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-muted); }
+    .arrow.active { color: var(--accent-emerald); font-weight: 700; }
+    .commentary { background: var(--bg-stone); border-left: 4px solid var(--text-black); padding: var(--space-3); margin-top: var(--space-3); font-family: var(--font-serif); font-size: 1rem; line-height: 1.55; }
+    .controls { display: flex; gap: 0.5rem; margin-top: var(--space-3); }
+    .savings-bar { height: 1.6rem; background: var(--bg-ivory); border: 2px solid var(--border-black); position: relative; overflow: hidden; }
+    .savings-fill { height: 100%; background: var(--accent-emerald); transition: width 200ms; }
+    .savings-label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 0.82rem; font-weight: 700; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; CDT</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>Handshake protocol walkthrough</h1>
+    <p class="lede">Step through the four-message exchange that drives shared-brotli compression: dictionary fetch, browser registration via <code>Use-As-Dictionary</code>, follow-up request carrying <code>Available-Dictionary: :sha256:</code>, and the <code>dcb</code>-encoded response. Each step highlights the wire-level message and explains what's happening behind the scenes.</p>
+  </header>
+
+  <section class="stage">
+    <nav class="stepper" id="stepper">
+      <button class="step-btn" data-i="0" aria-current="step">1 · fetch dictionary</button>
+      <button class="step-btn" data-i="1">2 · register</button>
+      <button class="step-btn" data-i="2">3 · later request</button>
+      <button class="step-btn" data-i="3">4 · dcb response</button>
+    </nav>
+
+    <div class="ladder">
+      <div class="actor-col">
+        <div class="actor-head">Browser</div>
+        <div class="msg empty" id="b0">—</div>
+        <div class="msg empty" id="b1">—</div>
+        <div class="msg empty" id="b2">—</div>
+        <div class="msg empty" id="b3">—</div>
+      </div>
+      <div class="arrow-col">
+        <div></div>
+        <div class="arrow" id="a0">→</div>
+        <div class="arrow" id="a1">←</div>
+        <div class="arrow" id="a2">→</div>
+        <div class="arrow" id="a3">←</div>
+      </div>
+      <div class="actor-col">
+        <div class="actor-head">Server</div>
+        <div class="msg empty" id="s0">—</div>
+        <div class="msg empty" id="s1">—</div>
+        <div class="msg empty" id="s2">—</div>
+        <div class="msg empty" id="s3">—</div>
+      </div>
+    </div>
+
+    <div class="commentary" id="commentary"></div>
+
+    <div style="margin-top: var(--space-3)">
+      <p style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.4rem;">cumulative wire-bytes saved (vs fresh brotli)</p>
+      <div class="savings-bar">
+        <div class="savings-fill" id="savings-fill"></div>
+        <span class="savings-label" id="savings-label">0%</span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="prev">&larr; step back</button>
+      <button id="next">step forward &rarr;</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>// Step 2 — server promotes the dictionary
+res.set("Use-As-Dictionary", 'match="/static/app-v*.js", type="raw"');
+res.set("Cache-Control", "public, max-age=2592000");
+
+// Step 3 — Chrome sends with the next matching request, automatically
+GET /static/app-v4.js
+Accept-Encoding: gzip, br, zstd, dcb, dcz
+Available-Dictionary: :7f8c…b9e3a:        // SHA-256 of app-v3.js
+
+// Step 4 — server responds delta-compressed against that dictionary
+HTTP/1.1 200 OK
+Content-Encoding: dcb
+Vary: Accept-Encoding, Available-Dictionary</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../cdt-shared/">Shared CDT simulator</a></li>
+      <li><a href="../use-as-dictionary-builder/">Use-As-Dictionary builder</a></li>
+      <li><a href="https://datatracker.ietf.org/doc/draft-ietf-httpbis-compression-dictionary/" target="_blank" rel="noopener">draft-ietf-httpbis-compression-dictionary</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const STEPS = [
+    {
+      browser: { 0: "GET /static/app-v3.js\nAccept-Encoding: gzip, br, zstd" },
+      server: {},
+      active: ["b0", "a0"],
+      commentary: "Step 1 — Browser asks for the initial JS bundle, no special dictionary headers yet. The server doesn't know yet that this resource will become a future dictionary.",
+      savings: 0,
+    },
+    {
+      browser: { 0: "GET /static/app-v3.js\nAccept-Encoding: gzip, br, zstd" },
+      server: {
+        1: 'HTTP/1.1 200 OK\nContent-Type: application/javascript\nUse-As-Dictionary: match="/static/app-v*.js", type="raw"\nCache-Control: max-age=2592000\nVary: Accept-Encoding\n\n…42 KB of bundle…',
+      },
+      active: ["s1", "a1"],
+      commentary: "Step 2 — Server returns the bundle and tags it with Use-As-Dictionary. The browser stores the response in a separate dictionary cache, keyed by SHA-256 of the body, and remembers it matches /static/app-v*.js.",
+      savings: 0,
+    },
+    {
+      browser: { 0: "GET /static/app-v3.js\nAccept-Encoding: gzip, br, zstd", 2: "GET /static/app-v4.js\nAccept-Encoding: gzip, br, zstd, dcb, dcz\nAvailable-Dictionary: :7f8c…b9e3a:\nSec-Available-Dictionary: app-v3" },
+      server: {
+        1: 'HTTP/1.1 200 OK\nUse-As-Dictionary: match="/static/app-v*.js"\nCache-Control: max-age=2592000\n\n…42 KB…',
+      },
+      active: ["b2", "a2"],
+      commentary: "Step 3 — Later, the browser needs app-v4.js. The URL matches the stored dictionary entry. Chrome adds the dcb / dcz encodings to Accept-Encoding and announces the dictionary it has in cache via Available-Dictionary: :sha256:.",
+      savings: 0,
+    },
+    {
+      browser: { 0: "GET /static/app-v3.js\nAccept-Encoding: gzip, br, zstd", 2: "GET /static/app-v4.js\nAvailable-Dictionary: :7f8c…b9e3a:" },
+      server: {
+        1: 'HTTP/1.1 200 OK\nUse-As-Dictionary: match="/static/app-v*.js"',
+        3: 'HTTP/1.1 200 OK\nContent-Encoding: dcb\nVary: Accept-Encoding, Available-Dictionary\nContent-Length: 4083\n\n…4 KB delta…',
+      },
+      active: ["s3", "a3"],
+      commentary: "Step 4 — Server confirms it has the dictionary, computes a brotli delta against it, and responds with Content-Encoding: dcb. Result: ~4 KB on the wire for a bundle that would have been ~42 KB fresh and ~14 KB plain brotli — a 90% reduction on this hop, ~70% versus fresh brotli.",
+      savings: 90,
+    },
+  ];
+
+  let cur = 0;
+  function render() {
+    document.querySelectorAll(".step-btn").forEach((b, i) => b.setAttribute("aria-current", i === cur ? "step" : "false"));
+    for (let i = 0; i < 4; i++) {
+      const b = document.getElementById("b" + i);
+      const s = document.getElementById("s" + i);
+      const a = document.getElementById("a" + i);
+      const step = STEPS[cur];
+      const bText = step.browser[i] || "";
+      const sText = step.server[i] || "";
+      b.textContent = bText || "—";
+      b.classList.toggle("empty", !bText);
+      s.textContent = sText || "—";
+      s.classList.toggle("empty", !sText);
+      b.classList.toggle("active", step.active.includes("b" + i));
+      s.classList.toggle("active", step.active.includes("s" + i));
+      a.classList.toggle("active", step.active.includes("a" + i));
+    }
+    document.getElementById("commentary").textContent = STEPS[cur].commentary;
+    document.getElementById("savings-fill").style.width = STEPS[cur].savings + "%";
+    document.getElementById("savings-label").textContent = STEPS[cur].savings + "% saved";
+  }
+
+  document.getElementById("next").addEventListener("click", () => { cur = (cur + 1) % STEPS.length; render(); });
+  document.getElementById("prev").addEventListener("click", () => { cur = (cur - 1 + STEPS.length) % STEPS.length; render(); });
+  document.querySelectorAll(".step-btn").forEach((b) => {
+    b.addEventListener("click", () => { cur = +b.dataset.i; render(); });
+  });
+
+  render();
+</script>
+</body>
+</html>
