@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pool Exhaustion Simulator — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .lab { display: grid; grid-template-columns: 280px 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 760px) { .lab { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; font-family: var(--font-mono); font-size: 0.85rem; }
+    input[type=range] { width: 140px; accent-color: var(--text-black); }
+    select { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: 0.3rem; font-family: var(--font-mono); font-size: 0.78rem; }
+    .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; box-shadow: var(--flat-shadow); margin-top: var(--space-3); }
+    .stage { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 720px) { .stage { grid-template-columns: 1fr; } }
+    .col { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); }
+    .col h4 { margin: 0 0 var(--space-2); font-family: var(--font-mono); font-size: 0.85rem; text-transform: uppercase; }
+    .req { background: var(--bg-ivory); border: 1px solid var(--border-black); padding: 0.3rem 0.5rem; margin: 0.2rem 0; font-family: var(--font-mono); font-size: 0.75rem; display: flex; justify-content: space-between; }
+    .req.queued { background: #fff3d6; }
+    .req.complete { background: #e0f7e8; }
+    .req.failed { background: #fde7e9; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-2); margin-top: var(--space-3); }
+    .stat { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-2); }
+    .stat-l { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); }
+    .stat-v { font-family: var(--font-mono); font-size: 1.2rem; font-weight: 600; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Re-sizing TCP connection pool</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>Pool Exhaustion Simulator</h1>
+    <p class="lede">A pool of <em>N</em> TCP sockets, a configurable request burst. Three pool sizes — 256 (default), 512, 1024 — run side by side. Watch when each pool exhausts, how long requests queue, and the tail-latency delta the experiment is measuring.</p>
+  </header>
+
+  <div class="lab">
+    <div class="panel">
+      <div class="row"><label>burst size (req)</label><span id="burst-val">600</span></div>
+      <div class="row"><input type="range" id="burst" min="100" max="2000" step="50" value="600"></div>
+      <div class="row"><label>per-request work (ms)</label><span id="work-val">200</span></div>
+      <div class="row"><input type="range" id="work" min="50" max="2000" step="50" value="200"></div>
+      <div class="row"><label>workload mix</label>
+        <select id="mix">
+          <option value="uniform">uniform</option>
+          <option value="bimodal">bimodal (fat tail)</option>
+          <option value="slow">all slow</option>
+        </select>
+      </div>
+      <button class="ctl-btn" id="run">Run burst</button>
+    </div>
+
+    <div>
+      <div class="stage">
+        <div class="col"><h4>pool 256</h4><div id="col-256"></div></div>
+        <div class="col"><h4>pool 512</h4><div id="col-512"></div></div>
+        <div class="col"><h4>pool 1024</h4><div id="col-1024"></div></div>
+      </div>
+      <div class="stats" id="stats"></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>what the experiment is asking</h2>
+    <p>Chrome 139 is running a staged experiment on the per-profile socket pool: from the long-standing 256 default, branches go to 255 and 257 (to validate that single-port shifts don't have second-order effects), and the bigger pools 512 and 1024 evaluate whether bursty SPA workloads see meaningful tail-latency improvement. The simulator runs the same burst on three sizes locally so the trade-off is intuitive.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v139/re-sizing-tcp-connection-pool/">Feature page</a></li>
+      <li><a href="/v139/re-sizing-tcp-connection-pool/pool-note/">Pool Note</a></li>
+      <li><a href="/v139/re-sizing-tcp-connection-pool/sidechannel-leak/">Sidechannel Leak</a></li>
+      <li><a href="https://chromestatus.com/feature/5174924428738560" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(() =&gt; {
+  const burstEl = document.getElementById('burst'), workEl = document.getElementById('work'), mixEl = document.getElementById('mix');
+  function val() { document.getElementById('burst-val').textContent = burstEl.value; document.getElementById('work-val').textContent = workEl.value; }
+  [burstEl, workEl, mixEl].forEach(e =&gt; e.addEventListener('input', val)); val();
+
+  function run() {
+    const burst = +burstEl.value;
+    const baseWork = +workEl.value;
+    const mix = mixEl.value;
+    const results = {};
+    const pools = [256, 512, 1024];
+
+    pools.forEach(P =&gt; {
+      // Discrete-time simulation, 10ms tick.
+      const inFlight = []; // {finish}
+      const completionTimes = [];
+      let nextSubmit = 0, queued = 0, peakQueued = 0;
+      let t = 0;
+      let submitted = 0;
+      while (submitted &lt; burst || inFlight.length &gt; 0) {
+        // Expire
+        for (let i = inFlight.length - 1; i &gt;= 0; i--) {
+          if (inFlight[i].finish &lt;= t) { completionTimes.push(t - inFlight[i].start); inFlight.splice(i, 1); }
+        }
+        // Submit as many as we can
+        while (submitted &lt; burst &amp;&amp; nextSubmit &lt;= t) {
+          let work;
+          if (mix === 'uniform') work = baseWork * (0.7 + Math.random() * 0.6);
+          else if (mix === 'bimodal') work = Math.random() &lt; 0.85 ? baseWork * (0.5 + Math.random()*0.3) : baseWork * 6;
+          else work = baseWork * (1 + Math.random()*0.3);
+          if (inFlight.length &lt; P) {
+            inFlight.push({ start: t, finish: t + work });
+          } else {
+            queued++;
+            peakQueued = Math.max(peakQueued, queued);
+            break;
+          }
+          submitted++;
+        }
+        // Process the queue if a slot opens
+        while (queued &gt; 0 &amp;&amp; inFlight.length &lt; P &amp;&amp; submitted &lt; burst) {
+          let work = baseWork * (0.7 + Math.random()*0.6);
+          inFlight.push({ start: t, finish: t + work });
+          queued--;
+          submitted++;
+        }
+        // Slot opens for queued
+        while (queued &gt; 0 &amp;&amp; inFlight.length &lt; P) {
+          let work = baseWork * (0.7 + Math.random()*0.6);
+          inFlight.push({ start: t, finish: t + work });
+          queued--;
+        }
+        t += 10;
+        if (t &gt; 60000) break;
+      }
+      completionTimes.sort((a, b) =&gt; a - b);
+      const p50 = completionTimes[Math.floor(completionTimes.length * 0.5)] || 0;
+      const p95 = completionTimes[Math.floor(completionTimes.length * 0.95)] || 0;
+      const p99 = completionTimes[Math.floor(completionTimes.length * 0.99)] || 0;
+      results[P] = { p50, p95, p99, peakQueued, totalTime: t };
+      const col = document.getElementById('col-' + P);
+      col.innerHTML = `&lt;h4&gt;pool ${P}&lt;/h4&gt;
+        &lt;div class="req complete"&gt;&lt;span&gt;burst total time&lt;/span&gt;&lt;span&gt;${(t/1000).toFixed(1)}s&lt;/span&gt;&lt;/div&gt;
+        &lt;div class="req"&gt;&lt;span&gt;p50 latency&lt;/span&gt;&lt;span&gt;${Math.round(p50)}ms&lt;/span&gt;&lt;/div&gt;
+        &lt;div class="req queued"&gt;&lt;span&gt;p95 latency&lt;/span&gt;&lt;span&gt;${Math.round(p95)}ms&lt;/span&gt;&lt;/div&gt;
+        &lt;div class="req failed"&gt;&lt;span&gt;p99 latency&lt;/span&gt;&lt;span&gt;${Math.round(p99)}ms&lt;/span&gt;&lt;/div&gt;
+        &lt;div class="req"&gt;&lt;span&gt;peak queued&lt;/span&gt;&lt;span&gt;${peakQueued}&lt;/span&gt;&lt;/div&gt;`;
+    });
+
+    document.getElementById('stats').innerHTML = `
+      &lt;div class="stat"&gt;&lt;div class="stat-l"&gt;p95 256→1024&lt;/div&gt;&lt;div class="stat-v"&gt;${Math.round(results[256].p95 - results[1024].p95)}ms&lt;/div&gt;&lt;/div&gt;
+      &lt;div class="stat"&gt;&lt;div class="stat-l"&gt;p99 256→1024&lt;/div&gt;&lt;div class="stat-v"&gt;${Math.round(results[256].p99 - results[1024].p99)}ms&lt;/div&gt;&lt;/div&gt;
+      &lt;div class="stat"&gt;&lt;div class="stat-l"&gt;burst saved&lt;/div&gt;&lt;div class="stat-v"&gt;${((results[256].totalTime - results[1024].totalTime)/1000).toFixed(1)}s&lt;/div&gt;&lt;/div&gt;`;
+  }
+
+  document.getElementById('run').addEventListener('click', run);
+  setTimeout(run, 200);
+})();
+</script>
+</body>
+</html>
