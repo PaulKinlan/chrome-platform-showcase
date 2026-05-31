@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shader Variable Packer — WebGPU maxInterStageShaderComponents removal — Chrome 135</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .section-title { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: var(--space-3) 0 var(--space-2); }
+    .probe-row { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .probe { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border-black); font-size: 0.8rem; }
+    .probe.fail { background: var(--accent-rose); color: var(--bg-ivory); }
+    .probe.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .probe.warn { background: #b45309; color: var(--bg-ivory); }
+    .info-box { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-size: 0.82rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+
+    /* Field list */
+    .field-list { margin-bottom: var(--space-2); }
+    .field-row {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      padding: var(--space-1) 0;
+      border-bottom: 1px solid var(--bg-stone);
+      flex-wrap: wrap;
+    }
+    .field-row:last-child { border-bottom: none; }
+    .field-name-input {
+      padding: 4px 7px;
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      width: 130px;
+    }
+    select.type-select {
+      padding: 4px 7px;
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+    }
+    .components-badge {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      background: var(--bg-stone);
+      padding: 2px 6px;
+      border: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+    }
+    button.remove-btn {
+      padding: 3px 8px;
+      border: 1px solid var(--accent-rose);
+      background: var(--bg-ivory);
+      color: var(--accent-rose);
+      font-size: 0.72rem;
+      font-family: inherit;
+      cursor: pointer;
+    }
+
+    /* Limit display */
+    .limit-bar-wrap {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      height: 24px;
+      margin-bottom: 4px;
+      position: relative;
+      overflow: hidden;
+    }
+    .limit-bar-fill {
+      height: 100%;
+      background: var(--accent-emerald);
+      transition: width 0.3s;
+    }
+    .limit-bar-fill.over { background: var(--accent-rose); }
+    .limit-bar-fill.warn { background: #b45309; }
+    .limit-label { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); margin-bottom: var(--space-1); }
+
+    /* Vec4 slots */
+    .slots-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: var(--space-3);
+    }
+    .slot-box {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: 5px 8px;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      min-width: 120px;
+    }
+    .slot-box .slot-header { font-size: 0.65rem; text-transform: uppercase; color: var(--text-muted); margin-bottom: 2px; }
+    .slot-component { color: #2563eb; }
+    .slot-component.padded { color: var(--text-muted); font-style: italic; }
+
+    button.action-btn {
+      padding: 7px 14px;
+      border: 1px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      font-size: 0.82rem;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    button.action-btn.secondary { background: var(--bg-stone); color: var(--text-charcoal); }
+    .btn-row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); }
+
+    .output-block { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.76rem; white-space: pre; overflow-x: auto; line-height: 1.5; margin-bottom: var(--space-3); }
+    code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-stone); padding: 1px 4px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v135/remove-webgpu-limit-maxinterstageshadercomponents/">&larr; WebGPU maxInterStageShaderComponents removal</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v135 · webgpu</p>
+    <h1>Shader Variable Packer</h1>
+    <p class="lede">Add the variables you want to pass from vertex to fragment shader. The packer assigns each to a vec4 slot, counts the <code>maxInterStageShaderVariables</code> slots consumed, and generates the corresponding WGSL struct — so you can see the exact limit Chrome 135 checks.</p>
+  </header>
+
+  <section>
+    <div class="probe-row">
+      <span class="probe fail" id="probeGPU">checking WebGPU…</span>
+      <span class="probe warn" id="probeLimit">checking maxInterStageShaderVariables…</span>
+    </div>
+
+    <div class="info-box">
+      WebGPU tracks two limits: <code>maxInterStageShaderComponents</code> (removed in Chrome 135) and <code>maxInterStageShaderVariables</code> (kept). The key insight: variables are vec4s, so <em>components = variables × 4</em>. Removing the components limit simplifies the API without losing expressiveness — only the variable count matters.
+    </div>
+
+    <p class="section-title">Shader output variables</p>
+    <div class="field-list" id="fieldList"></div>
+
+    <div class="btn-row">
+      <button class="action-btn" id="addBtn">+ Add variable</button>
+      <button class="action-btn secondary" id="resetBtn">Reset to defaults</button>
+    </div>
+
+    <p class="section-title">Slot usage</p>
+    <div class="limit-label" id="limitLabel">Variables: 0 / — (loading device limit…)</div>
+    <div class="limit-bar-wrap"><div class="limit-bar-fill" id="limitBar" style="width:0%"></div></div>
+    <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:var(--space-2)" id="componentNote">Components equivalent: 0 (removed limit was maxInterStageShaderComponents)</div>
+
+    <p class="section-title">Vec4 slot assignments</p>
+    <div class="slots-grid" id="slotsGrid"></div>
+
+    <p class="section-title">Generated WGSL struct</p>
+    <div class="output-block" id="wgslOut">Add variables above to generate WGSL.</div>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const probeGPU = document.getElementById('probeGPU');
+  const probeLimit = document.getElementById('probeLimit');
+
+  let deviceMaxVars = 16; // default / fallback
+
+  const TYPES = {
+    'f32':   { label: 'f32',   components: 1, wgsl: 'f32' },
+    'vec2f': { label: 'vec2f', components: 2, wgsl: 'vec2<f32>' },
+    'vec3f': { label: 'vec3f', components: 3, wgsl: 'vec3<f32>' },
+    'vec4f': { label: 'vec4f', components: 4, wgsl: 'vec4<f32>' },
+    'u32':   { label: 'u32',   components: 1, wgsl: 'u32' },
+    'i32':   { label: 'i32',   components: 1, wgsl: 'i32' },
+    'vec2u': { label: 'vec2u', components: 2, wgsl: 'vec2<u32>' },
+    'vec3u': { label: 'vec3u', components: 3, wgsl: 'vec3<u32>' },
+  };
+
+  const DEFAULT_FIELDS = [
+    { name: 'position', type: 'vec4f' },
+    { name: 'uv',       type: 'vec2f' },
+    { name: 'normal',   type: 'vec3f' },
+    { name: 'color',    type: 'vec4f' },
+  ];
+
+  let fields = DEFAULT_FIELDS.map(f => ({ ...f }));
+
+  async function initGPU() {
+    if (!navigator.gpu) {
+      probeGPU.textContent = 'WebGPU not available';
+      probeGPU.className = 'probe fail';
+      probeLimit.textContent = 'using default limit (16 variables)';
+      probeLimit.className = 'probe warn';
+      render();
+      return;
+    }
+
+    probeGPU.textContent = 'WebGPU available';
+    probeGPU.className = 'probe ok';
+
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) throw new Error('no adapter');
+      const limits = adapter.limits;
+      const hasVars = 'maxInterStageShaderVariables' in limits;
+      const hasComps = 'maxInterStageShaderComponents' in limits;
+      deviceMaxVars = limits.maxInterStageShaderVariables ?? 16;
+
+      let msg = `maxInterStageShaderVariables: ${deviceMaxVars}`;
+      if (hasComps) {
+        msg += ` | maxInterStageShaderComponents still present: ${limits.maxInterStageShaderComponents}`;
+        probeLimit.className = 'probe warn';
+      } else {
+        msg += ' | maxInterStageShaderComponents removed ✓';
+        probeLimit.className = 'probe ok';
+      }
+      probeLimit.textContent = msg;
+    } catch (e) {
+      probeLimit.textContent = 'could not query limits: ' + e.message;
+      probeLimit.className = 'probe warn';
+    }
+    render();
+  }
+
+  function getVariablesUsed(fieldList) {
+    // Each field occupies ceil(components/4) vec4 slots? Actually in WGSL each
+    // interstage variable IS one slot regardless of component count (f32 or vec4f = 1 variable).
+    return fieldList.length;
+  }
+
+  function renderFields() {
+    const list = document.getElementById('fieldList');
+    list.innerHTML = '';
+    fields.forEach((f, i) => {
+      const row = document.createElement('div');
+      row.className = 'field-row';
+
+      const nameIn = document.createElement('input');
+      nameIn.className = 'field-name-input';
+      nameIn.value = f.name;
+      nameIn.addEventListener('input', e => { fields[i].name = e.target.value; update(); });
+
+      const typeSelect = document.createElement('select');
+      typeSelect.className = 'type-select';
+      Object.entries(TYPES).forEach(([k, v]) => {
+        const opt = document.createElement('option');
+        opt.value = k;
+        opt.textContent = v.label;
+        if (k === f.type) opt.selected = true;
+        typeSelect.appendChild(opt);
+      });
+      typeSelect.addEventListener('change', e => { fields[i].type = e.target.value; update(); });
+
+      const badge = document.createElement('span');
+      badge.className = 'components-badge';
+      badge.textContent = TYPES[f.type].components + ' comp';
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'remove-btn';
+      removeBtn.textContent = '✕';
+      removeBtn.addEventListener('click', () => { fields.splice(i, 1); renderFields(); update(); });
+
+      row.appendChild(nameIn);
+      row.appendChild(typeSelect);
+      row.appendChild(badge);
+      row.appendChild(removeBtn);
+      list.appendChild(row);
+
+      // update badge on type change
+      typeSelect.addEventListener('change', () => {
+        badge.textContent = TYPES[typeSelect.value].components + ' comp';
+      });
+    });
+  }
+
+  function update() {
+    const used = getVariablesUsed(fields);
+    const totalComponents = fields.reduce((s, f) => s + TYPES[f.type].components, 0);
+    const pct = Math.min(100, (used / deviceMaxVars) * 100);
+
+    document.getElementById('limitLabel').textContent =
+      `Variables: ${used} / ${deviceMaxVars}  (${deviceMaxVars - used} remaining)`;
+    const bar = document.getElementById('limitBar');
+    bar.style.width = pct + '%';
+    bar.className = 'limit-bar-fill' + (pct > 100 ? ' over' : pct > 80 ? ' warn' : '');
+
+    document.getElementById('componentNote').textContent =
+      `Components equivalent: ${totalComponents} — the removed maxInterStageShaderComponents would have been ${deviceMaxVars * 4}`;
+
+    // Slots — each variable is 1 slot (the slot holds up to 4 components)
+    const slotsGrid = document.getElementById('slotsGrid');
+    slotsGrid.innerHTML = '';
+    fields.forEach((f, i) => {
+      const t = TYPES[f.type];
+      const box = document.createElement('div');
+      box.className = 'slot-box';
+      const names = ['x', 'y', 'z', 'w'];
+      let compHtml = '';
+      for (let c = 0; c < 4; c++) {
+        if (c < t.components) {
+          compHtml += `<span class="slot-component">${f.name}.${names[c]}</span>`;
+        } else {
+          compHtml += `<span class="slot-component padded">—</span>`;
+        }
+        if (c < 3) compHtml += ', ';
+      }
+      box.innerHTML = `<div class="slot-header">slot ${i} · ${t.label}</div>${compHtml}`;
+      slotsGrid.appendChild(box);
+    });
+
+    // WGSL
+    const structLines = ['struct VertexOutput {'];
+    structLines.push('  @builtin(position) clip_position: vec4<f32>,');
+    fields.forEach((f, i) => {
+      const t = TYPES[f.type];
+      structLines.push(`  @location(${i}) ${f.name}: ${t.wgsl},`);
+    });
+    structLines.push('}', '', '// maxInterStageShaderVariables limit check:', `// Used: ${used} / ${deviceMaxVars}${used > deviceMaxVars ? '  ← OVER LIMIT — reduce variables!' : '  ← OK'}`);
+    structLines.push(`// (maxInterStageShaderComponents removed in Chrome 135 — was ${deviceMaxVars * 4})`);
+    document.getElementById('wgslOut').textContent = structLines.join('\n');
+  }
+
+  function render() {
+    renderFields();
+    update();
+  }
+
+  document.getElementById('addBtn').addEventListener('click', () => {
+    fields.push({ name: 'var' + fields.length, type: 'f32' });
+    renderFields();
+    update();
+  });
+
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    fields = DEFAULT_FIELDS.map(f => ({ ...f }));
+    renderFields();
+    update();
+  });
+
+  initGPU();
+})();
+</script>
+</body>
+</html>
