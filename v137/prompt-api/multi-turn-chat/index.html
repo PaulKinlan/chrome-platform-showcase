@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multi-turn chat — Prompt API session — Chrome 137</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { border: 2px solid var(--accent-amber); background: var(--bg-paper); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; box-shadow: var(--thin-shadow); }
+    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--accent-amber); display: block; margin-bottom: 0.4rem; }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    select, input[type="text"], textarea { font: inherit; font-family: var(--font-mono); font-size: 0.85rem; padding: 0.4rem 0.55rem; background: var(--bg-paper); color: var(--text-black); border: 2px solid var(--border-black); }
+    textarea { resize: vertical; min-height: 60px; width: 100%; }
+    .grid { display: grid; grid-template-columns: 2fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .chat { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); min-height: 200px; max-height: 460px; overflow-y: auto; }
+    .turn { padding: var(--space-2) var(--space-3); margin: var(--space-2) 0; border: 1px solid var(--border-black); background: var(--bg-stone); }
+    .turn.user { background: var(--text-black); color: var(--bg-ivory); }
+    .turn .role { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.25rem; }
+    .turn .body { font-family: var(--font-serif); white-space: pre-wrap; }
+    .meters { padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); font-family: var(--font-mono); font-size: 0.8rem; }
+    .meter { display: flex; justify-content: space-between; padding: var(--space-1) 0; border-bottom: 1px dashed var(--text-muted); }
+    .quota-bar { height: 8px; background: var(--bg-stone); border: 1px solid var(--border-black); margin-top: 0.3rem; overflow: hidden; }
+    .quota-bar > div { height: 100%; background: var(--accent-emerald); transition: width 0.2s, background 0.2s; }
+    .quota-bar.warn > div { background: var(--accent-amber); }
+    .quota-bar.full > div { background: var(--accent-rose); }
+    .probe { font-family: var(--font-mono); font-size: 0.8rem; padding: var(--space-2) var(--space-3); background: var(--bg-stone); border: 1px solid var(--border-black); margin: var(--space-3) 0; }
+    .probe.ok { color: var(--accent-emerald); }
+    .probe.fail { color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Prompt API</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v137</p>
+    <h1>Multi-turn chat &amp; quota</h1>
+    <p class="lede">A real <code>LanguageModel</code> session with system prompt, persisting turns, fork-on-branch (<code>session.clone()</code>), and live read-out of <code>tokensSoFar</code> / <code>tokensLeft</code> / <code>maxTokens</code>. Watch the budget tick as the conversation grows.</p>
+  </header>
+
+  <div class="warn-block"><strong>Origin trial</strong>Requires Chrome 137+ with on-device Prompt API. Without it the chat simulates the bookkeeping but answers come from a deterministic stub.</div>
+
+  <div class="probe" id="probe">probing&hellip;</div>
+
+  <div class="stage">
+    <div class="controls">
+      <button id="newSession">New session</button>
+      <button id="branch" disabled>Branch (clone)</button>
+      <button id="reset">Reset chat</button>
+    </div>
+    <textarea id="system" placeholder="system prompt">You are a terse Welsh poet who answers in three lines, in English.</textarea>
+  </div>
+
+  <div class="grid">
+    <div>
+      <div class="chat" id="chat"></div>
+      <div class="controls" style="margin-top:0.6rem">
+        <input type="text" id="msg" placeholder="say something…" style="flex:1; min-width: 160px">
+        <button id="send">Send</button>
+      </div>
+    </div>
+    <div class="meters">
+      <h4>session quota</h4>
+      <div class="meter"><span>tokensSoFar</span><span id="m-so">0</span></div>
+      <div class="meter"><span>tokensLeft</span><span id="m-left">—</span></div>
+      <div class="meter"><span>maxTokens</span><span id="m-max">—</span></div>
+      <div class="quota-bar" id="quota"><div style="width:0%"></div></div>
+      <h4 style="margin-top:1rem">turns</h4>
+      <div class="meter"><span>this session</span><span id="m-turns">0</span></div>
+      <div class="meter"><span>branches alive</span><span id="m-branches">0</span></div>
+      <h4 style="margin-top:1rem">timings</h4>
+      <div class="meter"><span>last latency</span><span id="m-lat">—</span></div>
+      <div class="meter"><span>avg latency</span><span id="m-avg">—</span></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>const session = await window.ai.languageModel.create({
+  systemPrompt: "You are a terse Welsh poet…",
+  temperature: 0.7,
+  topK: 40,
+});
+
+await session.prompt("write me three lines about Cardiff in May");
+
+console.log(session.tokensSoFar, session.tokensLeft, session.maxTokens);
+
+const branch = await session.clone();      // fork the chat
+await branch.prompt("now about Aberystwyth");</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../prompt-call/">prompt call demo</a></li>
+      <li><a href="../streaming-meter/">streaming meter</a></li>
+      <li><a href="../structured-output/">structured output</a></li>
+      <li><a href="https://chromestatus.com/feature/5134603979063296" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const probe = document.getElementById("probe");
+  const hasAI = typeof window.ai === "object" && window.ai && window.ai.languageModel;
+  probe.classList.add(hasAI ? "ok" : "fail");
+  probe.textContent = hasAI ? "ai.languageModel = available" : "ai.languageModel = unavailable (using simulated session)";
+
+  let session = null;
+  let branchCount = 0;
+  let turns = 0;
+  let lats = [];
+
+  async function newSession() {
+    const sys = document.getElementById("system").value;
+    if (hasAI) {
+      try { session = await window.ai.languageModel.create({ systemPrompt: sys, temperature: 0.7, topK: 40 }); }
+      catch { session = simSession(sys); }
+    } else session = simSession(sys);
+    document.getElementById("branch").disabled = false;
+    turns = 0; lats = [];
+    document.getElementById("chat").innerHTML = "";
+    addTurn("system", sys);
+    updateMeters();
+  }
+
+  function simSession(sys) {
+    let so = 12, max = 4096;
+    return {
+      systemPrompt: sys,
+      get tokensSoFar() { return so; },
+      get tokensLeft() { return max - so; },
+      get maxTokens() { return max; },
+      async prompt(text) {
+        await new Promise((r) => setTimeout(r, 200 + Math.random() * 600));
+        so = Math.min(max, so + text.split(/\s+/).length + 20);
+        return "[" + sys.split(" ").slice(0, 2).join(" ") + " stub] " + text.split(" ").slice(0, 8).join(" ") + " — three lines of made up verse.";
+      },
+      async clone() { return simSession(sys); },
+    };
+  }
+
+  function addTurn(role, body) {
+    const div = document.createElement("div");
+    div.className = "turn " + role;
+    div.innerHTML = `<div class="role">${role}</div><div class="body">${body}</div>`;
+    document.getElementById("chat").appendChild(div);
+    document.getElementById("chat").scrollTop = 1e9;
+  }
+
+  function updateMeters() {
+    if (!session) return;
+    document.getElementById("m-so").textContent = session.tokensSoFar ?? "—";
+    document.getElementById("m-left").textContent = session.tokensLeft ?? "—";
+    document.getElementById("m-max").textContent = session.maxTokens ?? "—";
+    document.getElementById("m-turns").textContent = turns;
+    document.getElementById("m-branches").textContent = branchCount;
+    const pct = session.maxTokens ? (session.tokensSoFar / session.maxTokens) * 100 : 0;
+    const quota = document.getElementById("quota");
+    quota.querySelector("div").style.width = pct + "%";
+    quota.className = "quota-bar" + (pct > 80 ? " full" : pct > 60 ? " warn" : "");
+    document.getElementById("m-lat").textContent = lats.length ? lats[lats.length - 1].toFixed(0) + " ms" : "—";
+    document.getElementById("m-avg").textContent = lats.length ? (lats.reduce((a, b) => a + b, 0) / lats.length).toFixed(0) + " ms" : "—";
+  }
+
+  document.getElementById("newSession").addEventListener("click", newSession);
+  document.getElementById("reset").addEventListener("click", () => {
+    document.getElementById("chat").innerHTML = "";
+    turns = 0; lats = []; updateMeters();
+  });
+  document.getElementById("branch").addEventListener("click", async () => {
+    if (!session) return;
+    const clone = await session.clone();
+    branchCount++;
+    addTurn("system", `(branched session #${branchCount} forked here — current view is still the original)`);
+    updateMeters();
+  });
+  document.getElementById("send").addEventListener("click", send);
+  document.getElementById("msg").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+
+  async function send() {
+    if (!session) await newSession();
+    const t = document.getElementById("msg").value.trim();
+    if (!t) return;
+    document.getElementById("msg").value = "";
+    addTurn("user", t);
+    const start = performance.now();
+    let resp;
+    try { resp = await session.prompt(t); }
+    catch (e) { resp = "error: " + e.message; }
+    const dur = performance.now() - start;
+    lats.push(dur);
+    addTurn("assistant", resp);
+    turns++;
+    updateMeters();
+  }
+
+  newSession();
+</script>
+</body>
+</html>
