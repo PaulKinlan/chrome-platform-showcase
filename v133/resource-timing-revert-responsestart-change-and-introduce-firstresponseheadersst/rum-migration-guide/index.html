@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RUM Migration Guide — Resource Timing Chrome 133</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .diff-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin-bottom: var(--space-3);
+    }
+    @media (max-width: 640px) { .diff-grid { grid-template-columns: 1fr; } }
+    .diff-card {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .diff-card h3 { margin: 0 0 var(--space-2); font-size: 0.9rem; }
+    .tag { display: inline-block; padding: 2px 6px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; margin-left: 6px; }
+    .tag.new { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .tag.old { background: var(--accent-rose); color: var(--bg-ivory); }
+    pre {
+      margin: 0;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      overflow-x: auto;
+      white-space: pre;
+      line-height: 1.6;
+    }
+    .line-del { background: #fee2e2; display: block; }
+    .line-add { background: #d1fae5; display: block; }
+    .line-ctx { display: block; }
+    .section-title { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: var(--space-3) 0 var(--space-2); }
+    .probe-row { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .probe { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border-black); font-size: 0.8rem; }
+    .probe.fail { background: var(--accent-rose); color: var(--bg-ivory); }
+    .probe.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .probe.warn { background: #b45309; color: var(--bg-ivory); }
+    .live-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    .live-table th { background: var(--bg-stone); text-align: left; padding: 6px 10px; border: 1px solid var(--border-black); font-size: 0.75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text-charcoal); }
+    .live-table td { padding: 6px 10px; border: 1px solid var(--border-black); vertical-align: top; font-family: var(--font-mono); font-size: 0.8rem; }
+    .live-table td.avail { color: var(--accent-emerald); font-weight: 700; }
+    .live-table td.unavail { color: var(--text-muted); }
+    button {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      border: none;
+      padding: 8px 16px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      margin-bottom: var(--space-2);
+    }
+    button:hover { opacity: 0.85; }
+    .info-box { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-size: 0.82rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v133/resource-timing-revert-responsestart-change-and-introduce-firstresponseheadersst/">&larr; Resource Timing Chrome 133</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v133 · performance</p>
+    <h1>RUM Migration Guide</h1>
+    <p class="lede">Chrome 133 reverts <code>responseStart</code> to its pre-Early-Hints meaning and adds <code>finalResponseHeadersStart</code>. This guide shows the exact code change needed in a Real User Monitoring library, with a live <code>PerformanceObserver</code> reading your browser's actual values.</p>
+  </header>
+
+  <section>
+    <div class="probe-row">
+      <span class="probe fail" id="probeFRHS">checking finalResponseHeadersStart…</span>
+      <span class="probe fail" id="probeRT">checking Resource Timing…</span>
+    </div>
+
+    <div class="info-box">
+      <strong>What changed in Chrome 133:</strong> <code>responseStart</code> reverted to return the <em>first response</em> (103 Early Hints included). New field <code>finalResponseHeadersStart</code> gives the 2xx/4xx/5xx response time. RUM libraries that were using <code>responseStart</code> for TTFB should now use <code>finalResponseHeadersStart ?? responseStart</code>.
+    </div>
+
+    <p class="section-title">Code diff — RUM TTFB calculation</p>
+    <div class="diff-grid">
+      <div class="diff-card">
+        <h3>Before <span class="tag old">pre-133 / other browsers</span></h3>
+        <pre><span class="line-ctx">function getTTFB(entry) {</span>
+<span class="line-ctx">  // responseStart = first non-103 response</span>
+<span class="line-del">-  return entry.responseStart</span>
+<span class="line-del">-         - entry.requestStart;</span>
+<span class="line-ctx">}</span>
+<span class="line-ctx"></span>
+<span class="line-ctx">function getServerTime(entry) {</span>
+<span class="line-del">-  return entry.responseStart</span>
+<span class="line-del">-         - entry.requestStart;</span>
+<span class="line-ctx">}</span></pre>
+      </div>
+      <div class="diff-card">
+        <h3>After <span class="tag new">Chrome 133+</span></h3>
+        <pre><span class="line-ctx">function getTTFB(entry) {</span>
+<span class="line-ctx">  // Use finalResponseHeadersStart when</span>
+<span class="line-ctx">  // available (Chrome 133+) for true 2xx</span>
+<span class="line-add">+  const start = entry.finalResponseHeadersStart</span>
+<span class="line-add">+    ?? entry.responseStart;</span>
+<span class="line-add">+  return start - entry.requestStart;</span>
+<span class="line-ctx">}</span>
+<span class="line-ctx"></span>
+<span class="line-ctx">function getServerTime(entry) {</span>
+<span class="line-add">+  const start = entry.finalResponseHeadersStart</span>
+<span class="line-add">+    ?? entry.responseStart;</span>
+<span class="line-add">+  return start - entry.requestStart;</span>
+<span class="line-ctx">}</span></pre>
+      </div>
+    </div>
+
+    <p class="section-title">Field semantics across eras</p>
+    <table class="live-table">
+      <thead>
+        <tr>
+          <th>Field</th>
+          <th>Pre-Chrome 130 intent</th>
+          <th>Chrome 130-132 (reverted)</th>
+          <th>Chrome 133+</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>responseStart</code></td>
+          <td>First byte of final (non-103) response</td>
+          <td>Changed to first byte incl. 103 — broke RUM</td>
+          <td>Reverted: first response (103 or final)</td>
+        </tr>
+        <tr>
+          <td><code>finalResponseHeadersStart</code></td>
+          <td>Did not exist</td>
+          <td>Did not exist</td>
+          <td><strong>New:</strong> first byte of 2xx/4xx/5xx response headers</td>
+        </tr>
+        <tr>
+          <td>TTFB (no Early Hints)</td>
+          <td><code>responseStart − requestStart</code></td>
+          <td>Same (no change when no 103)</td>
+          <td><code>finalResponseHeadersStart ?? responseStart</code></td>
+        </tr>
+        <tr>
+          <td>TTFB (with Early Hints)</td>
+          <td>Only final 200 measured</td>
+          <td>103 timestamp — too early</td>
+          <td><code>finalResponseHeadersStart − requestStart</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="section-title">Live PerformanceObserver — your browser's values</p>
+    <button id="fetchBtn">Fetch this page and observe timing</button>
+    <table class="live-table" id="liveTable" style="display:none">
+      <thead>
+        <tr>
+          <th>Field</th>
+          <th>Value (ms from navigationStart)</th>
+          <th>Available?</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody id="liveTbody"></tbody>
+    </table>
+    <div id="liveMsg" style="font-size:0.82rem;color:var(--text-muted);font-family:var(--font-mono);margin-top:var(--space-2)"></div>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const probeFRHS = document.getElementById('probeFRHS');
+  const probeRT = document.getElementById('probeRT');
+
+  const hasRT = typeof PerformanceResourceTiming !== 'undefined';
+  const testEntry = performance.getEntriesByType('navigation')[0];
+  const hasFRHS = testEntry && 'finalResponseHeadersStart' in testEntry;
+
+  if (hasRT) { probeRT.textContent = 'Resource Timing supported'; probeRT.classList.replace('fail', 'ok'); }
+  if (hasFRHS) { probeFRHS.textContent = 'finalResponseHeadersStart supported'; probeFRHS.classList.replace('fail', 'ok'); }
+  else { probeFRHS.textContent = 'finalResponseHeadersStart not in this browser'; }
+
+  document.getElementById('fetchBtn').addEventListener('click', async () => {
+    const url = location.href + '?rum-probe=' + Date.now();
+    const liveMsg = document.getElementById('liveMsg');
+    liveMsg.textContent = 'Fetching…';
+
+    const observer = new PerformanceObserver(list => {
+      const entries = list.getEntriesByType('resource').filter(e => e.name.includes('rum-probe'));
+      if (!entries.length) return;
+      observer.disconnect();
+      const e = entries[0];
+
+      const fields = [
+        { field: 'requestStart', value: e.requestStart, note: 'When browser sent request' },
+        { field: 'responseStart', value: e.responseStart, note: 'Chrome 133: first response (incl. 103 if any)' },
+        { field: 'finalResponseHeadersStart', value: e.finalResponseHeadersStart, note: 'Chrome 133: 2xx/4xx/5xx headers — NEW' },
+        { field: 'responseEnd', value: e.responseEnd, note: 'Last byte received' },
+        { field: 'TTFB (new formula)', value: (e.finalResponseHeadersStart ?? e.responseStart) - e.requestStart, note: 'finalResponseHeadersStart ?? responseStart − requestStart' },
+        { field: 'TTFB (old formula)', value: e.responseStart - e.requestStart, note: 'responseStart − requestStart (pre-133)' },
+      ];
+
+      const tbody = document.getElementById('liveTbody');
+      tbody.innerHTML = '';
+      fields.forEach(f => {
+        const avail = f.value !== undefined && f.value !== null;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><code>${f.field}</code></td>
+          <td class="${avail ? 'avail' : 'unavail'}">${avail ? f.value.toFixed(2) + ' ms' : '—'}</td>
+          <td class="${avail ? 'avail' : 'unavail'}">${avail ? '✓' : '✗'}</td>
+          <td style="font-family:inherit;font-size:0.78rem">${f.note}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      document.getElementById('liveTable').style.display = '';
+      liveMsg.textContent = `Observed: ${e.name.split('?')[0]}… (initiatorType: ${e.initiatorType})`;
+    });
+    observer.observe({ type: 'resource', buffered: true });
+
+    try {
+      await fetch(url, { cache: 'no-store' });
+    } catch {}
+  });
+})();
+</script>
+</body>
+</html>
