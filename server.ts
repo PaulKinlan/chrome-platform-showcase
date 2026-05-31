@@ -2718,6 +2718,45 @@ function statusBadgeFor(channels: Channels, milestone: number): string {
   return "Upcoming";
 }
 
+function parseDate(date: string | undefined): Date | null {
+  if (!date) return null;
+  const parsed = new Date(date);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function datePart(date: Date, part: "day" | "month" | "year"): string {
+  if (part === "month") return date.toLocaleDateString("en-GB", { month: "short" });
+  return date.toLocaleDateString("en-GB", { [part]: "numeric" });
+}
+
+function stableDateRange(channel: Channel): string {
+  const start = parseDate(channel.stable_date);
+  if (!start) return "";
+  const end = parseDate(channel.late_stable_date ?? channel.stable_refresh_first);
+  if (!end || end.getTime() === start.getTime()) {
+    return start.toLocaleDateString("en-GB", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
+  }
+
+  const startYear = datePart(start, "year");
+  const endYear = datePart(end, "year");
+  const startMonth = datePart(start, "month");
+  const endMonth = datePart(end, "month");
+  const startDay = datePart(start, "day");
+  const endDay = datePart(end, "day");
+
+  if (startYear === endYear && startMonth === endMonth) {
+    return `${startDay}-${endDay} ${endMonth} ${endYear}`;
+  }
+  if (startYear === endYear) {
+    return `${startDay} ${startMonth}-${endDay} ${endMonth} ${endYear}`;
+  }
+  return `${startDay} ${startMonth} ${startYear}-${endDay} ${endMonth} ${endYear}`;
+}
+
 async function renderIndex(channels: Channels): Promise<string> {
   const commit = await getLatestCommit();
   // Chromestatus's "stable.mstone" is the *next* stable cut, even when its
@@ -2726,17 +2765,17 @@ async function renderIndex(channels: Channels): Promise<string> {
   // line up with what's actually deployed.
   const prevStable = channels.stable.mstone - 1;
   const releases: { mstone: number; status: string; date: string }[] = [
-    { mstone: channels.dev.mstone, status: "Dev", date: channels.dev.stable_date },
-    { mstone: channels.beta.mstone, status: "Beta", date: channels.beta.stable_date },
+    { mstone: channels.dev.mstone, status: "Dev", date: stableDateRange(channels.dev) },
+    { mstone: channels.beta.mstone, status: "Beta", date: stableDateRange(channels.beta) },
     {
       mstone: channels.stable.mstone,
       status: "Stable (rolling out)",
-      date: channels.stable.stable_date,
+      date: stableDateRange(channels.stable),
     },
     { mstone: prevStable, status: "Stable (live)", date: "" },
   ];
 
-  // Surface any backfilled older releases that have v<N>/ folders too, so a
+  // Surface older releases that have v<N>/ folders too, so a
   // demo for an older Chrome doesn't get hidden just because the channels API
   // no longer mentions it.
   const seen = new Set(releases.map((r) => r.mstone));
@@ -2758,15 +2797,9 @@ async function renderIndex(channels: Channels): Promise<string> {
   const cards = releases.map((r) => {
     let note: string;
     if (r.date) {
-      note = `Stable date: ${
-        new Date(r.date).toLocaleDateString("en-GB", {
-          day: "numeric",
-          month: "short",
-          year: "numeric",
-        })
-      }`;
+      note = `Stable date range: ${r.date}`;
     } else if (r.status === "Archive") {
-      note = "Backfilled";
+      note = "Archive release";
     } else {
       note = "Most users are here";
     }
@@ -2801,13 +2834,13 @@ async function renderIndex(channels: Channels): Promise<string> {
     <section>
       <h2>releases</h2>
       <ol class="release-list">${cards}</ol>
-      <p class="note">Or jump straight to <a href="/features">the full feature catalogue</a> to search across every release at once. Older Chrome releases will be backfilled as the routine works through the chromestatus archive.</p>
+      <p class="note">Or jump straight to <a href="/features">the full feature catalogue</a> to search across every release at once. Release cards show ChromeStatus stable rollout ranges when the channel schedule exposes them.</p>
     </section>
 
     <section class="how">
       <h2>how it works</h2>
       <ol>
-        <li>The routine reads the <a href="https://chromestatus.com/" target="_blank" rel="noopener">chromestatus.com</a> JSON API for current, upcoming, and backfilled milestones.</li>
+        <li>The routine reads the <a href="https://chromestatus.com/" target="_blank" rel="noopener">chromestatus.com</a> JSON API for current, upcoming, and archived milestones.</li>
         <li>It builds every missing feature directly from the listing name, feature details, specs, docs, samples, and explainers.</li>
         <li>Each feature gets a feature index plus every distinct interactive concept the API needs; 2-3 concepts is a floor, not a cap.</li>
         <li>The routine commits one feature at a time to <code>main</code>. Deno Deploy redeploys from GitHub.</li>
@@ -3952,7 +3985,7 @@ async function knownReleaseMilestones(channels: Channels): Promise<Set<number>> 
   // Always accept the three live channels plus the previous stable (since
   // chromestatus's "stable" is the next cut, the previous mstone is what most
   // users actually have installed). Also accept any v<N>/ directory in the
-  // repo, which covers backfilled older releases.
+  // repo, which covers archived older releases.
   const set = new Set<number>([
     channels.stable.mstone - 1,
     channels.stable.mstone,

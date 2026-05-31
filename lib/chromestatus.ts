@@ -33,6 +33,8 @@ export interface Channel {
   version: number;
   branch_point: string;
   stable_date: string;
+  late_stable_date?: string;
+  stable_refresh_first?: string;
 }
 
 export interface Channels {
