@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Latency meter - WebAudio playback stats - Chrome 131 - chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; align-items: center; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: var(--space-3); margin: var(--space-4) 0; }
+    .cell { border: 2px solid var(--border-black); padding: var(--space-3); background: var(--bg-paper); font-family: var(--font-mono); }
+    .cell .head { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+    .cell .val { font-size: 1.4rem; font-weight: 700; margin-top: 0.25rem; }
+    .cell .sub { font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem; }
+    canvas.scope { width: 100%; height: 160px; border: 2px solid var(--border-black); background: var(--bg-stone); display: block; }
+    .stat-strip { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-2); font-family: var(--font-mono); font-size: 0.75rem; }
+    .stat-strip .chip { padding: 0.3rem 0.55rem; border: 2px solid var(--border-black); background: var(--bg-stone); }
+    .stat-strip .chip.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .stat-strip .chip.bad { background: var(--accent-rose); color: var(--bg-ivory); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v131/">&larr; v131</a> &middot; <a href="../">WebAudio playback stats</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v131</p>
+    <h1>rolling latency chart</h1>
+    <p class="lede">A running graph of <code>AudioContext.outputLatency</code> sampled every 200ms while a sustained sine plays. Latency drift is what shows up as audible pitch wobble in a DAW. The badges show when the audio context is suspended, running, or closed.</p>
+  </header>
+
+  <div class="toolbar">
+    <button id="play">play sine</button>
+    <button id="stop" disabled>stop</button>
+    <button id="suspend" disabled>suspend ctx</button>
+    <button id="resume" disabled>resume</button>
+  </div>
+
+  <div class="stat-strip" id="state-strip">
+    <span class="chip" id="state-chip">state: closed</span>
+    <span class="chip" id="rate-chip">sample-rate: ?</span>
+    <span class="chip" id="base-chip">baseLatency: ?</span>
+  </div>
+
+  <div class="grid">
+    <div class="cell"><div class="head">outputLatency</div><div class="val" id="out-lat">—</div><div class="sub">ms (instantaneous)</div></div>
+    <div class="cell"><div class="head">min observed</div><div class="val" id="min-lat">—</div><div class="sub">ms</div></div>
+    <div class="cell"><div class="head">max observed</div><div class="val" id="max-lat">—</div><div class="sub">ms</div></div>
+    <div class="cell"><div class="head">rolling avg</div><div class="val" id="avg-lat">—</div><div class="sub">ms (last 30 samples)</div></div>
+  </div>
+
+  <h3 style="font-family: var(--font-mono); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted);">latency over time</h3>
+  <canvas class="scope" id="scope" width="800" height="160"></canvas>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../webaudio-stats/">Base playback stats</a></li>
+      <li><a href="../glitch-detector/">Glitch detector</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  let ctx, osc, tick;
+  const samples = [];
+  const canvas = document.getElementById("scope");
+  const c = canvas.getContext("2d");
+  function setState() {
+    document.getElementById("state-chip").textContent = "state: " + (ctx?.state ?? "closed");
+    document.getElementById("state-chip").className = "chip " + (ctx?.state === "running" ? "ok" : (ctx?.state === "suspended" ? "bad" : ""));
+  }
+  document.getElementById("play").addEventListener("click", () => {
+    if (!ctx) ctx = new AudioContext();
+    if (osc) { osc.stop(); osc.disconnect(); }
+    osc = ctx.createOscillator();
+    osc.frequency.value = 220;
+    osc.type = "sine";
+    const g = ctx.createGain(); g.gain.value = 0.1;
+    osc.connect(g); g.connect(ctx.destination);
+    osc.start();
+    document.getElementById("rate-chip").textContent = "sample-rate: " + ctx.sampleRate;
+    document.getElementById("base-chip").textContent = "baseLatency: " + (ctx.baseLatency * 1000).toFixed(1) + "ms";
+    setState();
+    document.getElementById("stop").disabled = false;
+    document.getElementById("suspend").disabled = false;
+    if (!tick) tick = setInterval(sample, 200);
+  });
+  document.getElementById("stop").addEventListener("click", async () => {
+    if (osc) { osc.stop(); osc.disconnect(); osc = null; }
+    if (ctx) { await ctx.close(); ctx = null; }
+    clearInterval(tick); tick = null;
+    setState();
+    document.getElementById("stop").disabled = true;
+    document.getElementById("suspend").disabled = true;
+    document.getElementById("resume").disabled = true;
+  });
+  document.getElementById("suspend").addEventListener("click", async () => { if (ctx) { await ctx.suspend(); setState(); document.getElementById("resume").disabled = false; document.getElementById("suspend").disabled = true; }});
+  document.getElementById("resume").addEventListener("click", async () => { if (ctx) { await ctx.resume(); setState(); document.getElementById("resume").disabled = true; document.getElementById("suspend").disabled = false; }});
+  function sample() {
+    if (!ctx) return;
+    const lat = (ctx.outputLatency || 0) * 1000;
+    samples.push(lat);
+    if (samples.length > 200) samples.shift();
+    const recent = samples.slice(-30);
+    const avg = recent.reduce((a,b) => a+b, 0) / Math.max(1, recent.length);
+    document.getElementById("out-lat").textContent = lat.toFixed(2);
+    document.getElementById("min-lat").textContent = Math.min(...samples).toFixed(2);
+    document.getElementById("max-lat").textContent = Math.max(...samples).toFixed(2);
+    document.getElementById("avg-lat").textContent = avg.toFixed(2);
+    draw();
+  }
+  function draw() {
+    const w = canvas.width, h = canvas.height;
+    c.fillStyle = "#f4f3ee"; c.fillRect(0, 0, w, h);
+    if (samples.length < 2) return;
+    const max = Math.max(...samples, 50);
+    c.strokeStyle = "#000"; c.lineWidth = 1.5; c.beginPath();
+    samples.forEach((v, i) => {
+      const x = i / samples.length * w;
+      const y = h - (v / max * (h - 10)) - 5;
+      if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+    });
+    c.stroke();
+    c.strokeStyle = "#0a8f5c"; c.setLineDash([4, 4]); c.beginPath();
+    const avgRecent = samples.slice(-30).reduce((a,b) => a+b, 0) / Math.min(30, samples.length);
+    const ay = h - (avgRecent / max * (h - 10)) - 5;
+    c.moveTo(0, ay); c.lineTo(w, ay); c.stroke(); c.setLineDash([]);
+  }
+  draw();
+</script>
+</body>
+</html>

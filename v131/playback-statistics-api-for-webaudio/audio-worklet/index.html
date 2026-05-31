@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worklet load - WebAudio playback stats - Chrome 131 - chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; align-items: center; font-family: var(--font-mono); font-size: 0.85rem; }
+    .toolbar input[type=range] { width: 200px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: var(--space-3); margin: var(--space-4) 0; }
+    .cell { border: 2px solid var(--border-black); padding: var(--space-3); background: var(--bg-paper); font-family: var(--font-mono); }
+    .cell .head { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+    .cell .val { font-size: 1.4rem; font-weight: 700; margin-top: 0.25rem; }
+    .cell.bad { background: var(--accent-rose); color: var(--bg-ivory); }
+    .cell.bad .head { color: var(--bg-ivory); opacity: 0.85; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v131/">&larr; v131</a> &middot; <a href="../">WebAudio playback stats</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v131</p>
+    <h1>worklet under increasing load: induce underruns</h1>
+    <p class="lede">An <code>AudioWorkletNode</code> running a CPU-busy DSP path. The slider sets how many synthetic milliseconds each <code>process()</code> call burns. Push it past your CPU's tolerance and the playback stats start counting <code>fallbackFramesDuration</code>. This is the DAW heart-attack monitor.</p>
+  </header>
+
+  <div class="toolbar">
+    <button id="play">start worklet</button>
+    <button id="stop" disabled>stop</button>
+    <label>load per process()</label>
+    <input type="range" id="load" min="0" max="40" value="0">
+    <span id="load-val">0 ms</span>
+  </div>
+
+  <div class="grid">
+    <div class="cell"><div class="head">frames rendered</div><div class="val" id="rendered">0</div></div>
+    <div class="cell"><div class="head">expected frames</div><div class="val" id="expected">0</div></div>
+    <div class="cell"><div class="head">deviation</div><div class="val" id="deviation">0</div></div>
+    <div class="cell" id="fallback-cell"><div class="head">fallback duration</div><div class="val" id="fallback">0</div></div>
+    <div class="cell"><div class="head">total duration</div><div class="val" id="total">0s</div></div>
+  </div>
+
+  <p style="font-family: var(--font-serif); color: var(--text-charcoal);">When the load slider pushes the worklet's <code>process()</code> over the render quantum budget (≈2.7ms for 128 frames at 48kHz), the audio thread can't deliver frames fast enough and the stats count it.</p>
+
+  <section>
+    <h2>the api</h2>
+<pre><code>const stats = ctx.playbackStats;     // AudioPlaybackStats
+console.log(stats.framesRendered);
+console.log(stats.fallbackFramesDuration);  // total underrun time in seconds
+console.log(stats.fallbackFramesEvents);    // number of distinct underrun events
+console.log(stats.totalFramesDuration);</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../webaudio-stats/">Base playback stats</a></li>
+      <li><a href="../glitch-detector/">Glitch detector</a></li>
+      <li><a href="../latency-meter/">Latency meter</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  let ctx, node, tick;
+  const loadRange = document.getElementById("load");
+  const loadVal = document.getElementById("load-val");
+  loadRange.addEventListener("input", () => {
+    loadVal.textContent = loadRange.value + " ms";
+    node?.port.postMessage({ load: +loadRange.value });
+  });
+  document.getElementById("play").addEventListener("click", async () => {
+    ctx = new AudioContext();
+    const blob = new Blob([`
+      class LoadProc extends AudioWorkletProcessor {
+        constructor() { super(); this.load = 0; this.port.onmessage = e => { this.load = e.data.load || 0; }; }
+        process(inputs, outputs, params) {
+          const t0 = performance.now();
+          while (performance.now() - t0 < this.load) { Math.sqrt(Math.random()); }
+          const out = outputs[0];
+          for (let ch = 0; ch < out.length; ch++) {
+            for (let i = 0; i < out[ch].length; i++) out[ch][i] = (Math.random() - 0.5) * 0.05;
+          }
+          return true;
+        }
+      }
+      registerProcessor("load-proc", LoadProc);
+    `], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+    await ctx.audioWorklet.addModule(url);
+    node = new AudioWorkletNode(ctx, "load-proc");
+    node.connect(ctx.destination);
+    document.getElementById("stop").disabled = false;
+    tick = setInterval(read, 200);
+  });
+  document.getElementById("stop").addEventListener("click", async () => {
+    if (node) { node.disconnect(); node = null; }
+    if (ctx) { await ctx.close(); ctx = null; }
+    clearInterval(tick); tick = null;
+    document.getElementById("stop").disabled = true;
+  });
+  function read() {
+    if (!ctx) return;
+    const stats = ctx.playbackStats || ctx.getPlaybackStats?.();
+    if (!stats) {
+      document.getElementById("rendered").textContent = "n/a";
+      document.getElementById("expected").textContent = "AudioPlaybackStats not exposed";
+      return;
+    }
+    document.getElementById("rendered").textContent = stats.framesRendered ?? "?";
+    document.getElementById("expected").textContent = stats.framesExpected ?? "?";
+    document.getElementById("deviation").textContent = (stats.framesExpected ?? 0) - (stats.framesRendered ?? 0);
+    const fb = stats.fallbackFramesDuration ?? 0;
+    document.getElementById("fallback").textContent = (fb * 1000).toFixed(1) + " ms";
+    document.getElementById("fallback-cell").classList.toggle("bad", fb > 0);
+    document.getElementById("total").textContent = (stats.totalFramesDuration ?? ctx.currentTime).toFixed(2) + "s";
+  }
+</script>
+</body>
+</html>
