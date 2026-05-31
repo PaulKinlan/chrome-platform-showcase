@@ -255,9 +255,9 @@
 const hasProfiler = typeof Profiler !== 'undefined';
 const banner = document.getElementById('supportBanner');
 if (hasProfiler) {
-  banner.innerHTML = '<div class="notice" style="border-left-color:var(--accent-emerald);"><strong>Profiler API available.</strong> Real <code>new Profiler()</code> calls will be made on both threads.</div>';
+  banner.innerHTML = '<div class="notice" style="border-left-color:var(--accent-emerald);"><strong>Profiler API available.</strong> This page is served with <code>Document-Policy: js-profiling-mode=lazy, js-profiling</code>; all traces below come from real <code>new Profiler()</code> calls.</div>';
 } else {
-  banner.innerHTML = '<div class="notice" style="border-left-color:var(--accent-rose);"><strong>Profiler API not available</strong> in this context (requires Chrome 94+ with <code>Document-Policy: js-profiling</code> header, and Chrome 147+ for workers). The demo will run in <em>simulated mode</em> with synthetic trace data.</div>';
+  banner.innerHTML = '<div class="notice" style="border-left-color:var(--accent-rose);"><strong>Profiler API not available</strong> in this context. Use a browser with JS Self-Profiling enabled; this page already sends the required <code>Document-Policy</code> response header.</div>';
 }
 
 // Check worker support
@@ -267,7 +267,7 @@ if (hasProfiler) {
   wn.innerHTML = '<strong>Main-thread Profiler confirmed.</strong> Worker support (Chrome 147+) will be tested when you start the worker profiler.';
   wn.style.borderLeftColor = 'var(--accent-emerald)';
 } else {
-  wn.innerHTML = '<strong>Profiler not available on main thread.</strong> Worker demo will run in simulated mode, showing the API shape for <code>new Profiler()</code> inside a Worker.';
+  wn.innerHTML = '<strong>Profiler not available on main thread.</strong> Worker profiling is disabled until the browser exposes <code>Profiler</code>.';
   wn.style.borderLeftColor = 'var(--accent-rose)';
 }
 
@@ -307,22 +307,6 @@ function runWorkload(type) {
   if (type === 'fib') { fibonacci(38); }
   else if (type === 'sort') { runSort(); }
   else { fibonacci(36); runSort(); }
-}
-
-// ── Synthetic trace builder (fallback) ────────────────────────────────────
-function syntheticTrace(workload, sampleCount) {
-  const fns = workload === 'fib'
-    ? ['fibonacci', 'fibonacci', 'fibonacci', 'anonymous (main)', '(anonymous)']
-    : workload === 'sort'
-    ? ['Array.sort', 'compareFn', 'runSort', 'anonymous (main)']
-    : ['fibonacci', 'fibonacci', 'Array.sort', 'runSort', 'compareFn', 'anonymous (main)'];
-
-  const frames = fns.map((name, i) => ({
-    name,
-    count: Math.max(1, Math.round(sampleCount * (0.4 - i * 0.06) + Math.random() * 5))
-  })).sort((a, b) => b.count - a.count);
-
-  return { samples: sampleCount, frames };
 }
 
 // ── Flame chart renderer ──────────────────────────────────────────────────
@@ -398,27 +382,31 @@ btnMainStart.addEventListener('click', async () => {
   const bufSize = +document.getElementById('mainBuffer').value;
   const workload = document.getElementById('mainWorkload').value;
 
+  if (!hasProfiler) {
+    document.getElementById('mainStatus').textContent = 'Profiler API unavailable in this browser. No trace was captured.';
+    return;
+  }
+
   document.getElementById('mainStatus').textContent = 'Profiler started — running workload…';
   btnMainStart.disabled = true;
   btnMainStop.disabled = false;
   btnMainStop.style.background = '';
   btnMainStop.style.color = '';
 
-  if (hasProfiler) {
-    try {
-      mainProfiler = new Profiler({ sampleInterval: interval, maxBufferSize: bufSize });
-      mainStartTime = performance.now();
-      await new Promise(r => setTimeout(r, 50));
-      runWorkload(workload);
-      await new Promise(r => setTimeout(r, 200));
-      document.getElementById('mainStatus').textContent = 'Workload complete — click Stop to view trace.';
-    } catch (e) {
-      document.getElementById('mainStatus').textContent = 'Profiler error: ' + e.message;
-    }
-  } else {
+  try {
+    mainProfiler = new Profiler({ sampleInterval: interval, maxBufferSize: bufSize });
     mainStartTime = performance.now();
+    await new Promise(r => setTimeout(r, 50));
     runWorkload(workload);
-    document.getElementById('mainStatus').textContent = 'Workload complete (simulated profiling) — click Stop.';
+    await new Promise(r => setTimeout(r, 200));
+    document.getElementById('mainStatus').textContent = 'Workload complete — click Stop to view trace.';
+  } catch (e) {
+    document.getElementById('mainStatus').textContent = 'Profiler error: ' + e.message;
+    mainProfiler = null;
+    btnMainStart.disabled = false;
+    btnMainStop.disabled = true;
+    btnMainStop.style.background = 'var(--bg-stone)';
+    btnMainStop.style.color = 'var(--text-muted)';
   }
 });
 
@@ -426,18 +414,28 @@ btnMainStop.addEventListener('click', async () => {
   const duration = Math.round(performance.now() - mainStartTime);
   let parsed;
 
-  if (hasProfiler && mainProfiler) {
-    try {
-      const trace = await mainProfiler.stop();
-      parsed = parseTrace(trace);
-    } catch (e) {
-      parsed = syntheticTrace(document.getElementById('mainWorkload').value, 120);
-    }
-    mainProfiler = null;
-  } else {
-    const workload = document.getElementById('mainWorkload').value;
-    parsed = syntheticTrace(workload, 80 + Math.floor(Math.random() * 60));
+  if (!mainProfiler) {
+    document.getElementById('mainStatus').textContent = 'No active profiler to stop.';
+    btnMainStart.disabled = !hasProfiler;
+    btnMainStop.disabled = true;
+    btnMainStop.style.background = 'var(--bg-stone)';
+    btnMainStop.style.color = 'var(--text-muted)';
+    return;
   }
+
+  try {
+    const trace = await mainProfiler.stop();
+    parsed = parseTrace(trace);
+  } catch (e) {
+    document.getElementById('mainStatus').textContent = 'Profiler stop failed: ' + e.message;
+    mainProfiler = null;
+    btnMainStart.disabled = false;
+    btnMainStop.disabled = true;
+    btnMainStop.style.background = 'var(--bg-stone)';
+    btnMainStop.style.color = 'var(--text-muted)';
+    return;
+  }
+  mainProfiler = null;
 
   mainTraceData = parsed;
   document.getElementById('mainSampleCount').textContent = parsed.samples;
@@ -464,13 +462,15 @@ self.onmessage = async function(e) {
     // Feature detect Profiler inside worker
     const hasP = typeof Profiler !== 'undefined';
     self.postMessage({ type: 'support', hasProfiler: hasP });
+    if (!hasP) {
+      self.postMessage({ type: 'unavailable', msg: 'Profiler is not exposed in this worker.' });
+      return;
+    }
 
     let profiler = null;
-    if (hasP) {
-      try {
-        profiler = new Profiler({ sampleInterval: interval, maxBufferSize: bufSize });
-      } catch(e) { self.postMessage({ type: 'error', msg: e.message }); return; }
-    }
+    try {
+      profiler = new Profiler({ sampleInterval: interval, maxBufferSize: bufSize });
+    } catch(e) { self.postMessage({ type: 'error', msg: e.message }); return; }
 
     // Run fibonacci workload
     function fib(n) { if (n<=1) return n; return fib(n-1)+fib(n-2); }
@@ -480,14 +480,10 @@ self.onmessage = async function(e) {
     const arr = Array.from({length:8000},()=>Math.random()); arr.sort((a,b)=>a-b);
     const duration = Date.now() - t0;
 
-    if (hasP && profiler) {
-      try {
-        const trace = await profiler.stop();
-        self.postMessage({ type: 'trace', trace, duration, real: true });
-      } catch(e) { self.postMessage({ type: 'error', msg: e.message }); }
-    } else {
-      self.postMessage({ type: 'trace', trace: null, duration, real: false });
-    }
+    try {
+      const trace = await profiler.stop();
+      self.postMessage({ type: 'trace', trace, duration });
+    } catch(e) { self.postMessage({ type: 'error', msg: e.message }); }
   }
 };
 `;
@@ -516,26 +512,24 @@ btnWorkerStart.addEventListener('click', () => {
         wn.innerHTML = '<strong>Profiler available inside Worker!</strong> Chrome 147+ detected. Real <code>new Profiler()</code> running in the dedicated worker.';
         wn.style.borderLeftColor = 'var(--accent-emerald)';
       } else {
-        wn.innerHTML = '<strong>Profiler not available in Worker</strong> — running in simulated mode. Requires Chrome 147+ with <code>Document-Policy: js-profiling</code>.';
+        wn.innerHTML = '<strong>Profiler not available in Worker</strong>. This browser did not expose <code>Profiler</code> in the dedicated worker despite the page policy header.';
         wn.style.borderLeftColor = 'var(--accent-rose)';
       }
     } else if (msg.type === 'trace') {
-      let parsed;
-      if (msg.real && msg.trace) {
-        parsed = parseTrace(msg.trace);
-      } else {
-        parsed = syntheticTrace('both', 90 + Math.floor(Math.random() * 50));
-      }
+      const parsed = parseTrace(msg.trace);
       workerTraceData = parsed;
       document.getElementById('workerSampleCount').textContent = parsed.samples;
       document.getElementById('workerDuration').textContent = msg.duration;
       document.getElementById('workerFnCount').textContent = parsed.frames.length;
       document.getElementById('workerSummary').style.display = '';
       document.getElementById('workerStatus').textContent =
-        'Worker trace captured — ' + parsed.samples + ' samples, ' + parsed.frames.length + ' frames.' +
-        (msg.real ? ' (real Profiler API)' : ' (simulated)');
+        'Worker trace captured — ' + parsed.samples + ' samples, ' + parsed.frames.length + ' frames. (real Profiler API)';
       renderFlame('workerFlame', parsed.frames, parsed.samples, 'bar-worker');
       btnWorkerStart.disabled = false;
+      URL.revokeObjectURL(url);
+    } else if (msg.type === 'unavailable') {
+      document.getElementById('workerStatus').textContent = msg.msg;
+      btnWorkerStart.disabled = !hasProfiler;
       URL.revokeObjectURL(url);
     } else if (msg.type === 'error') {
       document.getElementById('workerStatus').textContent = 'Worker error: ' + msg.msg;
@@ -551,23 +545,26 @@ btnWorkerStart.addEventListener('click', () => {
 
 // ── COMPARISON TAB ────────────────────────────────────────────────────────
 document.getElementById('btnRunBoth').addEventListener('click', async () => {
+  if (!hasProfiler) {
+    document.getElementById('compareStatus').textContent = 'Profiler API unavailable in this browser. No comparison was run.';
+    return;
+  }
+
   document.getElementById('compareStatus').textContent = 'Running both profilers…';
   const container = document.getElementById('compareFlame');
   container.innerHTML = '<div class="flame-title">main vs worker — overlaid by function name</div>';
 
   // Run main
-  if (hasProfiler) {
-    try {
-      const p = new Profiler({ sampleInterval: 10, maxBufferSize: 300 });
-      runWorkload('both');
-      const t = await p.stop();
-      mainTraceData = parseTrace(t);
-    } catch(e) {
-      mainTraceData = syntheticTrace('both', 90);
-    }
-  } else {
+  try {
+    const p = new Profiler({ sampleInterval: 10, maxBufferSize: 300 });
+    await new Promise(r => setTimeout(r, 50));
     runWorkload('both');
-    mainTraceData = syntheticTrace('both', 90);
+    await new Promise(r => setTimeout(r, 100));
+    const t = await p.stop();
+    mainTraceData = parseTrace(t);
+  } catch(e) {
+    document.getElementById('compareStatus').textContent = 'Main-thread profiler failed: ' + e.message;
+    return;
   }
 
   // Run worker
@@ -581,11 +578,7 @@ document.getElementById('btnRunBoth').addEventListener('click', async () => {
   worker.onmessage = (e) => {
     const msg = e.data;
     if (msg.type === 'trace') {
-      if (msg.real && msg.trace) {
-        workerTraceData = parseTrace(msg.trace);
-      } else {
-        workerTraceData = syntheticTrace('both', 85 + Math.floor(Math.random() * 40));
-      }
+      workerTraceData = parseTrace(msg.trace);
       URL.revokeObjectURL(url);
 
       // Merge and render comparison
@@ -601,6 +594,12 @@ document.getElementById('btnRunBoth').addEventListener('click', async () => {
         main: mainMap[name] || 0,
         worker: workerMap[name] || 0,
       })).sort((a, b) => (b.main + b.worker) - (a.main + a.worker));
+
+      if (rows.length === 0) {
+        container.insertAdjacentHTML('beforeend', '<p style="font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);">Both profilers ran, but neither trace contained frames.</p>');
+        document.getElementById('compareStatus').textContent = 'Comparison complete with no frames captured.';
+        return;
+      }
 
       const maxVal = Math.max(...rows.map(r => Math.max(r.main, r.worker)), 1);
       const title = container.querySelector('.flame-title');
@@ -634,11 +633,16 @@ document.getElementById('btnRunBoth').addEventListener('click', async () => {
 
       document.getElementById('compareStatus').textContent =
         'Comparison complete. Main: ' + (mainTraceData?.samples || 0) + ' samples, Worker: ' + (workerTraceData?.samples || 0) + ' samples.';
+    } else if (msg.type === 'unavailable') {
+      document.getElementById('compareStatus').textContent = msg.msg;
+      URL.revokeObjectURL(url);
+    } else if (msg.type === 'error') {
+      document.getElementById('compareStatus').textContent = 'Worker profiler failed: ' + msg.msg;
+      URL.revokeObjectURL(url);
     }
   };
-  worker.onerror = () => {
-    workerTraceData = syntheticTrace('both', 85);
-    document.getElementById('compareStatus').textContent = 'Worker failed — showing simulated worker data.';
+  worker.onerror = (err) => {
+    document.getElementById('compareStatus').textContent = 'Worker failed: ' + err.message;
     URL.revokeObjectURL(url);
   };
 });

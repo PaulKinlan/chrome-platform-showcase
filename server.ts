@@ -164,6 +164,16 @@ function jsonResponse(payload: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(payload, null, 2), { ...init, headers });
 }
 
+function withHeaders(response: Response, extraHeaders: Record<string, string>): Response {
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(extraHeaders)) headers.set(name, value);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -1753,6 +1763,75 @@ async function renderFetchLaterRoute(req: Request, sub: string): Promise<Respons
   }
 
   return null;
+}
+
+// ----- JS Self-Profiling telemetry receiver -----
+
+interface ProfileTelemetryEvent {
+  id: string;
+  receivedAt: string;
+  contentType: string;
+  bodyBytes: number;
+  totalSamples: number | null;
+  hotFunctionCount: number | null;
+  topFunction: string | null;
+  userAgent: string;
+}
+
+const profileTelemetryEvents: ProfileTelemetryEvent[] = [];
+
+async function renderProfileTelemetryRoute(req: Request, path: string): Promise<Response | null> {
+  if (!path.startsWith("/telemetry/profile")) return null;
+
+  if (path === "/telemetry/profile/events" && req.method === "GET") {
+    return jsonResponse({ events: profileTelemetryEvents.slice(0, 25) });
+  }
+
+  if (path === "/telemetry/profile/reset" && req.method === "POST") {
+    profileTelemetryEvents.splice(0);
+    return jsonResponse({ reset: true, events: [] });
+  }
+
+  if (path !== "/telemetry/profile") return null;
+
+  if (req.method === "GET") {
+    return jsonResponse({ events: profileTelemetryEvents.slice(0, 25) });
+  }
+
+  if (req.method !== "POST") {
+    return jsonResponse({ error: "POST a JSON profiling payload to this endpoint." }, {
+      status: 405,
+      headers: { allow: "GET, POST" },
+    });
+  }
+
+  const text = await req.text();
+  const bodyBytes = new TextEncoder().encode(text).byteLength;
+  let payload: Record<string, unknown> = {};
+  try {
+    const parsed = text ? JSON.parse(text) : {};
+    payload = objectValue(parsed);
+  } catch {
+    payload = {};
+  }
+  const hot = Array.isArray(payload.hot) ? payload.hot : [];
+  const top = objectValue(hot[0]);
+  const event: ProfileTelemetryEvent = {
+    id: randomBase64Url(9),
+    receivedAt: new Date().toISOString(),
+    contentType: req.headers.get("content-type") ?? "",
+    bodyBytes,
+    totalSamples: typeof payload.totalSamples === "number" ? payload.totalSamples : null,
+    hotFunctionCount: hot.length || null,
+    topFunction: stringValue(top.name) || null,
+    userAgent: req.headers.get("user-agent") ?? "",
+  };
+  profileTelemetryEvents.unshift(event);
+  profileTelemetryEvents.splice(50);
+
+  return jsonResponse({ accepted: true, event, recent: profileTelemetryEvents.slice(0, 5) }, {
+    status: 202,
+  });
 }
 
 function renderWebSocketBfcacheRoute(req: Request, sub: string): Response | null {
@@ -3572,6 +3651,9 @@ Deno.serve({ port: PORT }, async (req) => {
 
   if (path.startsWith("/public/")) return readPublicAsset(path);
 
+  const telemetryResponse = await renderProfileTelemetryRoute(req, path);
+  if (telemetryResponse) return telemetryResponse;
+
   if (path === "/.well-known/web-identity") return renderFedCmWellKnown(req);
 
   // Per-release routes: /vNNN/ and /vNNN/<sub>.
@@ -3619,6 +3701,17 @@ Deno.serve({ port: PORT }, async (req) => {
       if (spcAuthResponse) return spcAuthResponse;
       const spcCheckoutResponse = await renderSpcCheckoutRoute(req, sub);
       if (spcCheckoutResponse) return spcCheckoutResponse;
+      if (
+        sub === "/js-profiling-in-dedicated-workers" ||
+        sub.startsWith("/js-profiling-in-dedicated-workers/")
+      ) {
+        const asset = await readReleaseAsset(release, sub);
+        if (asset) {
+          return withHeaders(asset, {
+            "document-policy": "js-profiling-mode=lazy, js-profiling",
+          });
+        }
+      }
     }
     if (release === "v135" || release === "v145" || release === "v147") {
       if (release === "v135") {

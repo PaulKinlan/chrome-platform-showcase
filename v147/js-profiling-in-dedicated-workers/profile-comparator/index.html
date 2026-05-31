@@ -54,7 +54,7 @@
   <section>
     <h2>enabling the profiler in a worker</h2>
     <pre style="background:var(--bg-stone);padding:var(--space-3);font-size:0.82rem;overflow-x:auto;border:1px solid var(--border-black)">// Chrome 147+: Profiler API now works inside a Dedicated Worker
-// Requires Document-Policy: js-profiling header on the parent document
+// Requires Document-Policy: js-profiling-mode=lazy on the parent document
 
 // worker.js
 const profiler = await new Profiler({ sampleInterval: 10, maxBufferSize: 10000 });
@@ -85,8 +85,8 @@ postMessage({ type: 'trace', trace });
   const supported = typeof Profiler !== 'undefined';
   const supportNote = document.getElementById('support-note');
   supportNote.textContent = supported
-    ? 'Profiler API is available (requires Document-Policy: js-profiling header in production).'
-    : 'Profiler API is not available in this browser. Simulated profile output is shown.';
+    ? 'Profiler API is available. This page is served with Document-Policy: js-profiling-mode=lazy, js-profiling.'
+    : 'Profiler API is not available in this browser. No profile output will be generated.';
   supportNote.style.borderLeftColor = supported ? 'var(--accent-emerald)' : 'var(--accent-rose)';
 
   // Workload: compute prime factorization repeatedly
@@ -121,11 +121,6 @@ postMessage({ type: 'trace', trace });
       ).join('');
   }
 
-  function simulatedTrace(tag) {
-    const fns = ['heavyWork','primeFactors','(anonymous)','Array.push','Number.prototype'];
-    return fns.map(fn => ({fn, count: Math.floor(Math.random()*50)+5})).flatMap(({fn,count}) => Array(count).fill(fn));
-  }
-
   async function runMainProfile() {
     const btn = document.getElementById('main-run-btn');
     const status = document.getElementById('main-status');
@@ -133,36 +128,36 @@ postMessage({ type: 'trace', trace });
     status.textContent = 'Profiling…';
     const t0 = performance.now();
     let samples = [];
-    if (supported) {
-      try {
-        const profiler = await new Profiler({ sampleInterval: 10, maxBufferSize: 10000 });
-        heavyWork();
-        const trace = await profiler.stop();
-        const elapsed = performance.now() - t0;
-        // Extract function names from stack trace
-        trace.samples.forEach(sample => {
-          if (sample.stackId != null) {
-            let frame = trace.stacks[sample.stackId];
-            while (frame) {
-              const fi = trace.frames[frame.frameId];
-              if (fi) samples.push(fi.name || '(anonymous)');
-              frame = frame.parentId != null ? trace.stacks[frame.parentId] : null;
-            }
-          }
-        });
-        renderTrace('main-results', samples, elapsed);
-        status.textContent = `Done — ${trace.samples.length} samples`;
-      } catch(e) {
-        samples = simulatedTrace('main');
-        renderTrace('main-results', samples, performance.now()-t0);
-        status.textContent = `Simulated (${e.message})`;
-      }
-    } else {
+
+    if (!supported) {
+      status.textContent = 'Profiler API unavailable';
+      btn.disabled = true;
+      return;
+    }
+
+    try {
+      const profiler = new Profiler({ sampleInterval: 10, maxBufferSize: 10000 });
+      await new Promise(resolve => setTimeout(resolve, 50));
       heavyWork();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const trace = await profiler.stop();
       const elapsed = performance.now() - t0;
-      samples = simulatedTrace('main');
+      // Extract function names from stack trace
+      trace.samples.forEach(sample => {
+        if (sample.stackId != null) {
+          let frame = trace.stacks[sample.stackId];
+          while (frame) {
+            const fi = trace.frames[frame.frameId];
+            if (fi) samples.push(fi.name || '(anonymous)');
+            frame = frame.parentId != null ? trace.stacks[frame.parentId] : null;
+          }
+        }
+      });
       renderTrace('main-results', samples, elapsed);
-      status.textContent = 'Simulated (API unavailable)';
+      status.textContent = `Done — ${trace.samples.length} samples`;
+    } catch(e) {
+      document.getElementById('main-results').textContent = 'Profiler failed: ' + e.message;
+      status.textContent = 'Profiler failed';
     }
     btn.disabled = false;
   }
@@ -192,10 +187,14 @@ postMessage({ type: 'trace', trace });
       const t0 = performance.now();
       async function run() {
         let result = {};
-        if (supported) {
+        if (!supported) {
+          result = { samples: [], elapsed: 0, mode: 'unsupported' };
+        } else {
           try {
-            const profiler = await new Profiler({ sampleInterval: 10, maxBufferSize: 10000 });
+            const profiler = new Profiler({ sampleInterval: 10, maxBufferSize: 10000 });
+            await new Promise(resolve => setTimeout(resolve, 50));
             heavyWork();
+            await new Promise(resolve => setTimeout(resolve, 100));
             const trace = await profiler.stop();
             const elapsed = performance.now() - t0;
             const samples = [];
@@ -211,12 +210,8 @@ postMessage({ type: 'trace', trace });
             });
             result = { samples, elapsed, mode: 'live' };
           } catch(e) {
-            heavyWork();
             result = { samples: [], elapsed: performance.now()-t0, mode: 'error:'+e.message };
           }
-        } else {
-          heavyWork();
-          result = { samples: [], elapsed: performance.now()-t0, mode: 'unsupported' };
         }
         postMessage(result);
       }
@@ -227,29 +222,34 @@ postMessage({ type: 'trace', trace });
     const worker = new Worker(url);
     worker.onmessage = e => {
       const {samples, elapsed, mode} = e.data;
-      if (samples.length === 0) {
-        // Simulate
-        const sim = ['heavyWork','primeFactors','Worker.onmessage','(anonymous)','Array.push'].flatMap(fn => Array(Math.floor(Math.random()*40)+5).fill(fn));
-        renderTrace('worker-results', sim, elapsed);
-        status.textContent = `${mode} — simulated samples`;
-      } else {
+      if (mode === 'live') {
         renderTrace('worker-results', samples, elapsed);
         status.textContent = `Live trace — ${samples.length} frames`;
+      } else {
+        document.getElementById('worker-results').textContent = mode === 'unsupported'
+          ? 'Profiler API is not exposed in this worker.'
+          : 'Worker profiler failed: ' + mode.replace(/^error:/, '');
+        status.textContent = mode === 'unsupported' ? 'Profiler unavailable' : 'Profiler failed';
       }
       btn.disabled = false;
       worker.terminate();
       URL.revokeObjectURL(url);
     };
     worker.onerror = err => {
-      const sim = ['heavyWork','primeFactors','(anonymous)'].flatMap(fn => Array(20).fill(fn));
-      renderTrace('worker-results', sim, 0);
-      status.textContent = 'Worker error (simulated)';
+      document.getElementById('worker-results').textContent = 'Worker error: ' + err.message;
+      status.textContent = 'Worker error';
       btn.disabled = false;
     };
   }
 
   document.getElementById('main-run-btn').addEventListener('click', runMainProfile);
   document.getElementById('worker-run-btn').addEventListener('click', runWorkerProfile);
+  if (!supported) {
+    document.getElementById('main-run-btn').disabled = true;
+    document.getElementById('worker-run-btn').disabled = true;
+    document.getElementById('main-status').textContent = 'Profiler unavailable';
+    document.getElementById('worker-status').textContent = 'Profiler unavailable';
+  }
 </script>
 </body>
 </html>
