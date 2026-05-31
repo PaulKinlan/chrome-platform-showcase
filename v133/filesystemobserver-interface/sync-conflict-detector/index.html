@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sync conflict detector — FileSystemObserver — Chrome 133</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
+    .panel { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 600px) { .panel { grid-template-columns: 1fr; } }
+    .col { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); }
+    .col h4 { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-3); }
+    .col textarea { width: 100%; min-height: 8rem; font-family: var(--font-mono); font-size: 0.85rem; border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); }
+    .ctrl { display: flex; gap: var(--space-2); margin-top: var(--space-2); flex-wrap: wrap; }
+    .stream { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin-top: var(--space-4); font-family: var(--font-mono); font-size: 0.82rem; max-height: 18rem; overflow-y: auto; }
+    .stream p { margin: 0 0 0.3rem; font-family: inherit; font-size: inherit; }
+    .conflict { color: var(--accent-rose); }
+    .modified { color: var(--accent-blue); }
+    .appeared { color: var(--accent-emerald); }
+    .removed { color: var(--text-muted); }
+    .warn-block { border: 2px solid var(--accent-rose); background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-4) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; FileSystemObserver</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo · v133</p>
+    <h1>Sync conflict detector</h1>
+    <p class="lede">Two virtual editors writing to the same OPFS file. A <code>FileSystemObserver</code> sits on the parent directory and labels each change as <code>appeared</code>, <code>modified</code>, <code>disappeared</code>, or &mdash; for simultaneous writes &mdash; <code>conflict</code>. The collaborative-editor primitive without a server.</p>
+  </header>
+  <div id="support" class="warn-block" hidden><code>FileSystemObserver</code> isn't available. Chrome 133+ required.</div>
+
+  <div class="stage">
+    <div class="panel">
+      <div class="col">
+        <h4>editor A</h4>
+        <textarea id="a">Hello from editor A.</textarea>
+        <div class="ctrl">
+          <button data-w="a">save A</button>
+          <button data-d="a">delete</button>
+        </div>
+      </div>
+      <div class="col">
+        <h4>editor B</h4>
+        <textarea id="b">Hello from editor B.</textarea>
+        <div class="ctrl">
+          <button data-w="b">save B</button>
+          <button data-w="ab">save A + B together</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="stream" id="stream"><p>save in either editor; the observer log fills below.</p></div>
+  </div>
+
+  <section>
+    <h2>the loop</h2>
+<pre><code>const root = await navigator.storage.getDirectory();
+const obs = new FileSystemObserver((records) =&gt; {
+  for (const r of records) router(r);
+});
+obs.observe(root, { recursive: true });
+
+function router(r) {
+  switch (r.type) {
+    case "appeared":    onCreated(r.changedHandle); break;
+    case "modified":    onModified(r.changedHandle); break;
+    case "disappeared": onDeleted(r.changedHandle); break;
+    case "moved":       onMoved(r.changedHandle, r.relativePath); break;
+    case "errored":     onError(r); break;
+    case "unknown":     fullResync(); break;
+  }
+}</code></pre>
+    <p>Two saves within the same observer tick land as a single delivery batch &mdash; the merge layer can spot a conflict before it commits either write to the canonical copy. Pre-observer code polled handles every 250ms, missing fast-flickering changes.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../fs-observer/">FileSystemObserver &mdash; original demo</a></li>
+      <li><a href="../opfs-live-editor/">OPFS live editor</a></li>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="https://github.com/whatwg/fs/pull/165" target="_blank" rel="noopener">WHATWG fs PR &mdash; FileSystemObserver</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+const stream = document.getElementById("stream");
+function log(cls, msg) {
+  const p = document.createElement("p");
+  p.className = cls;
+  p.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+  stream.prepend(p);
+  while (stream.children.length > 30) stream.lastChild.remove();
+}
+
+async function setup() {
+  if (typeof FileSystemObserver === "undefined") {
+    document.getElementById("support").hidden = false;
+    return;
+  }
+  let root;
+  try { root = await navigator.storage.getDirectory(); } catch (e) { log("conflict", "no OPFS: " + e.message); return; }
+  const obs = new FileSystemObserver((records) => {
+    if (records.length > 1) log("conflict", `conflict batch &mdash; ${records.length} simultaneous changes`);
+    for (const r of records) {
+      const name = r.changedHandle ? r.changedHandle.name : (r.relativePathComponents ? r.relativePathComponents.join("/") : "?");
+      log(r.type === "appeared" ? "appeared" : r.type === "modified" ? "modified" : r.type === "disappeared" ? "removed" : "modified", `${r.type.padEnd(12)} ${name}`);
+    }
+  });
+  try { await obs.observe(root, { recursive: true }); } catch (e) { log("conflict", "observe failed: " + e.message); }
+
+  async function write(name, body) {
+    const f = await root.getFileHandle(name, { create: true });
+    const w = await f.createWritable();
+    await w.write(body);
+    await w.close();
+  }
+  async function del(name) {
+    try { await root.removeEntry(name); } catch {}
+  }
+
+  document.querySelectorAll("[data-w]").forEach((b) => b.addEventListener("click", async () => {
+    const kind = b.dataset.w;
+    if (kind === "a") await write("doc.txt", document.getElementById("a").value);
+    if (kind === "b") await write("doc.txt", document.getElementById("b").value);
+    if (kind === "ab") {
+      await Promise.all([
+        write("doc.txt", document.getElementById("a").value),
+        write("doc.txt", document.getElementById("b").value),
+      ]);
+    }
+  }));
+  document.querySelectorAll("[data-d]").forEach((b) => b.addEventListener("click", () => del("doc.txt")));
+}
+setup();
+</script>
+</body>
+</html>
