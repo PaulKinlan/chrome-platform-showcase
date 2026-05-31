@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sync Display Wall — Multicast — Chrome 142</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+
+    .wall {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: var(--space-2);
+      margin-bottom: var(--space-4);
+    }
+    @media (max-width: 700px) { .wall { grid-template-columns: repeat(2, 1fr); } }
+    .display {
+      aspect-ratio: 4/3;
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      position: relative;
+      overflow: hidden;
+      transition: var(--transition);
+    }
+    .display canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .display .meta {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      padding: 2px 6px;
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      display: flex;
+      justify-content: space-between;
+    }
+    .display.offline { filter: grayscale(1); opacity: 0.4; }
+    .display .lag { background: var(--accent-amber); color: var(--text-black); padding: 0 4px; }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-3);
+      margin-bottom: var(--space-4);
+    }
+    .ctl {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+    }
+    .ctl label { display: block; font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.3rem; }
+    select, input {
+      font: inherit;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: 0.4rem 0.6rem;
+    }
+
+    .group-info {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: var(--space-3);
+      margin: var(--space-4) 0;
+    }
+    @media (max-width: 600px) { .group-info { grid-template-columns: 1fr 1fr; } }
+    .stat {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .stat-l { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+    .stat-v { font-family: var(--font-mono); font-size: 1.05rem; font-weight: 600; color: var(--text-black); margin-top: 0.2rem; }
+
+    .warn-block {
+      border: 2px solid var(--accent-amber);
+      background: color-mix(in srgb, var(--accent-amber) 8%, var(--bg-ivory));
+      padding: var(--space-3) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Multicast</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v142</p>
+    <h1>Sync Display Wall</h1>
+    <p class="lede">The use case the spec leads with: a shopping-mall video wall where ten displays show the exact same animation. Unicast = N TCP streams; multicast = one UDP send. Below is a sender (you) and eight simulated receivers all joined to <code>239.1.1.1:9000</code>. Press play and watch them tick in lock-step. Toggle packet loss to see how the wall degrades.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>IWA-only.</strong> The real <code>UDPSocket</code> + multicast API only works inside an <a href="https://chromeos.dev/en/web/isolated-web-apps" target="_blank" rel="noopener">Isolated Web App</a>. The probe below shows whether your runtime grants it. The wall simulates the network deterministically so this page demonstrates the topology and timing characteristics even from a normal browser tab.
+  </div>
+
+  <section class="stage">
+    <div class="controls">
+      <div class="ctl">
+        <label>multicast group</label>
+        <input id="grp" value="239.1.1.1" size="14">
+      </div>
+      <div class="ctl">
+        <label>port</label>
+        <input id="prt" type="number" value="9000" min="1024" max="65535">
+      </div>
+      <div class="ctl">
+        <label>simulated loss</label>
+        <select id="loss">
+          <option value="0">0%</option>
+          <option value="2">2%</option>
+          <option value="10">10%</option>
+          <option value="40">40%</option>
+        </select>
+      </div>
+      <div class="ctl">
+        <label>action</label>
+        <button id="play">Play animation</button>
+      </div>
+      <div class="ctl">
+        <label>UDPSocket support</label>
+        <span class="stat-v" id="udpProbe">—</span>
+      </div>
+    </div>
+
+    <div class="wall" id="wall"></div>
+
+    <div class="group-info">
+      <div class="stat"><div class="stat-l">packets sent</div><div class="stat-v" id="sent">0</div></div>
+      <div class="stat"><div class="stat-l">packets delivered</div><div class="stat-v" id="delivered">0</div></div>
+      <div class="stat"><div class="stat-l">receivers joined</div><div class="stat-v" id="joined">8</div></div>
+      <div class="stat"><div class="stat-l">spread (worst lag)</div><div class="stat-v" id="spread">— ms</div></div>
+    </div>
+  </section>
+
+  <h2>relevant markup</h2>
+<pre><code>// Sender: one socket, one send() per frame — N receivers consume.
+const sock = new UDPSocket({
+  remoteAddress: "239.1.1.1",
+  remotePort: 9000,
+  multicastTimeToLive: 1
+});
+const { writable } = await sock.opened;
+const w = writable.getWriter();
+for await (const frame of animationFrames) {
+  await w.write({ data: encode(frame) });
+}
+
+// Receiver
+const rx = new UDPSocket({
+  localAddress: "0.0.0.0",
+  localPort: 9000,
+  multicastGroupAddress: "239.1.1.1"   // ← new in Chrome 142
+});
+for await (const { data } of rx.readable) {
+  paint(decode(data));
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Multicast</a> — feature index</li>
+      <li><a href="../multicast-receiver/">Multicast Receiver</a></li>
+      <li><a href="../service-discovery/">Service Discovery (mDNS-style)</a></li>
+      <li><a href="https://github.com/WICG/direct-sockets/pull/79" target="_blank" rel="noopener">Spec PR 79</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const N = 8;
+  const wall = document.getElementById("wall");
+  const sentEl = document.getElementById("sent");
+  const delEl = document.getElementById("delivered");
+  const spreadEl = document.getElementById("spread");
+  const lossEl = document.getElementById("loss");
+  const udpProbe = document.getElementById("udpProbe");
+
+  udpProbe.textContent = ("UDPSocket" in window) ? "available (IWA-gated)" : "not exposed";
+
+  const displays = [];
+  for (let i = 0; i < N; i++) {
+    const d = document.createElement("div");
+    d.className = "display";
+    d.innerHTML = `<div class="meta"><span>recv ${i + 1}</span><span class="lag" data-lag>0ms</span></div>
+      <canvas></canvas>`;
+    wall.appendChild(d);
+    const canvas = d.querySelector("canvas");
+    canvas.width = 200;
+    canvas.height = 150;
+    const ctx = canvas.getContext("2d");
+    displays.push({ el: d, ctx, frame: 0, lagEl: d.querySelector("[data-lag]"), missed: 0 });
+  }
+
+  let sent = 0, delivered = 0, playing = false;
+
+  function draw(rec, frame) {
+    const ctx = rec.ctx;
+    ctx.fillStyle = "#fdfcf8";
+    ctx.fillRect(0, 0, 200, 150);
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 2;
+    const t = frame * 0.1;
+    ctx.beginPath();
+    for (let x = 0; x < 200; x++) {
+      const y = 75 + Math.sin((x / 30) + t) * 40;
+      if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.fillStyle = "#0022ff";
+    const cx = 100 + Math.cos(t) * 60;
+    const cy = 75 + Math.sin(t * 1.3) * 40;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#000";
+    ctx.font = "12px monospace";
+    ctx.fillText("f=" + frame, 6, 14);
+  }
+
+  document.getElementById("play").addEventListener("click", () => {
+    if (playing) return;
+    playing = true;
+    sent = 0;
+    delivered = 0;
+    sentEl.textContent = "0";
+    delEl.textContent = "0";
+    let frame = 0;
+    const loss = parseInt(lossEl.value) / 100;
+
+    function tick() {
+      if (!playing) return;
+      frame++;
+      sent++;
+      sentEl.textContent = sent;
+      const lags = [];
+      for (const rec of displays) {
+        if (Math.random() < loss) {
+          rec.missed++;
+          rec.lagEl.textContent = (rec.missed * 50) + "ms";
+          lags.push(rec.missed * 50);
+          continue;
+        }
+        rec.missed = 0;
+        rec.lagEl.textContent = "0ms";
+        rec.frame = frame;
+        delivered++;
+        draw(rec, frame);
+        lags.push(0);
+      }
+      delEl.textContent = delivered;
+      spreadEl.textContent = Math.max(...lags) + "ms";
+      if (frame < 200) setTimeout(tick, 50);
+      else { playing = false; }
+    }
+    tick();
+  });
+</script>
+</body>
+</html>
