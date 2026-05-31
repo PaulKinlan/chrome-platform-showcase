@@ -36,7 +36,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v130</p>
     <h1>Connection state-machine debugger</h1>
-    <p class="lede">Drive a synthetic serial / RFCOMM port through every transition: granted → connected → reading → physically unplugged → reconnect. The state diagram highlights the current node, the event ticker records every <code>connect</code> / <code>disconnect</code> firing with the value of <code>port.connected</code> at the time, and the right-hand panel shows what a Web Serial app would observe via the Chrome 130 API surface.</p>
+    <p class="lede">Drive a real granted serial / RFCOMM port through permission, open, reader-lock, and close states. The state diagram highlights the current node, the event ticker records browser <code>connect</code> / <code>disconnect</code> events with the value of <code>port.connected</code> at the time, and the right-hand panel shows what a Web Serial app observes via the Chrome 130 API surface.</p>
   </header>
 
   <section class="stage">
@@ -61,7 +61,7 @@
     </div>
 
     <div class="verdict" id="verdict">
-      <strong>Try the buttons.</strong> Every state transition fires events on either the port itself or <code>navigator.serial</code>. Watch how <code>port.connected</code> tracks physical connection independently from whether you've called <code>open()</code> — that's the whole point of the Chrome 130 addition.
+      <strong>Try the buttons.</strong> Request a real serial port, open it, acquire a reader, and close it. Physical attach/detach events come from <code>navigator.serial</code>; <code>port.connected</code> tracks connection independently from whether you've called <code>open()</code>.
     </div>
   </section>
 
@@ -96,35 +96,15 @@ for (const port of ports) {
 <script>
   const STATE = {
     NONE: { label: "none (no permission yet)" },
-    GRANTED: { label: "permission granted, port present, NOT open" },
-    OPEN_CLOSED: { label: "open() succeeded, streams live" },
-    READING: { label: "actively reading from readable" },
-    DISCONNECTED: { label: "physically disconnected (cable unplugged / out of range)" },
-  };
-
-  const TRANSITIONS = {
-    NONE: [
-      { label: "navigator.serial.requestPort()", to: "GRANTED" },
-    ],
-    GRANTED: [
-      { label: "port.open({ baudRate: 9600 })", to: "OPEN_CLOSED" },
-      { label: "physically unplug", to: "DISCONNECTED" },
-    ],
-    OPEN_CLOSED: [
-      { label: "port.readable.getReader().read()", to: "READING" },
-      { label: "port.close()", to: "GRANTED" },
-      { label: "physically unplug", to: "DISCONNECTED" },
-    ],
-    READING: [
-      { label: "reader.releaseLock()", to: "OPEN_CLOSED" },
-      { label: "physically unplug", to: "DISCONNECTED" },
-    ],
-    DISCONNECTED: [
-      { label: "physically reconnect", to: "GRANTED" },
-    ],
+    GRANTED: { label: "permission granted, port present, not open" },
+    OPEN: { label: "open() succeeded, streams live" },
+    READER_LOCKED: { label: "readable.getReader() lock acquired" },
+    DISCONNECTED: { label: "browser reported disconnect" },
   };
 
   let state = "NONE";
+  let port = null;
+  let reader = null;
   let connected = false;
   let readable = null, writable = null;
   const events = [];
@@ -137,42 +117,66 @@ for (const port of ports) {
     ticker.scrollTop = ticker.scrollHeight;
   }
 
-  function applyTransition(to) {
-    const prev = state;
-    const prevConnected = connected;
+  function refreshPortState() {
+    connected = Boolean(port && typeof port.connected === "boolean" ? port.connected : port);
+    readable = port?.readable ? "ReadableStream" : "null";
+    writable = port?.writable ? "WritableStream" : "null";
+    const info = port?.getInfo?.() ?? {};
+    document.getElementById("info").textContent = JSON.stringify(info);
+  }
 
-    if (to === "DISCONNECTED") {
-      connected = false;
-      readable = null; writable = null;
-      logEvent("port.disconnect", "ev-disconnect", "fired (was in " + prev + ")");
-      logEvent("port.connected", "ev-attr", "false");
-    } else if (prev === "DISCONNECTED" && to === "GRANTED") {
-      connected = true;
-      logEvent("port.connect", "ev-connect", "fired (re-attach)");
-      logEvent("port.connected", "ev-attr", "true");
-    } else if (prev === "NONE" && to === "GRANTED") {
-      connected = true;
-      logEvent("navigator.serial.connect (one-shot)", "ev-connect", "user granted");
-      logEvent("port.connected", "ev-attr", "true");
-    } else if (to === "OPEN_CLOSED" && prev === "GRANTED") {
-      readable = "ReadableStream";
-      writable = "WritableStream";
-      logEvent("port.open()", "ev-other", "resolved; streams live");
-    } else if (to === "READING") {
-      logEvent("reader.read()", "ev-other", "pumping bytes");
-    } else if (to === "GRANTED" && prev === "OPEN_CLOSED") {
-      readable = null; writable = null;
-      logEvent("port.close()", "ev-other", "streams torn down");
-    } else if (to === "OPEN_CLOSED" && prev === "READING") {
-      logEvent("reader.releaseLock()", "ev-other", "back to idle open");
+  async function requestPort() {
+    if (!("serial" in navigator)) {
+      logEvent("navigator.serial", "ev-disconnect", "Web Serial is not available in this browser/context");
+      return;
     }
+    port = await navigator.serial.requestPort();
+    state = "GRANTED";
+    refreshPortState();
+    logEvent("requestPort()", "ev-connect", "permission granted; connected=" + String(connected));
+    render();
+  }
 
-    state = to;
+  async function openPort() {
+    if (!port) return;
+    await port.open({ baudRate: 9600 });
+    state = "OPEN";
+    refreshPortState();
+    logEvent("port.open()", "ev-other", "resolved; streams live");
+    render();
+  }
+
+  function acquireReader() {
+    if (!port?.readable || reader) return;
+    reader = port.readable.getReader();
+    state = "READER_LOCKED";
+    refreshPortState();
+    logEvent("readable.getReader()", "ev-other", "reader lock acquired without consuming bytes");
+    render();
+  }
+
+  function releaseReader() {
+    if (!reader) return;
+    reader.releaseLock();
+    reader = null;
+    state = "OPEN";
+    refreshPortState();
+    logEvent("reader.releaseLock()", "ev-other", "reader lock released");
+    render();
+  }
+
+  async function closePort() {
+    if (!port) return;
+    if (reader) releaseReader();
+    await port.close();
+    state = "GRANTED";
+    refreshPortState();
+    logEvent("port.close()", "ev-other", "streams torn down");
     render();
   }
 
   function render() {
-    const D = ["NONE", "GRANTED", "OPEN_CLOSED", "READING", "DISCONNECTED"].map((s) => {
+    const D = ["NONE", "GRANTED", "OPEN", "READER_LOCKED", "DISCONNECTED"].map((s) => {
       const tag = s === state ? `<span class="now">[${s}]</span>` : `[${s}]`;
       return `${tag} ${STATE[s].label}`;
     }).join("\n  ↓\n");
@@ -181,11 +185,25 @@ for (const port of ports) {
 
     const actions = document.getElementById("actions");
     actions.innerHTML = "";
-    for (const tr of TRANSITIONS[state]) {
+    const buttons = [];
+    if (state === "NONE" || state === "DISCONNECTED") buttons.push(["navigator.serial.requestPort()", requestPort]);
+    if (state === "GRANTED") buttons.push(["port.open({ baudRate: 9600 })", openPort]);
+    if (state === "OPEN") buttons.push(["port.readable.getReader()", acquireReader], ["port.close()", closePort]);
+    if (state === "READER_LOCKED") buttons.push(["reader.releaseLock()", releaseReader]);
+    for (const [label, action] of buttons) {
       const b = document.createElement("button");
       b.className = "act-btn";
-      b.textContent = tr.label;
-      b.addEventListener("click", () => applyTransition(tr.to));
+      b.textContent = label;
+      b.addEventListener("click", () => {
+        try {
+          const result = action();
+          if (result?.catch) {
+            result.catch((error) => logEvent("error", "ev-disconnect", error.message));
+          }
+        } catch (error) {
+          logEvent("error", "ev-disconnect", error.message);
+        }
+      });
       actions.appendChild(b);
     }
 
@@ -194,6 +212,29 @@ for (const port of ports) {
     cb.className = "badge " + (connected ? "true" : "false");
     document.getElementById("readable").textContent = readable || "null";
     document.getElementById("writable").textContent = writable || "null";
+  }
+
+  if ("serial" in navigator) {
+    navigator.serial.addEventListener("connect", (event) => {
+      if (event.port === port) {
+        state = "GRANTED";
+        refreshPortState();
+        logEvent("navigator.serial connect", "ev-connect", "connected=" + String(connected));
+        render();
+      }
+    });
+    navigator.serial.addEventListener("disconnect", (event) => {
+      if (event.port === port) {
+        state = "DISCONNECTED";
+        connected = false;
+        readable = null;
+        writable = null;
+        logEvent("navigator.serial disconnect", "ev-disconnect", "connected=false");
+        render();
+      }
+    });
+  } else {
+    logEvent("navigator.serial", "ev-disconnect", "Web Serial is not available in this browser/context");
   }
 
   render();

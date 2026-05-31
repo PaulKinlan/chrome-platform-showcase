@@ -153,7 +153,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v130</p>
     <h1>RFCOMM Device Explorer</h1>
-    <p class="lede">Chrome 130 adds <code>SerialPort.connected</code> (whether a previously-paired Bluetooth RFCOMM device is in range) and new <code>connect</code>/<code>disconnect</code> events on <code>navigator.serial</code> for Bluetooth RFCOMM ports. This explorer simulates managing a fleet of paired serial devices — detecting which are in range without needing to open each port.</p>
+    <p class="lede">Chrome 130 adds <code>SerialPort.connected</code> (whether a previously-paired Bluetooth RFCOMM device is in range) and new <code>connect</code>/<code>disconnect</code> events on <code>navigator.serial</code> for Bluetooth RFCOMM ports. This explorer lists real granted serial ports and reports the browser's live connected state.</p>
   </header>
 
   <div class="probe fail" id="probe">Checking Web Serial API availability…</div>
@@ -161,8 +161,6 @@
   <div class="action-row">
     <button class="btn btn-primary" id="requestBtn">Request serial port</button>
     <button class="btn btn-neutral" id="getPairedBtn">List paired ports</button>
-    <button class="btn btn-neutral" id="simConnectBtn">Simulate: device connected</button>
-    <button class="btn btn-neutral" id="simDisconnectBtn">Simulate: device disconnected</button>
   </div>
 
   <div class="device-list">
@@ -171,7 +169,7 @@
       <span id="deviceCount" style="color:var(--text-muted)">0 devices</span>
     </div>
     <div class="dl-body" id="deviceList">
-      <div style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted)">No devices paired yet. Click "Request serial port" or "Simulate" to add.</div>
+      <div style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted)">No devices paired yet. Click "Request serial port" or "List paired ports".</div>
     </div>
   </div>
 
@@ -255,13 +253,6 @@ if (port.connected) {
   let logEntries = [];
   let nextId    = 1;
 
-  const SIM_DEVICES = [
-    { name: 'HC-06 Bluetooth Module',    type: 'Bluetooth RFCOMM', connected: false },
-    { name: 'Arduino via USB-Serial',    type: 'USB CDC Serial',   connected: true  },
-    { name: 'GPS Receiver (BT)',         type: 'Bluetooth RFCOMM', connected: false },
-    { name: 'ESP32 Serial',              type: 'USB CDC Serial',   connected: true  },
-  ];
-
   function ts() { return new Date().toISOString().slice(11,23); }
 
   function addLog(evt, msg, cls) {
@@ -281,9 +272,9 @@ if (port.connected) {
       return;
     }
     devList.innerHTML = devices.map(d => {
-      const isBT = d.type.includes('Bluetooth');
-      const statusCls = d.connected ? 'status-connected' : 'status-disconnected';
-      const statusText = d.connected ? (isBT ? 'in range' : 'connected') : (isBT ? 'out of range' : 'disconnected');
+      const isBT = d.type.includes('Bluetooth') || d.connected !== null;
+      const statusCls = d.connected === true ? 'status-connected' : d.connected === false ? 'status-disconnected' : 'status-rfcomm';
+      const statusText = d.connected === true ? 'connected / in range' : d.connected === false ? 'disconnected / out of range' : 'connected property unavailable';
       return `
         <div class="device-row">
           <span class="dev-icon">${isBT ? '🔵' : '🔌'}</span>
@@ -292,25 +283,37 @@ if (port.connected) {
             <div class="dev-type">${d.type} · ID: port-${d.id}</div>
           </div>
           <span class="dev-status ${statusCls}">${statusText}</span>
-          ${isBT ? `<button class="dev-btn" onclick="toggleDevice(${d.id})">${d.connected ? 'Disconnect' : 'Connect'}</button>` : ''}
         </div>
       `;
     }).join('');
   }
 
-  function toggleDevice(id) {
-    const d = devices.find(x => x.id === id);
-    if (!d) return;
-    d.connected = !d.connected;
-    const isBT = d.type.includes('Bluetooth');
-    if (d.connected) {
-      addLog('connect', `${d.name} — SerialPort.connected: true`, 'log-conn');
-    } else {
-      addLog('disconnect', `${d.name} — SerialPort.connected: false`, 'log-disc');
-    }
-    renderDevices();
+  function describePort(port) {
+    const info = typeof port.getInfo === 'function' ? port.getInfo() : {};
+    const connected = typeof port.connected === 'boolean' ? port.connected : null;
+    const id = nextId++;
+    const label = info.usbVendorId
+      ? `USB ${info.usbVendorId.toString(16).padStart(4, '0')}:${(info.usbProductId ?? 0).toString(16).padStart(4, '0')}`
+      : `Serial Port ${id}`;
+    return {
+      id,
+      port,
+      name: label,
+      type: connected === null ? 'Serial port' : 'Serial / RFCOMM capable',
+      connected,
+    };
   }
-  window.toggleDevice = toggleDevice;
+
+  function upsertPort(port) {
+    const existing = devices.find(d => d.port === port);
+    if (existing) {
+      existing.connected = typeof port.connected === 'boolean' ? port.connected : null;
+      return existing;
+    }
+    const next = describePort(port);
+    devices.push(next);
+    return next;
+  }
 
   // Probe
   if ('serial' in navigator) {
@@ -318,70 +321,45 @@ if (port.connected) {
     probe.classList.replace('fail', 'ok');
 
     navigator.serial.addEventListener('connect', e => {
-      addLog('connect', 'Real connect event fired', 'log-conn');
+      const port = upsertPort(e.port);
+      addLog('connect', `${port.name} — SerialPort.connected: ${String(port.connected)}`, 'log-conn');
+      renderDevices();
     });
     navigator.serial.addEventListener('disconnect', e => {
-      addLog('disconnect', 'Real disconnect event fired', 'log-disc');
+      const port = upsertPort(e.port);
+      addLog('disconnect', `${port.name} — SerialPort.connected: ${String(port.connected)}`, 'log-disc');
+      renderDevices();
     });
   } else {
-    probe.textContent = '⚠ Web Serial not available (HTTPS required, or unsupported browser). Using simulation.';
+    probe.textContent = '⚠ Web Serial not available (HTTPS required, or unsupported browser). Real port APIs are disabled.';
     probe.classList.replace('fail', 'warn');
+    document.getElementById('requestBtn').disabled = true;
+    document.getElementById('getPairedBtn').disabled = true;
   }
 
   document.getElementById('requestBtn').addEventListener('click', async () => {
     if ('serial' in navigator) {
       try {
-        const port = await navigator.serial.requestPort();
-        const id = nextId++;
-        devices.push({ id, name: 'Serial Port ' + id, type: 'USB CDC Serial', connected: true });
-        addLog('paired', `New port granted — connected: ${!!port.connected}`, 'log-rfcomm');
+        const port = upsertPort(await navigator.serial.requestPort());
+        addLog('paired', `New port granted — connected: ${String(port.connected)}`, 'log-rfcomm');
         renderDevices();
       } catch (e) {
         addLog('cancelled', e.message, 'log-info');
       }
-    } else {
-      const sd = SIM_DEVICES[devices.length % SIM_DEVICES.length];
-      const id = nextId++;
-      devices.push({ ...sd, id });
-      addLog('paired', `Simulated: ${sd.name} — connected: ${sd.connected}`, 'log-rfcomm');
-      renderDevices();
     }
   });
 
   document.getElementById('getPairedBtn').addEventListener('click', async () => {
     if ('serial' in navigator) {
       const ports = await navigator.serial.getPorts();
+      devices = [];
       ports.forEach((p, i) => {
-        addLog('getPorts', `Port ${i}: connected=${!!p.connected}`, 'log-info');
+        const port = upsertPort(p);
+        addLog('getPorts', `Port ${i}: connected=${String(port.connected)}`, 'log-info');
       });
       if (ports.length === 0) addLog('getPorts', 'No previously-granted ports', 'log-info');
-    } else {
-      devices.forEach(d => {
-        addLog('getPorts', `${d.name}: connected=${d.connected}`, 'log-info');
-      });
-      if (devices.length === 0) addLog('getPorts', 'No paired devices in simulation', 'log-info');
+      renderDevices();
     }
-  });
-
-  document.getElementById('simConnectBtn').addEventListener('click', () => {
-    const sd = SIM_DEVICES[nextId % SIM_DEVICES.length];
-    const id = nextId++;
-    const d  = { ...sd, id, connected: true };
-    devices.push(d);
-    addLog('connect', `${d.name} came into range — SerialPort.connected: true`, 'log-conn');
-    renderDevices();
-  });
-
-  document.getElementById('simDisconnectBtn').addEventListener('click', () => {
-    const rfcomm = devices.filter(d => d.type.includes('Bluetooth') && d.connected);
-    if (rfcomm.length === 0) {
-      addLog('disconnect', 'No connected Bluetooth devices to disconnect', 'log-info');
-      return;
-    }
-    const d = rfcomm[0];
-    d.connected = false;
-    addLog('disconnect', `${d.name} went out of range — SerialPort.connected: false`, 'log-disc');
-    renderDevices();
   });
 
   renderDevices();

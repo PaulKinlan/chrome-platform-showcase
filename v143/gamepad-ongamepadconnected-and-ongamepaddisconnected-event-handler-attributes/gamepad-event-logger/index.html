@@ -240,9 +240,7 @@
     </div>
 
     <div class="controls-row">
-      <button class="btn btn-primary" onclick="simulateConnect()">Simulate connect</button>
-      <button class="btn btn-warn" onclick="simulateDisconnect()">Simulate disconnect</button>
-      <button class="btn btn-secondary" onclick="runRaceTest()">Race condition test</button>
+      <button class="btn btn-primary" onclick="refreshGamepads()">Refresh connected gamepads</button>
     </div>
     <div class="race-result" id="race-result"></div>
 
@@ -257,7 +255,7 @@
           </div>
         </div>
         <div class="event-log" id="event-log">
-          <div class="log-empty" id="log-empty">No events yet. Connect a gamepad or use the simulate buttons above.</div>
+          <div class="log-empty" id="log-empty">No events yet. Connect a gamepad and press any button.</div>
         </div>
       </div>
 
@@ -325,7 +323,7 @@
       <h2 style="font-family:var(--font-mono);font-size:0.9rem;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:var(--space-2);">Live controller state</h2>
       <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted);margin-bottom:var(--space-3);">Press any button on a real gamepad to activate polling. Buttons flash when pressed; axes show current deflection.</p>
       <div class="controllers-grid" id="controllers-grid">
-        <div class="no-controllers" id="no-controllers">No gamepads detected. Connect one or use the Simulate button.</div>
+        <div class="no-controllers" id="no-controllers">No gamepads detected. Connect one and press any button.</div>
       </div>
     </div>
 
@@ -339,9 +337,6 @@
     const controllersGrid = document.getElementById('controllers-grid');
     const noControllers = document.getElementById('no-controllers');
 
-    // Synthetic gamepad tracker
-    const syntheticGamepads = {};
-    let syntheticCounter = 0;
     let rafId = null;
 
     // Check IDL attribute support
@@ -374,8 +369,7 @@
 
     function updateCountBadge() {
       const real = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean).length : 0;
-      const synthetic = Object.keys(syntheticGamepads).length;
-      countBadge.textContent = real + synthetic;
+      countBadge.textContent = real;
     }
 
     // --- addEventListener approach ---
@@ -384,7 +378,7 @@
       if (!addEventEnabled) return;
       logEntry('connect', 'addEventListener', `id: ${e.gamepad.id} | index: ${e.gamepad.index} | mapping: ${e.gamepad.mapping || 'none'}`);
       updateCountBadge();
-      buildControllerCard(e.gamepad.index, e.gamepad.id, false);
+      buildControllerCard(e.gamepad.index, e.gamepad.id);
       startPolling();
     });
     window.addEventListener('gamepaddisconnected', (e) => {
@@ -418,89 +412,8 @@
       badgeH.className = `approach-badge ${handlerEnabled ? 'active' : ''}`;
     }
 
-    // --- Synthetic gamepad simulation ---
-    function simulateConnect() {
-      const idx = 100 + syntheticCounter++;
-      const gp = {
-        id: `Simulated Controller #${syntheticCounter} (XInput STANDARD GAMEPAD)`,
-        index: idx,
-        mapping: 'standard',
-        buttons: Array.from({length: 16}, () => ({pressed: false, value: 0})),
-        axes: [0, 0, 0, 0],
-        _synthetic: true,
-      };
-      syntheticGamepads[idx] = gp;
-      const evt = new Event('gamepadconnected');
-      evt.gamepad = gp;
-      window.dispatchEvent(evt);
-      buildControllerCard(idx, gp.id, true);
-      updateCountBadge();
-      startPolling();
-    }
-
-    function simulateDisconnect() {
-      const keys = Object.keys(syntheticGamepads);
-      if (!keys.length) {
-        logEntry('disconnect', 'simulate', 'No synthetic gamepads to disconnect.');
-        return;
-      }
-      const idx = keys[keys.length - 1];
-      const gp = syntheticGamepads[idx];
-      delete syntheticGamepads[idx];
-      const evt = new Event('gamepaddisconnected');
-      evt.gamepad = gp;
-      window.dispatchEvent(evt);
-      removeControllerCard(idx);
-      updateCountBadge();
-    }
-
-    // --- Race condition test ---
-    async function runRaceTest() {
-      const resultEl = document.getElementById('race-result');
-      resultEl.className = 'race-result show';
-      resultEl.textContent = 'Running race test — connecting and disconnecting rapidly…';
-
-      const order = [];
-      const origAE = addEventEnabled;
-      const origH = handlerEnabled;
-
-      // temp listeners
-      const tmpAE = (e) => { if (e.gamepad.id.includes('Race')) order.push(`addEventListener:${e.type}`); };
-      window.addEventListener('gamepadconnected', tmpAE);
-      window.addEventListener('gamepaddisconnected', tmpAE);
-
-      let savedHandler = null;
-      if (supportsIDL) {
-        savedHandler = window.ongamepadconnected;
-        window.ongamepadconnected = (e) => {
-          if (e.gamepad.id.includes('Race')) order.push(`ongamepadconnected:connect`);
-          if (savedHandler) savedHandler(e);
-        };
-      }
-
-      for (let i = 0; i < 3; i++) {
-        const gp = { id: `Race Test Gamepad ${i}`, index: 200 + i, mapping: 'standard', buttons: [], axes: [] };
-        const ce = new Event('gamepadconnected');
-        ce.gamepad = gp;
-        window.dispatchEvent(ce);
-        await new Promise(r => setTimeout(r, 10));
-        const de = new Event('gamepaddisconnected');
-        de.gamepad = gp;
-        window.dispatchEvent(de);
-        await new Promise(r => setTimeout(r, 10));
-      }
-
-      window.removeEventListener('gamepadconnected', tmpAE);
-      window.removeEventListener('gamepaddisconnected', tmpAE);
-      if (supportsIDL && savedHandler !== null) window.ongamepadconnected = savedHandler;
-
-      resultEl.innerHTML = `<strong>Firing order (3 rapid connect/disconnect cycles):</strong><br>`
-        + order.map((o, i) => `${i + 1}. ${o}`).join('<br>')
-        + `<br><br><em>addEventListener fires first (registered earlier in the event listener queue). The IDL attribute handler runs after all listeners added before it.</em>`;
-    }
-
     // --- Controller card rendering ---
-    function buildControllerCard(index, id, synthetic) {
+    function buildControllerCard(index, id) {
       noControllers.style.display = 'none';
       const existing = document.getElementById(`ctrl-${index}`);
       if (existing) return;
@@ -511,7 +424,7 @@
       card.innerHTML = `
         <div class="ctrl-header">
           <div class="ctrl-name">${escHtml(id)}</div>
-          <div style="font-family:var(--font-mono);font-size:0.62rem;color:var(--text-muted);">index: ${index}${synthetic ? ' · synthetic' : ''}</div>
+          <div style="font-family:var(--font-mono);font-size:0.62rem;color:var(--text-muted);">index: ${index}</div>
         </div>
         <div class="ctrl-body">
           <div class="ctrl-section-label">Buttons (16)</div>
@@ -542,6 +455,7 @@
       if (rafId) return;
       function poll() {
         const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
+        pads.forEach(gp => buildControllerCard(gp.index, gp.id));
         pads.forEach(gp => {
           gp.buttons.forEach((btn, i) => {
             const el = document.getElementById(`btn-${gp.index}-${i}`);
@@ -563,6 +477,18 @@
       poll();
     }
 
+    function refreshGamepads() {
+      const pads = navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
+      pads.forEach(gp => buildControllerCard(gp.index, gp.id));
+      updateCountBadge();
+      if (pads.length) {
+        startPolling();
+        logEntry('connect', 'getGamepads()', `${pads.length} currently connected gamepad${pads.length === 1 ? '' : 's'} found`);
+      } else {
+        logEntry('disconnect', 'getGamepads()', 'No connected gamepads returned by the browser.');
+      }
+    }
+
     function clearLog() {
       logEl.innerHTML = '';
       logEl.appendChild(logEmpty);
@@ -573,7 +499,7 @@
       return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     }
 
-    updateCountBadge();
+    refreshGamepads();
     updateListeners();
   </script>
 </body>
