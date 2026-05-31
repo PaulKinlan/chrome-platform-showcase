@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AsyncDisposableStack — Explicit resource management (async) — Chrome 134</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .lab { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .row { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0; }
+    .resource-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); margin: var(--space-3) 0; }
+    .resource { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); }
+    .resource .name { font-weight: bold; }
+    .resource .state { padding: 0.1rem 0.4rem; background: var(--bg-paper); border: 1px solid var(--border-black); font-size: 0.7rem; text-transform: uppercase; }
+    .state.acquired { background: var(--accent-blue); color: white; border-color: var(--accent-blue); }
+    .state.disposed { background: var(--accent-emerald); color: white; border-color: var(--accent-emerald); }
+    .state.error { background: var(--accent-rose); color: white; border-color: var(--accent-rose); }
+
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; min-height: 10rem; max-height: 18rem; overflow: auto; white-space: pre-wrap; }
+    .probe { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
+    .ok { color: var(--accent-emerald); } .no { color: var(--accent-rose); }
+    .field-row { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; font-family: var(--font-mono); font-size: 0.82rem; }
+    .field-row label { font-weight: 600; }
+    input[type="range"] { width: 8rem; accent-color: var(--text-black); }
+
+    pre.code { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; white-space: pre; overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v134/">&larr; Chrome 134</a> / <a href="../">Explicit resource management (async)</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v134 · javascript</p>
+    <h1>AsyncDisposableStack</h1>
+    <p class="lede">Acquire N async resources conditionally, get LIFO async cleanup on success or throw. Simulate a real pipeline: open a temp file, fetch a token, lock a db row, push a message — make any step fail and watch the cleanup unwind in reverse.</p>
+  </header>
+
+  <div class="probe" id="probe"></div>
+
+  <div class="lab">
+    <p class="note" style="margin: 0 0 var(--space-2);">Each resource is async-acquired and async-disposed (with simulated latency). Pick which step should fail.</p>
+    <ul class="resource-list" id="rlist">
+      <li class="resource" data-r="tmp"><span class="name">temp file</span><span class="state" id="s-tmp">pending</span></li>
+      <li class="resource" data-r="token"><span class="name">auth token</span><span class="state" id="s-token">pending</span></li>
+      <li class="resource" data-r="lock"><span class="name">db row lock</span><span class="state" id="s-lock">pending</span></li>
+      <li class="resource" data-r="msg"><span class="name">queue message</span><span class="state" id="s-msg">pending</span></li>
+    </ul>
+    <div class="field-row">
+      <label for="fail">fail at step</label>
+      <select id="fail" style="font-family: var(--font-mono); border: 1px solid var(--border-black); padding: 0.25rem 0.5rem; background: var(--bg-ivory); color: var(--text-black);">
+        <option value="">none (happy path)</option>
+        <option value="tmp">temp file</option>
+        <option value="token">auth token</option>
+        <option value="lock">db row lock</option>
+        <option value="msg">queue message</option>
+      </select>
+    </div>
+    <div class="row">
+      <button id="runBtn">run pipeline</button>
+      <button id="resetBtn" style="background: var(--bg-paper); color: var(--text-black);">reset</button>
+    </div>
+    <div class="log" id="log">waiting…</div>
+  </div>
+
+  <pre class="code">async function run() {
+  await using stack = new AsyncDisposableStack();
+
+  const tmp   = stack.use(await open("/tmp/job"));
+  const token = stack.use(await fetchToken());
+  const lock  = stack.use(await db.lockRow(token, 42));
+  const msg   = stack.use(await queue.publish({ tmp, lock }));
+
+  return msg.id;
+  // any throw above → stack.[Symbol.asyncDispose]()
+  // runs in LIFO order, awaiting each .[Symbol.asyncDispose].
+}</pre>
+
+  <section>
+    <h2>why this matters</h2>
+    <p>Try/finally pyramids of awaits get ugly fast. Worse, error-handling around each finally has to repeat the rollback logic, and an awaited finally can swallow the original rejection (see SuppressedError on the sync demo for the same problem class). <code>AsyncDisposableStack</code> centralises the rollback as a stack of disposers — same shape as RAII in C++ or Python's <code>contextlib.ExitStack</code>.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Explicit resource management (async)</a> — feature index</li>
+      <li><a href="../await-using/">await using basics</a></li>
+      <li><a href="../db-transaction/">Async transaction</a></li>
+      <li><a href="../../explicit-resource-management-sync/error-suppression/">SuppressedError (sync sibling)</a></li>
+      <li><a href="https://tc39.es/proposal-explicit-resource-management/" target="_blank" rel="noopener">TC39 proposal</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const log = document.getElementById("log");
+  const probe = document.getElementById("probe");
+  const supported = typeof AsyncDisposableStack === "function" && typeof Symbol.asyncDispose !== "undefined";
+  probe.innerHTML = supported
+    ? '<span class="ok">[ok]</span> AsyncDisposableStack present — happy path and failure paths will run.'
+    : '<span class="no">[no]</span> AsyncDisposableStack missing — demo will fall back to a simulated stack.';
+
+  const lines = [];
+  function note(s) {
+    lines.unshift("[" + new Date().toISOString().slice(11,23) + "] " + s);
+    log.textContent = lines.slice(0,40).join("\n");
+  }
+
+  function setState(id, s) {
+    const el = document.getElementById("s-" + id);
+    el.className = "state " + s;
+    el.textContent = s;
+  }
+
+  function reset() {
+    ["tmp","token","lock","msg"].forEach(id => setState(id, "pending"));
+    lines.length = 0;
+    log.textContent = "ready";
+  }
+  document.getElementById("resetBtn").addEventListener("click", reset);
+
+  function makeResource(name, failHere) {
+    return {
+      async acquire() {
+        await new Promise(r => setTimeout(r, 120));
+        if (failHere === name) throw new Error("acquire failed at " + name);
+        setState(name, "acquired");
+        note("acquired " + name);
+        return this;
+      },
+      async [Symbol.asyncDispose]() {
+        await new Promise(r => setTimeout(r, 80));
+        setState(name, "disposed");
+        note("disposed " + name);
+      },
+    };
+  }
+
+  document.getElementById("runBtn").addEventListener("click", async () => {
+    reset();
+    const fail = document.getElementById("fail").value;
+    note("starting pipeline (fail=" + (fail || "none") + ")");
+    try {
+      if (supported) {
+        // We need to use 'await using' which requires async function via new AsyncFunction
+        const AsyncFunction = (async () => {}).constructor;
+        const body = `
+          await using stack = new AsyncDisposableStack();
+          const tmp   = stack.use(await mk("tmp").acquire());
+          const token = stack.use(await mk("token").acquire());
+          const lock  = stack.use(await mk("lock").acquire());
+          const msg   = stack.use(await mk("msg").acquire());
+          return "ok";
+        `;
+        const fn = new AsyncFunction("mk", body);
+        await fn((n) => makeResource(n, fail));
+        note("pipeline ok");
+      } else {
+        // fallback simulation
+        const r = ["tmp","token","lock","msg"];
+        const acquired = [];
+        try {
+          for (const n of r) {
+            const res = makeResource(n, fail);
+            await res.acquire();
+            acquired.push(res);
+          }
+          note("pipeline ok");
+        } catch (e) {
+          throw e;
+        } finally {
+          for (let i = acquired.length - 1; i >= 0; i--) {
+            await acquired[i][Symbol.asyncDispose]?.();
+          }
+        }
+      }
+    } catch (e) {
+      note("ERROR: " + e.message);
+      // mark step that failed in red
+      if (fail) setState(fail, "error");
+    }
+  });
+
+  reset();
+</script>
+</body>
+</html>
