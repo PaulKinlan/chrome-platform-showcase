@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>File handle - using sync - Chrome 131 - chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; }
+    .compare { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-4) 0; }
+    @media (max-width: 720px) { .compare { grid-template-columns: 1fr; } }
+    .compare h4 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3); min-height: 240px; box-shadow: var(--thin-shadow); }
+    .log { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); max-height: 280px; overflow-y: auto; min-height: 140px; }
+    .log .row { padding: 0.1rem 0; }
+    .log .row.acquire { color: var(--accent-blue); }
+    .log .row.use { color: var(--text-charcoal); }
+    .log .row.dispose { color: var(--accent-emerald); }
+    .log .row.leak { color: var(--accent-rose); }
+    .resource-list { font-family: var(--font-mono); font-size: 0.85rem; padding: var(--space-2) 0; }
+    .resource-list li { padding: 0.2rem 0; }
+    .resource-list li.open { color: var(--accent-rose); }
+    .resource-list li.closed { color: var(--accent-emerald); text-decoration: line-through; }
+    .stat-row { display: flex; gap: var(--space-2); flex-wrap: wrap; font-family: var(--font-mono); font-size: 0.75rem; }
+    .stat-row .chip { padding: 0.3rem 0.55rem; border: 2px solid var(--border-black); }
+    .stat-row .chip.bad { background: var(--accent-rose); color: var(--bg-ivory); }
+    .stat-row .chip.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .stat-row .chip.neutral { background: var(--bg-stone); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v131/">&larr; v131</a> &middot; <a href="../">using (sync)</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v131</p>
+    <h1>file handle lifecycle: try/finally vs using</h1>
+    <p class="lede">Open a mock file handle, throw a fake parse error mid-read, and watch what each style does. Left side uses <code>try/finally</code> — easy to forget. Right side uses <code>using</code> — disposal is guaranteed by the language. The simulator counts leaks so you can run it many times.</p>
+  </header>
+
+  <div class="toolbar">
+    <button id="run">run both</button>
+    <button id="run-throw">throw mid-read</button>
+    <button id="reset">reset counts</button>
+  </div>
+
+  <div class="compare">
+    <div>
+      <h4>traditional try/finally (and one without)</h4>
+      <div class="stage">
+        <ul class="resource-list" id="trad-list"></ul>
+        <div class="stat-row" id="trad-stats"></div>
+        <div class="log" id="trad-log"></div>
+      </div>
+    </div>
+    <div>
+      <h4>using (deterministic dispose)</h4>
+      <div class="stage">
+        <ul class="resource-list" id="erm-list"></ul>
+        <div class="stat-row" id="erm-stats"></div>
+        <div class="log" id="erm-log"></div>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <h2>the api</h2>
+<pre><code>function makeFile(name) {
+  return {
+    read() { /* ... */ },
+    [Symbol.dispose]() { console.log("closed", name); }
+  };
+}
+
+function read(name) {
+  using f = makeFile(name);  // disposed at scope exit, even if read throws
+  return f.read();
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../using/">Base using demo</a></li>
+      <li><a href="../disposable-stack/">DisposableStack</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  let counter = 0;
+  const handles = { trad: new Set(), erm: new Set() };
+  function rec(side, cls, msg) {
+    const log = document.getElementById(side + "-log");
+    const row = document.createElement("div");
+    row.className = "row " + cls;
+    row.textContent = msg;
+    log.prepend(row);
+  }
+  function refresh(side) {
+    const list = document.getElementById(side + "-list");
+    list.innerHTML = "";
+    handles[side].forEach(h => {
+      const li = document.createElement("li");
+      li.className = h.closed ? "closed" : "open";
+      li.textContent = (h.closed ? "[closed] " : "[open] ") + h.name;
+      list.appendChild(li);
+    });
+    const stats = document.getElementById(side + "-stats");
+    stats.innerHTML = "";
+    const open = [...handles[side]].filter(h => !h.closed).length;
+    const closed = [...handles[side]].filter(h => h.closed).length;
+    stats.innerHTML = `<span class="chip ${open > 0 ? "bad" : "ok"}">${open} leaked</span><span class="chip neutral">${closed} closed</span>`;
+  }
+  function makeTradFile(side, name, autoClose) {
+    const h = { name, closed: false, side };
+    handles[side].add(h);
+    rec(side, "acquire", "open " + name);
+    refresh(side);
+    return {
+      read(throws) {
+        rec(side, "use", "read " + name);
+        if (throws) { rec(side, "leak", "parse error mid-read"); throw new Error("bad data"); }
+        return "ok";
+      },
+      close() {
+        h.closed = true;
+        rec(side, "dispose", "close " + name);
+        refresh(side);
+      },
+    };
+  }
+  function makeUsingFile(name) {
+    const h = { name, closed: false, side: "erm" };
+    handles.erm.add(h);
+    rec("erm", "acquire", "open " + name);
+    refresh("erm");
+    return {
+      read(throws) {
+        rec("erm", "use", "read " + name);
+        if (throws) { rec("erm", "leak", "parse error mid-read"); throw new Error("bad data"); }
+        return "ok";
+      },
+      [Symbol.dispose]() {
+        h.closed = true;
+        rec("erm", "dispose", "auto-close " + name);
+        refresh("erm");
+      },
+    };
+  }
+  function runTraditional(shouldThrow) {
+    counter++;
+    const name = "config-" + counter + ".json";
+    // forgot try/finally
+    const bad = makeTradFile("trad", "missed-finally-" + name);
+    try { bad.read(shouldThrow); bad.close(); } catch (e) { /* leak */ }
+    // with try/finally
+    const good = makeTradFile("trad", "with-finally-" + name);
+    try { good.read(shouldThrow); } catch {} finally { good.close(); }
+  }
+  function runErm(shouldThrow) {
+    counter++;
+    const name = "config-" + counter + ".json";
+    if (!Symbol.dispose) {
+      rec("erm", "leak", "Symbol.dispose missing - upgrade Chrome");
+      return;
+    }
+    try {
+      const f = makeUsingFile(name);
+      try { f.read(shouldThrow); } finally { f[Symbol.dispose](); }
+    } catch (e) {
+      rec("erm", "use", "caught: " + e.message + " (resource still released)");
+    }
+  }
+  document.getElementById("run").addEventListener("click", () => { runTraditional(false); runErm(false); });
+  document.getElementById("run-throw").addEventListener("click", () => { runTraditional(true); runErm(true); });
+  document.getElementById("reset").addEventListener("click", () => {
+    handles.trad.clear(); handles.erm.clear();
+    document.getElementById("trad-log").innerHTML = "";
+    document.getElementById("erm-log").innerHTML = "";
+    refresh("trad"); refresh("erm");
+  });
+  refresh("trad"); refresh("erm");
+  rec("erm", "acquire", Symbol.dispose ? "Symbol.dispose available" : "Symbol.dispose missing");
+</script>
+</body>
+</html>
