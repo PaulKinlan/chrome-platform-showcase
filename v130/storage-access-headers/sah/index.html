@@ -69,13 +69,13 @@
 
   <header class="lede-block">
     <p class="eyebrow">demo · v130</p>
-    <h1>Storage Access Headers simulator</h1>
-    <p class="lede">Toggle the embed's state and whether the embedded site has already been granted the <code>storage-access</code> permission. The simulator shows the exact request/response header dance and whether unpartitioned cookies flow on this subresource.</p>
+    <h1>Storage Access Headers live probe</h1>
+    <p class="lede">Toggle the embed state, call a real server endpoint, and inspect the actual request headers your browser sent plus the <code>Activate-Storage-Access</code> response header the server emitted.</p>
   </header>
 
   <section class="stage">
     <div class="row">
-      <label for="grant">user has granted storage-access for this embed</label>
+      <label for="grant">server treats this origin as storage-access granted</label>
       <input type="checkbox" id="grant" checked>
     </div>
     <div class="row">
@@ -87,7 +87,7 @@
       </select>
     </div>
     <div class="row">
-      <label for="kind">request kind</label>
+      <label for="kind">request kind label sent to the probe endpoint</label>
       <select id="kind">
         <option value="subresource" selected>subresource (cookies needed)</option>
         <option value="navigation">navigation (top-level frame)</option>
@@ -96,19 +96,19 @@
 
     <div class="grid">
       <div class="col">
-        <h3>1 — initial request (no extra headers)</h3>
+        <h3>1 — actual request observed by server</h3>
         <pre class="head" id="req1"></pre>
       </div>
       <div class="col">
-        <h3>2 — server response</h3>
+        <h3>2 — actual server response headers</h3>
         <pre class="head" id="res1"></pre>
       </div>
       <div class="col">
-        <h3>3 — retry request (if activated)</h3>
+        <h3>3 — observed follow-up request</h3>
         <pre class="head" id="req2"></pre>
       </div>
       <div class="col">
-        <h3>4 — final response</h3>
+        <h3>4 — latest probe payload</h3>
         <pre class="head" id="res2"></pre>
       </div>
     </div>
@@ -145,55 +145,55 @@ Cookie: session=abc123
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 <script>
-  function render() {
+  const session = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+
+  function formatHeaders(headers) {
+    return Object.entries(headers)
+      .map(([name, value]) => `${name}: ${value ?? '(not sent)'}`)
+      .join('\n');
+  }
+
+  async function render() {
     const grant = document.getElementById("grant").checked;
     const act = document.getElementById("serverActivates").value;
     const kind = document.getElementById("kind").value;
 
-    const req1Header = grant ? "inactive" : "none";
-    const req1 = `GET /widget.js HTTP/2\n` +
-      `Host: embed.example\n` +
-      `Sec-Fetch-Site: cross-site\n` +
-      `Sec-Fetch-Dest: ${kind === "navigation" ? "document" : "script"}\n` +
-      `Sec-Fetch-Storage-Access: ${req1Header}\n` +
-      `Cookie: (third-party cookies blocked — partitioned only)`;
+    const url = `../probe?session=${encodeURIComponent(session)}&grant=${grant ? '1' : '0'}&activate=${encodeURIComponent(act)}&resource=${encodeURIComponent(kind)}&phase=initial`;
+    document.getElementById("req1").textContent = "fetching live probe...";
+    document.getElementById("res1").textContent = "waiting for response...";
+    document.getElementById("req2").textContent = "waiting for observation...";
+    document.getElementById("res2").textContent = "";
 
-    let res1 = "HTTP/2 200 OK\nContent-Type: application/javascript\n";
-    if (act === "retry" && grant) {
-      res1 += "Activate-Storage-Access: retry; allowed-origin=*\n";
-    } else if (act === "load" && grant) {
-      res1 += "Activate-Storage-Access: load\n";
+    try {
+      const response = await fetch(url, { credentials: "include", cache: "no-store" });
+      const payload = await response.json();
+      const event = payload.event;
+      document.getElementById("req1").textContent = formatHeaders({
+        "GET": event.request.url,
+        "Origin": event.request.origin,
+        "Cookie": event.request.cookie,
+        "Sec-Fetch-Site": event.request.secFetchSite,
+        "Sec-Fetch-Mode": event.request.secFetchMode,
+        "Sec-Fetch-Dest": event.request.secFetchDest,
+        "Sec-Fetch-Storage-Access": event.request.secFetchStorageAccess,
+      });
+      document.getElementById("res1").textContent = formatHeaders({
+        "HTTP status": response.status,
+        "Activate-Storage-Access": response.headers.get("activate-storage-access"),
+        "Vary": response.headers.get("vary"),
+        "Content-Type": response.headers.get("content-type"),
+      });
+      document.getElementById("req2").textContent = payload.observed.length > 1
+        ? formatHeaders(payload.observed[1].request)
+        : "No automatic follow-up request observed by this same-origin probe.";
+      document.getElementById("res2").textContent = JSON.stringify(event, null, 2);
+      const activateHeader = response.headers.get("activate-storage-access");
+      document.getElementById("verdict").innerHTML = activateHeader
+        ? `<span class="ok">SERVER EMITTED ACTIVATE-STORAGE-ACCESS</span> — ${activateHeader}. The request table above shows what this browser actually sent.`
+        : `<span class="no">NO ACTIVATE-STORAGE-ACCESS RESPONSE HEADER</span> — the server left the request in its current cookie state.`;
+    } catch (error) {
+      document.getElementById("verdict").innerHTML = `<span class="no">Probe failed</span> — ${error.message}`;
     }
-
-    let req2 = "", res2 = "", verdict = "";
-    if (act === "retry" && grant) {
-      req2 = `GET /widget.js HTTP/2\n` +
-        `Host: embed.example\n` +
-        `Sec-Fetch-Storage-Access: active\n` +
-        `Cookie: session=abc123; uid=42  (UNPARTITIONED — storage-access permission activated)`;
-      res2 = `HTTP/2 200 OK\nVary: Sec-Fetch-Storage-Access\nContent-Type: application/javascript`;
-      verdict = `<span class="ok">UNPARTITIONED COOKIES FLOWED</span> on the retry — embed gets full first-party cookies on the second request.`;
-    } else if (act === "load" && grant) {
-      req2 = `(no retry — server activated inline)`;
-      res2 = `(same as step 2; subsequent same-document subresources auto-attach)`;
-      verdict = `<span class="ok">STORAGE-ACCESS ACTIVATED FOR THIS LOAD</span> — subsequent fetches on the page attach unpartitioned cookies without an extra round trip.`;
-    } else if (act !== "none" && !grant) {
-      req2 = `(no retry — user has not granted the permission)`;
-      res2 = `(server's Activate-Storage-Access ignored without a prior grant)`;
-      verdict = `<span class="no">REQUEST WITHOUT COOKIES</span> — the user has not granted document.requestStorageAccess() / FedCM yet, so the server's header is a no-op.`;
-    } else {
-      req2 = `(no retry — server didn't request activation)`;
-      res2 = `(initial response is final; cookies remain partitioned)`;
-      verdict = grant
-        ? `<span class="no">PARTITIONED COOKIES ONLY</span> — even though the user granted permission, the server has to opt in with Activate-Storage-Access.`
-        : `<span class="no">PARTITIONED COOKIES ONLY</span> — no grant, no activation, no third-party cookies.`;
-    }
-
-    document.getElementById("req1").textContent = req1;
-    document.getElementById("res1").textContent = res1;
-    document.getElementById("req2").textContent = req2;
-    document.getElementById("res2").textContent = res2;
-    document.getElementById("verdict").innerHTML = verdict;
   }
   for (const id of ["grant", "serverActivates", "kind"]) {
     document.getElementById(id).addEventListener("input", render);

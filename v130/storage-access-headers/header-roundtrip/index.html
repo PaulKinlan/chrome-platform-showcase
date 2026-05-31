@@ -105,8 +105,8 @@
   <p class="crumbs"><a href="../">&larr; Storage Access Headers</a></p>
   <header class="lede-block">
     <p class="eyebrow">demo · v130</p>
-    <h1>Header Round-trip Simulator</h1>
-    <p class="lede">Chrome 130's Storage Access Headers replace the iframe-only <code>requestStorageAccess()</code> JS flow with a pure HTTP header dialogue. The browser sends <code>Sec-Fetch-Storage-Access</code> with the request; the server can respond with <code>Activate-Storage-Access</code> to attach unpartitioned cookies without any JS or iframe. This simulator walks every possible round-trip scenario based on your configuration.</p>
+    <h1>Header Round-trip Probe</h1>
+    <p class="lede">Chrome 130's Storage Access Headers replace the iframe-only <code>requestStorageAccess()</code> JS flow with a pure HTTP header dialogue. This demo calls a real endpoint, records the request headers your browser sent, and surfaces the <code>Activate-Storage-Access</code> response header the server emitted.</p>
   </header>
 
   <div class="config-grid">
@@ -144,7 +144,7 @@
       </select>
     </div>
     <div class="cfg-group" style="align-self:end">
-      <button class="send-btn" id="sendBtn">Simulate request →</button>
+      <button class="send-btn" id="sendBtn">Send live request →</button>
     </div>
   </div>
 
@@ -171,7 +171,7 @@
   <section>
     <h2>see also</h2>
     <ul>
-      <li><a href="../sah/">Storage Access Headers simulator</a></li>
+      <li><a href="../sah/">Storage Access Headers live probe</a></li>
       <li><a href="../no-iframe-flow/">No-iframe flow</a></li>
       <li><a href="../policy-matrix/">Server policy matrix</a></li>
     </ul>
@@ -197,9 +197,10 @@
     return `<span class="hdr-name">${escHtml(name)}: </span><span class="hdr-val ${cls || ''}">${escHtml(val)}</span>`;
   }
 
-  document.getElementById('sendBtn').addEventListener('click', simulate);
+  const session = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+  document.getElementById('sendBtn').addEventListener('click', sendProbe);
 
-  function simulate() {
+  async function sendProbe() {
     const resType     = document.getElementById('resType').value;
     const permission  = document.getElementById('storagePermission').value;
     const tpCookies   = document.getElementById('tpCookies').value;
@@ -210,118 +211,60 @@
     const outcome = document.getElementById('outcomeBox');
     outcome.style.display = 'none';
 
-    // Determine Sec-Fetch-Storage-Access value
-    let sfsa;
-    if (tpCookies === 'allowed') {
-      sfsa = null; // header not sent when 3P cookies available
-    } else if (permission === 'granted') {
-      sfsa = 'active';
-    } else if (permission === 'inactive') {
-      sfsa = 'inactive';
-    } else {
-      sfsa = 'none';
-    }
-
-    const reqLines = [
-      hdr(resType === 'iframe' ? 'SEC-FETCH-DEST' : 'Method', resType === 'fetch' ? 'GET /api/data HTTP/1.1' : `GET /resource.${resType === 'img' ? 'png' : resType === 'script' ? 'js' : 'html'} HTTP/1.1`),
-      hdr('Origin', 'https://publisher.example'),
-      hdr('Sec-Fetch-Site', 'cross-site'),
-    ];
-
-    if (sfsa !== null) {
-      reqLines.push(hdr('Sec-Fetch-Storage-Access', sfsa, sfsa === 'inactive' ? 'warn-header' : sfsa === 'active' ? 'new-header' : 'hdr-val'));
-    } else {
-      reqLines.push(hdr('Cookie', 'session=abc123 (unpartitioned, sent normally)', 'new-header'));
-    }
-
-    addStep(rt, 'request', '→ Browser Request 1', reqLines);
-
-    // Scenario: 3P cookies fully available
-    if (tpCookies === 'allowed') {
-      addStep(rt, 'response', '← Server Response', [
-        hdr('HTTP/1.1', '200 OK'),
-        hdr('Content-Type', 'application/json'),
-        '(cookies already attached — no Storage Access header needed)',
+    addStep(rt, 'request', '→ Browser Request', ['fetching live endpoint...']);
+    try {
+      const grant = permission !== 'none' && tpCookies !== 'allowed';
+      const url = `../probe?session=${encodeURIComponent(session)}&grant=${grant ? '1' : '0'}&activate=${encodeURIComponent(srvActivate)}&resource=${encodeURIComponent(resType)}&phase=initial`;
+      const response = await fetch(url, { credentials: 'include', cache: 'no-store' });
+      const payload = await response.json();
+      const request = payload.event.request;
+      const responseHeaders = payload.event.responseHeaders;
+      rt.innerHTML = '';
+      addStep(rt, 'request', '→ Browser Request', [
+        hdr('Request URL', request.url),
+        hdr('Cookie', request.cookie || '(none observed)'),
+        hdr('Sec-Fetch-Site', request.secFetchSite || '(not sent)'),
+        hdr('Sec-Fetch-Mode', request.secFetchMode || '(not sent)'),
+        hdr('Sec-Fetch-Dest', request.secFetchDest || '(not sent)'),
+        hdr('Sec-Fetch-Storage-Access', request.secFetchStorageAccess || '(not sent)', request.secFetchStorageAccess ? 'key-header' : ''),
       ]);
-      outcome.innerHTML = '<span class="outcome-ok">✓ Cookies attached via normal 3P mechanism — no Storage Access Headers needed.</span>';
-      outcome.style.display = 'block';
-      return;
-    }
-
-    // Scenario: permission = none, server can't activate
-    if (permission === 'none') {
       addStep(rt, 'response', '← Server Response', [
-        hdr('HTTP/1.1', '401 Unauthorized'),
-        hdr('Activate-Storage-Access', srvActivate !== 'none' ? srvActivate + '; allowed-origin=*' : '(not sent)', srvActivate !== 'none' ? 'warn-header' : 'hdr-val'),
+        hdr('HTTP status', String(response.status)),
+        hdr('Activate-Storage-Access', responseHeaders['activate-storage-access'] || '(not sent)', responseHeaders['activate-storage-access'] ? 'new-header' : ''),
+        hdr('Vary', responseHeaders.vary),
+        hdr('Content-Type', responseHeaders['content-type']),
       ]);
-      if (srvActivate !== 'none') {
-        addStep(rt, 'blocked', '⚠ Browser decision', [
-          'Activate-Storage-Access received but storage-access permission NOT granted.',
-          'Browser cannot activate — no retry.',
-          hdr('Result', 'Request fails (no unpartitioned cookies attached)', ''),
+      if (payload.observed.length > 1) {
+        addStep(rt, 'retry', '→ Observed follow-up request', [
+          hdr('Request URL', payload.observed[1].request.url),
+          hdr('Sec-Fetch-Storage-Access', payload.observed[1].request.secFetchStorageAccess || '(not sent)', 'key-header'),
+          hdr('Cookie', payload.observed[1].request.cookie || '(none observed)'),
         ]);
-        outcome.innerHTML = '<span class="outcome-fail">✗ Server sent Activate-Storage-Access but permission not granted — browser ignores it.</span>';
       } else {
-        outcome.innerHTML = '<span class="outcome-fail">✗ No storage-access permission and server did not send Activate-Storage-Access — cookies not attached.</span>';
+        addStep(rt, 'retry', '→ Observed follow-up request', [
+          'No automatic follow-up request observed in this same-origin probe.',
+          'Deploy the endpoint cross-site with an existing storage-access grant to watch Chrome retry at the network layer.',
+        ]);
       }
+      addStep(rt, 'final', 'Probe payload', [
+        hdr('Probe id', payload.event.id),
+        hdr('Permission control', permission),
+        hdr('Third-party cookie mode label', tpCookies),
+        hdr('Resource label', resType),
+      ]);
+      outcome.innerHTML = responseHeaders['activate-storage-access']
+        ? '<span class="outcome-ok">Live endpoint emitted Activate-Storage-Access. The steps above are the request and response observed by this browser.</span>'
+        : '<span class="outcome-warn">Live endpoint did not emit Activate-Storage-Access for this configuration.</span>';
       outcome.style.display = 'block';
-      return;
-    }
-
-    // Scenario: permission = inactive (classic path)
-    if (permission === 'inactive') {
-      if (srvActivate === 'retry') {
-        addStep(rt, 'response', '← Server Response 1', [
-          hdr('HTTP/1.1', '401 Unauthorized'),
-          hdr('Activate-Storage-Access', 'retry; allowed-origin=*', 'new-header'),
-          '(tells browser: retry with unpartitioned cookies)',
-        ]);
-        addStep(rt, 'retry', '→ Browser Request 2 (auto-retry)', [
-          hdr('GET /api/data HTTP/1.1', ''),
-          hdr('Cookie', 'session=abc123 (unpartitioned — now active)', 'new-header'),
-          hdr('Sec-Fetch-Storage-Access', 'active', 'new-header'),
-        ]);
-        addStep(rt, 'final', '← Server Response 2', [
-          hdr('HTTP/1.1', '200 OK'),
-          hdr('Content-Type', 'application/json'),
-          '✓ Unpartitioned cookies available to server — authenticated response',
-        ]);
-        outcome.innerHTML = '<span class="outcome-ok">✓ Storage Access Headers flow complete — unpartitioned cookies attached on retry. No JS or iframe required.</span>';
-      } else if (srvActivate === 'load') {
-        addStep(rt, 'response', '← Server Response', [
-          hdr('HTTP/1.1', '200 OK'),
-          hdr('Activate-Storage-Access', 'load', 'new-header'),
-          '(tells browser: activate storage access for future requests)',
-        ]);
-        addStep(rt, 'final', 'Browser activates storage access', [
-          'Future requests from this origin will include unpartitioned cookies.',
-          'No retry needed for this response — server handled unauthenticated.',
-        ]);
-        outcome.innerHTML = '<span class="outcome-ok">✓ Storage access activated via "load" directive — future requests will include unpartitioned cookies.</span>';
-      } else {
-        addStep(rt, 'response', '← Server Response', [
-          hdr('HTTP/1.1', '200 OK'),
-          '(no Activate-Storage-Access header)',
-          'Server did not activate — partitioned cookies only',
-        ]);
-        outcome.innerHTML = '<span class="outcome-warn">⚠ Server did not send Activate-Storage-Access. Permission was inactive — request succeeded but without unpartitioned cookies.</span>';
-      }
+    } catch (error) {
+      rt.innerHTML = '';
+      addStep(rt, 'blocked', 'Probe error', [escHtml(error.message)]);
+      outcome.innerHTML = '<span class="outcome-fail">Live probe failed.</span>';
       outcome.style.display = 'block';
-      return;
     }
-
-    // permission = granted + active
-    addStep(rt, 'response', '← Server Response', [
-      hdr('HTTP/1.1', '200 OK'),
-      hdr('Content-Type', 'application/json'),
-      hdr('Sec-Fetch-Storage-Access', 'active — unpartitioned cookies sent', 'new-header'),
-    ]);
-    outcome.innerHTML = '<span class="outcome-ok">✓ Permission already active — unpartitioned cookies attached on first request.</span>';
-    outcome.style.display = 'block';
   }
 
-  // Render initial state
-  simulate();
+  sendProbe();
 </script>
 </body>
 </html>
