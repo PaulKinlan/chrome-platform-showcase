@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Transaction Stress — IndexedDB SQLite backend — Chrome 144</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; font-family: var(--font-mono); font-size: 0.82rem; }
+    input { border: 2px solid var(--border-black); padding: 0.3rem 0.5rem; font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-paper); color: var(--text-black); width: 6rem; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+    .panel { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); display: grid; gap: var(--space-2); }
+    .panel h3 { margin: 0; font-family: var(--font-display); }
+    .stat { font-family: var(--font-mono); font-size: 0.85rem; display: grid; grid-template-columns: 8rem 1fr; gap: 0.5rem; }
+    .stat dt { color: var(--text-charcoal); }
+    .stat dd { margin: 0; font-weight: 700; }
+    .chart { height: 80px; background: var(--bg-paper); border: 1px solid var(--border-black); display: flex; align-items: flex-end; padding: 2px; gap: 1px; overflow: hidden; }
+    .chart .bar { flex: 1; background: var(--accent-blue); min-width: 2px; }
+    .chart .bar.slow { background: var(--accent-rose); }
+    .badge { font-family: var(--font-mono); font-size: 0.75rem; padding: 0.15rem 0.5rem; border: 1px solid var(--border-black); display: inline-block; }
+    .badge.ok { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .badge.no { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v144/">&larr; Chrome 144</a> / <a href="../">IndexedDB SQLite backend</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v144</p>
+    <h1>Transaction Stress</h1>
+    <p class="lede">The new SQLite backend changes <em>how</em> Chrome stores IDB data, not the API. The wins show up under stress: concurrent transactions, large reads, long-running writes. Run the stress test and watch p50/p99 latency, throughput, and failure rate. Open the page in regular and incognito tabs to compare.</p>
+  </header>
+
+  <div class="stage">
+    <p>IndexedDB: <span class="badge" id="support">checking&hellip;</span></p>
+    <div class="controls">
+      <label>parallel txns <input type="number" id="conc" value="8" min="1" max="64"></label>
+      <label>records/txn <input type="number" id="recs" value="500" min="10" max="5000"></label>
+      <label>value size <input type="number" id="vsz" value="256" min="16" max="65536"></label>
+      <button id="run">run stress test</button>
+      <button id="clear">clear store</button>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <h3>write latency</h3>
+        <div class="chart" id="wchart"></div>
+        <dl class="stat">
+          <dt>p50 / p99</dt><dd id="wp">&mdash;</dd>
+          <dt>throughput</dt><dd id="wthr">&mdash;</dd>
+          <dt>failures</dt><dd id="wfail">&mdash;</dd>
+        </dl>
+      </div>
+      <div class="panel">
+        <h3>read latency</h3>
+        <div class="chart" id="rchart"></div>
+        <dl class="stat">
+          <dt>p50 / p99</dt><dd id="rp">&mdash;</dd>
+          <dt>throughput</dt><dd id="rthr">&mdash;</dd>
+          <dt>failures</dt><dd id="rfail">&mdash;</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <h2>what changed</h2>
+<pre><code>// no JS change &mdash; same API, new storage engine
+const db = await openDB("notes");
+await db.put("k", value);
+await db.get("k");
+
+// Chrome 144: in incognito + memory-constrained contexts, IDB is now backed
+// by SQLite in-memory. Tighter concurrency model, ACID semantics, better
+// reliability when the OS evicts pages.</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">IndexedDB SQLite backend (in-memory contexts)</a></li>
+      <li><a href="../incognito-idb/">Incognito IDB</a></li>
+      <li><a href="../cycle-test/">Round-Trip Cycle</a></li>
+      <li><a href="https://chromestatus.com/feature/5126896685809664" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+const supported = 'indexedDB' in window;
+document.getElementById('support').textContent = supported ? 'available' : 'unavailable';
+document.getElementById('support').classList.add(supported ? 'ok' : 'no');
+
+function openDB() {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open('stress-demo', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('s');
+    req.onsuccess = () => res(req.result);
+    req.onerror = () => rej(req.error);
+  });
+}
+
+async function runWrite(db, n, sz) {
+  const val = new Uint8Array(sz).fill(0x42);
+  return new Promise((res) => {
+    const t0 = performance.now();
+    const tx = db.transaction('s', 'readwrite');
+    const store = tx.objectStore('s');
+    let failed = false;
+    for (let i = 0; i < n; i++) {
+      const k = 'k_' + crypto.randomUUID().slice(0, 8) + '_' + i;
+      store.put({ v: val, i }, k);
+    }
+    tx.oncomplete = () => res({ ms: performance.now() - t0, ok: !failed });
+    tx.onerror = () => { failed = true; res({ ms: performance.now() - t0, ok: false }); };
+  });
+}
+
+async function runRead(db) {
+  return new Promise((res) => {
+    const t0 = performance.now();
+    const tx = db.transaction('s', 'readonly');
+    const store = tx.objectStore('s');
+    const req = store.openCursor();
+    let count = 0;
+    req.onsuccess = (e) => {
+      const c = e.target.result;
+      if (c) { count++; c.continue(); }
+    };
+    tx.oncomplete = () => res({ ms: performance.now() - t0, ok: true, count });
+    tx.onerror = () => res({ ms: performance.now() - t0, ok: false, count });
+  });
+}
+
+function pct(arr, p) {
+  if (!arr.length) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
+}
+
+function drawChart(id, samples) {
+  const el = document.getElementById(id);
+  const max = Math.max(...samples, 1);
+  el.innerHTML = '';
+  for (const s of samples) {
+    const b = document.createElement('div');
+    b.className = 'bar' + (s > max * 0.8 ? ' slow' : '');
+    b.style.height = (s / max * 100) + '%';
+    el.appendChild(b);
+  }
+}
+
+document.getElementById('run').addEventListener('click', async () => {
+  if (!supported) return;
+  const db = await openDB();
+  const conc = +document.getElementById('conc').value;
+  const recs = +document.getElementById('recs').value;
+  const vsz = +document.getElementById('vsz').value;
+
+  document.getElementById('wp').textContent = 'running...';
+  const writeResults = await Promise.all(Array.from({ length: conc }, () => runWrite(db, recs, vsz)));
+  const writeLat = writeResults.map((r) => r.ms);
+  const wfail = writeResults.filter((r) => !r.ok).length;
+  document.getElementById('wp').textContent = pct(writeLat, 0.5).toFixed(1) + 'ms / ' + pct(writeLat, 0.99).toFixed(1) + 'ms';
+  document.getElementById('wthr').textContent = (conc * recs / (writeLat.reduce((a, b) => a + b, 0) / 1000)).toFixed(0) + ' ops/s';
+  document.getElementById('wfail').textContent = wfail + ' / ' + conc;
+  drawChart('wchart', writeLat);
+
+  document.getElementById('rp').textContent = 'running...';
+  const readResults = await Promise.all(Array.from({ length: conc }, () => runRead(db)));
+  const readLat = readResults.map((r) => r.ms);
+  const rfail = readResults.filter((r) => !r.ok).length;
+  document.getElementById('rp').textContent = pct(readLat, 0.5).toFixed(1) + 'ms / ' + pct(readLat, 0.99).toFixed(1) + 'ms';
+  document.getElementById('rthr').textContent = readResults.reduce((a, r) => a + (r.count || 0), 0) + ' rows';
+  document.getElementById('rfail').textContent = rfail + ' / ' + conc;
+  drawChart('rchart', readLat);
+});
+
+document.getElementById('clear').addEventListener('click', async () => {
+  const db = await openDB();
+  const tx = db.transaction('s', 'readwrite');
+  tx.objectStore('s').clear();
+});
+</script>
+</body>
+</html>
