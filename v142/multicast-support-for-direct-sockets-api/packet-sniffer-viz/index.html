@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multicast Packet Flow Visualizer — Direct Sockets API — Chrome 142</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .notice {
+      border: 2px solid var(--text-charcoal);
+      background: var(--bg-stone);
+      padding: var(--space-3) var(--space-4);
+      margin: var(--space-4) 0;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      color: var(--text-charcoal);
+    }
+    .notice strong { display: block; margin-bottom: var(--space-2); text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.08em; color: var(--text-muted); }
+
+    /* Network diagram */
+    .net-diagram {
+      position: relative;
+      width: 100%;
+      height: 300px;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      margin: var(--space-4) 0;
+      overflow: hidden;
+    }
+    .net-node {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      cursor: default;
+    }
+    .net-node-box {
+      width: 72px;
+      height: 48px;
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-align: center;
+      transition: background 0.25s, box-shadow 0.25s;
+      box-shadow: var(--thin-shadow);
+    }
+    .net-node-box.sender { background: var(--text-black); color: var(--bg-ivory); }
+    .net-node-box.receiver-active { background: var(--bg-paper); }
+    .net-node-box.receiver-inactive { background: var(--bg-stone); color: var(--text-muted); border-style: dashed; }
+    .net-node-box.receiver-lit { background: var(--accent-emerald); color: var(--bg-ivory); box-shadow: var(--flat-shadow); }
+    .net-node-label {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: var(--text-muted);
+      text-align: center;
+    }
+    .join-btn {
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      padding: 0.1rem 0.4rem;
+      border: 1px solid var(--border-black);
+      cursor: pointer;
+      background: var(--bg-ivory);
+      color: var(--text-black);
+    }
+    .join-btn.leave { background: var(--text-charcoal); color: var(--bg-ivory); }
+
+    /* Lines drawn on canvas */
+    #net-canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    /* Controls */
+    .controls { display: flex; gap: var(--space-3); margin: var(--space-3) 0; flex-wrap: wrap; align-items: center; }
+    .btn-broadcast {
+      background: var(--accent-blue);
+      color: var(--bg-ivory);
+      border: 2px solid var(--border-black);
+      padding: 0.5rem 1.2rem;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      cursor: pointer;
+      box-shadow: var(--flat-shadow);
+    }
+    .btn-broadcast:hover { box-shadow: var(--flat-shadow-hover); }
+    .btn-broadcast:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+    .toggle-btn {
+      background: var(--bg-stone);
+      color: var(--text-black);
+      border: 2px solid var(--border-black);
+      padding: 0.5rem 1rem;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      cursor: pointer;
+    }
+    .toggle-btn.active { background: var(--text-charcoal); color: var(--bg-ivory); }
+
+    /* Stats */
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 500px) { .stats-row { grid-template-columns: 1fr 1fr; } }
+    .stat {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-3);
+    }
+    .stat-label { font-family: var(--font-mono); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.3rem; }
+    .stat-val { font-family: var(--font-mono); font-size: 1rem; color: var(--text-black); }
+    .stat-val.good { color: var(--accent-emerald); }
+    .stat-val.warn { color: var(--accent-rose); }
+
+    /* Packet log */
+    .log-panel {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+      max-height: 200px;
+      overflow-y: auto;
+      margin: var(--space-3) 0;
+    }
+    .pkt { display: flex; gap: var(--space-3); padding: 0.2rem 0; border-bottom: 1px solid var(--bg-ivory); flex-wrap: wrap; }
+    .pkt-time { color: var(--text-muted); flex-shrink: 0; }
+    .pkt-src { color: var(--accent-blue); }
+    .pkt-dst { color: var(--accent-emerald); }
+    .pkt-mode { color: var(--text-muted); }
+    .pkt-bw { color: var(--accent-rose); }
+    .section-label {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+      margin: var(--space-4) 0 var(--space-2);
+    }
+    .bw-compare {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-4);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 560px) { .bw-compare { grid-template-columns: 1fr; } }
+    .bw-col {
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      background: var(--bg-stone);
+    }
+    .bw-col h3 { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: var(--space-2); }
+    .bw-bar-bg { height: 24px; background: var(--bg-paper); border: 1px solid var(--border-black); margin: var(--space-2) 0; }
+    .bw-bar-fill { height: 100%; transition: width 0.4s ease; }
+    .bw-fill-multi { background: var(--accent-emerald); }
+    .bw-fill-uni { background: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v142/multicast-support-for-direct-sockets-api/">&larr; Multicast support for Direct Sockets API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v142</p>
+    <h1>Multicast Packet Flow Visualizer</h1>
+    <p class="lede">Watch packets propagate from a single sender to a multicast group of receivers simultaneously. Toggle individual receivers in and out of the group, then switch to unicast mode to see how many separate packets would be required instead — and what that does to bandwidth.</p>
+  </header>
+
+  <div class="notice" id="api-notice">
+    <strong>feature detection</strong>
+    <span id="api-notice-text">Checking for Direct Sockets API…</span>
+    The simulation runs in demo mode regardless — no real sockets are opened from this page.
+  </div>
+
+  <section class="stage">
+    <div class="controls">
+      <button class="btn-broadcast" id="btn-broadcast">Broadcast packet</button>
+      <button class="toggle-btn" id="btn-mode">Switch to unicast comparison</button>
+    </div>
+
+    <div class="net-diagram" id="net-diagram">
+      <canvas id="net-canvas"></canvas>
+      <!-- nodes positioned by JS -->
+    </div>
+
+    <div class="stats-row">
+      <div class="stat">
+        <div class="stat-label">mode</div>
+        <div class="stat-val" id="stat-mode">multicast</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">active receivers</div>
+        <div class="stat-val good" id="stat-receivers">4</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">packets sent</div>
+        <div class="stat-val" id="stat-packets">0</div>
+      </div>
+    </div>
+
+    <p class="section-label">bandwidth comparison</p>
+    <div class="bw-compare">
+      <div class="bw-col">
+        <h3>multicast — 1 packet to group</h3>
+        <div class="bw-bar-bg"><div class="bw-bar-fill bw-fill-multi" id="bw-multi" style="width:20%"></div></div>
+        <div style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-charcoal);" id="bw-multi-label">1 packet/broadcast</div>
+      </div>
+      <div class="bw-col">
+        <h3>unicast — N packets (one per receiver)</h3>
+        <div class="bw-bar-bg"><div class="bw-bar-fill bw-fill-uni" id="bw-uni" style="width:80%"></div></div>
+        <div style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-charcoal);" id="bw-uni-label">4 packets/broadcast</div>
+      </div>
+    </div>
+
+    <p class="section-label">packet log</p>
+    <div class="log-panel" id="log-panel">
+      <div class="pkt"><span class="pkt-time">—</span><span>waiting for first broadcast…</span></div>
+    </div>
+  </section>
+
+  <h2>relevant API</h2>
+<pre><code>// Chrome 142+: multicast UDP via Direct Sockets (Isolated Web Apps / origin trial)
+const socket = new UDPSocket({
+  remoteAddress: "239.0.0.1",   // multicast group address
+  remotePort: 5000,
+  dnsQueryType: "ipv4",
+});
+const { readable, writable } = await socket.opened;
+
+// Join group (receiver side)
+await socket.joinMulticastGroup("239.0.0.1");
+
+// Send one packet — all group members receive it
+const writer = writable.getWriter();
+await writer.write({ data: new TextEncoder().encode("hello group") });</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v142/multicast-support-for-direct-sockets-api/">Feature index</a></li>
+      <li><a href="/v142/multicast-support-for-direct-sockets-api/multicast-receiver/">Multicast receiver</a></li>
+      <li><a href="/v142/multicast-support-for-direct-sockets-api/service-discovery/">Service discovery</a></li>
+      <li><a href="https://chromestatus.com/feature/6444952983920640" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/WICG/direct-sockets" target="_blank" rel="noopener">Direct Sockets explainer</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(function () {
+  // Feature detection
+  const hasDS = typeof UDPSocket !== "undefined" || (navigator.directSockets != null);
+  const noticeText = document.getElementById("api-notice-text");
+  noticeText.textContent = hasDS
+    ? "Direct Sockets API detected. Demo uses simulated packets for safety (no real network traffic)."
+    : "Direct Sockets API not available in this browser (requires Isolated Web App or origin trial). ";
+
+  // State
+  let isMulticast = true;
+  let totalPackets = 0;
+  let packetSeq = 0;
+  let animating = false;
+
+  const MULTICAST_GROUP = "239.0.0.1";
+  const SENDER = { id: "sender", label: "SENDER\n10.0.0.1", x: 0.5, y: 0.12 };
+  const RECEIVERS = [
+    { id: "r0", label: "RX-1\n10.0.0.2", x: 0.15, y: 0.75, active: true },
+    { id: "r1", label: "RX-2\n10.0.0.3", x: 0.38, y: 0.75, active: true },
+    { id: "r2", label: "RX-3\n10.0.0.4", x: 0.62, y: 0.75, active: true },
+    { id: "r3", label: "RX-4\n10.0.0.5", x: 0.85, y: 0.75, active: true },
+  ];
+
+  const diagram = document.getElementById("net-diagram");
+  const canvas = document.getElementById("net-canvas");
+  const ctx = canvas.getContext("2d");
+
+  function px(node, dim) {
+    return dim === "x"
+      ? node.x * diagram.offsetWidth
+      : node.y * diagram.offsetHeight;
+  }
+
+  // Create DOM nodes
+  function buildNodes() {
+    // Remove old
+    diagram.querySelectorAll(".net-node").forEach(n => n.remove());
+
+    function makeNode(node, isSender) {
+      const el = document.createElement("div");
+      el.className = "net-node";
+      el.id = "node-" + node.id;
+      const box = document.createElement("div");
+      box.className = "net-node-box " + (isSender ? "sender" : (node.active ? "receiver-active" : "receiver-inactive"));
+      box.id = "box-" + node.id;
+      box.style.whiteSpace = "pre";
+      box.textContent = node.label;
+      el.appendChild(box);
+
+      if (!isSender) {
+        const lbl = document.createElement("div");
+        lbl.className = "net-node-label";
+        lbl.textContent = node.active ? "in group" : "left group";
+        lbl.id = "lbl-" + node.id;
+        el.appendChild(lbl);
+
+        const btn = document.createElement("button");
+        btn.className = "join-btn" + (node.active ? " leave" : "");
+        btn.textContent = node.active ? "Leave" : "Join";
+        btn.id = "jbtn-" + node.id;
+        btn.addEventListener("click", () => toggleReceiver(node));
+        el.appendChild(btn);
+      }
+
+      const w = diagram.offsetWidth;
+      const h = diagram.offsetHeight;
+      el.style.position = "absolute";
+      el.style.left = (node.x * w - 36) + "px";
+      el.style.top = (node.y * h - 24) + "px";
+      diagram.appendChild(el);
+    }
+
+    makeNode(SENDER, true);
+    RECEIVERS.forEach(r => makeNode(r, false));
+    drawLines();
+    updateStats();
+  }
+
+  function toggleReceiver(node) {
+    node.active = !node.active;
+    const box = document.getElementById("box-" + node.id);
+    const lbl = document.getElementById("lbl-" + node.id);
+    const btn = document.getElementById("jbtn-" + node.id);
+    box.className = "net-node-box " + (node.active ? "receiver-active" : "receiver-inactive");
+    lbl.textContent = node.active ? "in group" : "left group";
+    btn.textContent = node.active ? "Leave" : "Join";
+    btn.className = "join-btn" + (node.active ? " leave" : "");
+    drawLines();
+    updateStats();
+  }
+
+  function drawLines() {
+    canvas.width = diagram.offsetWidth;
+    canvas.height = diagram.offsetHeight;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const sx = px(SENDER, "x");
+    const sy = px(SENDER, "y") + 24;
+
+    RECEIVERS.forEach(r => {
+      if (!r.active) return;
+      const rx = px(r, "x");
+      const ry = px(r, "y") - 24;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(rx, ry);
+      ctx.strokeStyle = "#00000033";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    });
+  }
+
+  function updateStats() {
+    const active = RECEIVERS.filter(r => r.active).length;
+    document.getElementById("stat-receivers").textContent = active;
+    document.getElementById("stat-mode").textContent = isMulticast ? "multicast" : "unicast";
+
+    // Bandwidth viz
+    const maxW = Math.max(active, 1);
+    if (isMulticast) {
+      document.getElementById("bw-multi").style.width = "20%";
+      document.getElementById("bw-uni").style.width = (20 * maxW) + "%";
+      document.getElementById("bw-multi-label").textContent = "1 packet/broadcast (multicast)";
+      document.getElementById("bw-uni-label").textContent = active + " packets/broadcast (unicast equivalent)";
+    } else {
+      document.getElementById("bw-multi").style.width = "20%";
+      document.getElementById("bw-uni").style.width = (20 * maxW) + "%";
+      document.getElementById("bw-multi-label").textContent = "1 packet/broadcast (multicast would use)";
+      document.getElementById("bw-uni-label").textContent = active + " packets/broadcast (unicast — current mode)";
+    }
+  }
+
+  async function animatePacket() {
+    if (animating) return;
+    animating = true;
+    document.getElementById("btn-broadcast").disabled = true;
+
+    const activeRx = RECEIVERS.filter(r => r.active);
+    if (activeRx.length === 0) {
+      logPacket(0, "no active receivers in group");
+      animating = false;
+      document.getElementById("btn-broadcast").disabled = false;
+      return;
+    }
+
+    packetSeq++;
+    totalPackets++;
+    document.getElementById("stat-packets").textContent = totalPackets;
+
+    const packetsSent = isMulticast ? 1 : activeRx.length;
+    const ttl = 4;
+    const payload = `seq=${packetSeq} ttl=${ttl} data="stream-chunk-${packetSeq}"`;
+
+    if (isMulticast) {
+      logPacket(packetsSent, `→ ${MULTICAST_GROUP}:5000 | ${payload}`);
+    } else {
+      activeRx.forEach(r => {
+        logPacket(1, `→ ${r.label.split("\n")[1]}:5000 | ${payload} [unicast]`);
+      });
+    }
+
+    // Animate: light up receivers one by one (multicast) or in sequence (unicast)
+    const delay = isMulticast ? 0 : 180;
+    for (let i = 0; i < activeRx.length; i++) {
+      await sleep(isMulticast ? 0 : delay * i);
+      const box = document.getElementById("box-" + activeRx[i].id);
+      box.className = "net-node-box receiver-lit";
+    }
+    await sleep(500);
+    activeRx.forEach(r => {
+      const box = document.getElementById("box-" + r.id);
+      box.className = "net-node-box receiver-active";
+    });
+
+    animating = false;
+    document.getElementById("btn-broadcast").disabled = false;
+  }
+
+  function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+  }
+
+  function logPacket(count, detail) {
+    const panel = document.getElementById("log-panel");
+    // clear placeholder
+    if (panel.querySelector("span:last-child")?.textContent === "waiting for first broadcast…") {
+      panel.innerHTML = "";
+    }
+    const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const entry = document.createElement("div");
+    entry.className = "pkt";
+    entry.innerHTML = `<span class="pkt-time">${t}</span>`
+      + `<span class="pkt-src">10.0.0.1</span>`
+      + `<span>→</span>`
+      + `<span class="pkt-dst">${isMulticast ? MULTICAST_GROUP : "unicast"}</span>`
+      + `<span class="pkt-mode">[${isMulticast ? "multicast" : "unicast"}]</span>`
+      + `<span>${detail}</span>`
+      + (count > 1 ? `<span class="pkt-bw">×${count} pkts</span>` : "");
+    panel.prepend(entry);
+    while (panel.children.length > 60) panel.removeChild(panel.lastChild);
+  }
+
+  document.getElementById("btn-broadcast").addEventListener("click", animatePacket);
+
+  document.getElementById("btn-mode").addEventListener("click", () => {
+    isMulticast = !isMulticast;
+    const btn = document.getElementById("btn-mode");
+    btn.textContent = isMulticast ? "Switch to unicast comparison" : "Switch to multicast";
+    btn.classList.toggle("active", !isMulticast);
+    updateStats();
+    drawLines();
+  });
+
+  // Init
+  buildNodes();
+  window.addEventListener("resize", () => { buildNodes(); });
+}());
+</script>
+</body>
+</html>
