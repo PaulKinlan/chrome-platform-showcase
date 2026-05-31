@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Parallel Scroll Race — Programmatic scroll promises — Chrome 150</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .race-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    @media (max-width: 500px) {
+      .race-grid { grid-template-columns: 1fr; }
+    }
+    .lane {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+    }
+    .lane-header {
+      padding: 0.4rem 0.75rem;
+      font-size: 0.75rem;
+      font-family: monospace;
+      font-weight: 700;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .lane-status {
+      font-weight: 400;
+      font-size: 0.7rem;
+      opacity: 0.8;
+    }
+    .lane-scroll {
+      height: 180px;
+      overflow-y: scroll;
+    }
+    .lane-item {
+      padding: 0.55rem 0.75rem;
+      font-size: 0.8125rem;
+      color: var(--text-charcoal);
+      border-bottom: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      transition: background 0.3s;
+    }
+    .lane-item:nth-child(odd) { background: var(--bg-stone); }
+    .lane-item.target {
+      background: color-mix(in srgb, var(--accent-blue) 18%, var(--bg-paper));
+      font-weight: 700;
+      color: var(--text-black);
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+      align-items: center;
+    }
+    .controls button { padding: 0.45rem 1rem; font-size: 0.82rem; cursor: pointer; }
+
+    .promise-display {
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: 0.75rem 1rem;
+      font-family: monospace;
+      font-size: 0.8125rem;
+      margin-bottom: 1rem;
+    }
+    .promise-display .row {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 0.2rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .promise-display .label {
+      color: var(--text-muted);
+      min-width: 9rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      font-size: 0.7rem;
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+    }
+    .badge.pending { background: var(--bg-stone); color: var(--text-muted); border-color: var(--text-muted); }
+    .badge.running { background: color-mix(in srgb, var(--accent-blue) 20%, var(--bg-ivory)); color: var(--text-black); border-color: var(--accent-blue); }
+    .badge.done { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .badge.waiting { background: color-mix(in srgb, #b87b00 15%, var(--bg-ivory)); color: var(--text-black); border-color: #b87b00; }
+
+    .log {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      font-family: monospace;
+      font-size: 0.75rem;
+      padding: 0.5rem 0.75rem;
+      max-height: 7rem;
+      overflow-y: auto;
+      color: var(--text-charcoal);
+      line-height: 1.65;
+    }
+    .log .line { display: block; }
+    .log .t-blue { color: var(--accent-blue); }
+    .log .t-green { color: var(--accent-emerald); }
+    .log .t-done { color: var(--text-black); font-weight: 700; }
+    .log .t-muted { color: var(--text-muted); }
+
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.875rem;
+      color: var(--text-charcoal);
+    }
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs">
+    <a href="/v150/">&larr; Chrome 150</a> /
+    <a href="/v150/programmatic-scroll-promises/">Programmatic scroll promises</a>
+  </p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v150 · Web APIs · Parallel Scrolling</p>
+    <h1>Parallel Scroll Race</h1>
+    <p class="lede">Use <code>Promise.all()</code> with scroll promises to fire multiple scrolls simultaneously and wait until <em>all</em> of them finish before taking action. Previously impossible without ad-hoc timers or complex listener coordination.</p>
+  </header>
+
+  <div class="note" id="support-note">Checking scroll Promise support…</div>
+
+  <section>
+    <h2>demo</h2>
+    <div class="race-grid">
+      <div class="lane">
+        <div class="lane-header">
+          <span>Lane A — short list</span>
+          <span class="lane-status" id="status-a">idle</span>
+        </div>
+        <div class="lane-scroll" id="lane-a"></div>
+      </div>
+      <div class="lane">
+        <div class="lane-header">
+          <span>Lane B — long list</span>
+          <span class="lane-status" id="status-b">idle</span>
+        </div>
+        <div class="lane-scroll" id="lane-b"></div>
+      </div>
+    </div>
+
+    <div class="promise-display">
+      <div class="row">
+        <span class="label">Promise A (short):</span>
+        <span class="badge pending" id="badge-a">pending</span>
+      </div>
+      <div class="row">
+        <span class="label">Promise B (long):</span>
+        <span class="badge pending" id="badge-b">pending</span>
+      </div>
+      <div class="row">
+        <span class="label">Promise.all():</span>
+        <span class="badge pending" id="badge-all">waiting</span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="btn-scroll-both">Scroll both (Promise.all)</button>
+      <button id="btn-scroll-a">Scroll A only</button>
+      <button id="btn-scroll-b">Scroll B only</button>
+      <button id="btn-reset">Reset to top</button>
+    </div>
+
+    <div class="log" id="log">Ready — click a button above…</div>
+  </section>
+
+  <section>
+    <h2>code</h2>
+    <pre><code>// Chrome 150+: scrollTo() returns Promise&lt;void&gt; for smooth scrolls
+const promiseA = containerA.scrollTo({
+  top: containerA.scrollHeight,
+  behavior: 'smooth',
+});
+
+const promiseB = containerB.scrollTo({
+  top: containerB.scrollHeight,
+  behavior: 'smooth',
+});
+
+// Both scroll animations run in parallel.
+// Promise.all() waits for BOTH to finish before proceeding.
+await Promise.all([promiseA, promiseB]);
+
+console.log('Both containers finished scrolling');
+doSomethingAfterBothAreVisible();
+
+// Pre-Chrome-150: you'd need two separate scroll-end event listeners,
+// tracking "done" state for each, and calling the shared callback
+// only when both had fired. Fragile and verbose.</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../scroll-promise-demo/">Scroll Promise Demo</a></li>
+      <li><a href="../scroll-sequence/">Scroll Sequence</a></li>
+      <li><a href="https://chromestatus.com/feature/5082138340491264" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Element/scrollTo" target="_blank" rel="noopener">MDN — Element.scrollTo()</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const laneA = document.getElementById('lane-a');
+  const laneB = document.getElementById('lane-b');
+  const statusA = document.getElementById('status-a');
+  const statusB = document.getElementById('status-b');
+  const badgeA = document.getElementById('badge-a');
+  const badgeB = document.getElementById('badge-b');
+  const badgeAll = document.getElementById('badge-all');
+  const logEl = document.getElementById('log');
+
+  // Populate lists
+  const ITEMS_A = 12;
+  const ITEMS_B = 28;
+  for (let i = 1; i <= ITEMS_A; i++) {
+    const el = document.createElement('div');
+    el.className = 'lane-item';
+    el.textContent = `Item A-${i}`;
+    el.dataset.index = i;
+    laneA.appendChild(el);
+  }
+  for (let i = 1; i <= ITEMS_B; i++) {
+    const el = document.createElement('div');
+    el.className = 'lane-item';
+    el.textContent = `Item B-${i}`;
+    el.dataset.index = i;
+    laneB.appendChild(el);
+  }
+
+  const hasScrollPromise = (() => {
+    const tmp = document.createElement('div');
+    tmp.style.cssText = 'height:10px;overflow:auto;position:absolute;left:-9999px';
+    document.body.appendChild(tmp);
+    const r = tmp.scrollTo({ top: 0 });
+    document.body.removeChild(tmp);
+    return r instanceof Promise;
+  })();
+
+  document.getElementById('support-note').innerHTML = hasScrollPromise
+    ? '<strong>Scroll Promises supported</strong> — Promise.all() will resolve exactly when both animations finish.'
+    : '<strong>Scroll Promises not supported</strong> — requires Chrome 150+. setTimeout fallback is used; timing may be off.';
+
+  function ts() { return new Date().toLocaleTimeString('en', { hour12: false, second: '2-digit', fractionalSecondDigits: 2 }); }
+
+  function log(msg, cls = '') {
+    if (logEl.textContent.startsWith('Ready')) logEl.textContent = '';
+    const line = document.createElement('span');
+    line.className = 'line' + (cls ? ' t-' + cls : '');
+    line.textContent = `[${ts()}] ${msg}`;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function setBadge(el, state, label) {
+    el.className = 'badge ' + state;
+    el.textContent = label;
+  }
+
+  function setStatus(el, text) { el.textContent = text; }
+
+  function resetBadges() {
+    setBadge(badgeA, 'pending', 'pending');
+    setBadge(badgeB, 'pending', 'pending');
+    setBadge(badgeAll, 'pending', 'pending');
+    setStatus(statusA, 'idle');
+    setStatus(statusB, 'idle');
+  }
+
+  function smoothScroll(container, targetTop) {
+    if (hasScrollPromise) {
+      return container.scrollTo({ top: targetTop, behavior: 'smooth' });
+    }
+    // Fallback: estimated duration
+    container.scrollTo({ top: targetTop, behavior: 'smooth' });
+    const distance = Math.abs(container.scrollTop - targetTop);
+    const estimatedMs = Math.max(300, distance * 0.5);
+    return new Promise(res => setTimeout(res, estimatedMs));
+  }
+
+  async function doParallelScroll() {
+    resetBadges();
+    setBadge(badgeA, 'running', 'scrolling…');
+    setBadge(badgeB, 'running', 'scrolling…');
+    setBadge(badgeAll, 'waiting', 'waiting…');
+    setStatus(statusA, 'scrolling');
+    setStatus(statusB, 'scrolling');
+
+    log('Starting both scrolls simultaneously…', 'blue');
+
+    const pA = smoothScroll(laneA, laneA.scrollHeight).then(() => {
+      setBadge(badgeA, 'done', 'done ✓');
+      setStatus(statusA, 'done');
+      log('Lane A finished', 'green');
+    });
+
+    const pB = smoothScroll(laneB, laneB.scrollHeight).then(() => {
+      setBadge(badgeB, 'done', 'done ✓');
+      setStatus(statusB, 'done');
+      log('Lane B finished', 'green');
+    });
+
+    await Promise.all([pA, pB]);
+    setBadge(badgeAll, 'done', 'resolved ✓');
+    log('Promise.all() resolved — both lanes done!', 'done');
+
+    // Highlight last items
+    const lastA = laneA.querySelector('[data-index="' + ITEMS_A + '"]');
+    const lastB = laneB.querySelector('[data-index="' + ITEMS_B + '"]');
+    if (lastA) lastA.classList.add('target');
+    if (lastB) lastB.classList.add('target');
+  }
+
+  async function doSingleScroll(lane, statusEl, badge, label) {
+    resetBadges();
+    setBadge(badge, 'running', 'scrolling…');
+    setStatus(statusEl, 'scrolling');
+    log(`Starting ${label} scroll…`, 'blue');
+
+    await smoothScroll(lane, lane.scrollHeight);
+    setBadge(badge, 'done', 'done ✓');
+    setStatus(statusEl, 'done');
+    log(`${label} scroll finished`, 'green');
+  }
+
+  document.getElementById('btn-scroll-both').addEventListener('click', doParallelScroll);
+  document.getElementById('btn-scroll-a').addEventListener('click', () => doSingleScroll(laneA, statusA, badgeA, 'Lane A'));
+  document.getElementById('btn-scroll-b').addEventListener('click', () => doSingleScroll(laneB, statusB, badgeB, 'Lane B'));
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    laneA.scrollTop = 0;
+    laneB.scrollTop = 0;
+    laneA.querySelectorAll('.target').forEach(el => el.classList.remove('target'));
+    laneB.querySelectorAll('.target').forEach(el => el.classList.remove('target'));
+    resetBadges();
+    logEl.textContent = 'Reset — ready to scroll again.';
+  });
+</script>
+</body>
+</html>
