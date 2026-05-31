@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker poll - WebHID on workers - Chrome 131 - chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-4) 0; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .panel { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); box-shadow: var(--thin-shadow); }
+    .panel h4 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    .log { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); min-height: 160px; max-height: 280px; overflow-y: auto; white-space: pre-wrap; }
+    .stat-row { display: flex; gap: var(--space-2); flex-wrap: wrap; font-family: var(--font-mono); font-size: 0.75rem; margin: var(--space-2) 0; }
+    .chip { padding: 0.3rem 0.55rem; border: 2px solid var(--border-black); background: var(--bg-stone); }
+    .chip.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .chip.bad { background: var(--accent-rose); color: var(--bg-ivory); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v131/">&larr; v131</a> &middot; <a href="../">WebHID on dedicated workers</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v131</p>
+    <h1>worker probe: navigator.hid in a dedicated worker</h1>
+    <p class="lede">v131 exposes <code>navigator.hid</code> inside dedicated workers. The main thread is freed from blocking I/O on HID reads — useful for high-frequency gaming peripherals, MIDI controllers, hardware key dongles. This page spawns a worker and asks it to enumerate devices on a tight loop.</p>
+  </header>
+
+  <div class="toolbar">
+    <button id="probe">probe worker</button>
+    <button id="request">request a device (worker)</button>
+    <button id="stop" disabled>stop worker</button>
+  </div>
+
+  <div class="stat-row" id="probes"></div>
+
+  <div class="grid">
+    <div class="panel">
+      <h4>main-thread view</h4>
+      <div class="log" id="main-log"></div>
+    </div>
+    <div class="panel">
+      <h4>worker view (postMessage relay)</h4>
+      <div class="log" id="worker-log"></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>the api</h2>
+<pre><code>// main.js
+const w = new Worker("hid-worker.js", { type: "module" });
+w.postMessage({ cmd: "enumerate" });
+
+// hid-worker.js
+self.onmessage = async (e) =&gt; {
+  if (e.data.cmd === "enumerate") {
+    const devices = await navigator.hid.getDevices();
+    self.postMessage({ devices: devices.map(d =&gt; ({ vendorId: d.vendorId, productId: d.productId, name: d.productName })) });
+  }
+};</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../hid-worker/">Base WebHID worker</a></li>
+      <li><a href="../high-freq-input/">High-frequency input</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  function log(panel, s) {
+    const el = document.getElementById(panel + "-log");
+    el.textContent = new Date().toISOString().slice(11,23) + " " + s + "\n" + el.textContent;
+  }
+  const probes = [
+    ["navigator.hid (main)", "hid" in navigator],
+    ["Worker available", typeof Worker !== "undefined"],
+  ];
+  const ps = document.getElementById("probes");
+  probes.forEach(([k, ok]) => {
+    const c = document.createElement("span");
+    c.className = "chip " + (ok ? "ok" : "bad");
+    c.textContent = k + ": " + (ok ? "yes" : "no");
+    ps.appendChild(c);
+  });
+
+  let worker = null;
+  function makeWorker() {
+    const code = `
+      self.onmessage = async (e) => {
+        if (e.data.cmd === "probe") {
+          self.postMessage({ kind: "probe", has: "hid" in navigator });
+        }
+        if (e.data.cmd === "enumerate") {
+          if (!("hid" in navigator)) { self.postMessage({ kind: "log", text: "navigator.hid NOT available in worker" }); return; }
+          try {
+            const devs = await navigator.hid.getDevices();
+            self.postMessage({ kind: "log", text: "found " + devs.length + " devices" });
+            for (const d of devs) self.postMessage({ kind: "log", text: "  - " + (d.productName || "?") + " vid=" + d.vendorId.toString(16) + " pid=" + d.productId.toString(16) });
+          } catch (err) { self.postMessage({ kind: "log", text: "enumerate failed: " + err.message }); }
+        }
+      };
+    `;
+    const blob = new Blob([code], { type: "application/javascript" });
+    const w = new Worker(URL.createObjectURL(blob));
+    w.onmessage = (e) => {
+      if (e.data.kind === "log") log("worker", e.data.text);
+      if (e.data.kind === "probe") log("worker", "probe -> hid in navigator: " + e.data.has);
+    };
+    return w;
+  }
+  document.getElementById("probe").addEventListener("click", () => {
+    if (!worker) worker = makeWorker();
+    worker.postMessage({ cmd: "probe" });
+    worker.postMessage({ cmd: "enumerate" });
+    log("main", "main: posted probe + enumerate to worker");
+    document.getElementById("stop").disabled = false;
+  });
+  document.getElementById("request").addEventListener("click", async () => {
+    if (!("hid" in navigator)) { log("main", "no navigator.hid on main"); return; }
+    try {
+      const devs = await navigator.hid.requestDevice({ filters: [] });
+      log("main", "user picked: " + devs.length + " devices");
+      if (worker) worker.postMessage({ cmd: "enumerate" });
+    } catch (e) { log("main", "request error: " + e.message); }
+  });
+  document.getElementById("stop").addEventListener("click", () => { if (worker) { worker.terminate(); worker = null; log("main", "worker terminated"); document.getElementById("stop").disabled = true; }});
+</script>
+</body>
+</html>

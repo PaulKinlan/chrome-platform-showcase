@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Parallel pipelines - WebHID on workers - Chrome 131 - chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-4) 0; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .panel { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); box-shadow: var(--thin-shadow); }
+    .panel h4 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    canvas { width: 100%; height: 140px; border: 2px solid var(--border-black); background: var(--bg-stone); display: block; margin: var(--space-2) 0; }
+    .stats { font-family: var(--font-mono); font-size: 0.8rem; padding: var(--space-2); background: var(--bg-stone); border: 1px solid var(--border-black); margin: var(--space-2) 0; }
+    .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; }
+    .pattern { width: 100%; height: 50px; background: var(--bg-stone); border: 2px solid var(--border-black); display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-muted); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v131/">&larr; v131</a> &middot; <a href="../">WebHID on dedicated workers</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v131</p>
+    <h1>two device pipelines, two workers, no main-thread jitter</h1>
+    <p class="lede">A high-frequency joystick + a haptic gamepad together can saturate a single thread reading HID reports. Spawning each on its own worker (each calling <code>navigator.hid</code>) keeps the main thread at 60fps for animation. This page simulates two HID streams arriving at different cadences and shows the main thread's frame-time staying flat.</p>
+  </header>
+
+  <div class="toolbar">
+    <button id="start">start both pipelines</button>
+    <button id="stop" disabled>stop</button>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h4>worker 1 — high-rate joystick</h4>
+      <canvas id="cv1"></canvas>
+      <div class="stats" id="s1">awaiting messages</div>
+    </div>
+    <div class="panel">
+      <h4>worker 2 — gamepad with haptics</h4>
+      <canvas id="cv2"></canvas>
+      <div class="stats" id="s2">awaiting messages</div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top: var(--space-4);">
+    <h4>main thread frame time (smaller is smoother)</h4>
+    <canvas id="cv-main" style="height: 80px;"></canvas>
+    <div class="stats" id="s-main">—</div>
+  </div>
+
+  <section>
+    <h2>the api</h2>
+<pre><code>// dispatch one worker per device class
+const joystick = new Worker("hid-joystick.js", { type: "module" });
+const gamepad  = new Worker("hid-gamepad.js",  { type: "module" });
+
+// hid-joystick.js (runs in worker)
+const [device] = await navigator.hid.requestDevice({ filters: [{ usagePage: 0x0001, usage: 0x0004 }] });
+await device.open();
+device.addEventListener("inputreport", e => {
+  // process in worker, post deltas to main
+  self.postMessage({ x: e.data.getInt8(0), y: e.data.getInt8(1) });
+});</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../hid-worker/">Base WebHID worker</a></li>
+      <li><a href="../high-freq-input/">High-frequency input</a></li>
+      <li><a href="../usage-poll/">Worker probe</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  let w1, w2, raf, mainTimes = [];
+  function makeSim(rateHz, name) {
+    const code = `
+      let interval = ${1000 / rateHz};
+      let n = 0;
+      setInterval(() => {
+        n++;
+        // simulate a small HID buffer parse
+        const start = performance.now();
+        let s = 0; for (let i = 0; i < 5000; i++) s += Math.sin(i);
+        const t = performance.now() - start;
+        self.postMessage({ name: "${name}", x: Math.sin(n*0.1), y: Math.cos(n*0.07), parseMs: t, count: n });
+      }, interval);
+    `;
+    return new Worker(URL.createObjectURL(new Blob([code], { type: "application/javascript" })));
+  }
+  function startMain() {
+    let last = performance.now();
+    function frame(t) {
+      const dt = t - last; last = t;
+      mainTimes.push(dt);
+      if (mainTimes.length > 200) mainTimes.shift();
+      drawMain();
+      raf = requestAnimationFrame(frame);
+    }
+    raf = requestAnimationFrame(frame);
+  }
+  function drawTrack(canvas, samples, color) {
+    const ctx = canvas.getContext("2d");
+    ctx.canvas.width = canvas.clientWidth * devicePixelRatio;
+    ctx.canvas.height = canvas.clientHeight * devicePixelRatio;
+    ctx.scale(devicePixelRatio, devicePixelRatio);
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    ctx.fillStyle = "#f4f3ee"; ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+    const max = Math.max(1, ...samples);
+    samples.forEach((v, i) => {
+      const x = i / samples.length * w;
+      const y = h - (v / max * (h - 4)) - 2;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  function drawMain() { drawTrack(document.getElementById("cv-main"), mainTimes, "#0a8f5c");
+    if (mainTimes.length) {
+      const avg = mainTimes.reduce((a,b) => a+b,0)/mainTimes.length;
+      const max = Math.max(...mainTimes);
+      document.getElementById("s-main").textContent = `avg frame: ${avg.toFixed(2)} ms · worst: ${max.toFixed(1)} ms`;
+    }
+  }
+  const samples = { 1: [], 2: [] };
+  function attach(w, panel, color) {
+    w.onmessage = e => {
+      samples[panel].push(e.data.parseMs);
+      if (samples[panel].length > 100) samples[panel].shift();
+      drawTrack(document.getElementById("cv" + panel), samples[panel], color);
+      document.getElementById("s" + panel).textContent = `event #${e.data.count} · parse ${e.data.parseMs.toFixed(2)} ms · x=${e.data.x.toFixed(2)}`;
+    };
+  }
+  document.getElementById("start").addEventListener("click", () => {
+    w1 = makeSim(120, "joystick"); attach(w1, 1, "#0022ff");
+    w2 = makeSim(60, "gamepad"); attach(w2, 2, "#d11a2a");
+    startMain();
+    document.getElementById("stop").disabled = false;
+  });
+  document.getElementById("stop").addEventListener("click", () => {
+    if (w1) { w1.terminate(); w1 = null; }
+    if (w2) { w2.terminate(); w2 = null; }
+    if (raf) cancelAnimationFrame(raf);
+    document.getElementById("stop").disabled = true;
+  });
+</script>
+</body>
+</html>
