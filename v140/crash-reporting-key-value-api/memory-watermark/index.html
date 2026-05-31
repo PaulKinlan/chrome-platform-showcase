@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Memory Watermark — Crash Reporting KV — Chrome 140 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: var(--space-5) 0; }
+    .gauge { display: grid; grid-template-columns: auto 1fr auto; gap: var(--space-3); align-items: center; margin-bottom: var(--space-3); }
+    .gauge .label { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-muted); }
+    .gauge .value { font-family: var(--font-mono); font-size: 0.9rem; color: var(--text-black); }
+    .bar { height: 18px; background: var(--bg-stone); border: 1px solid var(--border-black); position: relative; overflow: hidden; }
+    .bar .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent-emerald); transition: width 200ms, background 200ms; }
+    .bar.warn .fill { background: var(--accent-amber); }
+    .bar.danger .fill { background: var(--accent-rose); }
+    .row { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; align-items: center; }
+    pre.payload { background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-3); font-size: 0.78rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Crash Reporting key-value API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v140</p>
+    <h1>Memory Watermark</h1>
+    <p class="lede">An OOM crash that lands with no memory context is the worst kind. Snapshot the heap watermark and a count of active long-lived objects (canvases, audio nodes, observers) on every navigation — the moment the tab dies, the report carries the last good reading.</p>
+  </header>
+
+  <div class="stage">
+    <div class="gauge">
+      <span class="label">heap used</span>
+      <div class="bar" id="heapBar"><div class="fill" id="heapFill" style="width:0%"></div></div>
+      <span class="value" id="heapVal">– MB</span>
+    </div>
+    <div class="gauge">
+      <span class="label">DOM nodes</span>
+      <div class="bar" id="domBar"><div class="fill" id="domFill" style="width:0%"></div></div>
+      <span class="value" id="domVal">–</span>
+    </div>
+    <div class="gauge">
+      <span class="label">active observers</span>
+      <div class="bar" id="obsBar"><div class="fill" id="obsFill" style="width:0%"></div></div>
+      <span class="value" id="obsVal">–</span>
+    </div>
+
+    <div class="row">
+      <button id="grow">Allocate +500k nodes</button>
+      <button id="shrink">Drop allocations</button>
+      <button id="snap">Snapshot to crash KV</button>
+      <button id="crash">Simulate crash</button>
+    </div>
+
+    <pre class="payload" id="payload">awaiting crash</pre>
+  </div>
+
+  <pre><code>// Run on a 5-second tick or after every route change.
+function snapshotMemory() {
+  if (performance.measureUserAgentSpecificMemory) {
+    performance.measureUserAgentSpecificMemory().then(r =&gt; {
+      crashReport.set("heap_mb", String(Math.round(r.bytes / 1e6)));
+    });
+  }
+  crashReport.set("dom_nodes", String(document.querySelectorAll("*").length));
+  crashReport.set("observers", String(activeObserverCount));
+}
+</code></pre>
+
+  <section>
+    <h2>why a watermark</h2>
+    <p>You don't ship a memory reading from inside the crash handler — by then the renderer is dead. You ship the <em>last</em> reading. Snapshot on every route change, every visibility change, and every WebGL context creation. When the report lands you can reconstruct: "this user was at 480 MB and 230k DOM nodes when their tab died." Way more actionable than "OOM."</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Crash Reporting key-value API</a> — feature index</li>
+      <li><a href="https://developer.chrome.com/blog/measureusermemory/" target="_blank" rel="noopener">measureUserAgentSpecificMemory</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const hasApi = 'crashReport' in window && typeof window.crashReport?.set === 'function';
+  const fake = new Map();
+  const api = hasApi ? window.crashReport : { set: (k, v) => fake.set(k, v), entries: () => fake.entries() };
+
+  const state = { heapMB: 64, domNodes: 4000, observers: 3 };
+  let ballast = [];
+
+  function setBar(id, ratio) {
+    const fill = document.getElementById(id + 'Fill');
+    const bar = document.getElementById(id + 'Bar');
+    fill.style.width = Math.min(100, ratio * 100) + '%';
+    bar.classList.toggle('warn', ratio > 0.5 && ratio <= 0.8);
+    bar.classList.toggle('danger', ratio > 0.8);
+  }
+
+  function render() {
+    document.getElementById('heapVal').textContent = state.heapMB + ' MB';
+    document.getElementById('domVal').textContent = state.domNodes.toLocaleString();
+    document.getElementById('obsVal').textContent = state.observers;
+    setBar('heap', state.heapMB / 512);
+    setBar('dom', state.domNodes / 200000);
+    setBar('obs', state.observers / 50);
+  }
+
+  function snapshot() {
+    api.set('heap_mb', String(state.heapMB));
+    api.set('dom_nodes', String(state.domNodes));
+    api.set('observers', String(state.observers));
+    api.set('snapshot_at', new Date().toISOString());
+  }
+
+  document.getElementById('grow').addEventListener('click', () => {
+    state.domNodes += 500_000;
+    state.heapMB += 64;
+    state.observers += 5;
+    ballast.push(new Array(50_000).fill(0));
+    snapshot();
+    render();
+  });
+  document.getElementById('shrink').addEventListener('click', () => {
+    state.domNodes = 4000;
+    state.heapMB = 64;
+    state.observers = 3;
+    ballast = [];
+    snapshot();
+    render();
+  });
+  document.getElementById('snap').addEventListener('click', () => {
+    snapshot();
+    document.getElementById('payload').textContent = `snapshot taken at ${new Date().toISOString()}\nkeys: heap_mb, dom_nodes, observers, snapshot_at`;
+  });
+
+  document.getElementById('crash').addEventListener('click', () => {
+    snapshot();
+    const entries = hasApi ? Array.from(api.entries?.() || []) : Array.from(fake);
+    const report = {
+      type: 'crash',
+      url: location.href,
+      timestamp: new Date().toISOString(),
+      body: { reason: 'oom', keyValues: Object.fromEntries(entries) },
+    };
+    document.getElementById('payload').textContent = JSON.stringify(report, null, 2);
+  });
+
+  snapshot();
+  render();
+</script>
+</body>
+</html>
