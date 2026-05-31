@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Streams - await using - Chrome 131 - chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; }
+    .panel { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); box-shadow: var(--thin-shadow); margin: var(--space-4) 0; }
+    .panel h4 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    .log { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); min-height: 140px; max-height: 320px; overflow-y: auto; }
+    .log .row.read { color: var(--accent-blue); }
+    .log .row.write { color: var(--text-charcoal); }
+    .log .row.release { color: var(--accent-emerald); }
+    .log .row.error { color: var(--accent-rose); }
+    .stat-row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0; font-family: var(--font-mono); font-size: 0.75rem; }
+    .stat-row .chip { padding: 0.4rem 0.55rem; border: 2px solid var(--border-black); background: var(--bg-stone); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v131/">&larr; v131</a> &middot; <a href="../">await using (async)</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v131</p>
+    <h1>stream reader: release the lock on scope exit</h1>
+    <p class="lede">A common bug: <code>const reader = stream.getReader()</code> then forget to <code>reader.releaseLock()</code>. The stream is permanently locked, other consumers can't read it, and you don't notice until the next bug report. Wrap the reader as <code>AsyncDisposable</code> and the lock releases automatically when the scope ends — including on early returns and thrown errors.</p>
+  </header>
+
+  <div class="toolbar">
+    <button id="run-good">run with AsyncDisposable</button>
+    <button id="run-bad">run without (leak)</button>
+    <button id="reset">reset</button>
+  </div>
+
+  <div class="stat-row">
+    <span class="chip" id="locks">locks acquired: 0</span>
+    <span class="chip" id="releases">locks released: 0</span>
+    <span class="chip" id="leaked">currently leaked: 0</span>
+  </div>
+
+  <div class="panel">
+    <h4>stream reader log</h4>
+    <div class="log" id="log"></div>
+  </div>
+
+  <section>
+    <h2>the api</h2>
+<pre><code>function disposableReader(stream) {
+  const reader = stream.getReader();
+  reader[Symbol.asyncDispose] = async () =&gt; {
+    reader.releaseLock();
+  };
+  return reader;
+}
+
+async function read(stream) {
+  await using reader = disposableReader(stream);
+  const { value } = await reader.read();
+  return value;
+}  // lock released here, even if read() threw</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../await-using/">Base await using</a></li>
+      <li><a href="../database-transaction/">Database transaction</a></li>
+      <li><a href="../abort-controller/">AbortController scope</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  let acquired = 0, released = 0;
+  function rec(cls, msg) {
+    const log = document.getElementById("log");
+    const row = document.createElement("div");
+    row.className = "row " + cls;
+    row.textContent = new Date().toISOString().slice(11,23) + " " + msg;
+    log.prepend(row);
+  }
+  function updateStats() {
+    document.getElementById("locks").textContent = "locks acquired: " + acquired;
+    document.getElementById("releases").textContent = "locks released: " + released;
+    document.getElementById("leaked").textContent = "currently leaked: " + (acquired - released);
+  }
+  function makeStream() {
+    let i = 0;
+    return new ReadableStream({
+      pull(c) {
+        if (i++ < 3) c.enqueue("chunk-" + i);
+        else c.close();
+      }
+    });
+  }
+  async function runWithDispose() {
+    const stream = makeStream();
+    const reader = stream.getReader();
+    acquired++;
+    rec("read", "getReader() called");
+    updateStats();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        rec("read", "read: " + value);
+        // Throw on chunk-2 to simulate an error
+        if (value === "chunk-2") throw new Error("simulated parse error");
+      }
+    } catch (e) {
+      rec("error", "caught: " + e.message);
+    } finally {
+      reader.releaseLock();
+      released++;
+      rec("release", "releaseLock() called from Symbol.asyncDispose (sim)");
+      updateStats();
+    }
+  }
+  async function runWithoutDispose() {
+    const stream = makeStream();
+    const reader = stream.getReader();
+    acquired++;
+    rec("read", "getReader() called (no releaseLock wired)");
+    updateStats();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        rec("read", "read: " + value);
+        if (value === "chunk-2") throw new Error("simulated parse error");
+      }
+    } catch (e) {
+      rec("error", "caught: " + e.message + " (LEAK: lock never released)");
+    }
+  }
+  document.getElementById("run-good").addEventListener("click", runWithDispose);
+  document.getElementById("run-bad").addEventListener("click", runWithoutDispose);
+  document.getElementById("reset").addEventListener("click", () => {
+    acquired = released = 0;
+    updateStats();
+    document.getElementById("log").innerHTML = "";
+  });
+  updateStats();
+</script>
+</body>
+</html>

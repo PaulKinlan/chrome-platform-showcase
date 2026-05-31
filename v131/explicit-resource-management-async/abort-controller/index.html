@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AbortController - await using - Chrome 131 - chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-4) 0; }
+    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .panel { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); box-shadow: var(--thin-shadow); }
+    .panel h4 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    .log { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); min-height: 140px; max-height: 260px; overflow-y: auto; }
+    .log .row.acquire { color: var(--accent-blue); }
+    .log .row.success { color: var(--accent-emerald); }
+    .log .row.abort { color: var(--accent-rose); }
+    .stat { font-family: var(--font-mono); font-size: 0.75rem; padding: 0.4rem 0.55rem; background: var(--bg-stone); border: 2px solid var(--border-black); display: inline-block; margin-right: var(--space-2); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v131/">&larr; v131</a> &middot; <a href="../">await using (async)</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v131</p>
+    <h1>cancellation: AsyncDisposable wrapping an AbortController</h1>
+    <p class="lede">When a request scope ends — user navigates away, drawer closes, page tears down — every in-flight fetch should abort. Wrap <code>AbortController</code> as an <code>AsyncDisposable</code> and any function leaving the scope sends abort to all child requests. Mock a slow API and watch in-flight requests cancel together.</p>
+  </header>
+
+  <div class="toolbar">
+    <button id="start">start scope (1 fetch + 1 stream)</button>
+    <button id="end-scope" disabled>end scope (auto-aborts)</button>
+    <button id="reset">reset</button>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h4>scope log</h4>
+      <div class="log" id="log"></div>
+      <div style="margin-top: var(--space-3);">
+        <span class="stat" id="open-stat">in-flight: 0</span>
+        <span class="stat" id="abort-stat">aborts: 0</span>
+        <span class="stat" id="done-stat">completed: 0</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h4>request timelines</h4>
+      <div id="timelines" style="display: flex; flex-direction: column; gap: 0.5rem; min-height: 200px;"></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>the api</h2>
+<pre><code>class RequestScope {
+  constructor() { this.ctrl = new AbortController(); }
+  fetch(url) { return fetch(url, { signal: this.ctrl.signal }); }
+  async [Symbol.asyncDispose]() { this.ctrl.abort("scope ended"); }
+}
+
+async function run() {
+  await using scope = new RequestScope();
+  scope.fetch("/api/users");
+  scope.fetch("/api/feed");
+  // ... scope ends here, both in-flight requests abort
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../await-using/">Base await using</a></li>
+      <li><a href="../database-transaction/">Database transaction</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  let openCount = 0, abortCount = 0, doneCount = 0;
+  function rec(cls, msg) {
+    const log = document.getElementById("log");
+    const row = document.createElement("div");
+    row.className = "row " + cls;
+    row.textContent = new Date().toISOString().slice(11,23) + " " + msg;
+    log.prepend(row);
+  }
+  function updateStats() {
+    document.getElementById("open-stat").textContent = "in-flight: " + openCount;
+    document.getElementById("abort-stat").textContent = "aborts: " + abortCount;
+    document.getElementById("done-stat").textContent = "completed: " + doneCount;
+  }
+  function addTimeline(name) {
+    const row = document.createElement("div");
+    row.style.cssText = "border: 1px solid #000; height: 16px; position: relative; background: #f4f3ee;";
+    row.innerHTML = `<div style="position: absolute; left: 0; top: 0; height: 100%; background: #0022ff; width: 0%; transition: width 50ms linear;"></div><span style="position: absolute; top: 50%; left: 6px; transform: translateY(-50%); font-family: monospace; font-size: 0.7rem; color: #fff; mix-blend-mode: difference;">${name}</span>`;
+    document.getElementById("timelines").appendChild(row);
+    return row.querySelector("div");
+  }
+  let scope = null;
+  function startScope() {
+    if (scope) return;
+    const ctrl = new AbortController();
+    scope = ctrl;
+    rec("acquire", "scope opened");
+    document.getElementById("end-scope").disabled = false;
+    // sim 2 requests
+    ["/api/users", "/api/feed"].forEach(url => {
+      openCount++;
+      updateStats();
+      const bar = addTimeline(url);
+      const total = 3000 + Math.random() * 2000;
+      const start = performance.now();
+      const tick = setInterval(() => {
+        const elapsed = performance.now() - start;
+        bar.style.width = Math.min(100, elapsed / total * 100) + "%";
+      }, 60);
+      const finishTimer = setTimeout(() => {
+        clearInterval(tick);
+        openCount--; doneCount++; updateStats();
+        rec("success", url + " ok");
+        bar.style.background = "#0a8f5c";
+        bar.style.width = "100%";
+      }, total);
+      ctrl.signal.addEventListener("abort", () => {
+        clearInterval(tick); clearTimeout(finishTimer);
+        if (openCount > 0) openCount--;
+        abortCount++;
+        updateStats();
+        rec("abort", url + " aborted: " + ctrl.signal.reason);
+        bar.style.background = "#d11a2a";
+      }, { once: true });
+    });
+  }
+  function endScope() {
+    if (!scope) return;
+    rec("acquire", "scope[Symbol.asyncDispose]() called");
+    scope.abort("scope ended");
+    scope = null;
+    document.getElementById("end-scope").disabled = true;
+  }
+  document.getElementById("start").addEventListener("click", startScope);
+  document.getElementById("end-scope").addEventListener("click", endScope);
+  document.getElementById("reset").addEventListener("click", () => {
+    if (scope) { scope.abort("reset"); scope = null; }
+    openCount = abortCount = doneCount = 0;
+    updateStats();
+    document.getElementById("log").innerHTML = "";
+    document.getElementById("timelines").innerHTML = "";
+    document.getElementById("end-scope").disabled = true;
+  });
+  updateStats();
+</script>
+</body>
+</html>
