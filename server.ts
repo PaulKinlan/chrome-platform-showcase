@@ -2213,7 +2213,7 @@ function renderWebSocketBfcacheRoute(req: Request, sub: string): Response | null
 
   const { socket, response } = Deno.upgradeWebSocket(req);
   const id = randomBase64Url(6);
-  let heartbeat: number | undefined;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
 
   socket.onopen = () => {
     socket.send(JSON.stringify({
