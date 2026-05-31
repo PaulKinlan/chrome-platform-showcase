@@ -20,6 +20,7 @@
     .filler { color: var(--text-muted); font-style: italic; }
     .dropped { background: var(--accent-rose); color: var(--bg-ivory); }
     .summary { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.9rem; margin: var(--space-4) 0; }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; white-space: pre-wrap; margin-top: var(--space-3); }
   </style>
 </head>
 <body>
@@ -34,7 +35,7 @@
 
   <div class="probe" id="probe">probing Private Aggregation per-context cap…</div>
 
-  <div class="warn-block">Private Aggregation lives inside Shared Storage worklets — this page replicates the bookkeeping. The production call signature in the snippet below is what Chrome 134+ honours.</div>
+  <div class="warn-block">Private Aggregation lives inside Shared Storage worklets. The table shows the request plan; the button below attempts the real <code>sharedStorage.worklet.addModule()</code> and <code>sharedStorage.run()</code> path where the browser exposes it.</div>
 
   <h2>Configure a report</h2>
   <div class="controls">
@@ -49,6 +50,8 @@
       <span id="contribs-val">14</span>
     </div>
   </div>
+  <button id="run-worklet">Run Shared Storage worklet</button>
+  <div class="log" id="run-log">waiting for worklet run…</div>
 
   <div class="stage">
     <table class="r"><thead><tr><th>slot</th><th>bucket</th><th>value</th><th>note</th></tr></thead><tbody id="rows"></tbody></table>
@@ -86,10 +89,11 @@ register('my-op', class {
 
 <script>
   const probe = document.getElementById('probe');
-  const supported = 'sharedStorage' in window;
+  const supported = typeof window.sharedStorage?.worklet?.addModule === 'function';
   probe.innerHTML = supported
-    ? '<span class="ok">sharedStorage detected</span> — per-context limits live inside worklets; simulation below uses spec-conformant bookkeeping'
-    : '<span class="bad">sharedStorage missing</span> — simulation only';
+    ? '<span class="ok">sharedStorage worklet detected</span> — run the real worklet call below'
+    : '<span class="bad">sharedStorage worklet missing</span> — this browser cannot run the Private Aggregation call';
+  document.getElementById('run-worklet').disabled = !supported;
 
   const cap = document.getElementById('cap');
   const contribs = document.getElementById('contribs');
@@ -97,6 +101,7 @@ register('my-op', class {
   const contribsVal = document.getElementById('contribs-val');
   const rowsEl = document.getElementById('rows');
   const summary = document.getElementById('summary');
+  const runLog = document.getElementById('run-log');
 
   function render() {
     const c = +cap.value;
@@ -112,7 +117,7 @@ register('my-op', class {
       const tr = document.createElement('tr');
       if (i < real) {
         const b = (i + 1).toString().padStart(2, '0');
-        tr.innerHTML = `<td>${i + 1}</td><td>0x${b}</td><td>${Math.floor(Math.random() * 50)}</td><td>real contribution</td>`;
+        tr.innerHTML = `<td>${i + 1}</td><td>0x${b}</td><td>${i + 1}</td><td>queued contribution</td>`;
       } else {
         tr.innerHTML = `<td>${i + 1}</td><td>0x00</td><td>0</td><td class="filler">noise padding</td>`;
       }
@@ -120,7 +125,7 @@ register('my-op', class {
     }
     for (let i = 0; i < dropped; i++) {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>—</td><td>0x${(c + i + 1).toString().padStart(2, '0')}</td><td>${Math.floor(Math.random() * 50)}</td><td class="dropped" style="padding: 0.4rem 0.8rem;">DROPPED — over cap</td>`;
+      tr.innerHTML = `<td>—</td><td>0x${(c + i + 1).toString().padStart(2, '0')}</td><td>${c + i + 1}</td><td class="dropped" style="padding: 0.4rem 0.8rem;">DROPPED — over cap</td>`;
       rowsEl.appendChild(tr);
     }
 
@@ -130,6 +135,38 @@ register('my-op', class {
 
   cap.addEventListener('input', render);
   contribs.addEventListener('input', render);
+  document.getElementById('run-worklet').addEventListener('click', async () => {
+    if (!supported) return;
+    runLog.textContent = 'Adding worklet module…';
+    const moduleCode = `
+      class BudgetTuningOperation {
+        async run(data) {
+          const count = Number(data.count || 0);
+          for (let i = 0; i < count; i++) {
+            privateAggregation.contributeToHistogram({
+              bucket: BigInt(i + 1),
+              value: i + 1,
+            });
+          }
+        }
+      }
+      register('budget-tuning', BudgetTuningOperation);
+    `;
+    const url = URL.createObjectURL(new Blob([moduleCode], { type: 'application/javascript' }));
+    try {
+      await sharedStorage.worklet.addModule(url);
+      runLog.textContent = 'Running sharedStorage.run("budget-tuning")…';
+      await sharedStorage.run('budget-tuning', {
+        data: { count: Number(contribs.value) },
+        privateAggregationConfig: { contributionLimit: Number(cap.value) },
+      });
+      runLog.textContent = `sharedStorage.run resolved with contributionLimit=${cap.value} and queued=${contribs.value}. Reports are delivered by the browser's Private Aggregation pipeline, not exposed back to this page.`;
+    } catch (e) {
+      runLog.textContent = `Worklet call rejected: ${e.name} — ${e.message}`;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  });
   render();
 </script>
 </body>

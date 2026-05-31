@@ -33,18 +33,18 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v134</p>
     <h1>Aggregatable Report Limit Lifted</h1>
-    <p class="lede">When a trigger registration sets <code>trigger_context_id</code>, the per-source aggregatable report cap (previously 20) no longer applies. Each conversion can spawn its own report. Use the simulator below to see how report yield changes when the cap is gone.</p>
+    <p class="lede">When a trigger registration sets <code>trigger_context_id</code>, the per-source aggregatable report cap (previously 20) no longer applies. Each conversion can spawn its own report. Use the probe below to build registrations and compare the report eligibility the backend returns.</p>
   </header>
 
   <div class="warn-block">
     <strong>Heads up</strong>
-    Attribution Reporting is a Privacy Sandbox API. To actually exercise the network behaviour, enable <code>chrome://flags/#privacy-sandbox-ads-apis-override</code> and register with attributionsrc-bearing pixels. The simulator below models the limit behaviour client-side so you can see what changed.
+    Attribution Reporting is a Privacy Sandbox API. To exercise browser registration, enable <code>chrome://flags/#privacy-sandbox-ads-apis-override</code> and register with attributionsrc-bearing pixels. This page calls the local trigger-registration endpoint so the response header is emitted by a server route.
   </div>
 
   <div class="probe" id="probe">probing navigator.attributionReporting...</div>
 
-  <h2>Try it — simulator</h2>
-  <p>Set the number of conversions and toggle whether each trigger carries a <code>trigger_context_id</code>. The bars show how many aggregatable reports are emitted under the new and old rules.</p>
+  <h2>Try it — trigger header probe</h2>
+  <p>Set the number of conversions and toggle whether each trigger carries a <code>trigger_context_id</code>. The bars show how many aggregatable reports are eligible under the new and old rules.</p>
 
   <div class="stage">
     <div class="controls">
@@ -95,7 +95,7 @@ Attribution-Reporting-Register-Trigger: {
   const hasAR = 'attributionReporting' in navigator;
   probe.innerHTML = hasAR
     ? '<span class="ok">navigator.attributionReporting exposed</span> — full pipeline requires enrollment'
-    : '<span class="bad">attributionReporting not in this browser</span> — simulator still shows the limit behaviour';
+    : '<span class="bad">attributionReporting not in this browser</span> — backend header probe is still available';
 
   const conv = document.getElementById('conv');
   const convVal = document.getElementById('conv-val');
@@ -104,6 +104,7 @@ Attribution-Reporting-Register-Trigger: {
   const postBars = document.getElementById('post-bars');
   const preOut = document.getElementById('pre-out');
   const postOut = document.getElementById('post-out');
+  let updateSeq = 0;
 
   function render(targetEl, count, total) {
     targetEl.innerHTML = '';
@@ -115,16 +116,37 @@ Attribution-Reporting-Register-Trigger: {
     }
   }
 
-  function update() {
+  async function update() {
     const n = +conv.value;
+    const seq = ++updateSeq;
     convVal.textContent = n;
     const cap = 20;
     const preCount = Math.min(n, cap);
-    const postCount = hasCtx.checked ? n : Math.min(n, cap);
+    const registration = {
+      aggregatable_trigger_data: [{ key_piece: '0x1', source_keys: ['cart'] }],
+      aggregatable_values: { cart: 1 },
+      trigger_data: 1,
+    };
+    if (hasCtx.checked) registration.trigger_context_id = `conversion-batch-${n}`;
+    let postCount = hasCtx.checked ? n : Math.min(n, cap);
+    let postDropped = n - postCount;
+    try {
+      const response = await fetch('../trigger-context-id-builder/register-trigger', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ registration, conversionCount: n }),
+      });
+      const result = await response.json();
+      if (seq !== updateSeq) return;
+      if (response.ok) {
+        postCount = result.acceptedReports;
+        postDropped = result.droppedReports;
+      }
+    } catch {}
     render(preBars, preCount, n);
     render(postBars, postCount, n);
-    preOut.textContent = `${preCount} reports emitted, ${n - preCount} dropped`;
-    postOut.textContent = `${postCount} reports emitted, ${n - postCount} dropped`;
+    preOut.textContent = `${preCount} reports eligible, ${n - preCount} dropped`;
+    postOut.textContent = `${postCount} reports eligible, ${postDropped} dropped`;
   }
   conv.addEventListener('input', update);
   hasCtx.addEventListener('change', update);

@@ -126,7 +126,7 @@
 
   <section>
     <div class="probe-row">
-      <span class="probe warn" id="probeAR">Attribution Reporting: server-side API — simulation mode</span>
+      <span class="probe ok" id="probeAR">Attribution Reporting trigger header endpoint ready</span>
     </div>
 
     <div class="info-box">
@@ -146,7 +146,7 @@
           <input type="text" id="sourceEventId" value="1234567890">
         </div>
         <div class="field-group">
-          <label>Total conversions to simulate</label>
+          <label>Total conversions to register</label>
           <input type="number" id="convCount" min="1" max="200" value="50">
         </div>
       </div>
@@ -190,6 +190,7 @@
 (function () {
   const MAX_LEGACY = 20;
   let useCtx = true;
+  let updateSeq = 0;
 
   document.getElementById('ctxOn').addEventListener('click', () => {
     useCtx = true;
@@ -210,41 +211,13 @@
     document.getElementById(id).addEventListener('input', update);
   });
 
-  function update() {
+  async function update() {
     const sourceId = document.getElementById('sourceId').value || 'campaign_id';
     const sourceEventId = document.getElementById('sourceEventId').value || '0';
     const convCount = Math.max(1, Math.min(200, parseInt(document.getElementById('convCount').value) || 50));
     const ctxIdVal = document.getElementById('ctxIdVal').value || 'ctx-001';
     const trigData = Math.max(0, Math.min(7, parseInt(document.getElementById('trigData').value) || 0));
     const keyPiece = document.getElementById('keyPiece').value || '0x1';
-
-    const sentLegacy = Math.min(convCount, MAX_LEGACY);
-    const droppedLegacy = convCount - sentLegacy;
-    const sentCtx = convCount;
-    const droppedCtx = 0;
-
-    const compareRow = document.getElementById('compareRow');
-    const legacyPct = convCount > 0 ? (sentLegacy / convCount * 100).toFixed(0) : 0;
-    const ctxPct = 100;
-
-    compareRow.innerHTML = `
-      <div class="compare-box">
-        <h4>Without trigger_context_id (pre-v134)</h4>
-        <div class="bar-track"><div class="bar-fill sent" style="width:${legacyPct}%"></div></div>
-        <div class="bar-label">Sent: <strong>${sentLegacy}</strong> / ${convCount} (capped at ${MAX_LEGACY})</div>
-        <div class="bar-track"><div class="bar-fill dropped" style="width:${100 - legacyPct}%"></div></div>
-        <div class="bar-label">Dropped: <strong>${droppedLegacy}</strong></div>
-        <span class="verdict ${droppedLegacy > 0 ? 'bad' : 'good'}">${droppedLegacy > 0 ? droppedLegacy + ' reports lost' : 'no drops'}</span>
-      </div>
-      <div class="compare-box">
-        <h4>With trigger_context_id (Chrome 134+)</h4>
-        <div class="bar-track"><div class="bar-fill sent" style="width:${ctxPct}%"></div></div>
-        <div class="bar-label">Sent: <strong>${sentCtx}</strong> / ${convCount} (uncapped)</div>
-        <div class="bar-track"><div class="bar-fill dropped" style="width:0%"></div></div>
-        <div class="bar-label">Dropped: <strong>0</strong></div>
-        <span class="verdict good">all reports sent ✓</span>
-      </div>
-    `;
 
     const registration = {
       aggregatable_trigger_data: [
@@ -264,11 +237,52 @@
 
     document.getElementById('jsonOutput').textContent = JSON.stringify(registration, null, 2);
 
-    const headerVal = JSON.stringify(registration);
-    document.getElementById('headerOutput').textContent =
-      `HTTP/1.1 302 Found\n` +
-      `Attribution-Reporting-Register-Trigger: ${headerVal}\n\n` +
-      `// Source event ID ${sourceEventId} will now accept ${useCtx ? 'unlimited' : 'up to ' + MAX_LEGACY} aggregatable reports.`;
+    const seq = ++updateSeq;
+    document.getElementById('headerOutput').textContent = 'Calling backend header endpoint…';
+
+    try {
+      const response = await fetch('./register-trigger', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ registration, conversionCount: convCount, sourceEventId }),
+      });
+      const result = await response.json();
+      if (seq !== updateSeq) return;
+      if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+
+      const sentLegacy = Math.min(convCount, MAX_LEGACY);
+      const droppedLegacy = convCount - sentLegacy;
+      const sentCtx = convCount;
+      const legacyPct = convCount > 0 ? (sentLegacy / convCount * 100).toFixed(0) : 0;
+      const compareRow = document.getElementById('compareRow');
+
+      compareRow.innerHTML = `
+        <div class="compare-box">
+          <h4>Without trigger_context_id (pre-v134)</h4>
+          <div class="bar-track"><div class="bar-fill sent" style="width:${legacyPct}%"></div></div>
+          <div class="bar-label">Accepted: <strong>${sentLegacy}</strong> / ${convCount} (capped at ${MAX_LEGACY})</div>
+          <div class="bar-track"><div class="bar-fill dropped" style="width:${100 - legacyPct}%"></div></div>
+          <div class="bar-label">Dropped: <strong>${droppedLegacy}</strong></div>
+          <span class="verdict ${droppedLegacy > 0 ? 'bad' : 'good'}">${droppedLegacy > 0 ? droppedLegacy + ' reports blocked by cap' : 'no drops'}</span>
+        </div>
+        <div class="compare-box">
+          <h4>With trigger_context_id (Chrome 134+)</h4>
+          <div class="bar-track"><div class="bar-fill sent" style="width:100%"></div></div>
+          <div class="bar-label">Accepted: <strong>${sentCtx}</strong> / ${convCount} (uncapped)</div>
+          <div class="bar-track"><div class="bar-fill dropped" style="width:0%"></div></div>
+          <div class="bar-label">Dropped: <strong>0</strong></div>
+          <span class="verdict good">all reports eligible</span>
+        </div>
+      `;
+
+      document.getElementById('headerOutput').textContent =
+        `${result.responsePreview}\n\n` +
+        `// Backend emitted ${result.headerName} for source event ${sourceEventId}.\n` +
+        `// Current registration: ${result.acceptedReports}/${result.conversionCount} accepted, ${result.droppedReports} dropped by the report cap.`;
+    } catch (e) {
+      if (seq !== updateSeq) return;
+      document.getElementById('headerOutput').textContent = `Backend validation failed: ${e.message}`;
+    }
   }
 
   update();

@@ -95,13 +95,13 @@
 
   <header class="lede-block">
     <p class="eyebrow">demo · v130</p>
-    <h1>B&amp;A auction simulator</h1>
-    <p class="lede">Walk through a Bidding &amp; Auction Services round: collect interest groups, encrypt for the TEE, run the off-device auction, and render the winning ad. The "run B&amp;A round" button executes a client-side simulation step-by-step.</p>
+    <h1>B&amp;A auction API probe</h1>
+    <p class="lede">Call <code>navigator.getInterestGroupAdAuctionData()</code>, inspect the encrypted request payload the browser returns, and POST it to a local seller endpoint. The page does not fabricate a winning ad; a real Bidding &amp; Auction service must return the server response bytes before <code>navigator.runAdAuction()</code> can render.</p>
   </header>
 
   <div class="warn-block">
     <strong>requires Privacy Sandbox + B&amp;A services</strong>
-    Live B&amp;A needs <code>chrome://flags/#enable-protected-audience-services-bidding-and-auction-server-api</code> plus a configured Bidding &amp; Auction server in a TEE. The simulator below runs the same logical steps client-side so you can see the request/response shape.
+    Live B&amp;A needs <code>chrome://flags/#enable-protected-audience-services-bidding-and-auction-server-api</code> plus a configured Bidding &amp; Auction server in a TEE. The local backend only records the encrypted request and returns a clear refusal instead of inventing an auction result.
   </div>
 
   <section class="stage">
@@ -112,8 +112,8 @@
         <input type="text" id="seller" value="https://ssp.example">
       </div>
       <div class="field">
-        <label for="groups">interest groups in this browser</label>
-        <input type="number" id="groups" min="0" max="50" value="6">
+        <label for="groups">requestSize KB</label>
+        <input type="number" id="groups" min="4" max="128" value="16">
       </div>
       <div class="controls">
         <button id="run">Run B&amp;A round</button>
@@ -168,6 +168,10 @@ document.querySelector("fencedframe").config = fencedFrameConfig;</code></pre>
 </main>
 <script>
   const logEl = document.getElementById("log");
+  const runBtn = document.getElementById("run");
+  const hasAuctionData = typeof navigator.getInterestGroupAdAuctionData === "function";
+  const hasRunAdAuction = typeof navigator.runAdAuction === "function";
+
   function log(msg) {
     logEl.textContent += `${new Date().toISOString().slice(11, 23)}  ${msg}\n`;
     logEl.scrollTop = logEl.scrollHeight;
@@ -178,37 +182,85 @@ document.querySelector("fencedframe").config = fencedFrameConfig;</code></pre>
   }
   document.getElementById("reset").addEventListener("click", reset);
 
-  document.getElementById("run").addEventListener("click", async () => {
+  function payloadForSeller(result, seller) {
+    if (!result || typeof result !== "object") return null;
+    if (result.request) return result.request;
+    if (result.requestsMap?.get) return result.requestsMap.get(seller) ?? null;
+    if (result.requests?.[seller]) return result.requests[seller];
+    return null;
+  }
+
+  function payloadBytes(payload) {
+    if (!payload) return 0;
+    if (typeof payload.byteLength === "number") return payload.byteLength;
+    if (payload.buffer && typeof payload.buffer.byteLength === "number") return payload.byteLength;
+    if (typeof payload.size === "number") return payload.size;
+    return 0;
+  }
+
+  if (!hasAuctionData) {
+    runBtn.disabled = true;
+    log("navigator.getInterestGroupAdAuctionData is not available in this browser.");
+  }
+
+  runBtn.addEventListener("click", async () => {
     reset();
     const seller = document.getElementById("seller").value;
-    const igs = +document.getElementById("groups").value;
-    const probe = "navigator" in self && "getInterestGroupAdAuctionData" in navigator;
-    log(`feature-detect getInterestGroupAdAuctionData: ${probe ? '✓' : '✗ (running pure simulation)'}`);
+    const requestSize = Math.max(4, +document.getElementById("groups").value || 16) * 1024;
 
-    document.getElementById("s1").classList.add("active");
-    await wait(450);
-    log(`[1] collected ${igs} interest groups for seller=${seller}`);
+    if (!hasAuctionData) {
+      log("Cannot run: getInterestGroupAdAuctionData is unavailable.");
+      return;
+    }
 
-    document.getElementById("s2").classList.add("active");
-    await wait(450);
-    const bytes = igs * 280 + 64;
-    log(`[2] OHTTP-encrypted blob: ${bytes} bytes, encapsulated key included`);
+    try {
+      document.getElementById("s1").classList.add("active");
+      log(`[1] calling navigator.getInterestGroupAdAuctionData({ seller, requestSize })`);
+      const auctionData = await navigator.getInterestGroupAdAuctionData({ seller, requestSize });
+      log(`    requestId: ${auctionData?.requestId ?? "(not exposed)"}`);
 
-    document.getElementById("s3").classList.add("active");
-    await wait(700);
-    const bids = Array.from({ length: igs }, (_, i) => ({
-      ig: `ig-${i + 1}`,
-      bid: +(Math.random() * 9.5 + 0.5).toFixed(2),
-    }));
-    bids.sort((a, b) => b.bid - a.bid);
-    const winner = bids[0] || { ig: "(none)", bid: 0 };
-    log(`[3] TEE scored ${igs} bids, top-3: ${bids.slice(0, 3).map((b) => `${b.ig}@$${b.bid}`).join(", ")}`);
-    log(`    winner: ${winner.ig} at $${winner.bid}`);
+      document.getElementById("s2").classList.add("active");
+      const payload = payloadForSeller(auctionData, seller);
+      const bytes = payloadBytes(payload);
+      if (!payload || bytes === 0) throw new Error("Browser did not return an encrypted B&A payload.");
+      log(`[2] browser returned encrypted payload: ${bytes} bytes`);
 
-    document.getElementById("s4").classList.add("active");
-    await wait(450);
-    log(`[4] browser opens fenced frame for ad from interestGroup="${winner.ig}"`);
-    log(`done.`);
+      document.getElementById("s3").classList.add("active");
+      log("[3] posting encrypted payload to ./auction");
+      const response = await fetch("./auction", {
+        method: "POST",
+        headers: {
+          "content-type": "application/octet-stream",
+          "x-pa-request-id": String(auctionData?.requestId ?? ""),
+        },
+        body: payload,
+      });
+      const contentType = response.headers.get("content-type") || "";
+      if (!response.ok) {
+        const detail = contentType.includes("json") ? await response.json() : await response.text();
+        log(`    seller endpoint returned HTTP ${response.status}`);
+        log(`    ${typeof detail === "string" ? detail : detail.nextStep}`);
+        return;
+      }
+
+      const serverResponse = await response.arrayBuffer();
+      log(`    seller endpoint returned ${serverResponse.byteLength} response bytes`);
+      if (!hasRunAdAuction) {
+        log("navigator.runAdAuction is not available, so rendering cannot continue.");
+        return;
+      }
+
+      document.getElementById("s4").classList.add("active");
+      const fencedFrameConfig = await navigator.runAdAuction({
+        seller,
+        serverResponse,
+        requestId: auctionData.requestId,
+      });
+      log(`[4] runAdAuction resolved with ${fencedFrameConfig ? "a fenced frame config" : "no config"}`);
+      log("done.");
+    } catch (e) {
+      log(`ERROR: ${e.name || "Error"} — ${e.message || e}`);
+    }
   });
   function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 </script>

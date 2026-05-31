@@ -121,7 +121,7 @@
   <header class="lede-block">
     <p class="eyebrow">v134 · privacy sandbox / ads</p>
     <h1>Payload Inspector</h1>
-    <p class="lede">Configure multiple sellers in a single <code>navigator.getInterestGroupAdAuctionData()</code> call. Inspect the per-seller payload breakdown, buyer settings, and estimated encrypted blob sizes before firing the call — all in one request thanks to Chrome 134.</p>
+    <p class="lede">Configure multiple sellers in a single <code>navigator.getInterestGroupAdAuctionData()</code> call. Fire the real browser API and inspect the encrypted payloads it returns — all in one request thanks to Chrome 134.</p>
   </header>
 
   <section>
@@ -160,7 +160,8 @@
     probe.textContent = 'navigator.getInterestGroupAdAuctionData available';
     probe.classList.replace('warn', 'ok');
   } else {
-    probe.textContent = 'navigator.getInterestGroupAdAuctionData not available — simulation mode';
+    probe.textContent = 'navigator.getInterestGroupAdAuctionData not available in this browser';
+    document.getElementById('runBtn').disabled = true;
   }
 
   let sellers = [
@@ -169,6 +170,7 @@
     { id: 3, seller: 'https://ssp3.example', coordinatorOrigin: 'https://coordinator2.example', buyerSignalSize: 1024, maxBuyers: 8, requestSize: 16384 },
   ];
   let nextId = 4;
+  let lastPayloadRows = [];
 
   const BAR_COLORS = ['bar-seller-0', 'bar-seller-1', 'bar-seller-2', 'bar-seller-3'];
 
@@ -215,6 +217,7 @@
     list.querySelectorAll('.danger').forEach(btn => {
       btn.addEventListener('click', () => {
         sellers = sellers.filter(x => x.id !== parseInt(btn.dataset.id));
+        lastPayloadRows = [];
         renderSellers();
         renderPayload();
       });
@@ -230,28 +233,65 @@
           else if (cls === 'f-bss') s.buyerSignalSize = parseInt(inp.value) || 256;
           else if (cls === 'f-mb') s.maxBuyers = parseInt(inp.value) || 1;
           else if (cls === 'f-rs') s.requestSize = parseInt(inp.value);
+          lastPayloadRows = [];
           renderPayload();
         });
       });
     });
   }
 
-  function estimateSellerBytes(s) {
-    const perBuyer = s.buyerSignalSize * s.maxBuyers;
-    const overhead = 256 + s.seller.length + s.coordinatorOrigin.length;
-    return Math.min(s.requestSize, perBuyer + overhead);
+  function buildRequest() {
+    const perBuyerConfig = {};
+    sellers.forEach((seller) => {
+      for (let i = 0; i < seller.maxBuyers; i++) {
+        perBuyerConfig[`https://buyer-${seller.id}-${i + 1}.example`] = {
+          targetSize: seller.buyerSignalSize,
+        };
+      }
+    });
+    return {
+      requestSize: Math.max(...sellers.map((seller) => seller.requestSize), 4096),
+      perBuyerConfig,
+      sellers: sellers.map((seller) => ({
+        seller: seller.seller,
+        coordinatorOrigin: seller.coordinatorOrigin,
+        requestSize: seller.requestSize,
+      })),
+    };
+  }
+
+  function byteLength(value) {
+    if (!value) return 0;
+    if (typeof value.byteLength === 'number') return value.byteLength;
+    if (typeof value.size === 'number') return value.size;
+    return 0;
+  }
+
+  function payloadRows(result) {
+    const rows = [];
+    if (result?.request) rows.push({ label: 'request', bytes: byteLength(result.request) });
+    if (result?.requestsMap?.forEach) {
+      result.requestsMap.forEach((value, key) => rows.push({ label: String(key), bytes: byteLength(value) }));
+    }
+    if (result?.requests && typeof result.requests === 'object') {
+      Object.entries(result.requests).forEach(([key, value]) => {
+        rows.push({ label: key, bytes: byteLength(value) });
+      });
+    }
+    return rows.filter((row) => row.bytes > 0);
   }
 
   function renderPayload() {
     const visual = document.getElementById('payloadVisual');
     visual.innerHTML = '';
 
-    const OVERHEAD = 512;
-    const sizes = sellers.map(s => estimateSellerBytes(s));
-    const total = sizes.reduce((a, b) => a + b, 0) + OVERHEAD;
+    const total = lastPayloadRows.reduce((sum, row) => sum + row.bytes, 0);
+    if (!lastPayloadRows.length) {
+      visual.innerHTML = '<div class="output-block">Call "Inspect payload" to run navigator.getInterestGroupAdAuctionData() and show the encrypted bytes returned by the browser.</div>';
+    }
 
-    sellers.forEach((s, i) => {
-      const bytes = sizes[i];
+    lastPayloadRows.forEach((payload, i) => {
+      const bytes = payload.bytes;
       const pct = total > 0 ? (bytes / total * 100).toFixed(1) : 0;
       const colorCls = BAR_COLORS[i % BAR_COLORS.length];
       const row = document.createElement('div');
@@ -260,7 +300,7 @@
         <span class="payload-label">seller[${i}]</span>
         <div class="payload-bar-track">
           <div class="payload-bar-fill ${colorCls}" style="width:${pct}%">
-            ${pct > 12 ? s.seller.replace('https://', '') : ''}
+            ${pct > 12 ? payload.label.replace('https://', '') : ''}
           </div>
         </div>
         <span class="payload-size">${(bytes / 1024).toFixed(1)}KB</span>
@@ -268,45 +308,20 @@
       visual.appendChild(row);
     });
 
-    const ohPct = (OVERHEAD / total * 100).toFixed(1);
-    const ohRow = document.createElement('div');
-    ohRow.className = 'payload-row';
-    ohRow.innerHTML = `
-      <span class="payload-label">overhead</span>
-      <div class="payload-bar-track">
-        <div class="payload-bar-fill bar-overhead" style="width:${ohPct}%;background:var(--text-muted)"></div>
-      </div>
-      <span class="payload-size">${(OVERHEAD / 1024).toFixed(1)}KB</span>
-    `;
-    visual.appendChild(ohRow);
-
     const legacyCalls = sellers.length;
     document.getElementById('metricsRow').innerHTML = `
       <div class="metric-card"><div class="metric-val">${sellers.length}</div><div class="metric-lbl">Sellers</div></div>
-      <div class="metric-card"><div class="metric-val">${(total / 1024).toFixed(1)}KB</div><div class="metric-lbl">Total payload</div></div>
+      <div class="metric-card"><div class="metric-val">${total ? (total / 1024).toFixed(1) + 'KB' : '—'}</div><div class="metric-lbl">Returned bytes</div></div>
       <div class="metric-card"><div class="metric-val good">1</div><div class="metric-lbl">API calls (v134)</div></div>
       <div class="metric-card"><div class="metric-val bad">${legacyCalls}</div><div class="metric-lbl">Legacy API calls</div></div>
     `;
 
-    const perSellerConfigs = sellers.map(s => ({
-      seller: s.seller,
-      coordinatorOrigin: s.coordinatorOrigin,
-      perBuyerConfig: Object.fromEntries(
-        Array.from({ length: s.maxBuyers }, (_, j) => [
-          `https://buyer${j + 1}.example`,
-          { targetSize: s.buyerSignalSize }
-        ])
-      ),
-      requestSize: s.requestSize,
-    }));
-
     document.getElementById('codeOutput').textContent =
-      `const { requestsMap } = await navigator.getInterestGroupAdAuctionData(\n` +
-      `  ${JSON.stringify(perSellerConfigs, null, 2).split('\n').join('\n  ')}\n` +
+      `const result = await navigator.getInterestGroupAdAuctionData(\n` +
+      `  ${JSON.stringify(buildRequest(), null, 2).split('\n').join('\n  ')}\n` +
       `);\n\n` +
       `// requestsMap is a Map keyed by seller origin.\n` +
-      `// Send each encrypted blob to its respective SSP:\n` +
-      sellers.map((s, i) => `const blob${i + 1} = requestsMap.get('${s.seller}'); // ${(sizes[i] / 1024).toFixed(1)}KB encrypted`).join('\n');
+      `// Send each encrypted blob to its respective SSP.`;
   }
 
   document.getElementById('addSellerBtn').addEventListener('click', () => {
@@ -318,13 +333,30 @@
       maxBuyers: 4,
       requestSize: 8192,
     });
+    lastPayloadRows = [];
     renderSellers();
     renderPayload();
   });
 
-  document.getElementById('runBtn').addEventListener('click', () => {
-    renderSellers();
-    renderPayload();
+  document.getElementById('runBtn').addEventListener('click', async () => {
+    if (!hasIGAD) return;
+    const btn = document.getElementById('runBtn');
+    btn.disabled = true;
+    document.getElementById('payloadVisual').innerHTML = '<div class="output-block">Calling navigator.getInterestGroupAdAuctionData()…</div>';
+    try {
+      const result = await navigator.getInterestGroupAdAuctionData(buildRequest());
+      lastPayloadRows = payloadRows(result);
+      renderPayload();
+      if (!lastPayloadRows.length) {
+        document.getElementById('payloadVisual').innerHTML = '<div class="output-block">The API resolved, but this browser did not expose request bytes in the returned object.</div>';
+      }
+    } catch (e) {
+      lastPayloadRows = [];
+      renderPayload();
+      document.getElementById('payloadVisual').innerHTML = `<div class="output-block">API rejected: ${e.name} — ${e.message}</div>`;
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   renderSellers();

@@ -449,6 +449,88 @@ function renderStorageAccessHeadersRoute(req: Request, sub: string): Response | 
   );
 }
 
+async function renderProtectedAudienceBiddingRoute(
+  req: Request,
+  sub: string,
+): Promise<Response | null> {
+  const prefix = "/protected-audience-bidding-auction-services/pa-bas";
+  if (!sub.startsWith(prefix)) return null;
+  const route = sub.slice(prefix.length);
+  if (route !== "/auction") return null;
+
+  if (req.method !== "POST") {
+    return jsonResponse({ error: "POST an encrypted B&A payload to this endpoint." }, {
+      status: 405,
+    });
+  }
+
+  const bytes = await req.arrayBuffer();
+  return jsonResponse({
+    received: true,
+    receivedBytes: bytes.byteLength,
+    contentType: req.headers.get("content-type") ?? "",
+    requestId: req.headers.get("x-pa-request-id") ?? "",
+    status: "encrypted-payload-received",
+    nextStep:
+      "A real seller Bidding & Auction service running in a trusted execution environment must decrypt and score this request. The local showcase server does not fabricate a winning ad response.",
+  }, { status: 501 });
+}
+
+async function renderAttributionTriggerContextRoute(
+  req: Request,
+  sub: string,
+): Promise<Response | null> {
+  const prefix =
+    "/attribution-reporting-feature-remove-aggregatable-report-limit-when-trigger-cont/trigger-context-id-builder";
+  if (!sub.startsWith(prefix)) return null;
+  const route = sub.slice(prefix.length);
+  if (route !== "/register-trigger") return null;
+
+  if (req.method !== "POST") {
+    return jsonResponse({ error: "POST a trigger registration JSON body." }, { status: 405 });
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = await req.json();
+  } catch {
+    return jsonResponse({ error: "Expected JSON request body." }, { status: 400 });
+  }
+
+  const registration = body.registration;
+  if (!registration || typeof registration !== "object" || Array.isArray(registration)) {
+    return jsonResponse({ error: "registration must be an object." }, { status: 400 });
+  }
+
+  const conversionCount = Math.max(1, Math.min(500, Number(body.conversionCount ?? 1) || 1));
+  const triggerContext = (registration as Record<string, unknown>).trigger_context_id;
+  const hasTriggerContext = typeof triggerContext === "string" && triggerContext.length > 0;
+  const legacyLimit = 20;
+  const acceptedReports = hasTriggerContext
+    ? conversionCount
+    : Math.min(conversionCount, legacyLimit);
+  const droppedReports = conversionCount - acceptedReports;
+  const headerValue = JSON.stringify(registration);
+  const headers = new Headers({
+    "Attribution-Reporting-Register-Trigger": headerValue,
+    "Attribution-Reporting-Eligible": "trigger",
+  });
+
+  return jsonResponse({
+    registered: true,
+    headerName: "Attribution-Reporting-Register-Trigger",
+    headerValue,
+    eligibleHeader: "Attribution-Reporting-Eligible: trigger",
+    triggerContextIdPresent: hasTriggerContext,
+    conversionCount,
+    acceptedReports,
+    droppedReports,
+    legacyLimit,
+    responsePreview:
+      `HTTP/1.1 204 No Content\nAttribution-Reporting-Eligible: trigger\nAttribution-Reporting-Register-Trigger: ${headerValue}`,
+  }, { status: 200, headers });
+}
+
 // ----- Email Verification Protocol server validator -----
 
 let evpKeyPairPromise: Promise<CryptoKeyPair> | null = null;
@@ -3986,6 +4068,12 @@ Deno.serve({ port: PORT }, async (req) => {
       if (webAuthnSignalResponse) return webAuthnSignalResponse;
       const storageAccessHeadersResponse = renderStorageAccessHeadersRoute(req, sub);
       if (storageAccessHeadersResponse) return storageAccessHeadersResponse;
+      const protectedAudienceResponse = await renderProtectedAudienceBiddingRoute(req, sub);
+      if (protectedAudienceResponse) return protectedAudienceResponse;
+    }
+    if (release === "v134") {
+      const attributionTriggerResponse = await renderAttributionTriggerContextRoute(req, sub);
+      if (attributionTriggerResponse) return attributionTriggerResponse;
     }
     if (release === "v136") {
       const autoPasskeyResponse = await renderAutoPasskeyRoute(req, sub);
