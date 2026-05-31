@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>External Skip and Observe — activeViewTransition — Chrome 142</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-5);
+      margin: var(--space-5) 0;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-3);
+      margin-bottom: var(--space-4);
+    }
+    .scene {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-4);
+    }
+    @media (max-width: 600px) { .scene { grid-template-columns: 1fr; } }
+    .card {
+      border: 2px solid var(--border-black);
+      padding: var(--space-4);
+      background: var(--bg-stone);
+      view-transition-name: var(--vt);
+    }
+    .card.alt { background: var(--bg-paper); }
+    .card h4 {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin: 0 0 var(--space-2);
+      color: var(--text-muted);
+    }
+    .card p { font-family: var(--font-serif); margin: 0; font-size: 1rem; }
+    .card.a { --vt: vt-panel-a; }
+    .card.b { --vt: vt-panel-b; }
+    .swap.a-out::view-transition-old(vt-panel-a),
+    .swap.a-out::view-transition-new(vt-panel-a) { animation-duration: 1800ms; }
+    .swap.b-out::view-transition-old(vt-panel-b),
+    .swap.b-out::view-transition-new(vt-panel-b) { animation-duration: 1800ms; }
+
+    .progress {
+      height: 10px;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      position: relative;
+      margin: var(--space-3) 0;
+    }
+    .progress-fill {
+      background: var(--accent-blue);
+      height: 100%;
+      width: 0;
+      transition: width 80ms linear;
+    }
+
+    .observer-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: var(--space-2);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 600px) { .observer-grid { grid-template-columns: 1fr 1fr; } }
+    .obs {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+    }
+    .obs strong { display: block; font-size: 0.72rem; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.2rem; }
+    .obs.on { background: color-mix(in srgb, var(--accent-emerald) 12%, var(--bg-paper)); }
+    .obs.off { background: color-mix(in srgb, var(--accent-rose) 12%, var(--bg-paper)); }
+
+    .log {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.55;
+      max-height: 180px;
+      overflow-y: auto;
+      margin-top: var(--space-3);
+    }
+    .log p { font-family: var(--font-mono); margin: 0; font-size: 0.78rem; }
+    .log .t { color: var(--text-muted); }
+    .log .ok { color: var(--accent-emerald); }
+    .log .warn { color: var(--accent-amber); }
+    .log .err { color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; activeViewTransition</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v142</p>
+    <h1>External Skip &amp; Observe</h1>
+    <p class="lede">Before Chrome 142 the only place you could call <code>.skipTransition()</code> on a running view transition was from the caller that started it. With <code>document.activeViewTransition</code>, any module — a back-button handler, an analytics layer, an accessibility prefers-reduced-motion watcher — can reach into the live transition and skip it, or just observe its lifecycle without holding the original handle.</p>
+  </header>
+
+  <section class="stage">
+    <h3>Two-panel swap, deliberately slow (1.8s)</h3>
+    <div class="controls">
+      <button id="swapA">Swap Panel A</button>
+      <button id="swapB">Swap Panel B</button>
+      <button id="extSkip">External skip (any caller)</button>
+      <button id="prmWatch">Prefers reduced motion auto-skip</button>
+      <button id="clearLog">Clear log</button>
+    </div>
+
+    <div class="scene" id="scene">
+      <div class="card a" id="cardA"><h4>Panel A</h4><p id="textA">First state of A</p></div>
+      <div class="card b alt" id="cardB"><h4>Panel B</h4><p id="textB">First state of B</p></div>
+    </div>
+
+    <div class="progress"><div class="progress-fill" id="pf"></div></div>
+
+    <div class="observer-grid">
+      <div class="obs" id="oActive"><strong>activeViewTransition</strong><span id="vActive">null</span></div>
+      <div class="obs" id="oReady"><strong>ready</strong><span id="vReady">—</span></div>
+      <div class="obs" id="oFinished"><strong>finished</strong><span id="vFinished">—</span></div>
+      <div class="obs" id="oUpdate"><strong>updateCallback</strong><span id="vUpdate">—</span></div>
+    </div>
+
+    <div class="log" id="log"></div>
+  </section>
+
+  <h2>relevant markup</h2>
+<pre><code>// Module A — start the transition
+document.startViewTransition(() =&gt; mutateDom());
+
+// Module B (totally separate) — read and act on the live transition
+const vt = document.activeViewTransition;
+if (vt) {
+  // observe
+  vt.ready.then(() =&gt; console.log("ready"));
+  vt.finished.then(() =&gt; console.log("finished"));
+  // or skip on demand
+  vt.skipTransition();
+}</code></pre>
+
+  <section>
+    <h2>why this is useful</h2>
+    <ul>
+      <li><strong>Back-button handling.</strong> A popstate listener doesn't own the transition that's running, but it can short-circuit it before navigating.</li>
+      <li><strong>Reduced motion.</strong> An a11y module watching <code>matchMedia("(prefers-reduced-motion: reduce)")</code> can skip every transition it sees flip on, without coordinating with each call site.</li>
+      <li><strong>Telemetry.</strong> A logger can attach to <code>ready</code>/<code>finished</code> from outside, without monkey-patching <code>startViewTransition</code>.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">activeViewTransition</a> — feature index</li>
+      <li><a href="../active-vt/">Active VT</a> — null-vs-instance flip</li>
+      <li><a href="../concurrent-guard/">Concurrent Navigation Guard</a></li>
+      <li><a href="https://chromestatus.com/feature/5067126381215744" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://drafts.csswg.org/css-view-transitions-2/#dom-document-activeviewtransition" target="_blank" rel="noopener">Spec — document.activeViewTransition</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const log = document.getElementById("log");
+  const pf = document.getElementById("pf");
+  const vActive = document.getElementById("vActive");
+  const vReady = document.getElementById("vReady");
+  const vFinished = document.getElementById("vFinished");
+  const vUpdate = document.getElementById("vUpdate");
+  const oActive = document.getElementById("oActive");
+  const oReady = document.getElementById("oReady");
+  const oFinished = document.getElementById("oFinished");
+  const oUpdate = document.getElementById("oUpdate");
+  const scene = document.getElementById("scene");
+
+  const supports = "startViewTransition" in document && "activeViewTransition" in document;
+  let counter = 0;
+  let toggleA = false;
+  let toggleB = false;
+  let prmAutoSkip = false;
+  let progressRAF = 0;
+
+  function ts() { return new Date().toISOString().slice(11, 23); }
+  function append(line, cls) {
+    const p = document.createElement("p");
+    p.innerHTML = `<span class="t">${ts()}</span> ${cls ? `<span class="${cls}">${line}</span>` : line}`;
+    log.appendChild(p);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function setObs(el, on, text) {
+    el.querySelector("span:nth-child(2)").textContent = text;
+    el.classList.remove("on", "off");
+    if (on === true) el.classList.add("on");
+    if (on === false) el.classList.add("off");
+  }
+
+  function syncActive() {
+    const vt = document.activeViewTransition;
+    if (vt) {
+      setObs(oActive, true, "[object ViewTransition]");
+    } else {
+      setObs(oActive, false, "null");
+    }
+  }
+
+  function trackProgress(vt) {
+    cancelAnimationFrame(progressRAF);
+    const start = performance.now();
+    const duration = 1800;
+    function step(now) {
+      if (!document.activeViewTransition) {
+        pf.style.width = "0%";
+        return;
+      }
+      const pct = Math.min(100, ((now - start) / duration) * 100);
+      pf.style.width = pct + "%";
+      if (pct < 100) progressRAF = requestAnimationFrame(step);
+    }
+    progressRAF = requestAnimationFrame(step);
+  }
+
+  function attachObservers(vt, label) {
+    setObs(oReady, null, "pending");
+    setObs(oFinished, null, "pending");
+    setObs(oUpdate, null, "pending");
+    vt.ready.then(() => {
+      setObs(oReady, true, "fulfilled");
+      append(`${label}: ready ✓`, "ok");
+    }, (e) => {
+      setObs(oReady, false, "rejected");
+      append(`${label}: ready rejected — ${e?.message ?? e}`, "warn");
+    });
+    vt.finished.then(() => {
+      setObs(oFinished, true, "fulfilled");
+      append(`${label}: finished ✓`, "ok");
+    }, (e) => {
+      setObs(oFinished, false, "rejected");
+      append(`${label}: finished rejected — ${e?.message ?? e}`, "warn");
+    });
+    vt.updateCallbackDone.then(() => {
+      setObs(oUpdate, true, "fulfilled");
+      append(`${label}: updateCallback ✓`, "ok");
+    }, (e) => {
+      setObs(oUpdate, false, "rejected");
+      append(`${label}: updateCallback rejected — ${e?.message ?? e}`, "warn");
+    });
+    trackProgress(vt);
+  }
+
+  function startSwap(which) {
+    if (!supports) {
+      append("startViewTransition not supported in this browser", "err");
+      return;
+    }
+    counter++;
+    const id = "T" + counter;
+    scene.classList.add(which === "A" ? "swap" : "swap", which === "A" ? "a-out" : "b-out");
+    append(`${id}: caller starts swap on Panel ${which}`);
+    const vt = document.startViewTransition(() => {
+      if (which === "A") {
+        toggleA = !toggleA;
+        document.getElementById("textA").textContent = toggleA ? "Second state of A" : "First state of A";
+      } else {
+        toggleB = !toggleB;
+        document.getElementById("textB").textContent = toggleB ? "Second state of B" : "First state of B";
+      }
+    });
+    syncActive();
+    attachObservers(vt, id);
+    vt.finished.finally(() => {
+      scene.classList.remove("a-out", "b-out");
+      syncActive();
+    });
+    if (prmAutoSkip) {
+      const live = document.activeViewTransition;
+      if (live) {
+        append(`${id}: prefers-reduced-motion watcher calls skipTransition()`, "warn");
+        live.skipTransition();
+      }
+    }
+  }
+
+  document.getElementById("swapA").addEventListener("click", () => startSwap("A"));
+  document.getElementById("swapB").addEventListener("click", () => startSwap("B"));
+  document.getElementById("extSkip").addEventListener("click", () => {
+    const vt = document.activeViewTransition;
+    if (vt) {
+      append("external module: document.activeViewTransition.skipTransition()", "warn");
+      vt.skipTransition();
+    } else {
+      append("external module: no active transition to skip", "err");
+    }
+  });
+  document.getElementById("prmWatch").addEventListener("click", (e) => {
+    prmAutoSkip = !prmAutoSkip;
+    e.currentTarget.textContent = prmAutoSkip ? "Auto-skip: ON" : "Prefers reduced motion auto-skip";
+    append(`auto-skip toggled ${prmAutoSkip ? "ON" : "OFF"}`);
+  });
+  document.getElementById("clearLog").addEventListener("click", () => { log.innerHTML = ""; });
+
+  if (!supports) {
+    append("This browser doesn't expose document.activeViewTransition. Open in Chrome 142+.", "err");
+  } else {
+    append("Ready. Try: Swap Panel A, then External skip mid-transition.", "ok");
+  }
+  syncActive();
+</script>
+</body>
+</html>

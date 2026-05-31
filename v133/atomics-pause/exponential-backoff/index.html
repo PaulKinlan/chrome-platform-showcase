@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Exponential backoff — Atomics.pause — Chrome 133</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin-bottom: var(--space-4); }
+    .field { display: flex; flex-direction: column; gap: var(--space-1); }
+    .field label { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+    .field input { font-family: var(--font-mono); font-size: 0.85rem; border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); padding: 0.3rem 0.4rem; width: 6rem; }
+    .out { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-top: var(--space-4); }
+    @media (max-width: 600px) { .out { grid-template-columns: 1fr; } }
+    .col { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); }
+    .col h4 { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    .col b { font-family: var(--font-mono); font-size: 1.5rem; }
+    .chart { display: flex; align-items: flex-end; gap: 2px; height: 100px; margin-top: var(--space-3); }
+    .chart span { flex: 1; background: var(--text-black); height: var(--h, 0); min-height: 2px; }
+    .warn-block { border: 2px solid var(--accent-rose); background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-4) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Atomics.pause</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">demo · v133</p>
+    <h1>Exponential backoff</h1>
+    <p class="lede">Run a simulated spin-wait against a flipping flag. Compare a tight busy loop against the textbook pattern: <code>Atomics.pause(1 &lt;&lt; attempt)</code> &mdash; doubling the hint on every retry so the CPU truly idles longer between checks.</p>
+  </header>
+  <div id="support" class="warn-block" hidden><code>Atomics.pause</code> is not present in this browser. Chrome 133+ required.</div>
+
+  <div class="stage">
+    <div class="controls">
+      <div class="field"><label for="wait">simulated wait (ms)</label><input id="wait" type="number" min="1" max="200" value="40"></div>
+      <button id="run">run benchmark</button>
+    </div>
+
+    <div class="out">
+      <div class="col">
+        <h4>tight loop (no pause)</h4>
+        <b id="tight-it">&mdash;</b> iterations
+        <div class="chart" id="chart-tight"></div>
+      </div>
+      <div class="col">
+        <h4>exponential pause</h4>
+        <b id="exp-it">&mdash;</b> iterations
+        <div class="chart" id="chart-exp"></div>
+      </div>
+    </div>
+    <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted);margin-top:var(--space-3);">Both loops run for the same wall-clock time. Fewer iterations means the CPU was actually allowed to coast between checks rather than burning power probing the flag.</p>
+  </div>
+
+  <section>
+    <h2>the pattern</h2>
+<pre><code>for (let attempt = 0; ; attempt++) {
+  if (Atomics.load(view, 0) !== 0) break;
+  // back off harder each retry &mdash; up to a cap
+  Atomics.pause(1 &lt;&lt; Math.min(attempt, 6));
+}</code></pre>
+    <p>This is exactly what JVM and Linux kernel spinlocks do: cheap probe, increasing pause hint, eventually park the thread entirely. Browsers can use the same pattern now that <code>Atomics.pause(iterationCount)</code> exists. The argument is a hint &mdash; the engine clamps it to a sensible internal range, so go wild.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../atomics-pause/">Atomics.pause &mdash; original demo</a></li>
+      <li><a href="../worker-spinlock/">Worker spinlock</a></li>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="https://tc39.es/proposal-atomics-microwait" target="_blank" rel="noopener">tc39 proposal-atomics-microwait</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+if (typeof Atomics === "undefined" || typeof Atomics.pause !== "function") {
+  document.getElementById("support").hidden = false;
+}
+
+function bench(useExp, waitMs) {
+  const start = performance.now();
+  const end = start + waitMs;
+  let it = 0;
+  const samples = [];
+  let nextSample = start + waitMs / 20;
+  while (performance.now() < end) {
+    it++;
+    if (useExp && typeof Atomics !== "undefined" && typeof Atomics.pause === "function") {
+      Atomics.pause(1 << Math.min(6, Math.floor(it / 16)));
+    }
+    const now = performance.now();
+    if (now >= nextSample) {
+      samples.push(it);
+      nextSample = now + waitMs / 20;
+    }
+  }
+  return { it, samples };
+}
+
+document.getElementById("run").addEventListener("click", () => {
+  const wait = +document.getElementById("wait").value;
+  const tight = bench(false, wait);
+  const exp = bench(true, wait);
+  document.getElementById("tight-it").textContent = tight.it.toLocaleString();
+  document.getElementById("exp-it").textContent = exp.it.toLocaleString();
+  const max = Math.max(...tight.samples, ...exp.samples, 1);
+  document.getElementById("chart-tight").innerHTML = tight.samples.map((v) => `<span style="--h:${(v / max * 100).toFixed(1)}%"></span>`).join("");
+  document.getElementById("chart-exp").innerHTML = exp.samples.map((v) => `<span style="--h:${(v / max * 100).toFixed(1)}%"></span>`).join("");
+});
+</script>
+</body>
+</html>
