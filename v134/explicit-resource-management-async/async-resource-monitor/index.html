@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Async Resource Monitor — Explicit Resource Management — Chrome 134</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .resource-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: var(--space-2);
+      margin-bottom: var(--space-3);
+    }
+    .resource-card {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      padding: var(--space-2);
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .resource-card.open { border-color: var(--accent-emerald); background: #f0fdf4; }
+    .resource-card.disposed { border-color: var(--accent-rose); background: #fff5f5; opacity: 0.65; }
+    .resource-card.pending { border-color: #b45309; background: #fffbeb; }
+    .res-name { font-weight: 700; font-size: 0.82rem; margin-bottom: 4px; }
+    .res-state {
+      display: inline-block;
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 2px 6px;
+      margin-bottom: 4px;
+    }
+    .res-state.open { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .res-state.disposed { background: var(--accent-rose); color: var(--bg-ivory); }
+    .res-state.pending { background: #b45309; color: var(--bg-ivory); }
+    .res-stat { font-size: 0.72rem; color: var(--text-charcoal); font-family: var(--font-mono); }
+    .section-title { font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: var(--space-3) 0 var(--space-2); }
+    .probe-row { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-3); flex-wrap: wrap; }
+    .probe { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border-black); font-size: 0.8rem; }
+    .probe.fail { background: var(--accent-rose); color: var(--bg-ivory); }
+    .probe.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .probe.warn { background: #b45309; color: var(--bg-ivory); }
+    .info-box { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-size: 0.82rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+    .controls-row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    button.primary {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      border: none;
+      padding: 8px 16px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    button.primary:hover { opacity: 0.85; }
+    button.secondary {
+      background: var(--bg-stone);
+      color: var(--text-black);
+      border: 1px solid var(--border-black);
+      padding: 8px 16px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    button.secondary:hover { background: var(--bg-paper); }
+    .timeline {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      min-height: 80px;
+      max-height: 220px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      line-height: 1.6;
+      margin-bottom: var(--space-3);
+    }
+    .tl-open { color: var(--accent-emerald); }
+    .tl-close { color: var(--accent-rose); }
+    .tl-error { color: #b45309; }
+    .tl-info { color: var(--text-muted); }
+    .summary-row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3); }
+    .metric-card { flex: 1; min-width: 100px; background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-2); text-align: center; }
+    .metric-val { font-family: var(--font-mono); font-size: 1.2rem; font-weight: 700; color: var(--text-black); }
+    .metric-label { font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: .04em; }
+    .code-block { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; overflow-x: auto; white-space: pre; line-height: 1.5; }
+    code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-stone); padding: 1px 4px; }
+    .field-group { display: flex; flex-direction: column; gap: 4px; }
+    .field-group label { font-size: 0.8rem; color: var(--text-muted); }
+    select { padding: 6px 8px; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); font-size: 0.82rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v134/explicit-resource-management-async/">&larr; Explicit Resource Management (async)</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v134 · javascript</p>
+    <h1>Async Resource Monitor</h1>
+    <p class="lede">Track the full lifecycle of simulated async resources — DB connections, file handles, HTTP clients, cache buckets — opened with <code>await using</code> and automatically disposed. See which resources are open, when they close, and what happens when a scope throws mid-flight.</p>
+  </header>
+
+  <section>
+    <div class="probe-row">
+      <span class="probe fail" id="probeAsyncDispose">checking Symbol.asyncDispose…</span>
+    </div>
+
+    <div class="info-box">
+      <code>await using conn = await openDB()</code> attaches <code>Symbol.asyncDispose</code> to <code>conn</code>. When the block exits — whether normally or via <code>throw</code> — the runtime <code>await</code>s the disposer. Resources below show their open/disposed state in real time.
+    </div>
+
+    <p class="section-title">Active resources</p>
+    <div class="resource-grid" id="resourceGrid"></div>
+
+    <div class="summary-row" id="summaryRow">
+      <div class="metric-card"><div class="metric-val" id="metOpen">0</div><div class="metric-label">Open</div></div>
+      <div class="metric-card"><div class="metric-val" id="metDisposed">0</div><div class="metric-label">Disposed</div></div>
+      <div class="metric-card"><div class="metric-val" id="metLeaked">0</div><div class="metric-label">Leaked</div></div>
+      <div class="metric-card"><div class="metric-val" id="metAvgLife">—</div><div class="metric-label">Avg lifetime (ms)</div></div>
+    </div>
+
+    <p class="section-title">Run a scenario</p>
+    <div class="controls-row">
+      <div class="field-group">
+        <label>Scenario</label>
+        <select id="scenarioSel">
+          <option value="happy">Happy path — 4 resources, all disposed</option>
+          <option value="throw">Scope throws after 2nd resource open</option>
+          <option value="stack">AsyncDisposableStack — 5 resources, LIFO unwind</option>
+          <option value="partial">Partial acquire — 3rd resource fails to open</option>
+        </select>
+      </div>
+      <button class="primary" id="runBtn">Run scenario</button>
+      <button class="secondary" id="resetBtn">Reset</button>
+    </div>
+
+    <p class="section-title">Resource lifecycle log</p>
+    <div class="timeline" id="timeline">Click "Run scenario" to start.</div>
+
+    <p class="section-title">Pattern: await using with async dispose</p>
+    <div class="code-block">// Each resource implements Symbol.asyncDispose
+function makeDbConnection(name) {
+  const conn = {
+    name,
+    query: async (sql) => { /* ... */ },
+    [Symbol.asyncDispose]: async () => {
+      await closeSocket(conn);  // async cleanup
+      console.log(`${name} connection closed`);
+    }
+  };
+  return conn;
+}
+
+// All resources auto-disposed — even if fetchData() throws
+async function processOrder(orderId) {
+  await using db = makeDbConnection('orders');
+  await using cache = makeCacheClient('redis://...');
+  await using lock = await acquireLock(`order:${orderId}`);
+
+  const order = await db.query(`SELECT * FROM orders WHERE id = ?`, orderId);
+  const cached = await cache.get(`order:${orderId}`);
+  // ... process ...
+  // On exit (throw OR return): lock released, cache closed, db closed (LIFO)
+}</div>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const probe = document.getElementById('probeAsyncDispose');
+  const hasAsyncDispose = typeof Symbol.asyncDispose === 'symbol';
+  if (hasAsyncDispose) {
+    probe.textContent = 'Symbol.asyncDispose available (Chrome 134+)';
+    probe.classList.replace('fail', 'ok');
+  } else {
+    probe.textContent = 'Symbol.asyncDispose not available — simulation only';
+    probe.classList.replace('fail', 'warn');
+  }
+
+  const RESOURCE_TYPES = [
+    { name: 'DB connection', icon: '🗄', color: '' },
+    { name: 'File handle', icon: '📄', color: '' },
+    { name: 'HTTP client', icon: '🌐', color: '' },
+    { name: 'Cache bucket', icon: '⚡', color: '' },
+    { name: 'Message queue', icon: '📬', color: '' },
+  ];
+
+  let resources = [];
+  let tlEl = document.getElementById('timeline');
+
+  function log(msg, cls) {
+    const ts = performance.now().toFixed(0);
+    const span = document.createElement('span');
+    span.className = cls || '';
+    span.textContent = `[+${ts}ms] ${msg}\n`;
+    tlEl.appendChild(span);
+    tlEl.scrollTop = tlEl.scrollHeight;
+  }
+
+  function clearLog() {
+    tlEl.innerHTML = '';
+  }
+
+  function resetResources() {
+    resources = [];
+    renderGrid();
+    updateMetrics();
+  }
+
+  function addResource(name) {
+    const res = { name, state: 'open', openedAt: performance.now(), disposedAt: null };
+    resources.push(res);
+    renderGrid();
+    updateMetrics();
+    return res;
+  }
+
+  function disposeResource(res) {
+    res.state = 'disposed';
+    res.disposedAt = performance.now();
+    renderGrid();
+    updateMetrics();
+  }
+
+  function renderGrid() {
+    const grid = document.getElementById('resourceGrid');
+    grid.innerHTML = '';
+    RESOURCE_TYPES.forEach((t, i) => {
+      const res = resources[i];
+      const card = document.createElement('div');
+      if (!res) {
+        card.className = 'resource-card';
+        card.innerHTML = `<div class="res-name">${t.icon} ${t.name}</div><div class="res-stat" style="color:var(--text-muted)">not opened</div>`;
+      } else {
+        card.className = 'resource-card ' + res.state;
+        const life = res.disposedAt ? (res.disposedAt - res.openedAt).toFixed(0) : (performance.now() - res.openedAt).toFixed(0);
+        card.innerHTML = `
+          <div class="res-name">${t.icon} ${t.name}</div>
+          <div><span class="res-state ${res.state}">${res.state}</span></div>
+          <div class="res-stat">lifetime: ${life}ms</div>
+        `;
+      }
+      grid.appendChild(card);
+    });
+  }
+
+  function updateMetrics() {
+    const open = resources.filter(r => r.state === 'open').length;
+    const disposed = resources.filter(r => r.state === 'disposed').length;
+    const leaked = resources.filter(r => r.state === 'open' && performance.now() - r.openedAt > 5000).length;
+    const lifetimes = resources.filter(r => r.disposedAt).map(r => r.disposedAt - r.openedAt);
+    const avgLife = lifetimes.length ? (lifetimes.reduce((a, b) => a + b, 0) / lifetimes.length).toFixed(0) : '—';
+    document.getElementById('metOpen').textContent = open;
+    document.getElementById('metDisposed').textContent = disposed;
+    document.getElementById('metLeaked').textContent = leaked;
+    document.getElementById('metAvgLife').textContent = avgLife;
+  }
+
+  function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  async function runHappy() {
+    log('→ Entering async scope (await using)', 'tl-info');
+    await delay(80);
+    const db = addResource('DB connection'); log('✓ Opened: DB connection', 'tl-open');
+    await delay(60);
+    const fh = addResource('File handle'); log('✓ Opened: File handle', 'tl-open');
+    await delay(50);
+    const http = addResource('HTTP client'); log('✓ Opened: HTTP client', 'tl-open');
+    await delay(70);
+    const cache = addResource('Cache bucket'); log('✓ Opened: Cache bucket', 'tl-open');
+    log('  … doing work …', 'tl-info');
+    await delay(200);
+    log('← Exiting scope normally — disposing LIFO', 'tl-info');
+    await delay(40); disposeResource(cache); log('✓ Disposed: Cache bucket (Symbol.asyncDispose)', 'tl-close');
+    await delay(40); disposeResource(http); log('✓ Disposed: HTTP client (Symbol.asyncDispose)', 'tl-close');
+    await delay(40); disposeResource(fh); log('✓ Disposed: File handle (Symbol.asyncDispose)', 'tl-close');
+    await delay(40); disposeResource(db); log('✓ Disposed: DB connection (Symbol.asyncDispose)', 'tl-close');
+    log('✓ Scope exited — all resources clean', 'tl-info');
+  }
+
+  async function runThrow() {
+    log('→ Entering async scope (await using)', 'tl-info');
+    await delay(80);
+    const db = addResource('DB connection'); log('✓ Opened: DB connection', 'tl-open');
+    await delay(60);
+    const fh = addResource('File handle'); log('✓ Opened: File handle', 'tl-open');
+    log('✗ THROW inside scope — "Query timeout"', 'tl-error');
+    await delay(40);
+    log('← Scope thrown — runtime disposes in LIFO order', 'tl-info');
+    await delay(40); disposeResource(fh); log('✓ Disposed: File handle (via throw path)', 'tl-close');
+    await delay(40); disposeResource(db); log('✓ Disposed: DB connection (via throw path)', 'tl-close');
+    log('✓ No resource leak despite unhandled throw', 'tl-info');
+    log('  (without await using, both resources would leak)', 'tl-error');
+  }
+
+  async function runStack() {
+    log('→ new AsyncDisposableStack()', 'tl-info');
+    const names = ['DB connection', 'File handle', 'HTTP client', 'Cache bucket', 'Message queue'];
+    const opened = [];
+    for (let i = 0; i < 5; i++) {
+      await delay(50);
+      const r = addResource(names[i]);
+      opened.push(r);
+      log(`✓ stack.use(): ${names[i]}`, 'tl-open');
+    }
+    log('← stack.disposeAsync() — LIFO unwind', 'tl-info');
+    for (let i = opened.length - 1; i >= 0; i--) {
+      await delay(40);
+      disposeResource(opened[i]);
+      log(`✓ Disposed: ${names[i]}`, 'tl-close');
+    }
+    log('✓ AsyncDisposableStack fully unwound', 'tl-info');
+  }
+
+  async function runPartial() {
+    log('→ Entering async scope (await using)', 'tl-info');
+    await delay(80);
+    const db = addResource('DB connection'); log('✓ Opened: DB connection', 'tl-open');
+    await delay(60);
+    const fh = addResource('File handle'); log('✓ Opened: File handle', 'tl-open');
+    log('✗ 3rd resource (HTTP client) FAILED to open — throws', 'tl-error');
+    await delay(40);
+    log('← Partial scope throws — disposing already-opened resources', 'tl-info');
+    await delay(40); disposeResource(fh); log('✓ Disposed: File handle', 'tl-close');
+    await delay(40); disposeResource(db); log('✓ Disposed: DB connection', 'tl-close');
+    log('✓ Partial acquisition — no leaks on open failure', 'tl-info');
+  }
+
+  document.getElementById('runBtn').addEventListener('click', async () => {
+    const sel = document.getElementById('scenarioSel').value;
+    clearLog();
+    resetResources();
+    document.getElementById('runBtn').disabled = true;
+    try {
+      if (sel === 'happy') await runHappy();
+      else if (sel === 'throw') await runThrow();
+      else if (sel === 'stack') await runStack();
+      else if (sel === 'partial') await runPartial();
+    } finally {
+      document.getElementById('runBtn').disabled = false;
+    }
+  });
+
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    clearLog();
+    resetResources();
+    log('Reset. Click "Run scenario" to start.', 'tl-info');
+  });
+
+  renderGrid();
+  log('Ready. Click "Run scenario" to start.', 'tl-info');
+})();
+</script>
+</body>
+</html>
