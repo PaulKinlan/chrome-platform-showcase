@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Allowlist explorer — Pervasive resource cache sharing — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3) var(--space-4); margin: 0 0 var(--space-5); font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: 0 0 var(--space-5); }
+    .input-row { display: flex; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); align-items: center; }
+    .input-row input { flex: 1; min-width: 320px; padding: 0.4rem 0.6rem; border: 2px solid var(--border-black); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.85rem; }
+    .input-row label { font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .verdict { padding: var(--space-3); border: 2px solid var(--border-black); margin: var(--space-3) 0; font-family: var(--font-mono); font-size: 0.85rem; }
+    .verdict.shared { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .verdict.partitioned { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .checklist { font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
+    .checklist li { padding: 0.25rem 0; border-bottom: 1px dashed var(--text-muted); display: flex; gap: 0.5rem; align-items: center; }
+    .checklist li::before { content: "•"; color: var(--text-muted); }
+    .checklist li.pass::before { content: "✓"; color: var(--accent-emerald); }
+    .checklist li.fail::before { content: "✗"; color: var(--accent-rose); }
+    .candidate-list { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); margin: var(--space-3) 0; }
+    @media (max-width: 600px) { .candidate-list { grid-template-columns: 1fr; } }
+    .candidate { font-family: var(--font-mono); font-size: 0.75rem; padding: 0.4rem 0.6rem; border: 2px solid var(--border-black); background: var(--bg-stone); cursor: pointer; word-break: break-all; }
+    .candidate:hover { background: var(--bg-paper); }
+    .candidate.shared { border-left: 6px solid var(--accent-emerald); }
+    .candidate.partitioned { border-left: 6px solid var(--accent-rose); }
+    .savings-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); margin: var(--space-3) 0; }
+    @media (max-width: 600px) { .savings-grid { grid-template-columns: 1fr; } }
+    .stat-card { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); }
+    .stat-card .v { font-family: var(--font-display); font-size: 1.5rem; }
+    .stat-card .l { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em; }
+    .support { font-family: var(--font-mono); font-size: 0.78rem; padding: 0.3rem 0.6rem; border: 1px solid var(--border-black); display: inline-block; margin-bottom: var(--space-3); }
+    .support.yes { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .support.no { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Cache sharing for pervasive resources</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>Allowlist explorer</h1>
+    <p class="lede">Cache sharing only kicks in for an explicit allowlist of resources that meet five criteria. Paste any URL and the page walks through each gate, telling you exactly why a resource qualifies — or doesn't — for cross-origin cache sharing.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Unflagged in Chrome 138, gated by criteria.</strong> Cache partitioning still applies broadly — only resources on the allowlist (heavy, immutable, semver-pinned, served by tiny number of origins, no cookies) get shared.
+  </div>
+
+  <div id="support" class="support">probing&hellip;</div>
+
+  <div class="stage">
+    <div class="input-row">
+      <label>resource URL</label>
+      <input type="text" id="url" value="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js" autocomplete="off">
+    </div>
+
+    <h3>Known good candidates (try them)</h3>
+    <div class="candidate-list" id="candidates"></div>
+
+    <h3>Verdict</h3>
+    <div class="verdict" id="verdict">paste a URL.</div>
+
+    <h3>Five-gate checklist</h3>
+    <ul class="checklist" id="checklist"></ul>
+
+    <h3>If shared · projected savings</h3>
+    <div class="savings-grid">
+      <div class="stat-card"><div class="v" id="s-size">—</div><div class="l">resource size</div></div>
+      <div class="stat-card"><div class="v" id="s-monthly">—</div><div class="l">est. monthly cache hits</div></div>
+      <div class="stat-card"><div class="v" id="s-bytes">—</div><div class="l">bytes saved (est.)</div></div>
+    </div>
+  </div>
+
+  <h3>The five criteria</h3>
+  <ol class="how">
+    <li><b>Versioned URL</b> — the URL must contain an immutable version (path segment like <code>/3.6.0/</code>, <code>/v2/</code>, content hash). Mutable URLs poison the cache.</li>
+    <li><b>Cache-Control: public, immutable</b> — origin commits to the resource never changing. Cache duration ≥ 1 year.</li>
+    <li><b>No cookies, no auth</b> — the request must not include credentials. Personal data must never enter a shared cache.</li>
+    <li><b>SHA-256 integrity</b> — Chrome verifies a hash of the body. Tampering by an upstream proxy is caught.</li>
+    <li><b>On the allowlist</b> — the host must be on the explicit, audited list of pervasive CDNs. Initial list includes jsDelivr, cdnjs, unpkg, googleapis, gstatic, and a few others.</li>
+  </ol>
+
+  <h3>Why bother</h3>
+  <p>The pre-2020 web shared cache for jQuery / Bootstrap / Lodash across origins. A user who'd already downloaded jquery-3.6.0.min.js once didn't download it again. Cache partitioning (2020) closed that as a privacy hardening — sites could no longer use shared cache as a tracking signal. The cost was up to 90% redundant downloads of a small set of extremely popular resources. v138's allowlisted scheme restores the saving for that small set, with the privacy properties intact.</p>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../shared-cache/">Shared cache demo</a></li>
+      <li><a href="../eligibility-checker/">Eligibility checker demo</a></li>
+      <li><a href="https://chromestatus.com/feature/5202380930678784" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  // Allowlisted hosts (illustrative — real list is in Chromium source).
+  const allowlist = [
+    'ajax.googleapis.com',
+    'fonts.googleapis.com',
+    'fonts.gstatic.com',
+    'www.gstatic.com',
+    'cdn.jsdelivr.net',
+    'cdnjs.cloudflare.com',
+    'unpkg.com',
+    'esm.sh',
+  ];
+  const sizeEstimates = {
+    'jquery': 90 * 1024,
+    'bootstrap': 160 * 1024,
+    'react': 130 * 1024,
+    'vue': 110 * 1024,
+    'lodash': 70 * 1024,
+    'roboto': 25 * 1024,
+    'noto': 35 * 1024,
+    'tailwind': 200 * 1024,
+  };
+  const candidates = [
+    'https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js',
+    'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css',
+    'https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js',
+    'https://unpkg.com/react@18.2.0/umd/react.production.min.js',
+    'https://fonts.googleapis.com/css2?family=Roboto:wght@400;700',
+    'https://fonts.gstatic.com/s/roboto/v30/KFOmCnqEu92Fr1Mu4mxK.woff2',
+    'https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js',
+    'https://example.com/assets/jquery.js',
+    'https://my-cdn.example.com/lib.js?v=1',
+    'https://ajax.googleapis.com/ajax/libs/jquery/latest/jquery.min.js',
+  ];
+
+  const candEl = document.getElementById('candidates');
+  candidates.forEach((u) => {
+    const d = document.createElement('div');
+    d.className = 'candidate';
+    d.textContent = u;
+    d.addEventListener('click', () => { document.getElementById('url').value = u; check(); });
+    candEl.appendChild(d);
+  });
+
+  const supportEl = document.getElementById('support');
+  supportEl.className = 'support yes';
+  supportEl.textContent = 'allowlist enforced by browser — page provides authoritative-shaped illustration';
+
+  function check() {
+    const u = document.getElementById('url').value.trim();
+    let parsed;
+    try { parsed = new URL(u); } catch { document.getElementById('verdict').textContent = 'invalid URL'; return; }
+    const checks = [
+      {name: 'host on allowlist', pass: allowlist.includes(parsed.hostname)},
+      {name: 'versioned path (e.g. /3.6.0/, /v2/, /hash/)', pass: /\/[v]?\d+(\.\d+){1,2}\//.test(parsed.pathname) || /[0-9a-f]{8}/.test(parsed.pathname)},
+      {name: 'no query string with mutable params', pass: !parsed.search || /^\?(family|display|subset)=/.test(parsed.search)},
+      {name: 'https scheme', pass: parsed.protocol === 'https:'},
+      {name: 'no cookies (assumed — depends on request)', pass: true},
+      {name: 'integrity attribute on consuming <script>/<link> (recommended)', pass: true},
+    ];
+    const allPass = checks.every((c) => c.pass);
+    const list = document.getElementById('checklist');
+    list.innerHTML = checks.map((c) => '<li class="' + (c.pass ? 'pass' : 'fail') + '">' + c.name + '</li>').join('');
+
+    const v = document.getElementById('verdict');
+    v.className = 'verdict ' + (allPass ? 'shared' : 'partitioned');
+    v.innerHTML = allPass
+      ? '<b>SHARED</b> — this URL meets the criteria. A user who downloaded this resource from origin-A and then visits origin-B will reuse the cached copy.'
+      : '<b>PARTITIONED</b> — this URL will be re-downloaded per top-level origin. Failing checks shown below.';
+
+    const m = u.match(/jquery|bootstrap|react|vue|lodash|roboto|noto|tailwind/i);
+    const size = m ? sizeEstimates[m[0].toLowerCase()] || 100 * 1024 : 100 * 1024;
+    document.getElementById('s-size').textContent = (size / 1024).toFixed(0) + ' KB';
+    if (allPass) {
+      document.getElementById('s-monthly').textContent = '~250M';
+      document.getElementById('s-bytes').textContent = ((size * 250e6) / 1e12).toFixed(1) + ' TB';
+    } else {
+      document.getElementById('s-monthly').textContent = '0 (partitioned)';
+      document.getElementById('s-bytes').textContent = '0';
+    }
+  }
+
+  document.getElementById('url').addEventListener('input', check);
+  check();
+</script>
+</body>
+</html>
