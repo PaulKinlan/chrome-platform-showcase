@@ -954,6 +954,10 @@ async function renderFedCmRoute(req: Request, sub: string): Promise<Response | n
       }
     })() as Record<string, unknown>;
     const now = Math.floor(Date.now() / 1000);
+    const scope = typeof params.scope === "string" ? params.scope : "openid email profile";
+    const scopes = scope.split(/\s+/).filter(Boolean);
+    const agent = typeof params.agent === "string" && params.agent ? params.agent : null;
+    const delegationRequested = params.delegation === true || params.delegation === "true";
     const token = await signFedCmJwt({
       iss: new URL(req.url).origin,
       aud: clientId,
@@ -963,8 +967,19 @@ async function renderFedCmRoute(req: Request, sub: string): Promise<Response | n
       iat: now,
       exp: now + 3600,
       nonce: body.get("nonce") ?? params.nonce ?? null,
-      scope: params.scope ?? "openid email profile",
-      agentic: Boolean(params.agent || params.delegation),
+      scope,
+      agentic: Boolean(agent || delegationRequested),
+      ...(agent ? { agent } : {}),
+      ...(delegationRequested && agent
+        ? {
+          sub_delegation: {
+            delegatee: agent,
+            scopes,
+            granted_at: now,
+            user_consent: body.get("disclosure_text_shown") === "true",
+          },
+        }
+        : {}),
       origin: req.headers.get("origin") ?? new URL(req.url).origin,
       disclosure_shown_for: body.get("disclosure_shown_for") ?? "",
       is_auto_selected: body.get("is_auto_selected") ?? "false",
@@ -990,6 +1005,68 @@ async function renderFedCmRoute(req: Request, sub: string): Promise<Response | n
       refresh_count: Number(result.payload.refresh_count ?? 0) + 1,
     });
     return jsonResponse({ token, previous: result.payload });
+  }
+
+  if (route === "/delegated-api" && req.method === "POST") {
+    const body = await requestJson(req);
+    const action = String(body.action ?? "");
+    const token = String(body.token ?? "");
+    const requiredScopes: Record<string, string> = {
+      calendar: "calendar.read",
+      email: "email.read",
+      tasks: "tasks.write",
+      admin: "admin.write",
+    };
+    const result = await verifyFedCmJwt(token);
+    if (!result.ok || !result.payload) return jsonResponse(result, { status: 401 });
+    const required = requiredScopes[action];
+    if (!required) return jsonResponse({ error: `Unknown action: ${action}` }, { status: 400 });
+    const delegation = typeof result.payload.sub_delegation === "object" &&
+        result.payload.sub_delegation !== null
+      ? result.payload.sub_delegation as Record<string, unknown>
+      : null;
+    if (!delegation) {
+      return jsonResponse({
+        error: "not_delegated",
+        message: "Token is valid, but it does not carry a delegated authority claim.",
+      }, { status: 403 });
+    }
+    const scopes = Array.isArray(delegation.scopes)
+      ? delegation.scopes.map((scope) => String(scope)).filter(Boolean)
+      : [];
+    if (!scopes.includes(required)) {
+      return jsonResponse({
+        error: "scope_not_delegated",
+        required,
+        delegated: scopes,
+      }, { status: 403 });
+    }
+    const responses: Record<string, unknown> = {
+      calendar: {
+        events: [
+          { id: "evt1", title: "Team standup", start: "2026-05-31T09:00:00Z" },
+          { id: "evt2", title: "Product review", start: "2026-05-31T14:00:00Z" },
+        ],
+      },
+      email: {
+        messages: [
+          { id: "m1", from: "bob@example.com", subject: "Quarterly report" },
+          { id: "m2", from: "carol@example.com", subject: "Re: project update" },
+        ],
+      },
+      tasks: {
+        task_id: `tsk_${randomBase64Url(5)}`,
+        title: "Follow up on quarterly report",
+        status: "created",
+      },
+    };
+    return jsonResponse({
+      action,
+      required,
+      delegated_by: result.payload.email,
+      agent: delegation.delegatee,
+      result: responses[action],
+    });
   }
 
   return null;

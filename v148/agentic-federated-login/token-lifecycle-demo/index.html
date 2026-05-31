@@ -353,8 +353,8 @@
 </main>
 <script>
 (function () {
-  const ISSUERS = ['idp.example', 'login.provider.test', 'auth.fedcm.dev'];
-  const SUBJECTS = ['agent/task-runner@org.example', 'user/paul@example.com', 'svc/build-bot@ci.example'];
+  const FEDCM_BASE = '/v148/agentic-federated-login/fedcm';
+  const CLIENT_ID = 'chrome-platform-showcase';
   const SCOPE_SETS = {
     normal:    ['openid', 'profile', 'email'],
     shortlived:['openid', 'email'],
@@ -383,6 +383,61 @@
     row.innerHTML = `<span class="el-time">${ts()}</span><span class="el-msg ${cls}">${msg}</span>`;
     log.appendChild(row);
     log.scrollTop = log.scrollHeight;
+  }
+
+  async function readJson(response) {
+    const data = await response.json();
+    return { ok: response.ok, status: response.status, data };
+  }
+
+  async function postJson(path, body = {}) {
+    const response = await fetch(`${FEDCM_BASE}${path}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return await readJson(response);
+  }
+
+  function decodeJwtPayload(token) {
+    const payload = token.split('.')[1];
+    const padded = payload.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((payload.length + 3) % 4);
+    return JSON.parse(atob(padded));
+  }
+
+  async function issueBackendToken() {
+    if (scenario === 'denied') {
+      await postJson('/logout');
+    } else {
+      await postJson('/login');
+    }
+    const accounts = await readJson(await fetch(`${FEDCM_BASE}/accounts`, { credentials: 'same-origin' }));
+    if (!accounts.ok) throw new Error(accounts.data.error || 'accounts endpoint failed');
+    const account = accounts.data.accounts[0];
+    const params = new URLSearchParams({
+      account_id: account.id,
+      client_id: CLIENT_ID,
+      fields: 'name,email,picture',
+      disclosure_text_shown: 'true',
+      disclosure_shown_for: 'name,email,picture',
+      is_auto_selected: scenario === 'normal' ? 'true' : 'false',
+      params: JSON.stringify({
+        nonce: crypto.randomUUID(),
+        scope: (SCOPE_SETS[scenario] || SCOPE_SETS.normal).join(' '),
+        agent: scenario === 'agent' ? 'task-runner' : '',
+      }),
+    });
+    const assertion = await readJson(await fetch(`${FEDCM_BASE}/assertion`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: params,
+    }));
+    if (!assertion.ok) throw new Error(assertion.data.error || 'assertion endpoint failed');
+    const validation = await postJson('/validate', { token: assertion.data.token });
+    if (!validation.ok) throw new Error(validation.data.error || 'token validation failed');
+    return { token: assertion.data.token, payload: validation.data.payload || decodeJwtPayload(assertion.data.token) };
   }
 
   function setState(s) {
@@ -463,26 +518,28 @@
     addLog('Sending identity credential request to IDP…', 'info');
     setState('requesting');
 
-    await delay(900);
-
-    if (scenario === 'denied') {
-      addLog('IDP returned: NOT_SIGNED_IN — user must authenticate first', 'err');
+    let issued;
+    try {
+      issued = await issueBackendToken();
+    } catch (error) {
+      addLog(`IDP returned: ${error.message || error}`, 'err');
       setState('idle');
       document.getElementById('btnRequest').disabled = false;
-      document.getElementById('insightBox').textContent = 'The identity provider rejected the token request (not signed in). An agent must queue a re-auth prompt or fail gracefully — it cannot silently proceed.';
+      document.getElementById('insightBox').textContent = 'The identity provider rejected the token request. An agent must queue a re-auth prompt or fail gracefully — it cannot silently proceed.';
       return;
     }
 
     const ttl = TTL_MAP[scenario] || 60;
     const issuedAt = elapsed;
     tokenData = {
-      id: 'tok_' + Math.random().toString(36).slice(2, 10),
-      issuer: ISSUERS[Math.floor(Math.random() * ISSUERS.length)],
-      subject: SUBJECTS[Math.floor(Math.random() * SUBJECTS.length)],
-      scopes: SCOPE_SETS[scenario] || SCOPE_SETS.normal,
+      id: issued.token.split('.')[2].slice(0, 12),
+      issuer: issued.payload.iss,
+      subject: issued.payload.email || issued.payload.sub,
+      scopes: String(issued.payload.scope || '').split(/\s+/).filter(Boolean),
       ttl,
       issuedAt,
       refreshEligible: scenario !== 'denied',
+      token: issued.token,
     };
     ttlRemaining = ttl;
     setState('issued');
@@ -509,10 +566,9 @@
     addLog('Sending refresh request to IDP…', 'info');
     setState('refreshing');
 
-    await delay(800);
-
     if (scenario === 'offline') {
-      addLog('Refresh failed: IDP unreachable (network error)', 'err');
+      const offline = await fetch(`${FEDCM_BASE}/refresh-offline`, { method: 'POST' });
+      addLog(`Refresh failed: IDP endpoint returned ${offline.status}`, 'err');
       setState('valid'); // stays valid until naturally expires
       addLog('Retaining existing token until expiry', 'warn');
       document.getElementById('insightBox').textContent = 'Offline refresh failed. The agent retains the existing token and will retry on next connectivity event. When the token finally expires, a full re-auth is required.';
@@ -520,9 +576,19 @@
     }
 
     const newTtl = TTL_MAP[scenario] || 60;
-    const newId = 'tok_' + Math.random().toString(36).slice(2, 10);
+    const refreshed = await postJson('/refresh', { token: tokenData.token });
+    if (!refreshed.ok) {
+      addLog(`Refresh rejected: ${refreshed.data.error || refreshed.status}`, 'err');
+      setState('expired');
+      return;
+    }
+    const payload = decodeJwtPayload(refreshed.data.token);
+    const newId = refreshed.data.token.split('.')[2].slice(0, 12);
     addLog(`New token issued: ${newId} (TTL=${newTtl}s)`, 'ok');
     tokenData.id = newId;
+    tokenData.token = refreshed.data.token;
+    tokenData.issuer = payload.iss;
+    tokenData.subject = payload.email || payload.sub;
     tokenData.issuedAt = elapsed;
     tokenData.ttl = newTtl;
     ttlRemaining = newTtl;
@@ -552,7 +618,7 @@
 
   window.forceExpire = function () {
     if (state !== 'valid') return;
-    addLog('Force-expiring token (simulating IDP clock ahead)', 'warn');
+    addLog('Force-expiring local token view', 'warn');
     ttlRemaining = 0;
     if (tokenData) tokenData.issuedAt = elapsed - tokenData.ttl;
     updateInspector();

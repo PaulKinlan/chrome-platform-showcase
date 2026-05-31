@@ -286,8 +286,11 @@
     delegationGranted: false,
     delegationDenied: false,
     tokenData: null,
+    token: null,
     revoked: false,
   };
+  const FEDCM_BASE = '/v148/agentic-federated-login/fedcm';
+  const CLIENT_ID = 'chrome-platform-showcase';
 
   // --- API Probe ---
   (function probeAPI() {
@@ -296,7 +299,7 @@
       el.textContent = '✓ IdentityProvider.getUserInfo() is available in this browser.';
       el.className = 'probe-result yes';
     } else {
-      el.textContent = '✗ IdentityProvider.getUserInfo() not available — this demo simulates the flow.';
+      el.textContent = 'IdentityProvider.getUserInfo() is not available; this page uses the backend FedCM endpoints directly.';
       el.className = 'probe-result no';
     }
   })();
@@ -327,6 +330,29 @@
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
 
+  async function readJson(response) {
+    const data = await response.json();
+    return { ok: response.ok, status: response.status, data };
+  }
+
+  async function postJson(path, body = {}) {
+    const response = await fetch(`${FEDCM_BASE}${path}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return await readJson(response);
+  }
+
+  function decodeJwt(token) {
+    const [header, payload] = token.split('.').slice(0, 2).map(part => {
+      const padded = part.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((part.length + 3) % 4);
+      return JSON.parse(atob(padded));
+    });
+    return { header, payload };
+  }
+
   function setStep(id, state) {
     const el = document.getElementById(id);
     if (!el) return;
@@ -334,8 +360,8 @@
   }
 
   // --- Grant flow ---
-  function startLogin() {
-    log('grant-log', 'navigator.credentials.get({identity:{providers:[{configURL:"…",clientId:"agent-client"}]}}) called…', 'info');
+  async function startLogin() {
+    log('grant-log', 'Preparing IdP session and reading FedCM account endpoint…', 'info');
     setStep('s1','active');
     const btn = document.getElementById('btn-login');
     btn.disabled = true;
@@ -343,20 +369,27 @@
     document.getElementById('grant-status').textContent = 'Authenticating';
     document.getElementById('grant-status').className = 'status-badge pending';
 
-    setTimeout(() => {
+    try {
+      const login = await postJson('/login');
+      if (!login.ok) throw new Error(login.data.error || 'IdP login failed.');
       setStep('s1','done');
       setStep('s2','active');
-      log('grant-log', 'FedCM dialog shown — user selected account: alice@example.com', 'ok');
-      setTimeout(() => {
-        setStep('s2','done');
-        state.userLoggedIn = true;
-        btn.textContent = 'Logged in ✓';
-        document.getElementById('grant-status').textContent = 'Authenticated';
-        document.getElementById('grant-status').className = 'status-badge granted';
-        document.getElementById('btn-request-token').disabled = false;
-        log('grant-log', 'User authenticated. Agent may now request delegation.', 'ok');
-      }, 900);
-    }, 1200);
+      const accounts = await readJson(await fetch(`${FEDCM_BASE}/accounts`, { credentials: 'same-origin' }));
+      if (!accounts.ok) throw new Error(accounts.data.error || 'Accounts endpoint failed.');
+      setStep('s2','done');
+      state.userLoggedIn = true;
+      btn.textContent = 'Logged in ✓';
+      document.getElementById('grant-status').textContent = 'Authenticated';
+      document.getElementById('grant-status').className = 'status-badge granted';
+      document.getElementById('btn-request-token').disabled = false;
+      log('grant-log', `FedCM accounts endpoint returned ${accounts.data.accounts[0].email}. Agent may now request delegation.`, 'ok');
+    } catch (error) {
+      btn.disabled = false;
+      btn.textContent = 'Step 1: User logs in via FedCM';
+      document.getElementById('grant-status').textContent = 'Error';
+      document.getElementById('grant-status').className = 'status-badge denied';
+      log('grant-log', error.message || String(error), 'err');
+    }
   }
 
   function requestDelegation() {
@@ -374,45 +407,68 @@
     }, 900);
   }
 
-  function allowDelegation() {
+  async function allowDelegation() {
     document.getElementById('consent-dialog-wrap').style.display = 'none';
     setStep('s4','done');
     setStep('s5','active');
-    log('grant-log', 'User clicked Allow. IdP issuing delegated JWT…', 'info');
+    log('grant-log', 'User clicked Allow. Calling FedCM assertion endpoint for delegated JWT…', 'info');
     document.getElementById('grant-status').textContent = 'Issuing token';
     document.getElementById('grant-status').className = 'status-badge pending';
 
-    setTimeout(() => {
+    try {
+      const params = new URLSearchParams({
+        account_id: 'alice-001',
+        client_id: CLIENT_ID,
+        fields: 'name,email,picture',
+        disclosure_text_shown: 'true',
+        disclosure_shown_for: 'name,email,picture',
+        is_auto_selected: 'false',
+        params: JSON.stringify({
+          nonce: crypto.randomUUID(),
+          scope: 'calendar.read email.read tasks.write',
+          delegation: true,
+          agent: 'ai-assistant.example.com',
+        }),
+      });
+      const assertion = await readJson(await fetch(`${FEDCM_BASE}/assertion`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: params,
+      }));
+      if (!assertion.ok) throw new Error(assertion.data.error || 'Assertion endpoint failed.');
+      const validation = await postJson('/validate', { token: assertion.data.token });
+      if (!validation.ok) throw new Error(validation.data.error || 'Token validation failed.');
+      const decoded = decodeJwt(assertion.data.token);
       setStep('s5','done');
       state.delegationGranted = true;
       state.revoked = false;
-
-      const exp = Math.floor(Date.now()/1000) + 3600;
-      const iat = Math.floor(Date.now()/1000);
+      state.token = assertion.data.token;
       state.tokenData = {
-        header: { alg:'RS256', typ:'JWT', kid:'idp-key-2026-05' },
+        header: decoded.header,
         payload: {
-          iss: 'https://identity.example.com',
-          sub: 'alice@example.com',
-          aud: 'ai-assistant.example.com',
-          iat,
-          exp,
-          'sub_delegation': {
-            delegatee: 'ai-assistant.example.com',
-            scopes: ['calendar.read','email.read','tasks.write'],
-            granted_at: iat,
-            user_consent: true
-          }
+          iss: decoded.payload.iss,
+          sub: decoded.payload.email,
+          aud: decoded.payload.aud,
+          iat: decoded.payload.iat,
+          exp: decoded.payload.exp,
+          agent: decoded.payload.agent,
+          'sub_delegation': decoded.payload.sub_delegation
         }
       };
 
       renderToken();
       document.getElementById('grant-status').textContent = 'Granted';
       document.getElementById('grant-status').className = 'status-badge granted';
-      log('grant-log', 'Delegated token issued. Agent may now act on behalf of alice@example.com.', 'ok');
+      log('grant-log', 'Delegated token issued and validated by the backend.', 'ok');
       updateExecuteTab();
       updateRevokeTab();
-    }, 800);
+    } catch (error) {
+      setStep('s5','error');
+      document.getElementById('grant-status').textContent = 'Error';
+      document.getElementById('grant-status').className = 'status-badge denied';
+      log('grant-log', error.message || String(error), 'err');
+    }
   }
 
   function denyDelegation() {
@@ -461,28 +517,28 @@
 
   const apiDefs = {
     calendar: {
-      method: 'GET', url: 'https://api.example.com/calendar/events',
+      method: 'POST', url: `${FEDCM_BASE}/delegated-api`,
       scope: 'calendar.read',
-      response: JSON.stringify({events:[{id:'evt1',title:'Team standup',start:'2026-05-31T09:00Z'},{id:'evt2',title:'Product review',start:'2026-05-31T14:00Z'}],delegated_by:'alice@example.com'},null,2)
+      response: null
     },
     email: {
-      method: 'GET', url: 'https://api.example.com/email/inbox',
+      method: 'POST', url: `${FEDCM_BASE}/delegated-api`,
       scope: 'email.read',
-      response: JSON.stringify({messages:[{id:'m1',from:'bob@example.com',subject:'Quarterly report'},{id:'m2',from:'carol@example.com',subject:'Re: project update'}],delegated_by:'alice@example.com'},null,2)
+      response: null
     },
     tasks: {
-      method: 'POST', url: 'https://api.example.com/tasks/create',
+      method: 'POST', url: `${FEDCM_BASE}/delegated-api`,
       scope: 'tasks.write',
-      response: JSON.stringify({task_id:'tsk_9f3a2b',title:'Follow up on quarterly report',status:'created',created_by_agent:'ai-assistant.example.com',on_behalf_of:'alice@example.com'},null,2)
+      response: null
     },
     admin: {
-      method: 'DELETE', url: 'https://api.example.com/admin/data',
+      method: 'POST', url: `${FEDCM_BASE}/delegated-api`,
       scope: 'admin.write (NOT in delegation)',
       response: null // blocked
     }
   };
 
-  function execAction(type) {
+  async function execAction(type) {
     const def = apiDefs[type];
     const callBox = document.getElementById('api-call-display');
     const respBox = document.getElementById('api-response-display');
@@ -494,16 +550,12 @@
       return;
     }
 
-    const tokenSnippet = 'eyJ...(delegated JWT)...xyz';
-    callBox.innerHTML = `<strong>${escHtml(def.method)} ${escHtml(def.url)}</strong>\nAuthorization: Bearer ${tokenSnippet}\nX-Delegation-Scope: ${escHtml(def.scope)}`;
+    const tokenSnippet = state.token ? state.token.slice(0, 28) + '...' : 'missing';
+    callBox.innerHTML = `<strong>${escHtml(def.method)} ${escHtml(def.url)}</strong>\nAuthorization: Bearer ${tokenSnippet}\nX-Delegation-Scope: ${escHtml(def.scope)}\n\n${escHtml(JSON.stringify({ action: type }, null, 2))}`;
 
-    if (type === 'admin') {
-      log('exec-log', `${def.method} ${def.url} → 403 Forbidden (scope not in delegation)`, 'err');
-      respBox.innerHTML = `<span style="color:var(--accent-rose)">403 Forbidden\n{"error":"scope_not_delegated","required":"admin.write","delegated":["calendar.read","email.read","tasks.write"]}</span>`;
-    } else {
-      log('exec-log', `${def.method} ${def.url} → 200 OK`, 'ok');
-      respBox.innerHTML = `<span style="color:var(--accent-emerald)">200 OK</span>\n${escHtml(def.response)}`;
-    }
+    const api = await postJson('/delegated-api', { token: state.token, action: type });
+    log('exec-log', `${def.method} ${def.url} → ${api.status}`, api.ok ? 'ok' : 'err');
+    respBox.innerHTML = `<span style="color:var(${api.ok ? '--accent-emerald' : '--accent-rose'})">${api.status} ${api.ok ? 'OK' : 'Rejected'}</span>\n${escHtml(JSON.stringify(api.data, null, 2))}`;
   }
 
   // --- Revoke tab ---
@@ -519,6 +571,7 @@
     if (agent === 'ai-assistant') {
       state.revoked = true;
       state.delegationGranted = false;
+      state.token = null;
       document.getElementById('btn-revoke-agent').disabled = true;
       document.getElementById('btn-revoke-agent').textContent = 'Revoked';
       document.getElementById('revoke-expiry-display').textContent = 'Revoked';
@@ -556,6 +609,7 @@
     state.delegationGranted = false;
     state.delegationDenied = false;
     state.tokenData = null;
+    state.token = null;
     state.revoked = false;
     document.getElementById('grant-status').textContent = 'Idle';
     document.getElementById('grant-status').className = 'status-badge idle';
