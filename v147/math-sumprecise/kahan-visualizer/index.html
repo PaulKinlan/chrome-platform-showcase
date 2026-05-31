@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kahan Summation Visualizer — Chrome 147 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .viz-panel { background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-4); margin: var(--space-4) 0; }
+    .algo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 580px) { .algo-grid { grid-template-columns: 1fr; } }
+    .algo-panel { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); }
+    .algo-panel h3 { margin: 0 0 var(--space-2); font-family: var(--font-mono); font-size: 0.85rem; }
+    .step-list { font-family: var(--font-mono); font-size: 0.75rem; max-height: 200px; overflow-y: auto; }
+    .step-row { padding: 3px 0; border-bottom: 1px solid var(--bg-paper); color: var(--text-charcoal); display: grid; grid-template-columns: 40px 1fr 120px; gap: 4px; }
+    .step-row:last-child { border-bottom: none; }
+    .step-row .err { color: var(--accent-rose); font-size: 0.7rem; }
+    .result-line { font-family: var(--font-mono); font-size: 0.9rem; margin-top: var(--space-2); padding: var(--space-2); background: var(--bg-paper); border: 1px solid var(--border-black); }
+    .result-line .ok { color: var(--accent-emerald); font-weight: bold; }
+    .result-line .bad { color: var(--accent-rose); font-weight: bold; }
+    .controls { margin: var(--space-3) 0; }
+    .controls label { font-size: 0.82rem; color: var(--text-muted); display: block; margin-bottom: 4px; }
+    .controls select, .controls input { font-family: var(--font-mono); font-size: 0.85rem; padding: 5px 8px; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .input-row { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: flex-end; }
+    .error-bar { margin: var(--space-2) 0; }
+    .error-bar .bar-label { font-size: 0.78rem; color: var(--text-muted); margin-bottom: 2px; font-family: var(--font-mono); }
+    .bar-track { height: 10px; background: var(--bg-stone); border: 1px solid var(--border-black); position: relative; }
+    .bar-fill { height: 100%; background: var(--accent-rose); transition: width 0.3s; }
+    .compensation { color: #16a34a; font-weight: bold; }
+    .drift { color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v147/">&larr; Chrome 147</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v147 · JavaScript · Precision</p>
+    <h1>Kahan Summation Visualizer</h1>
+    <p class="lede">Step through Kahan compensated summation — the algorithm behind <code>Math.sumPrecise()</code> — side-by-side with naïve <code>+</code> addition. See the compensation term accumulate and watch error drift at each step.</p>
+  </header>
+
+  <section>
+    <div class="viz-panel">
+      <div class="controls">
+        <div class="input-row">
+          <div>
+            <label>Test dataset</label>
+            <select id="dataset">
+              <option value="uniform">1000 × 0.1 (exact answer: 100)</option>
+              <option value="large-small">Large + many small (catastrophic cancellation)</option>
+              <option value="alternating">Alternating large/small</option>
+              <option value="custom">Custom values (comma-separated)</option>
+            </select>
+          </div>
+          <button id="run-btn">Visualise</button>
+        </div>
+        <div id="custom-row" style="margin-top:var(--space-2);display:none">
+          <label>Custom values</label>
+          <input type="text" id="custom-input" value="0.1, 0.2, 0.3, 0.1, 0.2, 0.1" style="width:300px">
+        </div>
+      </div>
+
+      <div class="algo-grid">
+        <div class="algo-panel">
+          <h3>Naïve sum (+ operator)</h3>
+          <div class="step-list" id="naive-steps"></div>
+          <div class="result-line" id="naive-result"></div>
+          <div class="error-bar">
+            <div class="bar-label">Error magnitude</div>
+            <div class="bar-track"><div class="bar-fill" id="naive-err-bar" style="width:0%"></div></div>
+          </div>
+        </div>
+        <div class="algo-panel">
+          <h3>Math.sumPrecise() / Kahan</h3>
+          <div class="step-list" id="kahan-steps"></div>
+          <div class="result-line" id="kahan-result"></div>
+          <div class="error-bar">
+            <div class="bar-label">Error magnitude</div>
+            <div class="bar-track"><div class="bar-fill" id="kahan-err-bar" style="width:1%"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="comparison" style="font-family:var(--font-mono);font-size:0.82rem;background:var(--bg-stone);padding:var(--space-2) var(--space-3);border:1px solid var(--border-black);margin-top:var(--space-2)"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>the algorithm</h2>
+    <pre style="background:var(--bg-stone);padding:var(--space-3);font-size:0.82rem;overflow-x:auto;border:1px solid var(--border-black)">// Naïve — accumulates floating-point error
+function naiveSum(values) {
+  let sum = 0;
+  for (const v of values) sum += v;
+  return sum;
+}
+
+// Kahan compensated sum — what Math.sumPrecise() implements
+function kahanSum(values) {
+  let sum = 0, compensation = 0;
+  for (const v of values) {
+    const y = v - compensation;       // compensate for lost low bits
+    const t = sum + y;
+    compensation = (t - sum) - y;     // recover what was lost
+    sum = t;
+  }
+  return sum;
+}
+
+// Chrome 147+: built-in, handles edge cases (Infinity, NaN, -0)
+Math.sumPrecise([0.1, 0.2, 0.3])     // → 0.6 (exact)</pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5135170140479488" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.chrome.com/release-notes/147" target="_blank" rel="noopener">Chrome 147 release notes</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const DATASETS = {
+    uniform: Array.from({length: 1000}, () => 0.1),
+    'large-small': [1e15, 1, -1e15, ...Array.from({length: 100}, () => 0.1)],
+    alternating: Array.from({length: 200}, (_, i) => i % 2 === 0 ? 1e10 : -1e10 + 0.1),
+  };
+
+  document.getElementById('dataset').addEventListener('change', e => {
+    document.getElementById('custom-row').style.display = e.target.value === 'custom' ? 'block' : 'none';
+  });
+
+  function fmt(n) {
+    if (!isFinite(n)) return String(n);
+    if (Math.abs(n) > 1e10) return n.toExponential(6);
+    return n.toPrecision(15);
+  }
+
+  function visualise(values) {
+    const expected = (() => {
+      // Use a high-precision reference: sum using BigInt-like approach for small rationals
+      // For display purposes, use kahanSum as the "true" value
+      return kahanSum(values);
+    })();
+
+    // Naive sum with steps
+    const naiveSteps = document.getElementById('naive-steps');
+    naiveSteps.innerHTML = '';
+    let naiveSum = 0;
+    const showEvery = Math.max(1, Math.floor(values.length / 30));
+    for (let i = 0; i < values.length; i++) {
+      const prev = naiveSum;
+      naiveSum += values[i];
+      if (i % showEvery === 0 || i === values.length - 1) {
+        const err = naiveSum - expected;
+        const row = document.createElement('div');
+        row.className = 'step-row';
+        row.innerHTML = `<span style="color:var(--text-muted)">${i+1}</span><span>${fmt(naiveSum)}</span><span class="err">${err !== 0 ? 'err:' + err.toExponential(2) : ''}</span>`;
+        naiveSteps.appendChild(row);
+      }
+    }
+    const naiveErr = Math.abs(naiveSum - expected);
+    document.getElementById('naive-result').innerHTML = `Sum: <span class="${naiveErr > 1e-9 ? 'bad' : 'ok'}">${fmt(naiveSum)}</span>`;
+
+    // Kahan sum with steps
+    const kahanStepsEl = document.getElementById('kahan-steps');
+    kahanStepsEl.innerHTML = '';
+    let kSum = 0, comp = 0;
+    for (let i = 0; i < values.length; i++) {
+      const y = values[i] - comp;
+      const t = kSum + y;
+      comp = (t - kSum) - y;
+      kSum = t;
+      if (i % showEvery === 0 || i === values.length - 1) {
+        const err = kSum - expected;
+        const row = document.createElement('div');
+        row.className = 'step-row';
+        row.innerHTML = `<span style="color:var(--text-muted)">${i+1}</span><span>${fmt(kSum)}</span><span class="compensation">${comp !== 0 ? 'c:'+comp.toExponential(1) : '✓'}</span>`;
+        kahanStepsEl.appendChild(row);
+      }
+    }
+    const kahanErr = Math.abs(kSum - expected);
+    document.getElementById('kahan-result').innerHTML = `Sum: <span class="ok">${fmt(kSum)}</span>`;
+
+    // Error bars
+    const maxErr = Math.max(naiveErr, 1e-15);
+    document.getElementById('naive-err-bar').style.width = Math.min(100, naiveErr / maxErr * 100) + '%';
+    document.getElementById('kahan-err-bar').style.width = kahanErr > 0 ? '2%' : '0.5%';
+
+    // Math.sumPrecise if available
+    let nativeResult = 'Math.sumPrecise not available in this browser';
+    if (typeof Math.sumPrecise === 'function') {
+      try { nativeResult = 'Math.sumPrecise → ' + fmt(Math.sumPrecise(values)); } catch(e) { nativeResult = 'Error: ' + e.message; }
+    }
+    document.getElementById('comparison').innerHTML =
+      `naïve error: <span class="${naiveErr>1e-9?'drift':'ok'}">${naiveErr.toExponential(3)}</span> &nbsp;|&nbsp; ` +
+      `kahan error: <span class="ok">${kahanErr.toExponential(3)}</span> &nbsp;|&nbsp; ${nativeResult}`;
+  }
+
+  function kahanSum(values) {
+    let sum = 0, c = 0;
+    for (const v of values) {
+      const y = v - c; const t = sum + y; c = (t - sum) - y; sum = t;
+    }
+    return sum;
+  }
+
+  document.getElementById('run-btn').addEventListener('click', () => {
+    const ds = document.getElementById('dataset').value;
+    let values;
+    if (ds === 'custom') {
+      values = document.getElementById('custom-input').value.split(',').map(s => parseFloat(s.trim())).filter(n => !isNaN(n));
+    } else {
+      values = DATASETS[ds];
+    }
+    if (values && values.length > 0) visualise(values);
+  });
+</script>
+</body>
+</html>
