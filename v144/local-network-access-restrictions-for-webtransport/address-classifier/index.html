@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Address Classifier — LNA for WebTransport — Chrome 144</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+    .panel { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); display: grid; gap: var(--space-2); }
+    .panel h3 { margin: 0; font-family: var(--font-display); }
+    input[type="text"], select { border: 2px solid var(--border-black); padding: 0.3rem 0.5rem; font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-paper); color: var(--text-black); width: 100%; box-sizing: border-box; }
+    .matrix { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.3rem; font-family: var(--font-mono); font-size: 0.78rem; }
+    .matrix .cell { padding: 0.4rem; border: 1px solid var(--border-black); background: var(--bg-paper); text-align: center; }
+    .matrix .cell.head { background: var(--text-black); color: var(--bg-ivory); }
+    .cell.allowed { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .cell.prompt { background: var(--accent-amber); color: var(--bg-ivory); }
+    .cell.blocked { background: var(--accent-rose); color: var(--bg-ivory); }
+    .examples { display: grid; gap: 0.2rem; font-family: var(--font-mono); font-size: 0.78rem; }
+    .examples button { background: var(--bg-paper); color: var(--text-black); border: 1px solid var(--border-black); padding: 0.3rem; text-align: left; }
+    .verdict { padding: var(--space-2); font-family: var(--font-mono); font-size: 0.95rem; border: 2px solid var(--border-black); text-align: center; }
+    .verdict.allowed { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .verdict.prompt { background: var(--accent-amber); color: var(--bg-ivory); }
+    .verdict.blocked { background: var(--accent-rose); color: var(--bg-ivory); }
+    .warn-block { border: 2px solid var(--accent-amber); background: var(--bg-stone); padding: var(--space-3); margin-bottom: var(--space-3); font-size: 0.85rem; color: var(--text-charcoal); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v144/">&larr; Chrome 144</a> / <a href="../">LNA for WebTransport</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v144</p>
+    <h1>Address Classifier</h1>
+    <p class="lede">LNA classifies every destination into <em>public</em>, <em>private</em>, or <em>loopback</em>. The page&rsquo;s own address space and the target address space together decide whether a WebTransport connection goes straight through, prompts the user, or is refused. Pick an origin/target pair and see what Chrome would do.</p>
+  </header>
+
+  <div class="warn-block">
+    LNA still rolling out in Chrome 144. Try <code>chrome://flags/#local-network-access-check</code> to force the policy. The matrix below reflects the shipping rules.
+  </div>
+
+  <div class="stage">
+    <div class="grid">
+      <div class="panel">
+        <h3>your page</h3>
+        <label>origin URL <input type="text" id="origin" value="https://news.example/article"></label>
+        <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-charcoal);">page address space: <code id="origin-space">public</code></p>
+
+        <h3>WebTransport target</h3>
+        <label>connect URL (https or h3 reachable host)<input type="text" id="target" value="https://192.168.1.50:4433/echo"></label>
+        <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-charcoal);">target address space: <code id="target-space">private</code></p>
+
+        <p class="examples">examples:</p>
+        <div class="examples">
+          <button data-o="https://example.com" data-t="https://192.168.1.50:4433/x">public &rarr; private (RFC1918)</button>
+          <button data-o="https://example.com" data-t="https://127.0.0.1:4433/x">public &rarr; loopback</button>
+          <button data-o="https://intranet.corp" data-t="https://10.0.0.1:4433/x">private &rarr; private</button>
+          <button data-o="https://intranet.corp" data-t="https://127.0.0.1:4433/x">private &rarr; loopback</button>
+          <button data-o="http://localhost/dev" data-t="https://192.168.1.50:4433/x">loopback &rarr; private</button>
+          <button data-o="https://a.example" data-t="https://b.example:4433/x">public &rarr; public</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>verdict</h3>
+        <div class="verdict" id="verdict">&mdash;</div>
+        <p style="font-family:var(--font-mono);font-size:0.85rem;color:var(--text-charcoal);" id="rule">choose an example or edit the URLs to see how Chrome classifies the pair.</p>
+
+        <h3>full matrix</h3>
+        <div class="matrix" id="matrix"></div>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <h2>the policy</h2>
+<pre><code>// page address space (less private) connecting to target (more private)
+// Chrome 144 + LNA: requires Permissions Policy + a user prompt.
+//
+// page   target    -&gt;  policy
+// public public    -&gt;  allowed
+// public private   -&gt;  permission prompt
+// public loopback  -&gt;  permission prompt
+// private private  -&gt;  allowed (same level)
+// private loopback -&gt;  permission prompt
+// loopback *       -&gt;  allowed
+//
+// WebTransport joins fetch and WebSocket in this gate.</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">LNA for WebTransport</a></li>
+      <li><a href="../wt-lna/">WebTransport LNA</a></li>
+      <li><a href="../permission-flow/">LNA Permission Flow</a></li>
+      <li><a href="https://wicg.github.io/local-network-access/" target="_blank" rel="noopener">LNA spec</a></li>
+      <li><a href="https://chromestatus.com/feature/5126430912544768" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+function classify(host) {
+  if (!host) return 'unknown';
+  host = host.toLowerCase();
+  if (host === 'localhost' || host.startsWith('127.') || host === '::1' || host === '[::1]') return 'loopback';
+  if (host.startsWith('10.') || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^169\.254\./.test(host) || host.endsWith('.local') || host.endsWith('.internal') || host.startsWith('fc') || host.startsWith('fd') || host.includes('intranet') || host.includes('corp')) return 'private';
+  return 'public';
+}
+
+const ORDER = { public: 0, private: 1, loopback: 2 };
+function verdict(o, t) {
+  if (ORDER[t] <= ORDER[o]) return { v: 'allowed', label: 'allowed &mdash; same or higher level' };
+  return { v: 'prompt', label: 'permission prompt &mdash; ' + o + ' page requesting ' + t + ' target' };
+}
+
+const matrixEl = document.getElementById('matrix');
+matrixEl.innerHTML = '<div class="cell head">page \\ target</div><div class="cell head">public</div><div class="cell head">private</div><div class="cell head">loopback</div>';
+for (const p of ['public', 'private', 'loopback']) {
+  matrixEl.innerHTML += '<div class="cell head">' + p + '</div>';
+  for (const t of ['public', 'private', 'loopback']) {
+    const r = verdict(p, t);
+    matrixEl.innerHTML += '<div class="cell ' + r.v + '">' + (r.v === 'allowed' ? 'allow' : r.v) + '</div>';
+  }
+}
+
+function urlHost(u) {
+  try { return new URL(u).hostname.replace(/^\[|\]$/g, ''); } catch { return ''; }
+}
+
+function refresh() {
+  const o = document.getElementById('origin').value;
+  const t = document.getElementById('target').value;
+  const oh = urlHost(o), th = urlHost(t);
+  const oSpace = classify(oh);
+  const tSpace = classify(th);
+  document.getElementById('origin-space').textContent = oSpace + ' (' + oh + ')';
+  document.getElementById('target-space').textContent = tSpace + ' (' + th + ')';
+  const r = verdict(oSpace, tSpace);
+  const v = document.getElementById('verdict');
+  v.className = 'verdict ' + r.v;
+  v.textContent = r.v.toUpperCase();
+  document.getElementById('rule').innerHTML = r.label;
+}
+
+document.querySelectorAll('.examples button').forEach((b) => b.addEventListener('click', () => {
+  document.getElementById('origin').value = b.dataset.o;
+  document.getElementById('target').value = b.dataset.t;
+  refresh();
+}));
+document.getElementById('origin').addEventListener('input', refresh);
+document.getElementById('target').addEventListener('input', refresh);
+refresh();
+</script>
+</body>
+</html>
