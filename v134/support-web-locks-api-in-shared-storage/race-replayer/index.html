@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Race Replayer — Web Locks in Shared Storage — Chrome 134</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .lab { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .row { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: var(--space-3) 0; align-items: center; }
+    .field-row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; font-family: var(--font-mono); font-size: 0.82rem; }
+    input[type="range"] { width: 12rem; accent-color: var(--text-black); }
+    select { font: inherit; padding: 0.3rem 0.5rem; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+
+    .timeline { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin: var(--space-3) 0; font-family: var(--font-mono); font-size: 0.78rem; }
+    .timeline .lane { display: flex; align-items: center; gap: var(--space-2); margin-bottom: 0.3rem; }
+    .timeline .label { width: 80px; color: var(--text-muted); }
+    .timeline .track { flex: 1; height: 22px; background: var(--bg-paper); border: 1px solid var(--border-black); position: relative; min-width: 400px; }
+    .seg { position: absolute; top: 1px; bottom: 1px; border: 1px solid var(--border-black); }
+    .seg.get { background: var(--accent-blue); color: white; padding: 0 0.3rem; }
+    .seg.set { background: var(--accent-emerald); color: white; padding: 0 0.3rem; }
+    .seg.lock { background: var(--accent-amber); color: white; padding: 0 0.3rem; opacity: 0.8; }
+    .seg.report { background: var(--accent-rose); color: white; padding: 0 0.3rem; }
+
+    .stat-row { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .stat { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3); flex: 1; text-align: center; min-width: 120px; }
+    .stat .num { font-family: var(--font-display); font-size: 1.6rem; }
+    .stat.bad { background: var(--accent-rose); color: white; border-color: var(--accent-rose); }
+    .stat.good { background: var(--accent-emerald); color: white; border-color: var(--accent-emerald); }
+    .stat .lbl { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v134/">&larr; Chrome 134</a> / <a href="../">Web Locks in Shared Storage</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v134 · privacy-sandbox</p>
+    <h1>Race Replayer</h1>
+    <p class="lede">Visualise the cross-site reach-measurement race. N worklets fire near-simultaneously, each reads <code>reported=false</code>, all report. Toggle the Web Locks fix and replay — only the first holds the lock, the rest read <code>reported=true</code> and skip.</p>
+  </header>
+
+  <div class="lab">
+    <div class="field-row">
+      <label>worklets firing</label>
+      <input type="range" id="n" min="2" max="8" value="5">
+      <span id="nV">5</span>
+      <label style="margin-left: 1rem;">use locks</label>
+      <select id="locks"><option value="no">no (race)</option><option value="yes" selected>yes (v134)</option></select>
+    </div>
+    <div class="row">
+      <button id="replay">replay</button>
+    </div>
+
+    <div class="timeline" id="timeline"></div>
+
+    <div class="stat-row">
+      <div class="stat"><div class="num" id="cFired">0</div><div class="lbl">worklets fired</div></div>
+      <div class="stat bad"><div class="num" id="cDup">0</div><div class="lbl">duplicate reports</div></div>
+      <div class="stat good"><div class="num" id="cKept">0</div><div class="lbl">unique reports</div></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>the race</h2>
+    <p>Each worklet does <code>get("reported")</code> then <code>set("reported", true)</code> and reports if the prior value was false. Without ordering, all N <code>get</code>s land before any <code>set</code> commits — they all see <code>false</code> and all report. Cross-site reach numbers inflate by ×N.</p>
+    <p>With v134's Web Locks integration, the worklet wraps the get/set in <code>navigator.locks.request("reach-lock", ...)</code>. The first worklet gets the lock and reports; subsequent worklets queue, then read <code>true</code> and skip. Reach number stays accurate.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Web Locks in Shared Storage</a> — feature index</li>
+      <li><a href="../ss-locks/">Shared Storage + Web Locks basics</a></li>
+      <li><a href="../dedupe-reach/">Dedupe reach measurement</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  function replay() {
+    const n = +document.getElementById("n").value;
+    const useLocks = document.getElementById("locks").value === "yes";
+    document.getElementById("nV").textContent = n;
+
+    const tl = document.getElementById("timeline");
+    tl.innerHTML = "";
+    let dup = 0, kept = 0;
+
+    const trackW = 600;
+    for (let i = 0; i < n; i++) {
+      const lane = document.createElement("div");
+      lane.className = "lane";
+      const start = i * 8; // small stagger
+      const segments = [];
+      if (useLocks) {
+        // each waits for the lock — serialised
+        const lockStart = i * 80;
+        segments.push({ x: lockStart, w: 30, cls: "lock", label: "lock" });
+        segments.push({ x: lockStart + 30, w: 25, cls: "get", label: "get" });
+        const willReport = i === 0;
+        segments.push({ x: lockStart + 55, w: 25, cls: "set", label: "set" });
+        if (willReport) { segments.push({ x: lockStart + 80, w: 35, cls: "report", label: "report" }); kept++; }
+      } else {
+        // all read at once, all see false, all report
+        segments.push({ x: 20 + start, w: 30, cls: "get", label: "get" });
+        segments.push({ x: 60 + start, w: 30, cls: "set", label: "set" });
+        segments.push({ x: 110 + start, w: 40, cls: "report", label: "report" });
+        if (i === 0) kept++;
+        else dup++;
+      }
+
+      lane.innerHTML = `<span class="label">w${i+1}</span><div class="track"></div>`;
+      const track = lane.querySelector(".track");
+      const totalSpan = useLocks ? n * 80 + 120 : 200 + n * 8;
+      segments.forEach(s => {
+        const seg = document.createElement("div");
+        seg.className = "seg " + s.cls;
+        seg.style.left = (s.x / totalSpan * 100) + "%";
+        seg.style.width = (s.w / totalSpan * 100) + "%";
+        seg.textContent = s.label;
+        track.appendChild(seg);
+      });
+      tl.appendChild(lane);
+    }
+
+    document.getElementById("cFired").textContent = n;
+    document.getElementById("cDup").textContent = dup;
+    document.getElementById("cKept").textContent = kept;
+  }
+  ["n","locks"].forEach(id => document.getElementById(id).addEventListener("input", replay));
+  document.getElementById("replay").addEventListener("click", replay);
+  replay();
+</script>
+</body>
+</html>

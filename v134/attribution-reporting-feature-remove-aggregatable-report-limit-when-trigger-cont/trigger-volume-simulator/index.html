@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trigger Volume Simulator — ARA Remove report limit — Chrome 134</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .lab { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .field-row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; font-family: var(--font-mono); font-size: 0.82rem; margin-bottom: var(--space-3); }
+    input[type="range"] { width: 12rem; accent-color: var(--text-black); }
+    input[type="text"] { font: inherit; padding: 0.3rem 0.5rem; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .chart { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-4); min-height: 180px; display: flex; gap: 2px; align-items: end; }
+    .bar { flex: 1; background: var(--accent-blue); position: relative; }
+    .bar.dropped { background: var(--accent-rose); }
+    .bar .tooltip { position: absolute; top: -1.2rem; left: 50%; transform: translateX(-50%); font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); }
+    .stat-row { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .stat { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3); flex: 1; text-align: center; }
+    .stat .num { font-family: var(--font-display); font-size: 1.6rem; line-height: 1; }
+    .stat.bad { background: var(--accent-rose); color: white; border-color: var(--accent-rose); }
+    .stat.good { background: var(--accent-emerald); color: white; border-color: var(--accent-emerald); }
+    .stat .lbl { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; }
+    .col-toggle { display: flex; gap: 0; margin: var(--space-3) 0; }
+    .col-toggle button { font-family: var(--font-mono); font-size: 0.78rem; padding: 0.4rem 0.7rem; background: var(--bg-paper); color: var(--text-black); border: 2px solid var(--border-black); cursor: pointer; box-shadow: none; }
+    .col-toggle button.on { background: var(--text-black); color: var(--bg-ivory); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v134/">&larr; Chrome 134</a> / <a href="../">ARA Remove report limit</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v134 · privacy-sandbox</p>
+    <h1>Trigger Volume Simulator</h1>
+    <p class="lede">Simulate a heavy conversion flow (a big shopping cart, a long form, a multi-step checkout). Compare pre-v134 (20-per-source cap silently drops events) to v134+ (<code>trigger_context_id</code> set → no cap, every conversion lands). Live histogram and dropped-event counter.</p>
+  </header>
+
+  <div class="lab">
+    <div class="field-row">
+      <label>conversions per source</label>
+      <input type="range" id="n" min="1" max="100" value="40">
+      <span id="nV">40</span>
+      <label style="margin-left: 1rem;">sources / day</label>
+      <input type="range" id="sources" min="1" max="20" value="5">
+      <span id="srcV">5</span>
+    </div>
+
+    <div class="col-toggle">
+      <button class="on" data-mode="new">v134 (trigger_context_id set)</button>
+      <button data-mode="old">pre-v134 (cap of 20)</button>
+    </div>
+
+    <div class="chart" id="chart"></div>
+
+    <div class="stat-row">
+      <div class="stat"><div class="num" id="cTotal">0</div><div class="lbl">attempted</div></div>
+      <div class="stat good"><div class="num" id="cKept">0</div><div class="lbl">reported</div></div>
+      <div class="stat bad"><div class="num" id="cDropped">0</div><div class="lbl">silently dropped</div></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>what changed in v134</h2>
+    <p>Pre-v134, the Attribution Reporting API capped aggregatable reports at 20 per source. Heavy carts that triggered, say, 35 conversion events on a single source silently dropped the last 15 — measurement was incomplete and the caller had no visibility.</p>
+    <p>v134 lifts that cap when the trigger registration sets a non-null <code>trigger_context_id</code>. The advertiser is opting in to per-conversion granularity; in exchange the platform stops trimming. Privacy is preserved by separately enforcing source-level noise budgets — see the linked spec.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">ARA Remove report limit</a> — feature index</li>
+      <li><a href="../ar-no-limit/">Removed Report Limit basics</a></li>
+      <li><a href="../per-conversion-stream/">Per-conversion stream</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  let mode = "new";
+  document.querySelectorAll(".col-toggle button").forEach(b => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll(".col-toggle button").forEach(x => x.classList.remove("on"));
+      b.classList.add("on");
+      mode = b.dataset.mode;
+      render();
+    });
+  });
+  ["n","sources"].forEach(id => document.getElementById(id).addEventListener("input", render));
+
+  function render() {
+    const n = +document.getElementById("n").value;
+    const sources = +document.getElementById("sources").value;
+    document.getElementById("nV").textContent = n;
+    document.getElementById("srcV").textContent = sources;
+
+    const chart = document.getElementById("chart");
+    chart.innerHTML = "";
+    let kept = 0, dropped = 0;
+    for (let s = 0; s < sources; s++) {
+      const reported = mode === "old" ? Math.min(20, n) : n;
+      const lost = n - reported;
+      kept += reported;
+      dropped += lost;
+      const bar = document.createElement("div");
+      bar.className = "bar";
+      bar.style.height = (reported / n * 100) + "%";
+      bar.innerHTML = `<span class="tooltip">${reported}</span>`;
+      chart.appendChild(bar);
+      if (lost > 0) {
+        const lostBar = document.createElement("div");
+        lostBar.className = "bar dropped";
+        lostBar.style.height = (lost / n * 100) + "%";
+        chart.appendChild(lostBar);
+      }
+    }
+    document.getElementById("cTotal").textContent = n * sources;
+    document.getElementById("cKept").textContent = kept;
+    document.getElementById("cDropped").textContent = dropped;
+  }
+
+  render();
+</script>
+</body>
+</html>
