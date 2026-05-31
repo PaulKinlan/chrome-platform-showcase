@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pipeline Health Monitor — MediaStreamTrackProcessor Frame Counters — Chrome 150</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--border-black);
+      padding: 0.65rem 1rem;
+      font-size: 0.8rem;
+      margin-bottom: 1.25rem;
+      color: var(--text-charcoal);
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 1.25rem;
+    }
+    .start-btn {
+      padding: 0.4rem 0.9rem;
+      font-family: monospace;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      cursor: pointer;
+    }
+    .stop-btn {
+      padding: 0.4rem 0.9rem;
+      font-family: monospace;
+      font-size: 0.8rem;
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+
+    .slider-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      font-family: monospace;
+      font-size: 0.78rem;
+      color: var(--text-charcoal);
+      flex-wrap: wrap;
+    }
+    .slider-row input[type=range] { width: 160px; accent-color: var(--text-black); }
+
+    /* Stats */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.5rem;
+      margin-bottom: 1.25rem;
+    }
+    @media (max-width: 600px) { .stats-grid { grid-template-columns: 1fr 1fr; } }
+    .stat-box {
+      border: 1px solid var(--border-black);
+      padding: 0.65rem 0.75rem;
+      background: var(--bg-paper);
+    }
+    .stat-label { font-family: monospace; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.2rem; }
+    .stat-val { font-family: monospace; font-size: 1.35rem; font-weight: 700; color: var(--text-black); }
+    .stat-val.warn { color: var(--accent-rose); }
+    .stat-val.ok { color: var(--accent-emerald); }
+
+    /* Health indicator */
+    .health-bar {
+      height: 6px;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      margin-bottom: 1rem;
+      position: relative;
+      overflow: hidden;
+    }
+    .health-fill {
+      height: 100%;
+      transition: width 0.3s, background 0.3s;
+    }
+
+    /* Chart */
+    .chart-wrap {
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      overflow: hidden;
+      margin-bottom: 1.25rem;
+    }
+    .chart-title {
+      font-family: monospace;
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      padding: 0.4rem 0.6rem;
+      border-bottom: 1px solid var(--bg-stone);
+    }
+    canvas.chart { display: block; width: 100%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs">
+    <a href="/v150/">&larr; Chrome 150</a> /
+    <a href="/v150/mediastreamtrackprocessor-frame-counters/">MediaStreamTrackProcessor Frame Counters</a>
+  </p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v150 · WebRTC · Media</p>
+    <h1>Pipeline Health Monitor</h1>
+    <p class="lede">A canvas-based video source feeds a <code>MediaStreamTrackProcessor</code>. Slow the consumer below the production rate with the slider and watch <code>totalFrames</code> and <code>discardedFrames</code> diverge — the gap is exactly the data your pipeline is losing.</p>
+  </header>
+
+  <div class="note" id="support-note">Checking MediaStreamTrackProcessor support…</div>
+
+  <div class="controls">
+    <button class="start-btn" id="start-btn">Start pipeline</button>
+    <button class="stop-btn" id="stop-btn">Stop</button>
+  </div>
+
+  <div class="slider-row">
+    <label for="consume-rate">Consumer rate:</label>
+    <input type="range" id="consume-rate" min="1" max="30" value="30" step="1">
+    <span id="consume-label">30 fps</span>
+    <span style="color:var(--text-muted);">(producer always runs at 30 fps)</span>
+  </div>
+
+  <div style="margin:0.75rem 0 1rem;font-family:monospace;font-size:0.75rem;color:var(--text-muted);">
+    Pipeline health:
+  </div>
+  <div class="health-bar">
+    <div class="health-fill" id="health-fill" style="width:100%;background:var(--accent-emerald)"></div>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-box">
+      <div class="stat-label">totalFrames</div>
+      <div class="stat-val" id="stat-total">—</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">discardedFrames</div>
+      <div class="stat-val" id="stat-discarded">—</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">deliver rate</div>
+      <div class="stat-val" id="stat-fps">—</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">discard %</div>
+      <div class="stat-val" id="stat-pct">—</div>
+    </div>
+  </div>
+
+  <div class="chart-wrap">
+    <div class="chart-title">totalFrames (black) vs. discardedFrames (red) over time</div>
+    <canvas class="chart" id="chart" height="120"></canvas>
+  </div>
+
+  <section>
+    <h2>reading the counters</h2>
+    <pre style="background:var(--bg-stone);border:1px solid var(--border-black);padding:1rem;overflow-x:auto;"><code style="font-size:0.8125rem;line-height:1.6;color:var(--text-charcoal);">const processor = new MediaStreamTrackProcessor({ track });
+
+// Chrome 150: read counters at any time
+function checkHealth() {
+  const total = processor.totalFrames;
+  const discarded = processor.discardedFrames;
+  const pct = total > 0 ? (discarded / total * 100).toFixed(1) : 0;
+
+  if (pct > 10) {
+    console.warn(`Dropping ${pct}% of frames — consumer is too slow`);
+    reduceProcessingLoad();
+  }
+}
+
+// Poll or check after each frame
+setInterval(checkHealth, 1000);</code></pre>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<canvas id="src-canvas" width="160" height="120" style="display:none"></canvas>
+
+<script>
+  const noteEl = document.getElementById('support-note');
+  const startBtn = document.getElementById('start-btn');
+  const stopBtn = document.getElementById('stop-btn');
+  const consumeSlider = document.getElementById('consume-rate');
+  const consumeLabel = document.getElementById('consume-label');
+  const statTotal = document.getElementById('stat-total');
+  const statDiscarded = document.getElementById('stat-discarded');
+  const statFps = document.getElementById('stat-fps');
+  const statPct = document.getElementById('stat-pct');
+  const healthFill = document.getElementById('health-fill');
+  const chart = document.getElementById('chart');
+  const chartCtx = chart.getContext('2d');
+
+  const supported = typeof MediaStreamTrackProcessor !== 'undefined';
+  noteEl.innerHTML = supported
+    ? '<strong>MediaStreamTrackProcessor is available</strong> — Chrome 150+ detected. The pipeline is real.'
+    : '<strong>MediaStreamTrackProcessor not available</strong> — requires Chrome 150+. A simulated counter is shown below.';
+
+  // Chart setup
+  const CHART_W = 600, CHART_H = 120;
+  chart.width = CHART_W;
+  const totalHistory = [], discardedHistory = [];
+  const MAX_POINTS = 60;
+
+  function drawChart() {
+    const w = CHART_W, h = CHART_H;
+    chartCtx.clearRect(0, 0, w, h);
+    chartCtx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg-paper') || '#fafaf8';
+    chartCtx.fillRect(0, 0, w, h);
+
+    if (totalHistory.length < 2) return;
+    const maxVal = Math.max(...totalHistory, 1);
+
+    const drawLine = (data, color) => {
+      chartCtx.beginPath();
+      chartCtx.strokeStyle = color;
+      chartCtx.lineWidth = 2;
+      data.forEach((v, i) => {
+        const x = (i / (MAX_POINTS - 1)) * w;
+        const y = h - (v / maxVal) * (h - 8) - 4;
+        i === 0 ? chartCtx.moveTo(x, y) : chartCtx.lineTo(x, y);
+      });
+      chartCtx.stroke();
+    };
+
+    drawLine(totalHistory, '#1a1a1a');
+    drawLine(discardedHistory, '#e05c5c');
+  }
+
+  // Pipeline state
+  let processorRef = null;
+  let readerRef = null;
+  let producerInterval = null;
+  let statsInterval = null;
+  let running = false;
+
+  // Simulation fallback
+  let simTotal = 0, simDiscarded = 0, simTick = 0;
+
+  consumeSlider.addEventListener('input', () => {
+    consumeLabel.textContent = consumeSlider.value + ' fps';
+  });
+
+  function updateStats(total, discarded) {
+    const pct = total > 0 ? (discarded / total * 100) : 0;
+    statTotal.textContent = total;
+    statDiscarded.textContent = discarded;
+    statFps.textContent = consumeSlider.value + ' fps';
+    statPct.textContent = pct.toFixed(1) + '%';
+
+    // Health bar
+    const health = 100 - Math.min(pct, 100);
+    healthFill.style.width = health + '%';
+    if (pct < 5) {
+      healthFill.style.background = 'var(--accent-emerald)';
+      statPct.className = 'stat-val ok';
+      statDiscarded.className = 'stat-val ok';
+    } else if (pct < 20) {
+      healthFill.style.background = 'var(--accent-blue)';
+      statPct.className = 'stat-val';
+      statDiscarded.className = 'stat-val';
+    } else {
+      healthFill.style.background = 'var(--accent-rose)';
+      statPct.className = 'stat-val warn';
+      statDiscarded.className = 'stat-val warn';
+    }
+
+    totalHistory.push(total);
+    discardedHistory.push(discarded);
+    if (totalHistory.length > MAX_POINTS) { totalHistory.shift(); discardedHistory.shift(); }
+    drawChart();
+  }
+
+  async function startPipeline() {
+    if (running) return;
+    running = true;
+
+    const srcCanvas = document.getElementById('src-canvas');
+    const ctx2d = srcCanvas.getContext('2d');
+    let frameN = 0;
+
+    // Draw animated frames
+    producerInterval = setInterval(() => {
+      frameN++;
+      ctx2d.fillStyle = 'hsl(' + (frameN * 3 % 360) + ',55%,45%)';
+      ctx2d.fillRect(0, 0, 160, 120);
+      ctx2d.fillStyle = '#fff';
+      ctx2d.font = '12px monospace';
+      ctx2d.fillText('f' + frameN, 6, 16);
+    }, 1000 / 30);
+
+    if (!supported) {
+      // Simulation
+      statsInterval = setInterval(() => {
+        const consumeRate = parseInt(consumeSlider.value, 10);
+        simTotal += 30;
+        simDiscarded += Math.max(0, 30 - consumeRate);
+        updateStats(simTotal, simDiscarded);
+      }, 1000);
+      return;
+    }
+
+    try {
+      const stream = srcCanvas.captureStream(30);
+      const track = stream.getVideoTracks()[0];
+      const processor = new MediaStreamTrackProcessor({ track });
+      processorRef = processor;
+      readerRef = processor.readable.getReader();
+
+      const hasCounters = 'totalFrames' in processor;
+      if (!hasCounters) {
+        noteEl.innerHTML = '<strong>totalFrames / discardedFrames not yet on this build</strong> — showing simulated values.';
+      }
+
+      let consumed = 0;
+      async function consumeLoop() {
+        while (running) {
+          const delay = 1000 / parseInt(consumeSlider.value, 10);
+          await new Promise(r => setTimeout(r, delay));
+          try {
+            const { value: frame, done } = await readerRef.read();
+            if (done) break;
+            if (frame) { consumed++; frame.close(); }
+            const total = hasCounters ? processor.totalFrames : frameN;
+            const discarded = hasCounters ? processor.discardedFrames : Math.max(0, frameN - consumed);
+            updateStats(total, discarded);
+          } catch (e) {
+            break;
+          }
+        }
+      }
+      consumeLoop();
+    } catch (e) {
+      noteEl.textContent = 'Pipeline error: ' + e.message;
+    }
+  }
+
+  function stopPipeline() {
+    running = false;
+    clearInterval(producerInterval);
+    clearInterval(statsInterval);
+    if (readerRef) { try { readerRef.cancel(); } catch (e) {} readerRef = null; }
+    processorRef = null;
+    simTotal = 0; simDiscarded = 0;
+    totalHistory.length = 0; discardedHistory.length = 0;
+    statTotal.textContent = '—';
+    statDiscarded.textContent = '—';
+    statFps.textContent = '—';
+    statPct.textContent = '—';
+    healthFill.style.width = '100%';
+    healthFill.style.background = 'var(--accent-emerald)';
+    chartCtx.clearRect(0, 0, CHART_W, CHART_H);
+  }
+
+  startBtn.addEventListener('click', startPipeline);
+  stopBtn.addEventListener('click', stopPipeline);
+</script>
+</body>
+</html>
