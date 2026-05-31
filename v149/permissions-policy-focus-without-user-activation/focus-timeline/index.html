@@ -86,6 +86,22 @@
       background: #fff1f2;
     }
 
+    .probe-frame {
+      display: block;
+      width: 100%;
+      min-height: 150px;
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      margin-top: 0.5rem;
+    }
+
+    .probe-status {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--text-muted);
+      margin-top: 0.35rem;
+    }
+
     .timeline {
       border: 2px solid var(--border-black);
       background: var(--text-black);
@@ -142,7 +158,7 @@
   <header class="lede-block">
     <p class="eyebrow">v149 · Permissions Policy · Security</p>
     <h1>Focus Timeline</h1>
-    <p class="lede">Every focus and blur event on this page is logged to the timeline below. Use the action buttons to trigger focus programmatically (from script), via timer (simulating an ad widget), or via direct user interaction. Toggle the simulated policy to see which attempts would be blocked when <code>focus-without-user-activation=()</code> is active.</p>
+    <p class="lede">Every focus and blur event is logged to the timeline below. Use the action buttons to trigger top-page user focus plus programmatic focus attempts inside a live iframe. Toggle the actual iframe policy to compare allowed and denied <code>focus()</code> calls.</p>
   </header>
 
   <div class="demo-area">
@@ -158,15 +174,23 @@
 
   <div class="policy-toggle" id="policyToggle">
     <input type="checkbox" id="policyEnabled" onchange="updatePolicy()">
-    <label for="policyEnabled"><strong>Simulate focus-without-user-activation=()</strong> — blocks script/timer focus attempts; allows user-triggered focus</label>
+    <label for="policyEnabled"><strong>Apply focus-without-user-activation=()</strong> — reloads the live iframe with <code>allow="focus-without-user-activation 'none'"</code></label>
+  </div>
+
+  <div class="demo-area">
+    <div class="da-head">Live iframe policy probe</div>
+    <div class="da-body">
+      <div id="probeStatus" class="probe-status">Preparing iframe…</div>
+      <div id="probeMount"></div>
+    </div>
   </div>
 
   <div class="action-grid">
     <button class="act-btn act-user" onclick="userFocus()">User click → Input A</button>
-    <button class="act-btn act-script" onclick="scriptFocus()">Script .focus() → Input B</button>
-    <button class="act-btn act-timer" onclick="timerFocus()">Timer (500ms) → Input A</button>
-    <button class="act-btn act-script" onclick="autofocusSim()">Simulate autofocus</button>
-    <button class="act-btn act-user" onclick="userTab()">Tab key (simulate)</button>
+    <button class="act-btn act-script" onclick="scriptFocus()">Script .focus() → iframe</button>
+    <button class="act-btn act-timer" onclick="timerFocus()">Timer (500ms) → iframe</button>
+    <button class="act-btn act-script" onclick="loadTimeFocus()">Load-time focus → iframe</button>
+    <button class="act-btn act-user" onclick="userTab()">User tab focus</button>
     <button class="act-btn act-timer" onclick="intervalFocus()">Interval hijack (3×)</button>
   </div>
 
@@ -202,6 +226,7 @@
   let hasUserActivation = false;
   let counts = { user: 0, script: 0, blocked: 0, blur: 0 };
   const startTime = Date.now();
+  let probeFrame = null;
 
   function ts() {
     const ms = Date.now() - startTime;
@@ -253,23 +278,36 @@
     const tog = document.getElementById('policyToggle');
     tog.classList.toggle('policy-active', policyOn);
     logSys(policyOn
-      ? 'Policy ENABLED — focus-without-user-activation=(). Script and timer focus attempts will be blocked.'
-      : 'Policy DISABLED — all focus attempts allowed.');
+      ? 'Policy ENABLED — reloaded iframe with allow="focus-without-user-activation \'none\'".'
+      : 'Policy DISABLED — reloaded iframe without the focus restriction.');
+    buildProbeFrame();
   };
 
   // Track user activation
   document.addEventListener('click', () => { hasUserActivation = true; });
   document.addEventListener('keydown', () => { hasUserActivation = true; });
 
-  function tryScriptFocus(el, label) {
-    if (policyOn && !hasUserActivation) {
-      logBlocked(`Script tried to focus ${label} without user activation`);
-      return false;
+  function buildProbeFrame() {
+    const mount = document.getElementById('probeMount');
+    mount.innerHTML = '';
+    const frame = document.createElement('iframe');
+    frame.className = 'probe-frame';
+    frame.src = '../probe-frame.html?channel=timeline';
+    frame.title = 'Live focus policy probe';
+    if (policyOn) frame.allow = "focus-without-user-activation 'none'";
+    mount.appendChild(frame);
+    probeFrame = frame;
+    document.getElementById('probeStatus').textContent = policyOn
+      ? 'Policy iframe: allow="focus-without-user-activation \'none\'"'
+      : 'Policy iframe: unrestricted';
+  }
+
+  function sendProbeCommand(data) {
+    if (!probeFrame?.contentWindow) {
+      logSys('Policy iframe is not ready yet.');
+      return;
     }
-    el.focus();
-    logEvent('focus', `Script→${label}`, 'script');
-    hasUserActivation = false;
-    return true;
+    probeFrame.contentWindow.postMessage(data, '*');
   }
 
   window.userFocus = function () {
@@ -280,36 +318,35 @@
 
   window.scriptFocus = function () {
     hasUserActivation = false;
-    tryScriptFocus(document.getElementById('targetB'), 'Input B');
+    logSys('Sent script focus command to the live iframe.');
+    sendProbeCommand({
+      type: 'focus-now',
+      action: 'script .focus() without activation',
+    });
   };
 
   window.timerFocus = function () {
-    logSys('Timer set for 500ms — will attempt to focus Input A without activation');
-    const snap = hasUserActivation;
+    logSys('Timer set for 500ms — the live iframe will attempt focus without activation');
     hasUserActivation = false;
-    setTimeout(() => {
-      if (policyOn) {
-        logBlocked('setTimeout (500ms) tried to focus Input A — no user activation');
-      } else {
-        document.getElementById('targetA').focus();
-        logEvent('focus', 'Timer(500ms)→Input A', 'script');
-      }
-    }, 500);
+    sendProbeCommand({
+      type: 'focus-delayed',
+      delay: 500,
+      action: 'timer .focus() without activation',
+    });
   };
 
-  window.autofocusSim = function () {
-    logSys('Simulating autofocus attribute behaviour — fires on load without user activation');
-    if (policyOn) {
-      logBlocked('autofocus simulation blocked by policy — no user activation at page load');
-    } else {
-      document.getElementById('targetA').focus();
-      logEvent('focus', 'autofocus sim→Input A', 'script');
-    }
+  window.loadTimeFocus = function () {
+    hasUserActivation = false;
+    logSys('Sent load-time style focus command to the live iframe without user activation.');
+    sendProbeCommand({
+      type: 'focus-now',
+      action: 'load-time focus without activation',
+    });
   };
 
   window.userTab = function () {
     hasUserActivation = true;
-    logSys('Tab key simulated — browser moves focus to next focusable element (always allowed)');
+    logSys('User tab/click path — browser moves focus to the next focusable element (always allowed)');
     document.getElementById('targetB').focus();
     logEvent('focus', 'Tab key (user)→Input B', 'user');
   };
@@ -319,13 +356,10 @@
     logSys('Interval hijack started — will attempt focus 3× every 400ms');
     const id = setInterval(() => {
       i++;
-      if (policyOn) {
-        logBlocked(`Interval hijack attempt #${i} — no user activation`);
-      } else {
-        const el = i % 2 === 0 ? document.getElementById('targetA') : document.getElementById('targetB');
-        el.focus();
-        logEvent('focus', `Interval#${i}→${i%2===0?'Input A':'Input B'}`, 'script');
-      }
+      sendProbeCommand({
+        type: 'focus-now',
+        action: `interval focus #${i} without activation`,
+      });
       if (i >= 3) clearInterval(id);
     }, 400);
   };
@@ -336,6 +370,24 @@
     updateCounters();
     logSys('Timeline cleared.');
   };
+
+  window.addEventListener('message', (event) => {
+    const data = event.data || {};
+    if (data.type === 'focus-policy-ready' && data.channel === 'timeline') {
+      document.getElementById('probeStatus').textContent += ' — ready';
+      logSys('Live iframe policy probe ready.');
+    }
+    if (data.type === 'focus-policy-result' && data.channel === 'timeline') {
+      if (data.focused) {
+        const cls = data.action.includes('user activation') ? 'user' : 'script';
+        logEvent('focus', `${data.action} → live iframe`, cls);
+      } else {
+        logBlocked(`${data.action} → live iframe`);
+      }
+    }
+  });
+
+  buildProbeFrame();
 })();
 </script>
 </body>
