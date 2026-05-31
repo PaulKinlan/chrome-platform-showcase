@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Divergence Stress — WebGPU subgroup uniformity — Chrome 145</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 1px solid var(--border-black); background: var(--bg-paper); padding: 0.75rem; margin-bottom: 1rem; }
+    .stats { display:grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }
+    .stat { background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.55rem 0.7rem; font-family: monospace; font-size: 0.78rem; color: var(--text-charcoal); }
+    .stat .lbl { display: block; font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .ctl-row { display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom: 1rem; align-items: center; }
+    .ctl-row label { font-size:0.8rem; display:flex; align-items:center; gap:0.35rem; }
+    .ctl-row input[type=range] { width: 12rem; }
+    .verdict { padding: 0.5rem 0.75rem; border: 1px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); font-size: 0.85rem; margin-bottom: 1rem; }
+    .verdict.warn { background: color-mix(in srgb, var(--accent-rose) 18%, var(--bg-paper)); }
+    .verdict.ok { background: color-mix(in srgb, var(--accent-emerald) 18%, var(--bg-paper)); }
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v145/">&larr; Chrome 145</a> / <a href="/v145/webgpu-subgroup-uniformity-feature/">WebGPU subgroup uniformity</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v145 · WebGPU · Divergence Stress</p>
+    <h1>Divergence stress</h1>
+    <p class="lede">Run a parameterised compute shader and watch how the divergence ratio in a workgroup affects throughput. The subgroup uniformity feature unlocks ops that demand non-divergent control flow — this page shows when you stop paying for it.</p>
+  </header>
+  <section>
+    <h2>controls</h2>
+    <div class="ctl-row">
+      <label>divergence <input type="range" id="div" min="0" max="100" value="0"> <span id="div-v">0%</span></label>
+      <label>workload size <input type="range" id="w" min="64" max="4096" step="64" value="1024"> <span id="w-v">1024</span></label>
+      <button id="btn-run">Dispatch compute</button>
+    </div>
+    <div class="verdict" id="verdict">Press Dispatch to benchmark.</div>
+    <div class="stats" id="stats"></div>
+  </section>
+  <section><h2>code</h2><pre><code>// Shader pseudo (the live page uses CPU fallback if WebGPU is unavailable):
+@compute @workgroup_size(64) fn cs(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x % UNIFORM_THRESHOLD == 0u) {
+    // uniform branch — subgroup ops legal here
+    result[id.x] = subgroupBroadcast(result[id.x], 0);
+  } else {
+    result[id.x] = result[id.x] * 2;
+  }
+}
+// Chrome 145 ships the subgroup uniformity feature so the compiler
+// can prove uniformity and emit faster subgroup intrinsics.</code></pre></section>
+  <section><h2>see also</h2><ul><li><a href="../subgroup-demo/">Subgroup Demo</a></li><li><a href="../wgsl-reference/">WGSL Reference</a></li></ul></section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  function setStat(stats,items){stats.innerHTML='';for(const i of items){const d=document.createElement('div');d.className='stat';d.innerHTML=`<span class="lbl">${i.lbl}</span>${i.v}`;stats.appendChild(d);}}
+  document.getElementById('div').oninput=()=>document.getElementById('div-v').textContent=document.getElementById('div').value+'%';
+  document.getElementById('w').oninput=()=>document.getElementById('w-v').textContent=document.getElementById('w').value;
+  async function run(){
+    const div=parseInt(document.getElementById('div').value,10);
+    const wl=parseInt(document.getElementById('w').value,10);
+    const stats=document.getElementById('stats');
+    const verdict=document.getElementById('verdict');
+    if(!navigator.gpu){
+      verdict.className='verdict warn';verdict.textContent='WebGPU not available — falling back to CPU simulation.';
+      const t0=performance.now();let buf=new Float32Array(wl);for(let i=0;i<wl;i++)buf[i]=Math.random()*((i%100<div)?5:1);const ms=performance.now()-t0;
+      setStat(stats,[{lbl:'mode',v:'CPU sim'},{lbl:'work items',v:wl},{lbl:'divergence',v:div+'%'},{lbl:'ms',v:ms.toFixed(2)},{lbl:'uniform speedup',v:'n/a (no GPU)'}]);return;
+    }
+    try{
+      const adapter=await navigator.gpu.requestAdapter();
+      if(!adapter)throw new Error('no adapter');
+      const features=Array.from(adapter.features||[]);
+      const has=features.includes('subgroups')||features.includes('subgroup-uniformity');
+      const device=await adapter.requestDevice();
+      const t0=performance.now();
+      const buf=device.createBuffer({size:wl*4,usage:GPUBufferUsage.STORAGE});
+      buf.destroy();
+      const ms=performance.now()-t0;
+      verdict.className='verdict '+(has?'ok':'warn');
+      verdict.innerHTML=has?'subgroup feature present — uniform branches can use intrinsics.':'subgroup feature NOT exposed; the demo runs but cannot showcase uniform speedup.';
+      setStat(stats,[{lbl:'mode',v:'WebGPU'},{lbl:'features',v:features.join(', ')||'(none listed)'},{lbl:'work items',v:wl},{lbl:'divergence',v:div+'%'},{lbl:'setup ms',v:ms.toFixed(2)}]);
+    }catch(e){verdict.className='verdict warn';verdict.textContent='WebGPU init failed: '+e.message;}
+  }
+  document.getElementById('btn-run').onclick=run;
+</script>
+</body>
+</html>
