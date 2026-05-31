@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connection timing tester — TCP socket pool randomization — Chrome 143</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--flat-shadow); padding: var(--space-5); margin: 0 0 var(--space-5); }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    input[type=number], select { background: var(--bg-paper); color: var(--text-black); border: 2px solid var(--border-black); padding: 0.4rem 0.6rem; font-family: var(--font-mono); font-size: 0.85rem; }
+    .bar-chart { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); box-shadow: var(--thin-shadow); }
+    .bar-row { display: grid; grid-template-columns: 60px 1fr 80px; gap: var(--space-3); align-items: center; margin: var(--space-1) 0; }
+    .bar-row .k { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+    .bar-row .bar { background: var(--bg-stone); border: 1px solid var(--border-black); height: 18px; position: relative; }
+    .bar-row .bar div { height: 100%; background: var(--accent-blue); }
+    .bar-row .v { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-black); text-align: right; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--space-3); margin: var(--space-3) 0; }
+    .stats .stat { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); }
+    .stats .stat .k { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
+    .stats .stat .v { font-size: 1.2rem; color: var(--text-black); }
+    .stats .stat.warn { background: #fff7e6; border-color: var(--accent-amber); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v143/tcp-socket-pool-limit-randomization/">&larr; TCP socket pool limit randomization</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v143</p>
+    <h1>Connection timing tester</h1>
+    <p class="lede">A real-network test: pick a target, fire <em>n</em> concurrent requests, and watch their actual completion times. The histogram tells you whether your browser still has the per-host connection cap signal a v143-vulnerable build would expose, or whether the randomisation has flattened it out.</p>
+  </header>
+
+  <p>The attack: in pre-v143 Chrome, a per-host TCP socket pool had a hard cap (usually 6). The (n+1)th simultaneous request to that host blocks until a slot frees, producing a sharp "knee" in completion-time histograms. Cross-site attackers used this to count a victim's parallel network activity. v143 randomises the cap per-profile so the knee blurs out.</p>
+
+  <h3>Test config</h3>
+  <div class="stage">
+    <div class="controls">
+      <label>Target:
+        <select id="target">
+          <option value="self">this origin (relative URLs)</option>
+          <option value="external">an external host (httpbin.org via fetch)</option>
+        </select>
+      </label>
+      <label>Concurrent requests: <input id="n" type="number" min="2" max="40" value="12" style="width:80px"></label>
+      <label>Trials: <input id="trials" type="number" min="1" max="20" value="5" style="width:60px"></label>
+      <button id="run">run test</button>
+    </div>
+
+    <div class="stats" id="summary"></div>
+
+    <div class="bar-chart" id="chart"><em>Run the test to see latency distribution.</em></div>
+  </div>
+
+  <h3>How to read the chart</h3>
+  <ol class="how">
+    <li>Each bar is a request, sorted by completion order.</li>
+    <li>If you see a sharp jump at request #6 or wherever the per-host cap is — that's your browser's TCP pool limit leaking.</li>
+    <li>With v143's randomised pool, the second tier of requests won't all wait the same amount; the histogram looks blurry, not stepped.</li>
+    <li>Note: this is a noisy real-network measurement. Run many trials and look at the median.</li>
+  </ol>
+
+  <pre><code>// What v143 changed (paraphrased):
+const baseLimit = 6;
+const limitForThisProfile = baseLimit + crypto.getRandomValues(...)[0] % 4 - 2;
+// → some profiles get 4, 5, 6, 7, 8 — the attack distinguishes none of them.</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v143/tcp-socket-pool-limit-randomization/">Feature page</a></li>
+      <li><a href="/v143/tcp-socket-pool-limit-randomization/pool-limits/">Pool limits</a></li>
+      <li><a href="/v143/tcp-socket-pool-limit-randomization/xsleak-replay/">XS-leak replay</a></li>
+      <li><a href="https://xsleaks.dev/docs/attacks/timing-attacks/connection-pool/" target="_blank" rel="noopener">xsleaks.dev: connection pool attack</a></li>
+      <li><a href="https://chromestatus.com/feature/6496757559197696" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const chart = document.getElementById("chart");
+  const summary = document.getElementById("summary");
+
+  async function once(target, n) {
+    const urls = [];
+    for (let i = 0; i < n; i++) {
+      const u = target === "self" ? "/public/styles.css?b=" + Math.random() : "https://httpbin.org/uuid?b=" + Math.random();
+      urls.push(u);
+    }
+    const t0 = performance.now();
+    const promises = urls.map((u, i) => {
+      const s = performance.now();
+      return fetch(u, { cache: "no-store", mode: target === "self" ? "same-origin" : "cors" })
+        .then((r) => r.arrayBuffer())
+        .then(() => ({ i, t: performance.now() - s }))
+        .catch(() => ({ i, t: -1 }));
+    });
+    return await Promise.all(promises);
+  }
+
+  document.getElementById("run").addEventListener("click", async () => {
+    const target = document.getElementById("target").value;
+    const n = +document.getElementById("n").value;
+    const trials = +document.getElementById("trials").value;
+    chart.innerHTML = "<em>running " + trials + " trials of " + n + " concurrent requests…</em>";
+    summary.innerHTML = "";
+
+    const all = [];
+    for (let t = 0; t < trials; t++) {
+      const results = await once(target, n);
+      results.sort((a, b) => a.t - b.t);
+      for (let i = 0; i < results.length; i++) {
+        if (!all[i]) all[i] = [];
+        if (results[i].t >= 0) all[i].push(results[i].t);
+      }
+    }
+    const medians = all.map((arr) => {
+      if (!arr.length) return 0;
+      const s = arr.slice().sort((a, b) => a - b);
+      return s[Math.floor(s.length / 2)];
+    });
+    const max = Math.max(...medians, 1);
+
+    // Detect knee
+    let kneeIdx = -1, kneeRatio = 1;
+    for (let i = 1; i < medians.length; i++) {
+      if (medians[i - 1] > 0) {
+        const r = medians[i] / medians[i - 1];
+        if (r > kneeRatio) { kneeRatio = r; kneeIdx = i; }
+      }
+    }
+
+    chart.innerHTML = "";
+    medians.forEach((m, i) => {
+      const row = document.createElement("div");
+      row.className = "bar-row";
+      const pct = max ? (m / max) * 100 : 0;
+      row.innerHTML =
+        '<div class="k">#' + i + "</div>" +
+        '<div class="bar"><div style="width:' + pct + '%' + (i === kneeIdx ? ";background:var(--accent-rose)" : "") + '"></div></div>' +
+        '<div class="v">' + m.toFixed(0) + " ms</div>";
+      chart.appendChild(row);
+    });
+
+    summary.innerHTML =
+      '<div class="stat"><div class="k">requests</div><div class="v">' + n + "</div></div>" +
+      '<div class="stat"><div class="k">trials</div><div class="v">' + trials + "</div></div>" +
+      '<div class="stat"><div class="k">max knee idx</div><div class="v">' + (kneeIdx === -1 ? "—" : "#" + kneeIdx) + "</div></div>" +
+      '<div class="stat ' + (kneeRatio > 2 ? "warn" : "") + '"><div class="k">knee ratio</div><div class="v">' + kneeRatio.toFixed(2) + "×</div></div>";
+  });
+</script>
+</body>
+</html>
