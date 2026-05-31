@@ -75,17 +75,17 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v136</p>
     <h1>Auto Passkey upgrade</h1>
-    <p class="lede">Pretend the user just logged in with password. Trigger a Conditional Create &mdash; the browser quietly creates a passkey under the same RP ID without a modal. Use the buttons below to attempt the real WebAuthn flow.</p>
+    <p class="lede">Complete a backend password sign-in, then trigger Conditional Create &mdash; the browser quietly creates a passkey under the same RP ID without a modal when the platform can upgrade the saved password.</p>
   </header>
 
   <div id="probe" class="probe">Probing&hellip;</div>
 
   <div class="stage">
-    <h3>simulated password login</h3>
+    <h3>backend password sign-in</h3>
     <div class="controls">
       <label>username <input id="user" type="text" value="ada@example.com"></label>
       <label>password <input id="pwd" type="password" value="hunter2"></label>
-      <button id="login">Simulate password login</button>
+      <button id="login">Sign in and get challenge</button>
     </div>
 
     <h3>then: conditional passkey create</h3>
@@ -102,17 +102,13 @@
 
   <section>
     <h2>the code</h2>
-<pre><code>// On successful password login:
+<pre><code>// On successful backend password login:
+const options = await fetch("/api/login", { method: "POST" }).then(r =&gt; r.json());
 const cma = await PublicKeyCredential.isConditionalMediationAvailable();
 if (cma) {
   try {
     await navigator.credentials.create({
-      publicKey: {
-        rp: { name: &quot;example&quot; },
-        user: { id: ..., name: &quot;ada@example.com&quot;, displayName: &quot;Ada&quot; },
-        challenge: ...,
-        pubKeyCredParams: [{ type: &quot;public-key&quot;, alg: -7 }],
-      },
+      publicKey: options.publicKey,
       mediation: &quot;conditional&quot;,        // 136+: silent upgrade
     });
   } catch (e) {
@@ -134,7 +130,61 @@ if (cma) {
 </main>
 
 <script>
+  const API = "/v136/web-authentication-conditional-create-automatic-passkey-upgrades/auto-passkey/api";
   const probe = document.getElementById("probe");
+  const state = { publicKey: null };
+
+  function base64UrlToBytes(value) {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
+    const binary = atob(padded);
+    return Uint8Array.from(binary, char => char.charCodeAt(0));
+  }
+
+  function b64url(buf) {
+    const bytes = new Uint8Array(buf);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(binary).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+  }
+
+  function decodeOptions(publicKey) {
+    const decoded = structuredClone(publicKey);
+    decoded.challenge = base64UrlToBytes(decoded.challenge);
+    decoded.user.id = base64UrlToBytes(decoded.user.id);
+    decoded.excludeCredentials = decoded.excludeCredentials.map(credential => ({
+      ...credential,
+      id: base64UrlToBytes(credential.id),
+    }));
+    return decoded;
+  }
+
+  function credentialToJSON(credential) {
+    return {
+      id: credential.id,
+      rawId: b64url(credential.rawId),
+      type: credential.type,
+      clientExtensionResults: credential.getClientExtensionResults?.() || {},
+      response: {
+        clientDataJSON: b64url(credential.response.clientDataJSON),
+        attestationObject: b64url(credential.response.attestationObject),
+      },
+    };
+  }
+
+  async function api(path, body = {}) {
+    const response = await fetch(API + path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || response.statusText);
+    return data;
+  }
+
   const has = !!(navigator.credentials && typeof PublicKeyCredential !== "undefined");
   if (has) {
     probe.classList.add("yes");
@@ -154,31 +204,38 @@ if (cma) {
     }
   })();
 
-  document.getElementById("login").addEventListener("click", () => {
-    document.getElementById("cond").disabled = false;
+  document.getElementById("login").addEventListener("click", async () => {
+    const out = document.getElementById("r-cc");
+    try {
+      const login = await api("/login", {
+        userName: document.getElementById("user").value,
+        password: document.getElementById("pwd").value,
+      });
+      state.publicKey = login.publicKey;
+      document.getElementById("cond").disabled = false;
+      out.className = "v pass";
+      out.textContent = "backend sign-in accepted; WebAuthn challenge issued";
+    } catch (e) {
+      out.className = "v fail";
+      out.textContent = "sign-in failed: " + e.message;
+    }
   });
 
   document.getElementById("cond").addEventListener("click", async () => {
     const out = document.getElementById("r-cc");
+    if (!state.publicKey) {
+      out.className = "v fail";
+      out.textContent = "sign in first to get a backend challenge";
+      return;
+    }
     try {
       const cred = await navigator.credentials.create({
-        publicKey: {
-          rp: { name: "chrome-platform-showcase", id: location.hostname },
-          user: {
-            id: new TextEncoder().encode(document.getElementById("user").value),
-            name: document.getElementById("user").value,
-            displayName: "Demo user",
-          },
-          challenge: crypto.getRandomValues(new Uint8Array(32)),
-          pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
-          excludeCredentials: [],
-          authenticatorSelection: { residentKey: "preferred", userVerification: "preferred" },
-        },
+        publicKey: decodeOptions(state.publicKey),
         mediation: "conditional",
       });
-      out.className = "v pass"; out.textContent = "PublicKeyCredential created — passkey upgraded";
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(cred.rawId))).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
-      document.getElementById("r-id").textContent = b64.slice(0, 32) + "…";
+      const registered = await api("/register", credentialToJSON(cred));
+      out.className = "v pass"; out.textContent = "PublicKeyCredential created and stored by backend";
+      document.getElementById("r-id").textContent = registered.credentials[0].id.slice(0, 32) + "…";
     } catch (e) {
       out.className = "v fail";
       out.textContent = "rejected: " + e.message;

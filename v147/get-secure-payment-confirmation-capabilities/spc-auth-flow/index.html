@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SPC Auth Simulator — Get Secure Payment Confirmation Capabilities — Chrome 147</title>
+  <title>SPC Auth Flow — Get Secure Payment Confirmation Capabilities — Chrome 147</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
     .tabs {
@@ -217,8 +217,8 @@
 
   <header class="lede-block">
     <p class="eyebrow">v147 · Payments · Web APIs</p>
-    <h1>SPC Auth Simulator</h1>
-    <p class="lede">Walk through the full Secure Payment Confirmation authentication flow — credential registration, payment challenge, and signature verification — using real WebAuthn API calls with the <code>payment</code> extension.</p>
+    <h1>SPC Auth Flow</h1>
+    <p class="lede">Walk through the full Secure Payment Confirmation authentication flow — credential registration, payment challenge, and server-side signature verification — using real WebAuthn API calls with the <code>payment</code> extension.</p>
   </header>
 
   <div id="support-banner"></div>
@@ -290,7 +290,7 @@
 
   <!-- TAB 2: CHALLENGE -->
   <div class="tab-panel" id="tab-challenge">
-    <p>Simulate a payment authentication challenge. This corresponds to the bank's server sending a challenge that the authenticator must sign, binding it to the payment instrument and merchant.</p>
+    <p>Request a payment authentication challenge from the backend. This corresponds to the bank's server sending a challenge that the authenticator must sign, binding it to the payment instrument and merchant.</p>
 
     <div class="notice" id="challengeNotice">
       Complete <strong>Setup</strong> first to register a credential, then return here to generate a challenge.
@@ -363,7 +363,7 @@
 
   <!-- TAB 3: VERIFY -->
   <div class="tab-panel" id="tab-verify">
-    <p>Check whether the signature in the assertion is consistent with the credential that was registered. In a real deployment, this step runs server-side using a WebAuthn library.</p>
+    <p>Ask the backend to verify the assertion signature against the public key extracted during registration.</p>
 
     <div class="notice" id="verifyNotice">
       Complete <strong>Setup</strong> and <strong>Challenge</strong> first to generate an assertion to verify.
@@ -389,26 +389,77 @@
 <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 
 <script>
-// ── State ──────────────────────────────────────────────────────────────────
+const API = '/v147/get-secure-payment-confirmation-capabilities/spc-auth-flow/api';
 const state = {
-  credential: null,        // PublicKeyCredential from create()
-  assertion: null,         // PublicKeyCredential from get()
-  credentialId: null,      // raw ArrayBuffer
-  publicKey: null,         // CryptoKey (extracted if possible)
+  credential: null,
+  assertionPayload: null,
+  assertionClientData: null,
+  verification: null,
 };
 
 // ── Utilities ───────────────────────────────────────────────────────────────
 function b64url(buf) {
-  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary)
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-}
-
-function randomBytes(n) {
-  return crypto.getRandomValues(new Uint8Array(n));
 }
 
 function hex(buf) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function base64UrlToBytes(value) {
+  const padded = value.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((value.length + 3) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, char => char.charCodeAt(0));
+}
+
+function decodePublicKeyOptions(publicKey) {
+  const decoded = structuredClone(publicKey);
+  decoded.challenge = base64UrlToBytes(decoded.challenge);
+  if (decoded.user?.id) decoded.user.id = base64UrlToBytes(decoded.user.id);
+  if (decoded.allowCredentials) {
+    decoded.allowCredentials = decoded.allowCredentials.map(credential => ({
+      ...credential,
+      id: base64UrlToBytes(credential.id),
+    }));
+  }
+  return decoded;
+}
+
+async function api(path, body = {}) {
+  const response = await fetch(API + path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+function credentialToJSON(credential) {
+  const response = credential.response;
+  const out = {
+    id: credential.id,
+    rawId: b64url(credential.rawId),
+    type: credential.type,
+    authenticatorAttachment: credential.authenticatorAttachment || null,
+    clientExtensionResults: credential.getClientExtensionResults?.() || {},
+    response: {
+      clientDataJSON: b64url(response.clientDataJSON),
+    },
+  };
+  if (response.attestationObject) out.response.attestationObject = b64url(response.attestationObject);
+  if (response.authenticatorData) out.response.authenticatorData = b64url(response.authenticatorData);
+  if (response.signature) out.response.signature = b64url(response.signature);
+  if (response.userHandle) out.response.userHandle = b64url(response.userHandle);
+  return out;
 }
 
 function badge(id, state) {
@@ -430,6 +481,8 @@ function setOutput(id, text, cls) {
   const banner = document.getElementById('support-banner');
   const hasWebAuthn = !!(window.PublicKeyCredential);
   const hasCred = !!(navigator.credentials && navigator.credentials.create);
+  const createButton = document.getElementById('btnCreate');
+  const challengeButton = document.getElementById('btnChallenge');
 
   if (hasWebAuthn && hasCred) {
     banner.innerHTML = '<div class="notice" style="border-left-color:var(--accent-emerald);">' +
@@ -437,8 +490,9 @@ function setOutput(id, text, cls) {
       '<code>.get()</code> calls will be made — your OS authenticator dialog will appear.</div>';
   } else {
     banner.innerHTML = '<div class="notice" style="border-left-color:var(--accent-rose);">' +
-      '<strong>WebAuthn not available</strong> in this context. The demo will run in ' +
-      '<em>simulated mode</em> — showing the exact API shapes without triggering an authenticator.</div>';
+      '<strong>WebAuthn not available</strong> in this context. This flow requires real browser credential APIs.</div>';
+    createButton.disabled = true;
+    challengeButton.disabled = true;
   }
 })();
 
@@ -463,88 +517,46 @@ document.getElementById('btnCreate').addEventListener('click', async () => {
   const attachment = document.getElementById('attachment').value;
   const uv = document.getElementById('uvReq').value;
 
-  const challenge = randomBytes(32);
-  const userId = randomBytes(16);
-
-  const options = {
-    challenge,
-    rp: { id: rpId, name: 'SPC Auth Simulator' },
-    user: { id: userId, name: userName, displayName: userName },
-    pubKeyCredParams: [
-      { type: 'public-key', alg: -7 },   // ES256
-      { type: 'public-key', alg: -257 },  // RS256
-    ],
-    authenticatorSelection: {
+  try {
+    const optionsResponse = await api('/register-options', {
+      rpId,
+      userName,
       authenticatorAttachment: attachment,
       userVerification: uv,
-      requireResidentKey: false,
-    },
-    timeout: 60000,
-    attestation: 'none',
-    extensions: {
-      payment: { isPayment: true }
-    }
-  };
-
-  setOutput('setupOutput',
-    'PublicKeyCredentialCreationOptions:\n' + JSON.stringify({
-      challenge: b64url(challenge),
-      rpId: options.rp.id,
-      user: { ...options.user, id: b64url(userId) },
-      pubKeyCredParams: options.pubKeyCredParams,
-      extensions: options.extensions,
-    }, null, 2), 'info'
-  );
-
-  badge('s1badge', 'ok');
-  badge('s2badge', 'running');
-
-  if (!window.PublicKeyCredential || !navigator.credentials) {
-    // Simulated mode
-    await new Promise(r => setTimeout(r, 700));
-    badge('s2badge', 'ok');
-    badge('s3badge', 'running');
-    const fakeId = randomBytes(32);
-    state.credentialId = fakeId.buffer;
-    state.credential = { simulated: true, id: b64url(fakeId.buffer), rpId };
-    await new Promise(r => setTimeout(r, 400));
-    badge('s3badge', 'ok');
+    });
+    const publicKey = decodePublicKeyOptions(optionsResponse.publicKey);
     setOutput('setupOutput',
-      '✓ Simulated credential created\n\n' +
-      'credential.id = ' + b64url(fakeId.buffer) + '\n' +
-      'type         = public-key\n' +
-      'extensions.payment = { isPayment: true }\n\n' +
-      '(Simulated — no real authenticator interaction)', 'success'
+      'Server-issued PublicKeyCredentialCreationOptions:\n' + JSON.stringify(optionsResponse.publicKey, null, 2),
+      'info'
     );
-    updateChallengeNotice();
-    return;
-  }
+    badge('s1badge', 'ok');
+    badge('s2badge', 'running');
 
-  try {
-    const cred = await navigator.credentials.create({ publicKey: options });
+    const cred = await navigator.credentials.create({ publicKey });
     badge('s2badge', 'ok');
     badge('s3badge', 'running');
-
-    state.credential = cred;
-    state.credentialId = cred.rawId;
 
     const resp = cred.response;
     const clientDataJSON = JSON.parse(new TextDecoder().decode(resp.clientDataJSON));
+    const registered = await api('/register', credentialToJSON(cred));
+    state.credential = registered.credential;
 
     await new Promise(r => setTimeout(r, 200));
     badge('s3badge', 'ok');
 
     setOutput('setupOutput',
-      '✓ Credential created successfully\n\n' +
-      'credential.id  = ' + cred.id + '\n' +
-      'type           = ' + cred.type + '\n' +
+      '✓ Credential created and verified by backend\n\n' +
+      'credential.id   = ' + cred.id + '\n' +
+      'stored rawId    = ' + registered.credential.rawId + '\n' +
       'clientData.type = ' + clientDataJSON.type + '\n' +
       'clientData.origin = ' + clientDataJSON.origin + '\n' +
       'attestationObject length: ' + resp.attestationObject.byteLength + ' bytes\n' +
-      'getClientExtensionResults(): ' + JSON.stringify(cred.getClientExtensionResults()), 'success'
+      'publicKey.kty   = ' + registered.credential.publicKey.kty + '\n' +
+      'server events   = ' + registered.events.length, 'success'
     );
     updateChallengeNotice();
   } catch (err) {
+    badge('s1badge', 'fail');
     badge('s2badge', 'fail');
     badge('s3badge', 'fail');
     setOutput('setupOutput',
@@ -557,17 +569,24 @@ document.getElementById('btnCreate').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('btnClearCred').addEventListener('click', () => {
-  state.credential = null; state.credentialId = null;
+document.getElementById('btnClearCred').addEventListener('click', async () => {
+  state.credential = null;
+  state.assertionPayload = null;
+  state.assertionClientData = null;
+  state.verification = null;
+  await api('/reset').catch(() => {});
   ['s1badge','s2badge','s3badge'].forEach(id => badge(id, 'pending'));
+  ['c1badge','c2badge','c3badge'].forEach(id => badge(id, 'pending'));
   setOutput('setupOutput', 'Credential output will appear here…');
+  setOutput('challengeOutput', 'Challenge output will appear here…');
   updateChallengeNotice();
+  updateVerifyNotice();
 });
 
 function updateChallengeNotice() {
   const n = document.getElementById('challengeNotice');
   if (state.credential) {
-    n.innerHTML = '<strong>Credential ready.</strong> A credential ID is registered — click <em>Authenticate payment</em> to simulate the challenge.';
+    n.innerHTML = '<strong>Credential ready.</strong> The backend stored the credential public key — click <em>Authenticate payment</em> to request a challenge.';
     n.style.borderLeftColor = 'var(--accent-emerald)';
   } else {
     n.innerHTML = 'Complete <strong>Setup</strong> first to register a credential, then return here.';
@@ -586,20 +605,9 @@ document.getElementById('btnChallenge').addEventListener('click', async () => {
   badge('c2badge', 'pending');
   badge('c3badge', 'pending');
 
-  const challenge = randomBytes(32);
   const amount = document.getElementById('payAmount').value.trim() || '$0.00';
   const merchant = document.getElementById('payMerchant').value.trim() || 'Merchant';
   const currency = document.getElementById('payCurrency').value.trim() || 'USD';
-
-  setOutput('challengeOutput',
-    'Building payment challenge…\n\nchallenge = ' + b64url(challenge) +
-    '\nallowCredentials[0].id = ' + (state.credential.id || b64url(state.credentialId)) +
-    '\npayment extension = { isPayment: true, payeeOrigin: "' + location.origin + '", ' +
-    'total: { currency: "' + currency + '", value: "' + amount + '" } }', 'info'
-  );
-
-  badge('c1badge', 'ok');
-  badge('c2badge', 'running');
 
   // Highlight flow boxes
   ['fc1','fc2','fc3','fc4','fc5','fc6'].forEach(id => {
@@ -609,88 +617,36 @@ document.getElementById('btnChallenge').addEventListener('click', async () => {
     document.getElementById(id).classList.remove('highlighted');
   });
 
-  if (!window.PublicKeyCredential || !navigator.credentials || state.credential.simulated) {
-    await new Promise(r => setTimeout(r, 800));
-    badge('c2badge', 'ok');
-    badge('c3badge', 'running');
-
-    const fakeClientDataHash = randomBytes(32);
-    const fakeAuthData = randomBytes(64);
-    const fakeSig = randomBytes(72);
-
-    state.assertion = {
-      simulated: true,
-      clientDataJSON: btoa(JSON.stringify({
-        type: 'webauthn.get',
-        challenge: b64url(challenge),
-        origin: location.origin,
-        crossOrigin: false,
-        payment: { isPayment: true, rpId: location.hostname }
-      })),
-      authenticatorData: b64url(fakeAuthData.buffer),
-      signature: b64url(fakeSig.buffer),
-      rawChallenge: challenge,
-    };
-
-    await new Promise(r => setTimeout(r, 400));
-    badge('c3badge', 'ok');
-    ['fc7','fc8','fc9'].forEach(id => document.getElementById(id).classList.add('highlighted'));
-
-    setOutput('challengeOutput',
-      '✓ Simulated assertion received\n\n' +
-      'clientDataJSON.type = "webauthn.get"\n' +
-      'clientDataJSON.payment.isPayment = true\n' +
-      'clientDataJSON.origin = ' + location.origin + '\n' +
-      'authenticatorData length: 64 bytes (simulated)\n' +
-      'signature length: 72 bytes (simulated)\n\n' +
-      'Payment details bound to assertion:\n' +
-      '  amount: ' + amount + '  currency: ' + currency + '\n' +
-      '  merchant: ' + merchant, 'success'
-    );
-    updateVerifyNotice();
-    return;
-  }
-
-  const getOptions = {
-    challenge,
-    rpId: location.hostname,
-    allowCredentials: [{
-      type: 'public-key',
-      id: state.credentialId,
-      transports: ['internal', 'hybrid']
-    }],
-    userVerification: document.getElementById('uvReq').value,
-    timeout: 60000,
-    extensions: {
-      payment: {
-        isPayment: true,
-        payeeOrigin: location.origin,
-        total: { currency, value: amount },
-        instrument: { displayName: merchant, icon: '' },
-        rpId: location.hostname,
-      }
-    }
-  };
-
   try {
-    const assertion = await navigator.credentials.get({ publicKey: getOptions });
+    const optionsResponse = await api('/challenge-options', {
+      amount,
+      merchant,
+      currency,
+      userVerification: document.getElementById('uvReq').value,
+    });
+    const publicKey = decodePublicKeyOptions(optionsResponse.publicKey);
+    setOutput('challengeOutput',
+      'Server-issued PublicKeyCredentialRequestOptions:\n' + JSON.stringify(optionsResponse.publicKey, null, 2),
+      'info'
+    );
+    badge('c1badge', 'ok');
+    badge('c2badge', 'running');
+
+    const assertion = await navigator.credentials.get({ publicKey });
     badge('c2badge', 'ok');
     badge('c3badge', 'running');
 
     const cdb = JSON.parse(new TextDecoder().decode(assertion.response.clientDataJSON));
-    state.assertion = {
-      raw: assertion,
-      clientDataJSON: cdb,
-      authenticatorData: assertion.response.authenticatorData,
-      signature: assertion.response.signature,
-    };
+    state.assertionPayload = credentialToJSON(assertion);
+    state.assertionClientData = cdb;
+    state.verification = null;
 
     await new Promise(r => setTimeout(r, 200));
     badge('c3badge', 'ok');
     ['fc7','fc8','fc9'].forEach(id => document.getElementById(id).classList.add('highlighted'));
 
     setOutput('challengeOutput',
-      '✓ Assertion received\n\n' +
+      '✓ Assertion received from authenticator\n\n' +
       'clientDataJSON.type = "' + cdb.type + '"\n' +
       'clientDataJSON.origin = ' + cdb.origin + '\n' +
       'clientDataJSON.payment.isPayment = ' + (cdb.payment?.isPayment ?? '(not present)') + '\n' +
@@ -708,7 +664,9 @@ document.getElementById('btnChallenge').addEventListener('click', async () => {
 });
 
 document.getElementById('btnClearChallenge').addEventListener('click', () => {
-  state.assertion = null;
+  state.assertionPayload = null;
+  state.assertionClientData = null;
+  state.verification = null;
   ['c1badge','c2badge','c3badge'].forEach(id => badge(id, 'pending'));
   setOutput('challengeOutput', 'Challenge output will appear here…');
   ['fc1','fc2','fc3','fc4','fc5','fc6','fc7','fc8','fc9'].forEach(id =>
@@ -719,8 +677,8 @@ document.getElementById('btnClearChallenge').addEventListener('click', () => {
 
 function updateVerifyNotice() {
   const n = document.getElementById('verifyNotice');
-  if (state.assertion) {
-    n.innerHTML = '<strong>Assertion ready.</strong> Click <em>Verify signature</em> to inspect the assertion fields.';
+  if (state.assertionPayload) {
+    n.innerHTML = '<strong>Assertion ready.</strong> Click <em>Verify signature</em> to send it to the backend verifier.';
     n.style.borderLeftColor = 'var(--accent-emerald)';
   } else {
     n.innerHTML = 'Complete <strong>Setup</strong> and <strong>Challenge</strong> first.';
@@ -730,7 +688,7 @@ function updateVerifyNotice() {
 
 // ── VERIFY ──────────────────────────────────────────────────────────────────
 document.getElementById('btnVerify').addEventListener('click', async () => {
-  if (!state.assertion) {
+  if (!state.assertionPayload) {
     document.getElementById('verifyOutputDefault').textContent =
       '✗ No assertion — complete Challenge first.';
     document.getElementById('verifyOutputDefault').className = 'output-block error';
@@ -746,62 +704,48 @@ document.getElementById('btnVerify').addEventListener('click', async () => {
   function addRow(label, val) {
     const row = document.createElement('div');
     row.className = 'sig-row';
-    row.innerHTML = '<span class="sig-label">' + label + '</span>' +
-      '<span class="sig-value">' + val + '</span>';
+    const labelEl = document.createElement('span');
+    labelEl.className = 'sig-label';
+    labelEl.textContent = label;
+    const valueEl = document.createElement('span');
+    valueEl.className = 'sig-value';
+    valueEl.textContent = String(val);
+    row.append(labelEl, valueEl);
     rows.appendChild(row);
   }
 
-  const a = state.assertion;
+  const payload = state.assertionPayload;
+  const cdb = state.assertionClientData || {};
+  addRow('credential.id', payload.id);
+  addRow('clientDataJSON.type', cdb.type || '—');
+  addRow('clientDataJSON.origin', cdb.origin || '—');
+  addRow('clientDataJSON.payment.isPayment', cdb.payment?.isPayment ?? '(not present)');
+  addRow('authenticatorData', payload.response.authenticatorData.substring(0, 64) + '…');
+  addRow('signature', payload.response.signature.substring(0, 64) + '…');
 
-  if (a.simulated) {
-    addRow('type', 'simulated PublicKeyCredential');
-    addRow('clientDataJSON.type', 'webauthn.get');
-    addRow('clientDataJSON.payment.isPayment', 'true');
-    addRow('clientDataJSON.origin', location.origin);
-    addRow('authenticatorData', a.authenticatorData + ' (64 bytes simulated)');
-    addRow('signature', a.signature.substring(0, 40) + '… (72 bytes simulated)');
-
+  try {
+    const verification = await api('/verify', payload);
+    state.verification = verification;
     setOutput('verifyOutput',
-      '✓ Simulated verification PASS\n\n' +
-      'In a real deployment, the RP server would:\n' +
-      '1. Decode clientDataJSON, check type === "webauthn.get"\n' +
-      '2. Verify challenge matches the one it issued\n' +
-      '3. Check clientData.payment.isPayment === true\n' +
-      '4. Verify origin matches rpId\n' +
-      '5. Compute SHA-256(clientDataJSON)\n' +
-      '6. Verify ECDSA signature over (authData || clientDataHash) with stored public key\n' +
-      '7. Confirm payment instrument details in clientData match the expected transaction', 'success'
+      '✓ Backend verification PASS\n\n' +
+      'verified: ' + verification.verified + '\n' +
+      'rpId: ' + verification.rpId + '\n' +
+      'signCount: ' + verification.signCount + '\n' +
+      'stored credential: ' + verification.credential.id + '\n' +
+      'payment: ' + JSON.stringify(verification.payment, null, 2),
+      'success'
     );
-  } else {
-    const cdb = a.clientDataJSON;
-    const rawCdb = typeof cdb === 'string' ? cdb : JSON.stringify(cdb);
-    addRow('clientDataJSON.type', cdb.type || '—');
-    addRow('clientDataJSON.origin', cdb.origin || '—');
-    addRow('clientDataJSON.payment.isPayment', cdb.payment?.isPayment ?? '(not present)');
-    addRow('authenticatorData', hex(a.authenticatorData).substring(0, 64) + '…');
-    addRow('signature', hex(a.signature).substring(0, 64) + '…');
-
-    // Attempt in-browser crypto verify for ES256 (if we have the COSE key)
-    // We don't have the raw public key from attestationObject here in this demo,
-    // so we do a structural verification and flag what server-side code would do.
-    const challengeOk = cdb.type === 'webauthn.get';
-    const originOk = cdb.origin === location.origin;
-
-    setOutput('verifyOutput',
-      (challengeOk && originOk ? '✓' : '⚠') + ' Structural checks\n\n' +
-      'type === "webauthn.get":  ' + (cdb.type === 'webauthn.get' ? 'PASS' : 'FAIL') + '\n' +
-      'origin === current origin: ' + (originOk ? 'PASS' : 'FAIL') + '\n' +
-      'payment.isPayment present: ' + (cdb.payment?.isPayment === true ? 'PASS' : 'not present (payment ext may need RP server)\n') +
-      '\n⚠  Full ECDSA/RS256 signature verification requires the stored public key — runs server-side.\n' +
-      'See MDN: navigator.credentials.get() + Web Authentication API for library recommendations.',
-      challengeOk && originOk ? 'success' : 'info'
-    );
+  } catch (err) {
+    setOutput('verifyOutput', '✗ Backend verification failed\n\n' + err.message, 'error');
   }
 });
 
-document.getElementById('btnReset').addEventListener('click', () => {
-  state.credential = null; state.assertion = null;
-  state.credentialId = null; state.publicKey = null;
+document.getElementById('btnReset').addEventListener('click', async () => {
+  await api('/reset').catch(() => {});
+  state.credential = null;
+  state.assertionPayload = null;
+  state.assertionClientData = null;
+  state.verification = null;
   ['s1badge','s2badge','s3badge'].forEach(id => badge(id, 'pending'));
   ['c1badge','c2badge','c3badge'].forEach(id => badge(id, 'pending'));
   setOutput('setupOutput', 'Credential output will appear here…');

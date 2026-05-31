@@ -68,7 +68,7 @@
       margin-top: 4px;
     }
 
-    .sim-btn {
+    .run-btn {
       font-family: var(--font-mono);
       font-size: 0.78rem;
       padding: 0.45rem 0.9rem;
@@ -80,8 +80,8 @@
       color: var(--text-black);
       margin-top: auto;
     }
-    .sim-btn:hover { background: var(--text-black); color: var(--bg-ivory); }
-    .sim-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .run-btn:hover { background: var(--text-black); color: var(--bg-ivory); }
+    .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
     /* Flow animation */
     .flow-diagram {
@@ -164,13 +164,13 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v147 · security · DBSC</p>
     <h1>Binding Strength Demo</h1>
-    <p class="lede">Three attack scenarios — plain cookie theft, DBSC hardware binding, and hybrid migration — each with a live "Simulate attack" animation. A strength meter rates each approach's resistance to session theft.</p>
+    <p class="lede">Three attack scenarios — plain cookie theft, DBSC hardware binding, and hybrid migration — each with a live attack trace. A strength meter rates each approach's resistance to session theft.</p>
   </header>
 
   <div class="note">
-    All cryptographic operations here use <code>SubtleCrypto</code> in-browser to illustrate DBSC concepts.
-    No actual DBSC API is invoked (it requires server-side infrastructure). The simulated flows show
-    exactly where each approach fails under a cookie-theft attack.
+    The DBSC path calls the same backend endpoints as the replay lab: the server stores a real
+    <code>dbsc+jwt</code> public-key proof and rejects refresh attempts signed with the attacker's key.
+    Plain-cookie and hybrid traces show the contrasting policy decisions around that live check.
   </div>
 
   <div class="scenario-grid">
@@ -189,7 +189,7 @@
       <div class="flow-diagram" id="flow-cookie"></div>
       <div class="outcome-badge" id="outcome-cookie">—</div>
 
-      <button class="sim-btn" id="attack-cookie">Simulate attack &rarr;</button>
+      <button class="run-btn" id="attack-cookie">Run attack &rarr;</button>
     </div>
 
     <!-- Scenario 2: DBSC -->
@@ -206,7 +206,7 @@
       <div class="flow-diagram" id="flow-dbsc"></div>
       <div class="outcome-badge" id="outcome-dbsc">—</div>
 
-      <button class="sim-btn" id="attack-dbsc">Simulate attack &rarr;</button>
+      <button class="run-btn" id="attack-dbsc">Run attack &rarr;</button>
     </div>
 
     <!-- Scenario 3: Hybrid migration -->
@@ -223,7 +223,7 @@
       <div class="flow-diagram" id="flow-hybrid"></div>
       <div class="outcome-badge" id="outcome-hybrid">—</div>
 
-      <button class="sim-btn" id="attack-hybrid">Simulate attack &rarr;</button>
+      <button class="run-btn" id="attack-hybrid">Run attack &rarr;</button>
     </div>
 
   </div>
@@ -308,6 +308,87 @@ const signature = await crypto.subtle.sign(
 </main>
 
 <script>
+  const BASE = location.pathname.match(/^\/v\d+\/device-bound-session-credentials/)?.[0] ||
+    '/v147/device-bound-session-credentials';
+  const encoder = new TextEncoder();
+
+  function bytesToBase64Url(bytes) {
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  function encodeJson(value) {
+    return bytesToBase64Url(encoder.encode(JSON.stringify(value)));
+  }
+
+  async function dbscCall(path, options = {}) {
+    const response = await fetch(`${BASE}${path}`, {
+      credentials: 'same-origin',
+      ...options,
+    });
+    const data = await response.json();
+    return { ok: response.ok, status: response.status, data };
+  }
+
+  async function makeDbscJwt(keyPair, challenge, publicJwk = null, authorization = null) {
+    const header = { alg: 'ES256', typ: 'dbsc+jwt' };
+    if (publicJwk) header.jwk = publicJwk;
+    const payload = { jti: challenge };
+    if (publicJwk && authorization) payload.authorization = authorization;
+    const signingInput = `${encodeJson(header)}.${encodeJson(payload)}`;
+    const signature = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      keyPair.privateKey,
+      encoder.encode(signingInput),
+    );
+    return `${signingInput}.${bytesToBase64Url(new Uint8Array(signature))}`;
+  }
+
+  async function runBackendReplayCheck() {
+    if (!crypto?.subtle) throw new Error('SubtleCrypto is required for the DBSC proof.');
+    await dbscCall('/reset', { method: 'POST' });
+    const aliceKey = await crypto.subtle.generateKey(
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      true,
+      ['sign', 'verify'],
+    );
+    const attackerKey = await crypto.subtle.generateKey(
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      true,
+      ['sign', 'verify'],
+    );
+    const alicePublicJwk = await crypto.subtle.exportKey('jwk', aliceKey.publicKey);
+    const login = await dbscCall('/login', { method: 'POST' });
+    const sessionId = login.data.sessionId;
+    const registrationProof = await makeDbscJwt(
+      aliceKey,
+      login.data.challenge,
+      alicePublicJwk,
+      login.data.authorization,
+    );
+    const registered = await dbscCall('/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Secure-Session-Response': registrationProof },
+      body: JSON.stringify({ proof: registrationProof }),
+    });
+    if (!registered.ok) throw new Error(registered.data.error || 'Registration failed.');
+
+    await dbscCall('/expire', { method: 'POST' });
+    const challenge = await dbscCall('/refresh', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    });
+    const attackerProof = await makeDbscJwt(attackerKey, challenge.data.challenge);
+    const replay = await dbscCall('/refresh', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'Secure-Session-Response': attackerProof },
+      body: JSON.stringify({ sessionId, proof: attackerProof }),
+    });
+    return { registered, replay };
+  }
+
   function addStep(containerId, text, cls, delay) {
     return new Promise(resolve => {
       setTimeout(() => {
@@ -338,7 +419,7 @@ const signature = await crypto.subtle.sign(
     outcome.textContent = text;
   }
 
-  // ---- Cookie attack simulation ----
+  // ---- Cookie attack trace ----
   document.getElementById('attack-cookie').addEventListener('click', async function() {
     this.disabled = true;
     clearFlow('flow-cookie');
@@ -353,7 +434,7 @@ const signature = await crypto.subtle.sign(
     this.disabled = false;
   });
 
-  // ---- DBSC attack simulation ----
+  // ---- DBSC attack trace ----
   document.getElementById('attack-dbsc').addEventListener('click', async function() {
     this.disabled = true;
     clearFlow('flow-dbsc');
@@ -367,7 +448,7 @@ const signature = await crypto.subtle.sign(
     await addStep(id, '> Server: signature mismatch → session evicted', 'success', 2900);
     await addStep(id, '> ATTACK BLOCKED — key never left device', 'success', 3400);
 
-    // Demonstrate with real SubtleCrypto
+    // Demonstrate with real SubtleCrypto and backend verification.
     if (window.crypto && window.crypto.subtle) {
       await addStep(id, '> [live] Generating P-256 key pair via SubtleCrypto…', 'warn', 3900);
       try {
@@ -383,8 +464,18 @@ const signature = await crypto.subtle.sign(
         );
         const sigHex = Array.from(new Uint8Array(sig)).slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
         await addStep(id, '> [live] Signature: ' + sigHex + '… (64 bytes) ✓', 'success', 4400);
+        await addStep(id, '> [backend] Registering Alice with /login + /register…', 'warn', 4900);
+        const result = await runBackendReplayCheck();
+        await addStep(
+          id,
+          result.replay.ok
+            ? '> [backend] Unexpected replay accepted'
+            : '> [backend] Attacker refresh rejected: ' + (result.replay.data.error || result.replay.status),
+          result.replay.ok ? 'fail' : 'success',
+          5400
+        );
       } catch(e) {
-        await addStep(id, '> [live] SubtleCrypto error: ' + e.message, 'fail', 4400);
+        await addStep(id, '> [live] DBSC proof error: ' + e.message, 'fail', 4400);
       }
     }
 
@@ -392,7 +483,7 @@ const signature = await crypto.subtle.sign(
     this.disabled = false;
   });
 
-  // ---- Hybrid migration simulation ----
+  // ---- Hybrid migration trace ----
   document.getElementById('attack-hybrid').addEventListener('click', async function() {
     this.disabled = true;
     clearFlow('flow-hybrid');
@@ -420,12 +511,12 @@ const signature = await crypto.subtle.sign(
     try {
       const kp = await crypto.subtle.generateKey(
         { name: 'ECDSA', namedCurve: 'P-256' },
-        false, ['sign', 'verify']
+        true, ['sign', 'verify']
       );
       const exported = await crypto.subtle.exportKey('raw', kp.publicKey);
       el.textContent = 'SubtleCrypto P-256 available. Public key: ' +
         Array.from(new Uint8Array(exported)).slice(0, 6).map(b => b.toString(16).padStart(2,'0')).join('') +
-        '… (65 bytes). Private key extractable: false (non-exportable, hardware-bound in production).';
+        '… (65 bytes). DBSC production stores the private key in device-bound secure storage.';
       el.style.borderLeftColor = 'var(--accent-emerald)';
     } catch(e) {
       el.textContent = 'SubtleCrypto error: ' + e.message;
