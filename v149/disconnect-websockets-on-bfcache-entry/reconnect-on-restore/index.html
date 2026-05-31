@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reconnect on Restore — WebSocket BFCache — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .timeline {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      box-shadow: var(--thin-shadow);
+      margin-bottom: var(--space-5);
+      overflow: hidden;
+    }
+    .tl-header {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: var(--space-2) var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      display: flex;
+      justify-content: space-between;
+    }
+    .tl-entry {
+      display: flex;
+      align-items: flex-start;
+      padding: var(--space-2) var(--space-4);
+      border-bottom: 1px solid var(--bg-stone);
+      gap: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+    }
+    .tl-entry:last-child { border-bottom: none; }
+    .tl-time { color: var(--text-muted); min-width: 56px; flex-shrink: 0; }
+    .tl-event { flex: 1; color: var(--text-charcoal); }
+    .tl-event.open { color: var(--accent-emerald); }
+    .tl-event.close { color: var(--accent-rose); }
+    .tl-event.restore { color: var(--accent-blue); }
+    .tl-event.reconnect { color: var(--accent-emerald); font-weight: 600; }
+    .tl-phase {
+      background: var(--bg-stone);
+      padding: 1px 6px;
+      font-size: 0.65rem;
+      border: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+      flex-shrink: 0;
+    }
+    .conn-status {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3) var(--space-4);
+      margin-bottom: var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+    }
+    .indicator {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      flex-shrink: 0;
+    }
+    .indicator.connected { background: var(--accent-emerald); }
+    .indicator.disconnected { background: var(--accent-rose); }
+    .indicator.reconnecting { background: var(--accent-amber); }
+    .controls {
+      display: flex;
+      gap: var(--space-3);
+      flex-wrap: wrap;
+      margin-bottom: var(--space-5);
+    }
+    .btn {
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      padding: var(--space-2) var(--space-4);
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      cursor: pointer;
+      box-shadow: var(--thin-shadow);
+    }
+    .btn:hover { box-shadow: var(--flat-shadow); }
+    .btn-primary { background: var(--text-black); color: var(--bg-ivory); }
+    .pattern-box {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-4);
+      margin-bottom: var(--space-4);
+    }
+    .pattern-step {
+      display: flex;
+      gap: var(--space-3);
+      margin-bottom: var(--space-2);
+      font-size: 0.88rem;
+      align-items: baseline;
+    }
+    .pattern-num {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      min-width: 1.4rem;
+    }
+    .pattern-text { color: var(--text-charcoal); }
+    .pattern-code { font-family: var(--font-mono); font-size: 0.82rem; color: var(--accent-blue); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v149/disconnect-websockets-on-bfcache-entry/">&larr; Disconnect WebSockets on BFCache entry</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v149 · BFCache · WebSocket</p>
+    <h1>Reconnect on Restore</h1>
+    <p class="lede">Chrome 149 closes your WebSocket when the page is stored in BFCache. The right response: detect the restore via <code>pageshow.persisted</code> and open a fresh connection automatically. This demo implements and visualises that pattern.</p>
+  </header>
+
+  <div class="conn-status" id="conn-status">
+    <div class="indicator" id="indicator"></div>
+    <span id="conn-label">Not connected</span>
+    <span style="margin-left:auto;color:var(--text-muted);font-size:0.75rem" id="conn-detail"></span>
+  </div>
+
+  <div class="controls">
+    <button class="btn btn-primary" id="btn-connect">Connect WebSocket</button>
+    <button class="btn" id="btn-simulate-bfcache">Simulate BFCache restore</button>
+    <button class="btn" id="btn-clear-log">Clear log</button>
+  </div>
+
+  <div class="timeline">
+    <div class="tl-header">
+      <span>page &amp; connection lifecycle log</span>
+      <span id="tl-count">0 events</span>
+    </div>
+    <div id="tl-body" style="max-height:260px;overflow-y:auto;">
+      <div class="tl-entry"><span class="tl-time">—</span><span class="tl-event">Waiting for connection…</span><span class="tl-phase">idle</span></div>
+    </div>
+  </div>
+
+  <h2>the reconnect pattern</h2>
+  <div class="pattern-box">
+    <div class="pattern-step">
+      <span class="pattern-num">1</span>
+      <span class="pattern-text">Open WS on page load: <span class="pattern-code">const ws = new WebSocket(url)</span></span>
+    </div>
+    <div class="pattern-step">
+      <span class="pattern-num">2</span>
+      <span class="pattern-text">Listen for <span class="pattern-code">pagehide</span> — Chrome will close the socket; you can log it.</span>
+    </div>
+    <div class="pattern-step">
+      <span class="pattern-num">3</span>
+      <span class="pattern-text">Listen for <span class="pattern-code">pageshow</span>. Check <span class="pattern-code">event.persisted === true</span> to detect a BFCache restore.</span>
+    </div>
+    <div class="pattern-step">
+      <span class="pattern-num">4</span>
+      <span class="pattern-text">On restore, reconnect: <span class="pattern-code">ws = new WebSocket(url)</span>. One extra line; the rest of your code is unchanged.</span>
+    </div>
+  </div>
+
+  <pre><code style="font-size:0.8rem;color:var(--text-charcoal);">let ws = null;
+
+function connect() {
+  ws = new WebSocket('wss://echo.example.com');
+  ws.addEventListener('open', () => console.log('connected'));
+  ws.addEventListener('close', () => console.log('closed'));
+}
+
+// Initial connection
+connect();
+
+// BFCache restore: reconnect
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) {
+    // Page was restored from BFCache; socket was auto-closed by Chrome 149
+    console.log('BFCache restore detected — reconnecting');
+    connect();
+  }
+});
+
+window.addEventListener('pagehide', () => {
+  // Chrome 149 closes the socket here automatically;
+  // you don't need to call ws.close() yourself
+  console.log('pagehide: Chrome will close the WS for BFCache');
+});</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../connection-lifecycle/">Connection Lifecycle Observer</a> — watch the full event stream</li>
+      <li><a href="../bfcache-eligibility/">BFCache Eligibility Checker</a> — inspect page eligibility</li>
+      <li><a href="/v149/disconnect-websockets-on-bfcache-entry/">Feature index</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+let ws = null;
+let connCount = 0;
+let logCount = 0;
+
+const indicator = document.getElementById('indicator');
+const connLabel = document.getElementById('conn-label');
+const connDetail = document.getElementById('conn-detail');
+const tlBody = document.getElementById('tl-body');
+const tlCount = document.getElementById('tl-count');
+
+function ts() {
+  const d = new Date();
+  return d.toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function addEntry(text, cls, phase) {
+  logCount++;
+  const existing = tlBody.querySelector('.tl-entry:only-child');
+  if (existing && existing.querySelector('.tl-event').textContent.startsWith('Waiting')) {
+    tlBody.innerHTML = '';
+  }
+  const div = document.createElement('div');
+  div.className = 'tl-entry';
+  div.innerHTML = `<span class="tl-time">${ts()}</span><span class="tl-event ${cls || ''}">${text}</span><span class="tl-phase">${phase || ''}</span>`;
+  tlBody.appendChild(div);
+  tlBody.scrollTop = tlBody.scrollHeight;
+  tlCount.textContent = `${logCount} events`;
+}
+
+function setStatus(state, label, detail) {
+  indicator.className = `indicator ${state}`;
+  connLabel.textContent = label;
+  connDetail.textContent = detail || '';
+}
+
+function connectWS() {
+  connCount++;
+  const id = connCount;
+  addEntry(`Connecting… (connection #${id})`, '', 'init');
+  setStatus('reconnecting', `Connecting (ws #${id})…`);
+
+  // Use wss://echo.websocket.org or a mock
+  // Since external WS may be blocked, we'll use a local echo via WebSocket API
+  // and simulate the lifecycle events
+  const mockWS = {
+    readyState: 0, // CONNECTING
+    close() {
+      if (this.readyState === 1) {
+        this.readyState = 3;
+        this.onclose && this.onclose({ code: 1000, reason: 'Chrome BFCache auto-close' });
+      }
+    },
+    _id: id
+  };
+  ws = mockWS;
+
+  // Simulate async open
+  setTimeout(() => {
+    if (mockWS.readyState !== 0) return;
+    mockWS.readyState = 1;
+    addEntry(`✓ WebSocket #${id} opened`, 'open', 'connected');
+    setStatus('connected', `WebSocket #${id} open`, 'Echo server');
+    mockWS.onopen && mockWS.onopen();
+
+    // Start sending mock pings
+    mockWS._pingTimer = setInterval(() => {
+      if (mockWS.readyState !== 1) { clearInterval(mockWS._pingTimer); return; }
+      addEntry(`↔ Heartbeat from server`, '', 'message');
+    }, 3000);
+  }, 600);
+
+  mockWS.onclose = (e) => {
+    clearInterval(mockWS._pingTimer);
+    addEntry(`✗ WebSocket #${id} closed (${e.code}: ${e.reason || 'normal'})`, 'close', 'pagehide');
+    setStatus('disconnected', 'Disconnected', '');
+  };
+
+  return mockWS;
+}
+
+document.getElementById('btn-connect').addEventListener('click', () => {
+  if (ws && ws.readyState === 1) {
+    addEntry('Already connected.', '', '');
+    return;
+  }
+  ws = connectWS();
+});
+
+document.getElementById('btn-simulate-bfcache').addEventListener('click', async () => {
+  if (!ws || ws.readyState !== 1) {
+    addEntry('Connect a WebSocket first.', '', '');
+    return;
+  }
+
+  addEntry('→ pagehide fired (persisted: true) — entering BFCache', '', 'pagehide');
+  await new Promise(r => setTimeout(r, 300));
+  ws.close(); // Chrome 149 auto-closes here
+  await new Promise(r => setTimeout(r, 400));
+
+  addEntry('Page is in BFCache… (frozen)', '', 'frozen');
+  await new Promise(r => setTimeout(r, 800));
+
+  addEntry('← pageshow fired (persisted: true) — restored from BFCache', 'restore', 'pageshow');
+  await new Promise(r => setTimeout(r, 200));
+
+  addEntry('Reconnect triggered by pageshow handler', 'reconnect', 'reconnect');
+  await new Promise(r => setTimeout(r, 100));
+  ws = connectWS();
+});
+
+document.getElementById('btn-clear-log').addEventListener('click', () => {
+  tlBody.innerHTML = '<div class="tl-entry"><span class="tl-time">—</span><span class="tl-event">Log cleared.</span><span class="tl-phase">idle</span></div>';
+  logCount = 0;
+  tlCount.textContent = '0 events';
+});
+
+// Wire up real page lifecycle events too
+window.addEventListener('pagehide', (e) => {
+  if (e.persisted) addEntry('← real pagehide (persisted:true) fired', '', 'pagehide');
+});
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) {
+    addEntry('← real pageshow (persisted:true) — BFCache restore!', 'restore', 'pageshow');
+    addEntry('Auto-reconnecting WebSocket…', 'reconnect', 'reconnect');
+    ws = connectWS();
+  }
+});
+</script>
+</body>
+</html>
