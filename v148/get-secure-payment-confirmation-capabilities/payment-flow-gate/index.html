@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Payment Flow Gate — SPC Capabilities — Chrome 148</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .checkout-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0; }
+    @media (max-width: 640px) { .checkout-layout { grid-template-columns: 1fr; } }
+    .checkout-card { background: var(--bg-paper); border: 1px solid var(--border-black); padding: 1.25rem; }
+    .checkout-card h3 { margin: 0 0 0.75rem; font-size: 0.875rem; }
+    .item-row { display: flex; justify-content: space-between; align-items: baseline; padding: 0.4rem 0; border-bottom: 1px solid var(--bg-stone); font-size: 0.82rem; }
+    .item-row:last-of-type { border-bottom: none; }
+    .total-row { display: flex; justify-content: space-between; font-weight: 700; margin-top: 0.75rem; padding-top: 0.75rem; border-top: 2px solid var(--border-black); font-size: 0.9rem; }
+    .capability-gate { background: var(--bg-stone); border: 1px solid var(--border-black); padding: 1rem; margin: 1.5rem 0; }
+    .capability-row { display: flex; gap: 0.5rem; align-items: center; margin: 0.4rem 0; font-size: 0.82rem; }
+    .cap-label { flex: 1; color: var(--text-charcoal); }
+    .badge { display: inline-block; padding: 0.15rem 0.5rem; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; border: 1px solid; }
+    .badge.yes { background: #d1fae5; border-color: #059669; color: #065f46; }
+    .badge.no { background: #fee2e2; border-color: #dc2626; color: #991b1b; }
+    .badge.pending { background: #fef3c7; border-color: #d97706; color: #92400e; }
+    .badge.na { background: var(--bg-stone); border-color: var(--border-black); color: var(--text-muted); }
+    .pay-btn-row { margin-top: 1rem; }
+    button { padding: 0.5rem 1rem; font-size: 0.85rem; cursor: pointer; border: 1px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); width: 100%; font-weight: 700; }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.fallback { background: var(--bg-ivory); color: var(--text-black); margin-top: 0.5rem; }
+    button.fallback:hover { background: var(--bg-stone); }
+    .flow-steps { list-style: none; padding: 0; margin: 1.5rem 0; counter-reset: step; }
+    .flow-step { counter-increment: step; display: flex; gap: 0.75rem; align-items: flex-start; padding: 0.6rem 0; border-bottom: 1px solid var(--bg-stone); font-size: 0.82rem; }
+    .flow-step::before { content: counter(step); display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; background: var(--text-black); color: var(--bg-ivory); font-size: 0.72rem; font-weight: 700; flex-shrink: 0; border-radius: 50%; }
+    .flow-step.active::before { background: var(--accent-blue); }
+    .flow-step.done::before { background: var(--accent-emerald); }
+    .flow-step-text { color: var(--text-charcoal); }
+    .flow-step-text strong { color: var(--text-black); }
+    .result-panel { background: var(--bg-paper); border: 2px solid var(--border-black); padding: 1rem; margin-top: 1rem; display: none; }
+    .result-panel.show { display: block; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v148/">&larr; Chrome 148</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v148 · Web APIs · Payments</p>
+    <h1>Payment Flow Gate</h1>
+    <p class="lede">A checkout that calls <code>PaymentRequest.getSecurePaymentConfirmationCapabilities()</code> before rendering the payment sheet — showing the SPC passkey button only when the device supports it, and falling back gracefully to a standard payment form otherwise.</p>
+  </header>
+
+  <section>
+    <h2>Checkout demo</h2>
+    <div class="checkout-layout">
+      <div class="checkout-card">
+        <h3>Order summary</h3>
+        <div class="item-row"><span>Chrome Dev Summit ticket</span><span>$149.00</span></div>
+        <div class="item-row"><span>Platform showcase book</span><span>$29.99</span></div>
+        <div class="item-row"><span>Shipping</span><span>$4.99</span></div>
+        <div class="total-row"><span>Total</span><span>$183.98</span></div>
+      </div>
+
+      <div class="checkout-card">
+        <h3>Payment method</h3>
+        <div class="capability-gate">
+          <p style="font-size:0.78rem;color:var(--text-muted);margin:0 0 0.5rem;">SPC capability check</p>
+          <div class="capability-row"><span class="cap-label">SPC supported</span><span class="badge pending" id="cap-spc">Checking…</span></div>
+          <div class="capability-row"><span class="cap-label">Passkey available</span><span class="badge pending" id="cap-passkey">Checking…</span></div>
+          <div class="capability-row"><span class="cap-label">User verified</span><span class="badge pending" id="cap-verified">Checking…</span></div>
+        </div>
+
+        <div class="pay-btn-row">
+          <button id="btn-spc" disabled>Pay with passkey (SPC)</button>
+          <button class="fallback" id="btn-standard">Pay with card form</button>
+        </div>
+        <div class="result-panel" id="result-panel"></div>
+      </div>
+    </div>
+
+    <h3 style="font-size:0.85rem;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted);margin:1.5rem 0 0.75rem;">How the gate works</h3>
+    <ol class="flow-steps" id="flow-steps">
+      <li class="flow-step" id="step-1"><div class="flow-step-text"><strong>Call getSecurePaymentConfirmationCapabilities()</strong> — check if SPC is available before rendering any payment UI. This avoids constructing a <code>PaymentRequest</code> object and calling <code>canMakePayment()</code> which requires interaction.</div></li>
+      <li class="flow-step" id="step-2"><div class="flow-step-text"><strong>Inspect capabilities object</strong> — check <code>supportsSPC</code>, <code>supportsPasskey</code>, and whether any stored credentials match the RP ID. All synchronous, no network needed.</div></li>
+      <li class="flow-step" id="step-3"><div class="flow-step-text"><strong>Show appropriate UI</strong> — if SPC is available, render the passkey button prominently. Otherwise hide it and go straight to card form. No wasted clicks or confusing "not available on this device" errors.</div></li>
+      <li class="flow-step" id="step-4"><div class="flow-step-text"><strong>Invoke payment</strong> — call <code>request.show()</code> only when the user clicks the button for the chosen path, ensuring the gesture requirement is met.</div></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>API usage</h2>
+    <pre style="background:var(--bg-stone);border:1px solid var(--border-black);padding:1rem;overflow-x:auto;"><code style="font-size:0.8125rem;line-height:1.6;color:var(--text-charcoal);">// Chrome 148: query SPC capabilities before showing any UI
+const caps = await PaymentRequest.getSecurePaymentConfirmationCapabilities();
+
+if (caps.supportsSPC && caps.supportsPasskey) {
+  showSPCButton(); // passkey-authenticated payment
+} else {
+  showCardForm();  // standard card entry fallback
+}
+
+// When SPC is available, show() presents the passkey sheet
+const request = new PaymentRequest([{ supportedMethods: 'secure-payment-confirmation', data: { ... } }], details);
+const response = await request.show();</code></pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5187358061289472" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Payment_Request_API" target="_blank" rel="noopener">MDN — Payment Request API</a></li>
+      <li><a href="https://www.w3.org/TR/secure-payment-confirmation/" target="_blank" rel="noopener">Secure Payment Confirmation spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  async function checkCapabilities() {
+    const capSpc = document.getElementById('cap-spc');
+    const capPasskey = document.getElementById('cap-passkey');
+    const capVerified = document.getElementById('cap-verified');
+    const btnSpc = document.getElementById('btn-spc');
+
+    document.getElementById('step-1').className = 'flow-step active';
+
+    await delay(400);
+
+    let spcSupported = false, passkeySupported = false;
+
+    try {
+      if (typeof PaymentRequest !== 'undefined' && typeof PaymentRequest.getSecurePaymentConfirmationCapabilities === 'function') {
+        const caps = await PaymentRequest.getSecurePaymentConfirmationCapabilities();
+        spcSupported = caps.supportsSPC !== false;
+        passkeySupported = caps.supportsPasskey !== false;
+      }
+    } catch(e) {
+      // API not available — simulate
+    }
+
+    document.getElementById('step-1').className = 'flow-step done';
+    document.getElementById('step-2').className = 'flow-step active';
+
+    await delay(300);
+
+    capSpc.textContent = spcSupported ? 'Yes' : 'No (API unavailable)';
+    capSpc.className = 'badge ' + (spcSupported ? 'yes' : 'no');
+
+    capPasskey.textContent = passkeySupported ? 'Yes' : 'No (simulated)';
+    capPasskey.className = 'badge ' + (passkeySupported ? 'yes' : 'no');
+
+    capVerified.textContent = 'No stored creds (demo)';
+    capVerified.className = 'badge na';
+
+    document.getElementById('step-2').className = 'flow-step done';
+    document.getElementById('step-3').className = 'flow-step active';
+
+    await delay(200);
+
+    if (spcSupported && passkeySupported) {
+      btnSpc.disabled = false;
+      btnSpc.textContent = 'Pay with passkey (SPC) ✓';
+    } else {
+      btnSpc.textContent = 'Pay with passkey (not available on this device)';
+      btnSpc.disabled = true;
+      btnSpc.title = 'SPC or passkey not available — use card form fallback';
+    }
+
+    document.getElementById('step-3').className = 'flow-step done';
+  }
+
+  document.getElementById('btn-spc').addEventListener('click', async () => {
+    document.getElementById('step-4').className = 'flow-step active';
+    await delay(300);
+    document.getElementById('step-4').className = 'flow-step done';
+    showResult('SPC passkey payment initiated — browser would show the passkey authentication sheet.', 'success');
+  });
+
+  document.getElementById('btn-standard').addEventListener('click', () => {
+    showResult('Standard card form opened — entering card details manually.', '');
+  });
+
+  function showResult(msg, type) {
+    const panel = document.getElementById('result-panel');
+    panel.className = 'result-panel show';
+    panel.style.borderColor = type === 'success' ? 'var(--accent-emerald)' : 'var(--border-black)';
+    panel.textContent = msg;
+  }
+
+  function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  checkCapabilities();
+</script>
+</body>
+</html>

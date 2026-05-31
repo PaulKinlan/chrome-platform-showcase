@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Offline Queue — Extended Lifetime SharedWorker — Chrome 148</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0; }
+    @media (max-width: 640px) { .layout { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-paper); border: 1px solid var(--border-black); padding: 1.1rem; }
+    .panel h3 { margin: 0 0 0.75rem; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+    .queue-list { list-style: none; padding: 0; margin: 0; min-height: 80px; }
+    .queue-item { display: flex; gap: 0.5rem; align-items: center; padding: 0.4rem 0.5rem; border: 1px solid var(--border-black); margin: 0.25rem 0; font-size: 0.8rem; background: var(--bg-stone); }
+    .queue-item.pending { background: #fef3c7; border-color: #d97706; }
+    .queue-item.sent { background: #d1fae5; border-color: #059669; }
+    .queue-item.failed { background: #fee2e2; border-color: #dc2626; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .status-dot.pending { background: #d97706; }
+    .status-dot.sent { background: #059669; }
+    .status-dot.failed { background: #dc2626; }
+    .queue-msg { font-family: monospace; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .queue-ts { color: var(--text-muted); font-size: 0.72rem; flex-shrink: 0; }
+    input.msg-input { width: 100%; padding: 0.45rem 0.6rem; font-size: 0.82rem; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); box-sizing: border-box; margin-bottom: 0.5rem; }
+    .btn-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    button { padding: 0.4rem 0.8rem; font-size: 0.8rem; cursor: pointer; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    button:hover { background: var(--bg-stone); }
+    button.primary { background: var(--text-black); color: var(--bg-ivory); }
+    button.primary:hover { opacity: 0.85; }
+    .worker-status { display: flex; gap: 0.5rem; align-items: center; font-size: 0.82rem; margin-bottom: 0.75rem; }
+    .worker-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent-emerald); flex-shrink: 0; }
+    .worker-dot.offline { background: #dc2626; }
+    .counter-display { font-size: 2.5rem; font-weight: 900; font-family: monospace; color: var(--text-black); line-height: 1; }
+    .counter-label { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 0.25rem; }
+    .support-note { background: var(--bg-stone); border-left: 3px solid var(--accent-blue); padding: 0.6rem 0.9rem; font-size: 0.8rem; color: var(--text-charcoal); margin: 1rem 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v148/">&larr; Chrome 148</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v148 · JavaScript · SharedWorker</p>
+    <h1>Offline Queue</h1>
+    <p class="lede">An analytics message queue backed by an extended-lifetime <code>SharedWorker</code>. Messages enqueued while "offline" persist in the worker — which keeps running even after all client tabs close — and flush automatically when connectivity returns.</p>
+  </header>
+
+  <section>
+    <div class="support-note" id="support-note">Checking SharedWorker support…</div>
+
+    <div class="layout">
+      <div class="panel">
+        <h3>Worker state</h3>
+        <div class="worker-status">
+          <div class="worker-dot" id="worker-dot"></div>
+          <span id="worker-state-label">Connecting…</span>
+        </div>
+        <div class="counter-display" id="queue-count">0</div>
+        <div class="counter-label">Messages in queue</div>
+        <div style="margin-top:1rem;">
+          <div class="counter-display" id="sent-count" style="font-size:1.5rem;color:var(--accent-emerald);">0</div>
+          <div class="counter-label">Messages sent</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Enqueue a message</h3>
+        <input class="msg-input" id="msg-input" type="text" placeholder="Analytics payload (e.g. page_view, click, conversion)">
+        <div class="btn-row">
+          <button class="primary" id="btn-enqueue">Enqueue</button>
+          <button id="btn-go-offline">Simulate offline</button>
+          <button id="btn-go-online">Simulate online</button>
+          <button id="btn-flush">Force flush</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:0;">
+      <h3>Queue contents</h3>
+      <ul class="queue-list" id="queue-list">
+        <li style="font-size:0.8rem;color:var(--text-muted);padding:0.5rem;">Queue is empty — enqueue messages above.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>How extended-lifetime enables this</h2>
+    <pre style="background:var(--bg-stone);border:1px solid var(--border-black);padding:1rem;overflow-x:auto;"><code style="font-size:0.8125rem;line-height:1.6;color:var(--text-charcoal);">// Worker created with extendedLifetime: true
+const worker = new SharedWorker('/queue-worker.js', {
+  name: 'analytics-queue',
+  extendedLifetime: true, // keeps running when all tabs close
+});
+
+// Worker side — queue persists in worker memory between tab sessions
+let queue = [];
+let isOnline = true;
+
+self.addEventListener('connect', e => {
+  const port = e.ports[0];
+  port.addEventListener('message', ({ data }) => {
+    if (data.type === 'enqueue') queue.push(data.payload);
+    if (data.type === 'flush') flushQueue();
+  });
+  port.start();
+  port.postMessage({ type: 'queue', queue }); // sync state to new tab
+});
+
+function flushQueue() {
+  if (!isOnline) return;
+  while (queue.length) {
+    const msg = queue.shift();
+    fetch('/analytics', { method: 'POST', body: JSON.stringify(msg) });
+  }
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5060826450935808" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/SharedWorker" target="_blank" rel="noopener">MDN — SharedWorker</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  // Simulate the shared worker entirely in-page (since we can't create actual SharedWorker files here)
+  const state = { queue: [], sent: 0, online: true, connected: false };
+
+  const workerDot = document.getElementById('worker-dot');
+  const workerStateLabel = document.getElementById('worker-state-label');
+  const queueCount = document.getElementById('queue-count');
+  const sentCount = document.getElementById('sent-count');
+  const queueList = document.getElementById('queue-list');
+  const msgInput = document.getElementById('msg-input');
+  const supportNote = document.getElementById('support-note');
+
+  // Check SharedWorker support
+  if (typeof SharedWorker !== 'undefined') {
+    supportNote.textContent = '✓ SharedWorker is supported. This demo simulates the extended-lifetime queue behaviour in-page (extendedLifetime: true is Chrome 148+ only).';
+    supportNote.style.borderLeftColor = 'var(--accent-emerald)';
+    state.connected = true;
+    updateWorkerState();
+  } else {
+    supportNote.textContent = 'SharedWorker is not available in this context. The demo runs in simulation mode.';
+    state.connected = true;
+    updateWorkerState();
+  }
+
+  function updateWorkerState() {
+    const label = state.connected
+      ? (state.online ? 'Worker running · Online' : 'Worker running · Offline (queue accumulating)')
+      : 'Worker disconnected';
+    workerStateLabel.textContent = label;
+    workerDot.className = 'worker-dot' + (!state.connected ? ' offline' : '');
+  }
+
+  function renderQueue() {
+    queueCount.textContent = state.queue.length;
+    sentCount.textContent = state.sent;
+    if (!state.queue.length) {
+      queueList.innerHTML = '<li style="font-size:0.8rem;color:var(--text-muted);padding:0.5rem;">Queue is empty.</li>';
+      return;
+    }
+    queueList.innerHTML = '';
+    state.queue.forEach(item => {
+      const li = document.createElement('li');
+      li.className = 'queue-item ' + item.status;
+      li.innerHTML = `
+        <div class="status-dot ${item.status}"></div>
+        <div class="queue-msg">${item.payload}</div>
+        <div class="queue-ts">${item.ts}</div>
+      `;
+      queueList.appendChild(li);
+    });
+  }
+
+  function enqueue() {
+    const payload = msgInput.value.trim() || 'page_view: /home';
+    const ts = new Date().toLocaleTimeString('en', { hour12: false });
+    state.queue.push({ payload, status: 'pending', ts });
+    msgInput.value = '';
+    renderQueue();
+    updateWorkerState();
+    if (state.online) setTimeout(flush, 800);
+  }
+
+  function flush() {
+    if (!state.online) return;
+    const pending = state.queue.filter(i => i.status === 'pending');
+    if (!pending.length) return;
+    pending.forEach(item => { item.status = 'sent'; state.sent++; });
+    renderQueue();
+    setTimeout(() => {
+      state.queue = state.queue.filter(i => i.status !== 'sent');
+      renderQueue();
+    }, 1500);
+  }
+
+  document.getElementById('btn-enqueue').addEventListener('click', enqueue);
+  msgInput.addEventListener('keydown', e => { if (e.key === 'Enter') enqueue(); });
+
+  document.getElementById('btn-go-offline').addEventListener('click', () => {
+    state.online = false;
+    updateWorkerState();
+  });
+  document.getElementById('btn-go-online').addEventListener('click', () => {
+    state.online = true;
+    updateWorkerState();
+    setTimeout(flush, 300);
+  });
+  document.getElementById('btn-flush').addEventListener('click', flush);
+
+  renderQueue();
+</script>
+</body>
+</html>
