@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebGL Failure Handler — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .lab { display: grid; grid-template-columns: 280px 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 760px) { .lab { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; font-family: var(--font-mono); font-size: 0.85rem; }
+    select, input[type=checkbox] { font-family: var(--font-mono); font-size: 0.78rem; }
+    select { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: 0.3rem; width: 150px; }
+    .stage { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-4); min-height: 280px; }
+    .stage canvas { width: 100%; height: 240px; display: block; border: 2px dashed var(--border-black); background: #fff; }
+    .fallback {
+      width: 100%; height: 240px;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(45deg, var(--bg-stone) 25%, transparent 25%), linear-gradient(-45deg, var(--bg-stone) 25%, transparent 25%);
+      background-size: 20px 20px;
+      border: 2px dashed var(--accent-rose);
+      color: var(--accent-rose); font-family: var(--font-mono); font-size: 0.95rem;
+      text-align: center;
+    }
+    pre.snippet { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; overflow-x: auto; }
+    .badge { display: inline-block; padding: 0.1rem 0.5rem; font-size: 0.72rem; border: 1px solid var(--border-black); font-family: var(--font-mono); }
+    .badge.gpu { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .badge.sw { background: var(--accent-amber); color: var(--bg-ivory); border-color: var(--accent-amber); }
+    .badge.fail { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Remove SwiftShader fallback</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>WebGL Failure Handler</h1>
+    <p class="lede">Construct a context the right way: feature-detect, listen for <code>webglcontextcreationerror</code>, and surface a Canvas2D fallback. Toggle the failure modes the SwiftShader removal exposes — &ldquo;no GPU&rdquo;, &ldquo;denied&rdquo;, &ldquo;lost mid-frame&rdquo; — and see what your users see.</p>
+  </header>
+
+  <div class="lab">
+    <div class="panel">
+      <div class="row"><label>simulate failure</label>
+        <select id="failure">
+          <option value="none">none (GPU available)</option>
+          <option value="no-gpu">no GPU (was SwiftShader)</option>
+          <option value="denied">policy-denied</option>
+          <option value="lost">context lost mid-frame</option>
+        </select>
+      </div>
+      <div class="row"><label>fallback strategy</label>
+        <select id="strategy">
+          <option value="canvas2d">Canvas2D draw</option>
+          <option value="cpu-render">CPU bitmap upload</option>
+          <option value="placeholder">static placeholder</option>
+        </select>
+      </div>
+      <p style="margin: var(--space-3) 0 0; font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);">
+        Status: <span id="status">probing&hellip;</span>
+      </p>
+    </div>
+
+    <div>
+      <div class="stage" id="stage"></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>recommended pattern</h2>
+    <pre class="snippet">// Up-front feature detection. The error event fires synchronously with attribution
+// of *why* the context failed — invaluable for telemetry and user messaging.
+const canvas = document.querySelector('canvas');
+canvas.addEventListener('webglcontextcreationerror', (e) =&gt; {
+  // 139+: no SwiftShader fallback, getContext returns null and this fires
+  telemetry('webgl_failed', { statusMessage: e.statusMessage });
+  fallbackToCanvas2D(canvas);
+});
+const gl = canvas.getContext('webgl2', { failIfMajorPerformanceCaveat: true });
+if (!gl) {
+  // Either feature is gone or we lost the major-perf race.
+  fallbackToCanvas2D(canvas);
+}
+canvas.addEventListener('webglcontextlost', (e) =&gt; {
+  e.preventDefault();          // request restoration if possible
+  pauseRender();
+});
+canvas.addEventListener('webglcontextrestored', () =&gt; restoreRender());</pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v139/remove-swiftshader-fallback/">Feature page</a></li>
+      <li><a href="/v139/remove-swiftshader-fallback/canvas2d-fallback/">Canvas2D Fallback</a></li>
+      <li><a href="/v139/remove-swiftshader-fallback/fallback-path/">Fallback Path</a></li>
+      <li><a href="https://chromestatus.com/feature/5090746788036608" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(() =&gt; {
+  const stage = document.getElementById('stage');
+  const failureEl = document.getElementById('failure'), stratEl = document.getElementById('strategy');
+  const statusEl = document.getElementById('status');
+
+  function render() {
+    stage.innerHTML = '';
+    const mode = failureEl.value, strat = stratEl.value;
+
+    if (mode === 'none') {
+      const c = document.createElement('canvas'); c.width = 600; c.height = 240;
+      stage.appendChild(c);
+      const gl = c.getContext('webgl2') || c.getContext('webgl');
+      if (gl) {
+        statusEl.innerHTML = '&lt;span class="badge gpu"&gt;GPU&lt;/span&gt; webgl2 acquired';
+        gl.clearColor(0.0, 0.55, 0.95, 1.0); gl.clear(gl.COLOR_BUFFER_BIT);
+        return;
+      } else {
+        statusEl.innerHTML = '&lt;span class="badge fail"&gt;no GL&lt;/span&gt; falling back';
+        renderFallback(strat);
+      }
+    } else if (mode === 'lost') {
+      const c = document.createElement('canvas'); c.width = 600; c.height = 240;
+      stage.appendChild(c);
+      const gl = c.getContext('webgl2');
+      if (gl) {
+        gl.clearColor(0.0, 0.55, 0.95, 1.0); gl.clear(gl.COLOR_BUFFER_BIT);
+        statusEl.innerHTML = '&lt;span class="badge gpu"&gt;GPU&lt;/span&gt; running… (will lose context in 1.2s)';
+        setTimeout(() =&gt; {
+          const ext = gl.getExtension('WEBGL_lose_context');
+          if (ext) ext.loseContext();
+          statusEl.innerHTML = '&lt;span class="badge fail"&gt;LOST&lt;/span&gt; webglcontextlost fired — falling back';
+          renderFallback(strat);
+        }, 1200);
+      } else {
+        renderFallback(strat);
+      }
+    } else if (mode === 'no-gpu' || mode === 'denied') {
+      statusEl.innerHTML = `&lt;span class="badge fail"&gt;${mode === 'denied' ? 'POLICY DENIED' : 'no GPU'}&lt;/span&gt; getContext returned null (no SwiftShader to catch this)`;
+      renderFallback(strat);
+    }
+  }
+
+  function renderFallback(strat) {
+    if (strat === 'canvas2d') {
+      const c = document.createElement('canvas'); c.width = 600; c.height = 240;
+      stage.appendChild(c);
+      const ctx = c.getContext('2d');
+      const g = ctx.createLinearGradient(0, 0, c.width, c.height);
+      g.addColorStop(0, '#0a8f5c'); g.addColorStop(1, '#0022ff');
+      ctx.fillStyle = g; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = '#fff'; ctx.font = '600 18px ui-monospace, monospace';
+      ctx.fillText('Canvas2D fallback render', 20, 40);
+    } else if (strat === 'cpu-render') {
+      const c = document.createElement('canvas'); c.width = 600; c.height = 240;
+      stage.appendChild(c);
+      const ctx = c.getContext('2d');
+      const img = ctx.createImageData(c.width, c.height);
+      for (let i = 0; i &lt; img.data.length; i += 4) {
+        img.data[i] = (i / 4 / c.width) | 0; img.data[i+1] = 128; img.data[i+2] = 200; img.data[i+3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+      ctx.fillStyle = '#000'; ctx.font = '600 16px ui-monospace, monospace';
+      ctx.fillText('CPU pixel upload', 20, 30);
+    } else {
+      const d = document.createElement('div'); d.className = 'fallback';
+      d.textContent = 'WebGL unavailable — upgrade your graphics driver.';
+      stage.appendChild(d);
+    }
+  }
+
+  [failureEl, stratEl].forEach(e =&gt; e.addEventListener('change', render));
+  render();
+})();
+</script>
+</body>
+</html>
