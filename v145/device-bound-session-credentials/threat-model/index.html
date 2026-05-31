@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Threat Model — Device Bound Session Credentials — Chrome 145</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .scenario-tabs {
+      display: flex;
+      gap: 0;
+      border: 2px solid var(--border-black);
+      margin-bottom: var(--space-5);
+      overflow-x: auto;
+    }
+
+    .tab-btn {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: var(--space-2) var(--space-4);
+      background: var(--bg-stone);
+      color: var(--text-muted);
+      border: none;
+      border-right: 1px solid var(--border-black);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .tab-btn:last-child { border-right: none; }
+    .tab-btn.active { background: var(--bg-paper); color: var(--text-black); }
+    .tab-btn:hover:not(.active) { background: var(--bg-paper); }
+
+    .scenario-panel {
+      display: none;
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      margin-bottom: var(--space-5);
+    }
+
+    .scenario-panel.active { display: block; }
+
+    .scenario-hdr {
+      padding: var(--space-3) var(--space-4);
+      border-bottom: 1px solid var(--border-black);
+      background: var(--bg-stone);
+    }
+
+    .scenario-title {
+      font-family: var(--font-display);
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--text-black);
+      margin-bottom: var(--space-1);
+    }
+
+    .scenario-desc {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    .comparison {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+    }
+
+    @media (max-width: 600px) {
+      .comparison { grid-template-columns: 1fr; }
+    }
+
+    .comp-col {
+      padding: var(--space-4);
+      border-right: 1px solid var(--border-black);
+    }
+
+    .comp-col:last-child { border-right: none; }
+
+    .comp-title {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      margin-bottom: var(--space-3);
+    }
+
+    .comp-col.without .comp-title { color: var(--accent-rose); }
+    .comp-col.with    .comp-title { color: var(--accent-emerald); }
+
+    .step-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+
+    .step {
+      display: flex;
+      gap: var(--space-2);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      margin-bottom: var(--space-2);
+      align-items: flex-start;
+    }
+
+    .step-icon { min-width: 18px; font-style: normal; }
+    .step-text { color: var(--text-charcoal); line-height: 1.4; }
+
+    .outcome {
+      margin-top: var(--space-4);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      font-weight: 700;
+    }
+
+    .outcome.bad  { background: rgba(244,63,94,0.08); color: var(--accent-rose); border-left: 3px solid var(--accent-rose); }
+    .outcome.good { background: rgba(16,185,129,0.08); color: var(--accent-emerald); border-left: 3px solid var(--accent-emerald); }
+
+    .matrix {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      margin-bottom: var(--space-5);
+    }
+
+    .matrix th {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      text-align: left;
+      color: var(--text-muted);
+      font-size: 0.65rem;
+      text-transform: uppercase;
+    }
+
+    .matrix td {
+      border: 1px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+    }
+
+    .cell-blocked  { color: var(--accent-emerald); font-weight: 700; }
+    .cell-partial  { color: var(--accent-blue); }
+    .cell-succeeds { color: var(--accent-rose); font-weight: 700; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v145/device-bound-session-credentials/">&larr; Device Bound Session Credentials</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v145 · Web APIs · Security · demo</p>
+    <h1>Threat Model</h1>
+    <p class="lede">DBSC doesn't change what secrets a server trusts — it changes <em>where</em> session proof must come from. Step through four attack scenarios side by side: what an attacker achieves with classic session cookies versus what DBSC allows them to do.</p>
+  </header>
+
+  <!-- Scenario tabs -->
+  <div class="scenario-tabs" id="scenario-tabs"></div>
+  <div id="scenario-panels"></div>
+
+  <!-- Attack matrix summary -->
+  <section>
+    <h2>attack matrix</h2>
+    <table class="matrix">
+      <thead>
+        <tr>
+          <th>Attack vector</th>
+          <th>Classic session cookie</th>
+          <th>DBSC-protected session</th>
+        </tr>
+      </thead>
+      <tbody id="matrix-body"></tbody>
+    </table>
+  </section>
+
+  <script>
+    const SCENARIOS = [
+      {
+        id: 'cookie-theft',
+        label: 'Cookie Theft',
+        desc: 'Malware or XSS extracts the session cookie from storage',
+        without: {
+          steps: [
+            { icon: '⚠', text: 'XSS payload or malware reads document.cookie / cookie jar' },
+            { icon: '⚠', text: 'Cookie exported to attacker's server via image beacon or fetch' },
+            { icon: '⚠', text: 'Attacker injects cookie into their own browser' },
+            { icon: '✗', text: 'Server sees a valid cookie — no way to distinguish attacker from victim' },
+          ],
+          outcome: 'bad',
+          outcomeText: 'Full session takeover — attacker has an unlimited-duration session clone',
+        },
+        with: {
+          steps: [
+            { icon: '⚠', text: 'Same XSS or malware runs — short-lived DBSC cookie is still stolen' },
+            { icon: '●', text: 'Attacker injects cookie — it's already near expiry (minutes)' },
+            { icon: '●', text: 'Cookie expires; server sends Sec-Session-Challenge header' },
+            { icon: '✓', text: 'Attacker cannot respond — private key is locked to victim's TPM/Secure Enclave' },
+            { icon: '✓', text: 'Server terminates attacker session; victim's session continues normally' },
+          ],
+          outcome: 'good',
+          outcomeText: 'Short-lived access only — attacker's clone dies at next refresh (minutes/hours)',
+        },
+      },
+      {
+        id: 'network-intercept',
+        label: 'Network Intercept',
+        desc: 'MITM or compromised proxy intercepts the session cookie in transit',
+        without: {
+          steps: [
+            { icon: '⚠', text: 'Attacker sits on the network path (rogue Wi-Fi, compromised proxy)' },
+            { icon: '⚠', text: 'TLS is downgraded or terminated — cookie visible in the clear' },
+            { icon: '⚠', text: 'Attacker replays cookie immediately before it expires' },
+            { icon: '✗', text: 'Server cannot tell the request is replayed' },
+          ],
+          outcome: 'bad',
+          outcomeText: 'Session hijacked for the lifetime of the stolen cookie',
+        },
+        with: {
+          steps: [
+            { icon: '⚠', text: 'Same intercept path — short DBSC cookie is captured' },
+            { icon: '●', text: 'Attacker replays cookie — succeeds briefly' },
+            { icon: '●', text: 'Refresh cycle hits; server issues Sec-Session-Challenge' },
+            { icon: '✓', text: 'Proof must be signed by device-bound key — attacker cannot forge it' },
+            { icon: '✓', text: 'Server kills the session; victim sees a re-auth prompt' },
+          ],
+          outcome: 'good',
+          outcomeText: 'Limited to the short-lived cookie window before the next refresh challenge',
+        },
+      },
+      {
+        id: 'device-theft',
+        label: 'Physical Device Theft',
+        desc: 'Attacker has physical access to an unlocked device',
+        without: {
+          steps: [
+            { icon: '⚠', text: 'Attacker unlocks device (shoulder-surfed PIN, or device already unlocked)' },
+            { icon: '⚠', text: 'Opens browser — cookies are present and valid for hours or days' },
+            { icon: '✗', text: 'Attacker has full authenticated access until cookies expire' },
+          ],
+          outcome: 'bad',
+          outcomeText: 'Full access for the remaining cookie lifetime — remote revoke is the only defence',
+        },
+        with: {
+          steps: [
+            { icon: '⚠', text: 'Attacker has unlocked device — DBSC cookie still present' },
+            { icon: '●', text: 'Short cookie works initially — attacker has brief access' },
+            { icon: '●', text: 'Refresh challenge arrives — device-bound key responds automatically' },
+            { icon: '✗', text: 'Key is bound to the device's TPM/Secure Enclave — it IS the device' },
+            { icon: '●', text: 'Access continues as long as attacker holds the physical device' },
+          ],
+          outcome: 'bad',
+          outcomeText: 'DBSC does NOT protect against physical device access — key is device-local',
+        },
+      },
+      {
+        id: 'server-side',
+        label: 'Server Breach',
+        desc: 'Attacker compromises the server's session store',
+        without: {
+          steps: [
+            { icon: '⚠', text: 'Attacker breaches server and exfiltrates session-ID database' },
+            { icon: '⚠', text: 'Replays any session ID as a cookie in a new browser' },
+            { icon: '✗', text: 'Server cannot distinguish — session ID is the proof of identity' },
+          ],
+          outcome: 'bad',
+          outcomeText: 'All sessions in the dump are immediately hijackable',
+        },
+        with: {
+          steps: [
+            { icon: '⚠', text: 'Server breach exfiltrates session IDs and public keys' },
+            { icon: '●', text: 'Attacker can read session IDs but cannot forge signed proofs' },
+            { icon: '✓', text: 'Private keys never leave client devices — not in the server dump' },
+            { icon: '✓', text: 'Sessions are useless without the matching private key' },
+          ],
+          outcome: 'good',
+          outcomeText: 'Session IDs in the dump are worthless — proof of possession lives on-device',
+        },
+      },
+    ];
+
+    const MATRIX = [
+      { vector: 'Stolen cookie (XSS / malware)', classic: 'succeeds', dbsc: 'blocked' },
+      { vector: 'Cookie replay (network MITM)',  classic: 'succeeds', dbsc: 'partial' },
+      { vector: 'Physical device access',        classic: 'succeeds', dbsc: 'succeeds' },
+      { vector: 'Server session store breach',   classic: 'succeeds', dbsc: 'blocked' },
+      { vector: 'Credential phishing (password)',classic: 'succeeds', dbsc: 'partial' },
+    ];
+
+    const MATRIX_LABELS = {
+      blocked:  { cls: 'cell-blocked',  text: '✓ Blocked' },
+      partial:  { cls: 'cell-partial',  text: '~ Partial mitigation' },
+      succeeds: { cls: 'cell-succeeds', text: '✗ Attack succeeds' },
+    };
+
+    function buildTabs() {
+      const tabsEl   = document.getElementById('scenario-tabs');
+      const panelsEl = document.getElementById('scenario-panels');
+
+      SCENARIOS.forEach((s, i) => {
+        const btn = document.createElement('button');
+        btn.className = 'tab-btn' + (i === 0 ? ' active' : '');
+        btn.textContent = s.label;
+        btn.onclick = () => switchTab(s.id);
+        tabsEl.appendChild(btn);
+
+        const panel = document.createElement('div');
+        panel.className = 'scenario-panel' + (i === 0 ? ' active' : '');
+        panel.id = 'panel-' + s.id;
+        panel.innerHTML = `
+          <div class="scenario-hdr">
+            <div class="scenario-title">${esc(s.label)}</div>
+            <div class="scenario-desc">${esc(s.desc)}</div>
+          </div>
+          <div class="comparison">
+            <div class="comp-col without">
+              <div class="comp-title">Without DBSC (classic cookies)</div>
+              <ul class="step-list">${renderSteps(s.without.steps)}</ul>
+              <div class="outcome ${s.without.outcome}">${esc(s.without.outcomeText)}</div>
+            </div>
+            <div class="comp-col with">
+              <div class="comp-title">With DBSC (Chrome 145+)</div>
+              <ul class="step-list">${renderSteps(s.with.steps)}</ul>
+              <div class="outcome ${s.with.outcome}">${esc(s.with.outcomeText)}</div>
+            </div>
+          </div>`;
+        panelsEl.appendChild(panel);
+      });
+    }
+
+    function renderSteps(steps) {
+      return steps.map(s =>
+        `<li class="step"><span class="step-icon">${esc(s.icon)}</span><span class="step-text">${esc(s.text)}</span></li>`
+      ).join('');
+    }
+
+    function switchTab(id) {
+      document.querySelectorAll('.tab-btn').forEach((b, i) => {
+        b.classList.toggle('active', SCENARIOS[i].id === id);
+      });
+      document.querySelectorAll('.scenario-panel').forEach(p => {
+        p.classList.toggle('active', p.id === 'panel-' + id);
+      });
+    }
+
+    function buildMatrix() {
+      const tbody = document.getElementById('matrix-body');
+      tbody.innerHTML = MATRIX.map(row => {
+        const c = MATRIX_LABELS[row.classic];
+        const d = MATRIX_LABELS[row.dbsc];
+        return `<tr>
+          <td>${esc(row.vector)}</td>
+          <td class="${c.cls}">${c.text}</td>
+          <td class="${d.cls}">${d.text}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    function esc(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    }
+
+    buildTabs();
+    buildMatrix();
+  </script>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../dbsc-demo/">DBSC Demo</a></li>
+      <li><a href="../session-binding/">Session Binding</a></li>
+      <li><a href="../cookie-lifecycle/">Cookie Lifecycle</a></li>
+      <li><a href="https://chromestatus.com/feature/5097414141952000" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
