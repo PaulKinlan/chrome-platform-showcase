@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Intercept and restore — Navigation API post-commit handlers — Chrome 146</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-5);
+      margin-bottom: var(--space-5);
+    }
+    .controls {
+      display: flex;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+      margin-bottom: var(--space-3);
+    }
+    .opt {
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      border: 2px solid var(--border-black);
+      padding: 0.3rem 0.7rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+    .opt.on { background: var(--text-black); color: var(--bg-ivory); }
+
+    .panes {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin-bottom: var(--space-3);
+    }
+    @media (max-width: 600px) { .panes { grid-template-columns: 1fr; } }
+    .pane {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+    }
+    .pane h4 {
+      font-family: var(--font-display);
+      font-size: 1rem;
+      margin: 0 0 var(--space-2);
+      padding-bottom: var(--space-2);
+      border-bottom: 1px solid var(--border-black);
+    }
+    .row { padding: 0.2rem 0; border-bottom: 1px dashed var(--text-muted); }
+    .row:last-child { border-bottom: none; }
+    .row.commit { color: var(--accent-emerald); font-weight: 600; }
+    .row.error { color: var(--accent-rose); }
+    .row.async { color: var(--accent-blue); }
+
+    .fake-url {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: var(--space-2) var(--space-3);
+      margin-bottom: var(--space-3);
+      display: flex;
+      justify-content: space-between;
+      gap: var(--space-3);
+      align-items: center;
+    }
+    .fake-url .visible { color: var(--accent-emerald); }
+
+    .targets {
+      display: flex;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+      margin-bottom: var(--space-3);
+    }
+    .nav-btn {
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      border: 2px solid var(--border-black);
+      padding: 0.4rem 0.85rem;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      cursor: pointer;
+    }
+
+    .warn-block {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: var(--space-3) var(--space-4);
+      margin: 0 0 var(--space-5);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v146/navigation-api-add-post-commit-handler-from-precommit/">&larr; Navigation API post-commit handlers</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v146</p>
+    <h1>Intercept and restore</h1>
+    <p class="lede">Toggle a flaky data fetch and compare two strategies: classic <code>intercept({ handler })</code> (URL only commits when the handler resolves) and the new <code>intercept({ precommitHandler, handler })</code> shape (URL commits immediately; the slow handler runs after). Watch which strategy can <em>roll the URL back</em> when the post-commit handler throws.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Behind a flag:</strong> the precommit/post-commit split ships behind
+    <code>chrome://flags/#enable-experimental-web-platform-features</code> in Chrome 146.
+    The panes simulate the timing so the comparison is faithful without the flag.
+  </div>
+
+  <p>Pick a destination, decide whether the data fetch should "succeed" or "throw mid-way", and switch the strategy. The address bar simulation shows when the URL becomes visible to the user — and what happens to it on error.</p>
+
+  <div class="stage">
+    <div class="fake-url">
+      <span>address bar →</span>
+      <span class="visible" id="visible-url">/dashboard</span>
+    </div>
+
+    <h3>strategy</h3>
+    <div class="controls" id="strat">
+      <button class="opt on" data-strat="pre">precommit + post-commit (146)</button>
+      <button class="opt" data-strat="classic">classic intercept (single handler)</button>
+    </div>
+
+    <h3>destination</h3>
+    <div class="targets" id="targets">
+      <button class="nav-btn" data-href="/dashboard">/dashboard</button>
+      <button class="nav-btn" data-href="/orders">/orders</button>
+      <button class="nav-btn" data-href="/profile">/profile</button>
+    </div>
+
+    <h3>data fetch behaviour</h3>
+    <div class="controls" id="fetch-mode">
+      <button class="opt on" data-mode="ok">resolves ok (800ms)</button>
+      <button class="opt" data-mode="throw">throws after URL commits</button>
+    </div>
+
+    <div class="panes">
+      <div class="pane">
+        <h4>events</h4>
+        <div id="events"></div>
+      </div>
+      <div class="pane">
+        <h4>address bar trace</h4>
+        <div id="trace"></div>
+      </div>
+    </div>
+  </div>
+
+  <pre><code>// 146 precommit/post-commit shape:
+navigation.addEventListener("navigate", (e) =&gt; {
+  e.intercept({
+    async precommitHandler() {
+      await ensureRouter(e.destination.url);   // fast — synchronous-ish
+    },
+    async handler() {
+      await fetchAndRender(e.destination.url); // slow — happens after URL commits
+    },
+  });
+});
+
+// classic shape:
+navigation.addEventListener("navigate", (e) =&gt; {
+  e.intercept({
+    handler: async () =&gt; {
+      await ensureRouter(e.destination.url);
+      await fetchAndRender(e.destination.url); // URL doesn't commit until both done
+    },
+  });
+});</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v146/navigation-api-add-post-commit-handler-from-precommit/">Feature page</a></li>
+      <li><a href="/v146/navigation-api-add-post-commit-handler-from-precommit/post-commit-demo/">Post-commit demo</a></li>
+      <li><a href="/v146/navigation-api-add-post-commit-handler-from-precommit/precommit-vs-postcommit/">Precommit vs post-commit</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/nav-history-apis.html#the-navigation-api" target="_blank" rel="noopener">HTML — Navigation API</a></li>
+      <li><a href="https://chromestatus.com/feature/5176907844943872" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const events = document.getElementById("events");
+  const trace = document.getElementById("trace");
+  const visible = document.getElementById("visible-url");
+
+  let strat = "pre";
+  let mode = "ok";
+
+  function row(host, kind, msg) {
+    const r = document.createElement("div");
+    r.className = "row " + kind;
+    r.textContent = new Date().toISOString().slice(14, 23) + "  " + msg;
+    host.prepend(r);
+  }
+
+  document.getElementById("strat").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-strat]");
+    if (!t) return;
+    strat = t.dataset.strat;
+    [...document.querySelectorAll("#strat .opt")].forEach((b) => b.classList.toggle("on", b.dataset.strat === strat));
+  });
+  document.getElementById("fetch-mode").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-mode]");
+    if (!t) return;
+    mode = t.dataset.mode;
+    [...document.querySelectorAll("#fetch-mode .opt")].forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
+  });
+
+  function setVisible(url) {
+    visible.textContent = url;
+    row(trace, "", "address bar shows: " + url);
+  }
+
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  async function navigate(url) {
+    row(events, "", "navigate event fired → " + url);
+
+    const previous = visible.textContent;
+
+    if (strat === "pre") {
+      // precommitHandler — synchronously commit-ish.
+      row(events, "", "precommitHandler() starts");
+      await sleep(40);
+      row(events, "commit", "URL commits (precommit done)");
+      setVisible(url);
+      row(events, "async", "post-commit handler() starts (fetch, render)");
+      try {
+        if (mode === "throw") {
+          await sleep(700);
+          throw new Error("data fetch rejected");
+        }
+        await sleep(800);
+        row(events, "commit", "handler() resolved — page ready");
+      } catch (err) {
+        row(events, "error", "handler() threw: " + err.message);
+        row(events, "error", "→ navigation.transition.finished rejected, but URL stays at " + url);
+        row(events, "", "app code shows an inline error toast; address bar unchanged");
+      }
+    } else {
+      row(events, "", "single handler() starts — URL is NOT visible yet");
+      try {
+        await sleep(40); // routing
+        if (mode === "throw") {
+          await sleep(700);
+          throw new Error("data fetch rejected");
+        }
+        await sleep(800);
+        row(events, "commit", "handler() resolved — URL commits now");
+        setVisible(url);
+      } catch (err) {
+        row(events, "error", "handler() threw: " + err.message);
+        row(events, "error", "→ navigation aborted; URL stays at " + previous);
+        setVisible(previous);
+      }
+    }
+  }
+
+  document.getElementById("targets").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-href]");
+    if (!t) return;
+    navigate(t.dataset.href);
+  });
+</script>
+</body>
+</html>
