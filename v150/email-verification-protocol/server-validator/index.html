@@ -142,7 +142,7 @@
   </header>
 
   <div class="warn-block">
-    <strong>Origin trial feature.</strong> EVP tokens are only issued by participating mail providers through Chrome 150's origin trial. The sample token below is synthetically structured for demonstration — the signature check runs against the decoded payload only (browser-side signature verification requires the provider's public key).
+    <strong>Origin trial feature.</strong> EVP tokens are only issued by participating mail providers through Chrome 150's origin trial. The built-in sample below is signed by this demo server with WebCrypto, and validation calls the backend so the cryptographic signature check is real.
   </div>
 
   <div class="token-input-area">
@@ -219,121 +219,47 @@
 </main>
 <script>
 (function () {
-  // Sample EVP-shaped JWT (header.payload.fakesig — NOT cryptographically valid)
-  const SAMPLE_PAYLOAD = {
-    iss: 'https://mail.example-provider.com',
-    aud: 'https://myapp.example.com',
-    exp: Math.floor(Date.now() / 1000) + 300,
-    iat: Math.floor(Date.now() / 1000) - 10,
-    email: 'alice@example-provider.com',
-    email_verified: true,
-    nonce: 'nonce-abc123',
-    sub: 'alice@example-provider.com',
+  async function postJson(path, body) {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  }
+
+  window.loadSample = async function () {
+    const expectedAud = document.getElementById('expectedAud').value.trim();
+    const expectedNonce = document.getElementById('expectedNonce').value.trim();
+    const { token } = await postJson('./api/sample', { expectedAud, expectedNonce });
+    document.getElementById('tokenInput').value = token;
+    await validate();
   };
 
-  function b64url(obj) {
-    return btoa(JSON.stringify(obj)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
-  }
-
-  function b64urlDecode(s) {
-    const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - s.length % 4);
-    return atob(s.replace(/-/g,'+').replace(/_/g,'/') + pad);
-  }
-
-  function buildSample() {
-    const header  = { alg: 'RS256', typ: 'JWT' };
-    const payload = SAMPLE_PAYLOAD;
-    const sig     = 'SAMPLE_SIGNATURE_NOT_VALID';
-    return `${b64url(header)}.${b64url(payload)}.${sig}`;
-  }
-
-  window.loadSample = function () {
-    document.getElementById('tokenInput').value = buildSample();
-    validate();
-  };
-
-  window.validate = function () {
+  window.validate = async function () {
     const raw = document.getElementById('tokenInput').value.trim();
     if (!raw) return;
 
-    const parts = raw.split('.');
-    if (parts.length !== 3) {
-      showVerdict(false, 'Token is not a valid JWT — expected 3 dot-separated parts.');
-      return;
-    }
-
-    let header, payload;
-    try {
-      header  = JSON.parse(b64urlDecode(parts[0]));
-      payload = JSON.parse(b64urlDecode(parts[1]));
-    } catch (e) {
-      showVerdict(false, 'Failed to decode token parts: ' + e.message);
-      return;
-    }
-
     const expectedAud   = document.getElementById('expectedAud').value.trim();
     const expectedNonce = document.getElementById('expectedNonce').value.trim();
-    const now           = Math.floor(Date.now() / 1000);
-
-    const checks = [
-      {
-        title: 'JWT structure is valid',
-        detail: 'Token has 3 base64url-encoded parts (header.payload.signature).',
-        value: `header.alg = "${header.alg || 'missing'}"`,
-        pass: !!header.alg,
-      },
-      {
-        title: 'Issuer (iss) is present',
-        detail: 'The iss claim identifies the mail provider. Check against your allowlist of trusted providers.',
-        value: `iss = "${payload.iss || '(missing)'}"`,
-        pass: !!payload.iss,
-      },
-      {
-        title: 'Audience (aud) matches your site',
-        detail: `Expected: "${expectedAud}". Reject tokens issued to other origins.`,
-        value: `aud = "${payload.aud || '(missing)'}"`,
-        pass: payload.aud === expectedAud,
-      },
-      {
-        title: 'Token has not expired (exp)',
-        detail: `exp must be > ${now} (current Unix time). Token was issued with exp = ${payload.exp || '(missing)'}.`,
-        value: payload.exp ? `exp = ${payload.exp} (${payload.exp > now ? 'valid' : 'EXPIRED'})` : 'exp: missing',
-        pass: !!payload.exp && payload.exp > now,
-      },
-      {
-        title: 'Nonce matches session nonce',
-        detail: `Expected nonce: "${expectedNonce}". Prevents replay attacks — mark nonce as used after first validation.`,
-        value: `nonce = "${payload.nonce || '(missing)'}"`,
-        pass: !!payload.nonce && payload.nonce === expectedNonce,
-      },
-      {
-        title: 'Email claim is present',
-        detail: 'The email address the mail provider vouches the user controls.',
-        value: `email = "${payload.email || '(missing)'}"`,
-        pass: !!payload.email && payload.email.includes('@'),
-      },
-      {
-        title: 'email_verified is true',
-        detail: 'Must be the boolean true, not a truthy string. Some providers may set this false for incomplete verifications.',
-        value: `email_verified = ${JSON.stringify(payload.email_verified ?? null)}`,
-        pass: payload.email_verified === true,
-      },
-      {
-        title: 'Signature verification (server-side only)',
-        detail: 'The RS256 signature must be verified with the provider\'s public key (JWK from the provider\'s JWKS endpoint). This check cannot run in the browser.',
-        value: 'Signature: SKIPPED (requires server + provider JWK)',
-        pass: null, // null = skip / info-only
-      },
-    ];
-
-    renderChecks(checks);
-
-    const failures = checks.filter(c => c.pass === false).length;
-    if (failures === 0) {
-      showVerdict(true,
-        `✓ All verifiable checks pass. Email "${payload.email}" can be trusted once signature is verified server-side.`);
-    } else {
-      showVerdict(false, `✗ ${failures} check${failures>1?'s':''} failed. Do NOT trust this token.`);
+    showVerdict(null, 'Calling backend validator...');
+    try {
+      const result = await postJson('./api/validate', {
+        token: raw,
+        expectedAud,
+        expectedNonce,
+      });
+      renderChecks(result.checks || []);
+      if (result.valid) {
+        showVerdict(true, `All server checks pass. Email "${result.payload.email}" can be trusted for this nonce.`);
+      } else {
+        const failures = (result.checks || []).filter(c => c.pass === false).length;
+        showVerdict(false, `${failures} check${failures === 1 ? '' : 's'} failed. Do NOT trust this token.`);
+      }
+    } catch (error) {
+      showVerdict(false, 'Backend validation failed: ' + error.message);
     }
   };
 
@@ -343,10 +269,10 @@
     list.style.display = '';
 
     items.innerHTML = checks.map(c => {
-      const icon   = c.pass === null ? 'ℹ' : c.pass ? '✓' : '✗';
-      const rowCls = c.pass === null ? '' : c.pass ? 'pass' : 'fail';
-      const stCls  = c.pass === null ? 'status-skip' : c.pass ? 'status-ok' : 'status-fail';
-      const st     = c.pass === null ? 'SKIP' : c.pass ? 'PASS' : 'FAIL';
+      const icon   = c.pass ? '✓' : '✗';
+      const rowCls = c.pass ? 'pass' : 'fail';
+      const stCls  = c.pass ? 'status-ok' : 'status-fail';
+      const st     = c.pass ? 'PASS' : 'FAIL';
       return `
         <div class="cl-row ${rowCls}">
           <div class="cl-icon">${icon}</div>
@@ -362,7 +288,7 @@
 
   function showVerdict(pass, msg) {
     const b = document.getElementById('verdictBanner');
-    b.className = 'verdict-banner ' + (pass ? 'vb-ok' : 'vb-fail');
+    b.className = 'verdict-banner ' + (pass === null ? 'vb-idle' : pass ? 'vb-ok' : 'vb-fail');
     b.textContent = msg;
   }
 

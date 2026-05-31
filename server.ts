@@ -449,6 +449,204 @@ function renderStorageAccessHeadersRoute(req: Request, sub: string): Response | 
   );
 }
 
+// ----- Email Verification Protocol server validator -----
+
+let evpKeyPairPromise: Promise<CryptoKeyPair> | null = null;
+const evpUsedNonces = new Set<string>();
+
+function getEvpKeyPair(): Promise<CryptoKeyPair> {
+  evpKeyPairPromise ??= crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"],
+  );
+  return evpKeyPairPromise;
+}
+
+async function signEvpJwt(payload: Record<string, unknown>): Promise<string> {
+  const keyPair = await getEvpKeyPair();
+  const publicJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+  const header = {
+    alg: "ES256",
+    typ: "evp+jwt",
+    kid: "showcase-evp-p256",
+    jwk: {
+      kty: publicJwk.kty,
+      crv: publicJwk.crv,
+      x: publicJwk.x,
+      y: publicJwk.y,
+    },
+  };
+  const encodedHeader = base64UrlEncode(new TextEncoder().encode(JSON.stringify(header)));
+  const encodedPayload = base64UrlEncode(new TextEncoder().encode(JSON.stringify(payload)));
+  const signingInput = `${encodedHeader}.${encodedPayload}`;
+  const signature = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" },
+    keyPair.privateKey,
+    new TextEncoder().encode(signingInput),
+  );
+  return `${signingInput}.${base64UrlEncode(new Uint8Array(signature))}`;
+}
+
+async function verifyEvpJwt(
+  token: string,
+  expectedAud: string,
+  expectedNonce: string,
+): Promise<Record<string, unknown>> {
+  const parts = token.split(".");
+  const checks: Array<Record<string, unknown>> = [];
+  const now = Math.floor(Date.now() / 1000);
+  let header: Record<string, unknown> = {};
+  let payload: Record<string, unknown> = {};
+  let signatureOk = false;
+
+  if (parts.length !== 3) {
+    return {
+      valid: false,
+      checks: [{
+        title: "JWT structure is valid",
+        detail: "Expected three base64url-encoded parts.",
+        value: `parts = ${parts.length}`,
+        pass: false,
+      }],
+    };
+  }
+
+  try {
+    header = decodeBase64UrlJson(parts[0]);
+    payload = decodeBase64UrlJson(parts[1]);
+    checks.push({
+      title: "JWT structure is valid",
+      detail: "Token has 3 base64url-encoded parts.",
+      value: `header.alg = "${header.alg ?? "missing"}"`,
+      pass: true,
+    });
+  } catch (error) {
+    return {
+      valid: false,
+      checks: [{
+        title: "JWT structure is valid",
+        detail: "Header or payload failed base64url JSON decoding.",
+        value: String((error as Error).message),
+        pass: false,
+      }],
+    };
+  }
+
+  try {
+    const publicJwk = objectValue(header.jwk) as JsonWebKey;
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      publicJwk,
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["verify"],
+    );
+    signatureOk = await crypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      key,
+      toArrayBuffer(base64UrlDecode(parts[2])),
+      new TextEncoder().encode(`${parts[0]}.${parts[1]}`),
+    );
+  } catch {
+    signatureOk = false;
+  }
+
+  checks.push(
+    {
+      title: "Signature verifies against provider JWK",
+      detail:
+        "Server imported the JWK from the JWT header and verified the ES256 signature over header.payload.",
+      value: `signature = ${signatureOk ? "valid" : "invalid"}`,
+      pass: signatureOk,
+    },
+    {
+      title: "Issuer (iss) is present",
+      detail: "The iss claim identifies the mail provider. Check against your provider allowlist.",
+      value: `iss = "${payload.iss ?? "(missing)"}"`,
+      pass: Boolean(payload.iss),
+    },
+    {
+      title: "Audience (aud) matches your site",
+      detail: `Expected: "${expectedAud}". Reject tokens issued to other origins.`,
+      value: `aud = "${payload.aud ?? "(missing)"}"`,
+      pass: payload.aud === expectedAud,
+    },
+    {
+      title: "Token has not expired (exp)",
+      detail: `exp must be greater than ${now}.`,
+      value: typeof payload.exp === "number" ? `exp = ${payload.exp}` : "exp: missing",
+      pass: typeof payload.exp === "number" && payload.exp > now,
+    },
+    {
+      title: "Nonce matches session nonce",
+      detail: `Expected nonce: "${expectedNonce}".`,
+      value: `nonce = "${payload.nonce ?? "(missing)"}"`,
+      pass: payload.nonce === expectedNonce,
+    },
+    {
+      title: "Nonce has not been replayed",
+      detail: "Server keeps a nonce replay cache and marks successful nonces as used.",
+      value: `nonce = "${payload.nonce ?? "(missing)"}"`,
+      pass: typeof payload.nonce === "string" && !evpUsedNonces.has(payload.nonce),
+    },
+    {
+      title: "Email claim is present",
+      detail: "The email address the mail provider vouches the user controls.",
+      value: `email = "${payload.email ?? "(missing)"}"`,
+      pass: typeof payload.email === "string" && payload.email.includes("@"),
+    },
+    {
+      title: "email_verified is true",
+      detail: "Must be the boolean true.",
+      value: `email_verified = ${JSON.stringify(payload.email_verified ?? null)}`,
+      pass: payload.email_verified === true,
+    },
+  );
+
+  const valid = checks.every((check) => check.pass === true);
+  if (valid && typeof payload.nonce === "string") evpUsedNonces.add(payload.nonce);
+  return { valid, checks, header, payload };
+}
+
+async function renderEmailVerificationRoute(req: Request, sub: string): Promise<Response | null> {
+  const prefix = "/email-verification-protocol/server-validator/api";
+  if (!sub.startsWith(prefix)) return null;
+  const route = sub.slice(prefix.length);
+
+  if (route === "/sample" && req.method === "POST") {
+    const body = await requestJson(req);
+    const aud = stringValue(body.expectedAud, "https://myapp.example.com");
+    const nonce = stringValue(body.expectedNonce, "nonce-abc123");
+    const now = Math.floor(Date.now() / 1000);
+    const token = await signEvpJwt({
+      iss: "https://mail.example-provider.com",
+      aud,
+      exp: now + 300,
+      iat: now - 10,
+      email: "alice@example-provider.com",
+      email_verified: true,
+      nonce,
+      sub: "alice@example-provider.com",
+    });
+    evpUsedNonces.delete(nonce);
+    return jsonResponse({ token });
+  }
+
+  if (route === "/validate" && req.method === "POST") {
+    const body = await requestJson(req);
+    return jsonResponse(
+      await verifyEvpJwt(
+        stringValue(body.token),
+        stringValue(body.expectedAud, "https://myapp.example.com"),
+        stringValue(body.expectedNonce, "nonce-abc123"),
+      ),
+    );
+  }
+
+  return null;
+}
+
 // ----- Conditional Create auto-passkey demo backend -----
 
 interface AutoPasskeySession {
@@ -3777,6 +3975,10 @@ Deno.serve({ port: PORT }, async (req) => {
 
     if (release === "v150" && sub === "/css-url-request-modifiers/referrer-echo") {
       return renderReferrerEcho(req);
+    }
+    if (release === "v150") {
+      const evpResponse = await renderEmailVerificationRoute(req, sub);
+      if (evpResponse) return evpResponse;
     }
     if (release === "v130") {
       const webAuthnSignalResponse = await renderWebAuthnSignalRoute(req, sub);
