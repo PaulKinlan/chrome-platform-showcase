@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cleanup Pattern Demo — Pointer Event Suppression — Chrome 148</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+      margin: 0.75rem 0;
+    }
+    @media (max-width: 680px) { .two-col { grid-template-columns: 1fr; } }
+
+    .panel {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      overflow: hidden;
+    }
+    .panel-head {
+      padding: 0.35rem 0.65rem;
+      border-bottom: 2px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 700;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .panel-head.bad  { background: #fff1f2; color: #7f1d1d; }
+    .panel-head.good { background: #ecfdf5; color: #065f46; }
+    .panel-body { padding: 0.65rem; }
+
+    .drag-arena {
+      position: relative;
+      height: 120px;
+      background: var(--bg-stone);
+      border: 2px dashed var(--border-black);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      user-select: none;
+    }
+    .drag-card {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      padding: 0.5rem 0.9rem;
+      cursor: grab;
+      border: 2px solid var(--border-black);
+      draggable: true;
+    }
+    .drag-card:active { cursor: grabbing; }
+
+    .progress-wrap {
+      margin: 0.5rem 0 0.35rem;
+      background: var(--bg-stone);
+      border: 1.5px solid var(--border-black);
+      height: 10px;
+      overflow: hidden;
+      position: relative;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      transition: width 0.1s;
+    }
+    .progress-fill.bad  { background: #f87171; }
+    .progress-fill.good { background: #34d399; }
+
+    .event-log {
+      height: 130px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 0.56rem;
+      line-height: 1.5;
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+      padding: 0.3rem 0.4rem;
+    }
+    .evt-row { padding: 0.05rem 0; }
+    .evt-cancel { color: #065f46; font-weight: 700; }
+    .evt-move   { color: #7c3aed; }
+    .evt-down   { color: var(--text-charcoal); }
+    .evt-drag   { color: #d97706; }
+    .evt-warn   { color: #991b1b; font-weight: 700; }
+
+    .status-badge {
+      display: inline-block;
+      padding: 0.08rem 0.35rem;
+      font-family: var(--font-mono);
+      font-size: 0.55rem;
+      font-weight: 700;
+      border: 1.5px solid;
+    }
+    .st-ok  { color: #065f46; border-color: #065f46; background: #ecfdf5; }
+    .st-bad { color: #991b1b; border-color: #991b1b; background: #fff1f2; }
+    .st-neu { color: var(--text-charcoal); border-color: var(--border-black); background: var(--bg-stone); }
+
+    .code-block {
+      background: var(--text-black);
+      color: #e2e8f0;
+      font-family: var(--font-mono);
+      font-size: 0.58rem;
+      padding: 0.5rem 0.65rem;
+      line-height: 1.6;
+      overflow-x: auto;
+      border: 2px solid var(--border-black);
+      margin: 0.5rem 0;
+      white-space: pre;
+    }
+    .ck { color: #93c5fd; }
+    .cv { color: #86efac; }
+    .cc { color: #6b7280; }
+    .ce { color: #f87171; }
+
+    .clear-btn {
+      padding: 0.18rem 0.45rem;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.55rem;
+      cursor: pointer;
+    }
+
+    .tip {
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      color: var(--text-charcoal);
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: 0.4rem 0.65rem;
+      margin: 0.5rem 0;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v148/pointer-event-suppression-on-drag-start/">&larr; Pointer event suppression on drag start</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v148 · Web APIs · Drag &amp; Drop</p>
+    <h1>Cleanup Pattern Demo</h1>
+    <p class="lede">See the difference between a broken cleanup pattern (that keeps tracking pointer position during a drag) and the correct pattern using <code>pointercancel</code> to stop tracking when Chrome 148 fires it on drag start. Drag each card and watch the progress bar and event log.</p>
+  </header>
+
+  <div class="tip">
+    Drag either card below. The <strong>Broken Pattern</strong> progress bar will keep growing during the drag (pointer move events leak into the drag). The <strong>Correct Pattern</strong> bar stops immediately when <code>pointercancel</code> fires — as it should in Chrome 148+.
+  </div>
+
+  <div class="two-col">
+    <!-- BAD PATTERN -->
+    <div class="panel">
+      <div class="panel-head bad">
+        <span>Broken pattern — no pointercancel cleanup</span>
+        <span class="status-badge st-bad" id="badStatus">Idle</span>
+      </div>
+      <div class="panel-body">
+        <div class="drag-arena">
+          <div class="drag-card" id="badCard" draggable="true">Drag me</div>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:0.55rem;color:var(--text-muted);margin:0.25rem 0;">pointermove count during drag:</div>
+        <div class="progress-wrap"><div class="progress-fill bad" id="badBar"></div></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.3rem;">
+          <span class="status-badge st-neu" id="badMoveCount">0 moves</span>
+          <button class="clear-btn" onclick="clearLog('bad')">Clear</button>
+        </div>
+        <div class="event-log" id="badLog"></div>
+      </div>
+    </div>
+
+    <!-- GOOD PATTERN -->
+    <div class="panel">
+      <div class="panel-head good">
+        <span>Correct pattern — cleanup via pointercancel</span>
+        <span class="status-badge st-ok" id="goodStatus">Idle</span>
+      </div>
+      <div class="panel-body">
+        <div class="drag-arena">
+          <div class="drag-card" id="goodCard" draggable="true">Drag me</div>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:0.55rem;color:var(--text-muted);margin:0.25rem 0;">pointermove count during drag:</div>
+        <div class="progress-wrap"><div class="progress-fill good" id="goodBar"></div></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.3rem;">
+          <span class="status-badge st-neu" id="goodMoveCount">0 moves</span>
+          <button class="clear-btn" onclick="clearLog('good')">Clear</button>
+        </div>
+        <div class="event-log" id="goodLog"></div>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <h2>the two patterns</h2>
+    <div class="code-block"><span class="cc">// ❌ BROKEN — no pointercancel handler</span>
+el.<span class="cv">addEventListener</span>(<span class="cv">'pointerdown'</span>, e => {
+  tracking = <span class="ck">true</span>;   <span class="cc">// start tracking</span>
+  progress = 0;
+});
+el.<span class="cv">addEventListener</span>(<span class="cv">'pointermove'</span>, e => {
+  <span class="ck">if</span> (!tracking) <span class="ck">return</span>;
+  <span class="cc">// ← runs during drag too! should not.</span>
+  progress += e.movementX;
+  updateUI(progress);
+});
+el.<span class="cv">addEventListener</span>(<span class="cv">'pointerup'</span>, () => { tracking = <span class="ck">false</span>; });
+<span class="cc">// No pointercancel handler → tracking keeps firing after dragstart</span>
+
+<span class="cc">// ✓ CORRECT — cleanup via pointercancel (fires on dragstart in Chrome 148)</span>
+el.<span class="cv">addEventListener</span>(<span class="cv">'pointerdown'</span>, e => {
+  tracking = <span class="ck">true</span>;
+  progress = 0;
+});
+el.<span class="cv">addEventListener</span>(<span class="cv">'pointermove'</span>, e => {
+  <span class="ck">if</span> (!tracking) <span class="ck">return</span>;   <span class="cc">// guard still there</span>
+  progress += e.movementX;
+  updateUI(progress);
+});
+el.<span class="cv">addEventListener</span>(<span class="cv">'pointercancel'</span>, () => {
+  tracking = <span class="ck">false</span>;   <span class="cc">// ← Chrome 148 fires this at dragstart</span>
+  <span class="cv">cleanup</span>();            <span class="cc">// safe to release resources</span>
+});
+el.<span class="cv">addEventListener</span>(<span class="cv">'pointerup'</span>, () => { tracking = <span class="ck">false</span>; });</div>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  function addEvent(logId, text, cls) {
+    const log = document.getElementById(logId);
+    const row = document.createElement('div');
+    row.className = 'evt-row' + (cls ? ' ' + cls : '');
+    row.textContent = new Date().toISOString().slice(11,23) + ' ' + text;
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // BAD PATTERN
+  let badTracking = false;
+  let badMoves = 0;
+  const badCard = document.getElementById('badCard');
+
+  badCard.addEventListener('pointerdown', (e) => {
+    badTracking = true;
+    badMoves = 0;
+    document.getElementById('badStatus').textContent = 'Tracking';
+    document.getElementById('badStatus').className = 'status-badge st-bad';
+    document.getElementById('badBar').style.width = '0%';
+    document.getElementById('badMoveCount').textContent = '0 moves';
+    addEvent('badLog', 'pointerdown → tracking started', 'evt-down');
+  });
+  badCard.addEventListener('pointermove', (e) => {
+    if (!badTracking) return;
+    badMoves++;
+    const w = Math.min(badMoves * 4, 100);
+    document.getElementById('badBar').style.width = w + '%';
+    document.getElementById('badMoveCount').textContent = `${badMoves} moves`;
+    addEvent('badLog', `pointermove #${badMoves} — still tracking!`, 'evt-warn');
+  });
+  badCard.addEventListener('dragstart', () => {
+    addEvent('badLog', 'dragstart fired — but tracking was NOT cleaned up', 'evt-drag');
+    document.getElementById('badStatus').textContent = 'Dragging (leak!)';
+  });
+  badCard.addEventListener('dragend', () => {
+    badTracking = false;
+    document.getElementById('badStatus').textContent = 'Done';
+    document.getElementById('badStatus').className = 'status-badge st-neu';
+    addEvent('badLog', `dragend — ${badMoves} spurious pointermoves during drag`, 'evt-drag');
+  });
+  badCard.addEventListener('pointerup', () => {
+    if (!badTracking) return;
+    badTracking = false;
+    document.getElementById('badStatus').textContent = 'Done';
+    document.getElementById('badStatus').className = 'status-badge st-neu';
+    addEvent('badLog', 'pointerup — tracking stopped (no drag occurred)', 'evt-down');
+  });
+  // No pointercancel handler — that's the bug
+
+  // GOOD PATTERN
+  let goodTracking = false;
+  let goodMoves = 0;
+  const goodCard = document.getElementById('goodCard');
+
+  goodCard.addEventListener('pointerdown', (e) => {
+    goodTracking = true;
+    goodMoves = 0;
+    document.getElementById('goodStatus').textContent = 'Tracking';
+    document.getElementById('goodStatus').className = 'status-badge st-ok';
+    document.getElementById('goodBar').style.width = '0%';
+    document.getElementById('goodMoveCount').textContent = '0 moves';
+    addEvent('goodLog', 'pointerdown → tracking started', 'evt-down');
+  });
+  goodCard.addEventListener('pointermove', (e) => {
+    if (!goodTracking) return;
+    goodMoves++;
+    const w = Math.min(goodMoves * 4, 100);
+    document.getElementById('goodBar').style.width = w + '%';
+    document.getElementById('goodMoveCount').textContent = `${goodMoves} moves`;
+    addEvent('goodLog', `pointermove #${goodMoves}`, 'evt-move');
+  });
+  goodCard.addEventListener('pointercancel', () => {
+    goodTracking = false;
+    document.getElementById('goodStatus').textContent = 'Cancelled (cleaned up)';
+    document.getElementById('goodStatus').className = 'status-badge st-ok';
+    addEvent('goodLog', 'pointercancel → tracking stopped — cleanup complete ✓', 'evt-cancel');
+  });
+  goodCard.addEventListener('dragstart', () => {
+    addEvent('goodLog', 'dragstart — pointer stream already cleaned up', 'evt-drag');
+    document.getElementById('goodStatus').textContent = 'Dragging (clean)';
+  });
+  goodCard.addEventListener('dragend', () => {
+    document.getElementById('goodStatus').textContent = 'Done';
+    document.getElementById('goodStatus').className = 'status-badge st-ok';
+    addEvent('goodLog', `dragend — 0 spurious pointermoves during drag ✓`, 'evt-drag');
+  });
+  goodCard.addEventListener('pointerup', () => {
+    if (!goodTracking) return;
+    goodTracking = false;
+    document.getElementById('goodStatus').textContent = 'Done';
+    document.getElementById('goodStatus').className = 'status-badge st-ok';
+    addEvent('goodLog', 'pointerup — tracking stopped (no drag occurred)', 'evt-down');
+  });
+
+  window.clearLog = function (side) {
+    document.getElementById(side + 'Log').innerHTML = '';
+    if (side === 'bad') {
+      badMoves = 0;
+      badTracking = false;
+      document.getElementById('badBar').style.width = '0%';
+      document.getElementById('badMoveCount').textContent = '0 moves';
+      document.getElementById('badStatus').textContent = 'Idle';
+      document.getElementById('badStatus').className = 'status-badge st-bad';
+    } else {
+      goodMoves = 0;
+      goodTracking = false;
+      document.getElementById('goodBar').style.width = '0%';
+      document.getElementById('goodMoveCount').textContent = '0 moves';
+      document.getElementById('goodStatus').textContent = 'Idle';
+      document.getElementById('goodStatus').className = 'status-badge st-ok';
+    }
+  };
+})();
+</script>
+</body>
+</html>
