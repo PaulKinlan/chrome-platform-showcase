@@ -157,6 +157,117 @@ function renderReferrerEcho(req: Request): Response {
   });
 }
 
+function jsonResponse(payload: unknown, init: ResponseInit = {}): Response {
+  const headers = new Headers(init.headers);
+  headers.set("content-type", "application/json; charset=utf-8");
+  if (!headers.has("cache-control")) headers.set("cache-control", "no-store");
+  return new Response(JSON.stringify(payload, null, 2), { ...init, headers });
+}
+
+function renderV151CapabilityEcho(req: Request): Response {
+  const url = new URL(req.url);
+  const started = performance.now();
+  const delay = Math.min(Math.max(Number(url.searchParams.get("delay") ?? 0), 0), 1200);
+  const scenario = url.searchParams.get("scenario") ?? "balanced";
+  const tier = Number(url.searchParams.get("tier") ?? 2);
+  const profile = tier >= 4 ? "full-fidelity" : tier >= 2 ? "balanced" : "conservative";
+  const payload = {
+    scenario,
+    requestedTier: tier,
+    selectedProfile: profile,
+    serverTiming: `app;dur=${Math.round(delay)}, profile;desc="${profile}"`,
+    request: {
+      method: req.method,
+      userAgent: req.headers.get("user-agent") ?? "",
+      secFetchMode: req.headers.get("sec-fetch-mode") ?? "",
+      secFetchSite: req.headers.get("sec-fetch-site") ?? "",
+      accept: req.headers.get("accept") ?? "",
+    },
+    elapsedMs: Math.round(performance.now() - started + delay),
+  };
+  return new Response(JSON.stringify(payload, null, 2), {
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "server-timing": `app;dur=${Math.round(delay)}, profile;desc="${profile}"`,
+    },
+  });
+}
+
+async function renderV151DelayedEcho(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const delay = Math.min(Math.max(Number(url.searchParams.get("delay") ?? 80), 0), 2000);
+  const label = url.searchParams.get("label") ?? "resource";
+  await new Promise((resolve) => setTimeout(resolve, delay));
+  return jsonResponse({
+    label,
+    delay,
+    time: new Date().toISOString(),
+    request: {
+      destination: req.headers.get("sec-fetch-dest") ?? "",
+      mode: req.headers.get("sec-fetch-mode") ?? "",
+      site: req.headers.get("sec-fetch-site") ?? "",
+    },
+    note:
+      "Use PerformanceResourceTiming to inspect duration, transfer size, Server-Timing, and Chrome 151 service-worker router fields when a static router is active.",
+  }, {
+    headers: { "server-timing": `edge;dur=${delay};desc="${label}"` },
+  });
+}
+
+function renderV151PolicyEcho(req: Request): Response {
+  const url = new URL(req.url);
+  const local = url.searchParams.get("local") ?? "self";
+  const loopback = url.searchParams.get("loopback") ?? "self";
+  const allow = url.searchParams.get("allow") ?? "none";
+  const policy = `local-network=(${local}), loopback-network=(${loopback})`;
+  return jsonResponse({
+    permissionsPolicy: policy,
+    iframeAllow: allow === "trusted" ? "local-network; loopback-network" : "",
+    request: {
+      origin: req.headers.get("origin") ?? "",
+      referer: req.headers.get("referer") ?? "",
+      secFetchSite: req.headers.get("sec-fetch-site") ?? "",
+    },
+    migration: {
+      chrome150:
+        `Permissions-Policy: direct-sockets-private=(${local}), local-network=(${local}), loopback-network=(${loopback})`,
+      chrome151: `Permissions-Policy: ${policy}`,
+    },
+  }, {
+    headers: { "permissions-policy": policy },
+  });
+}
+
+function renderV151HtmlStream(req: Request): Response {
+  const url = new URL(req.url);
+  const chunks = Math.min(Math.max(Number(url.searchParams.get("chunks") ?? 6), 1), 12);
+  const delay = Math.min(Math.max(Number(url.searchParams.get("delay") ?? 180), 0), 1200);
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      controller.enqueue(encoder.encode(`<article class="stream-item"><h3>stream started</h3>`));
+      for (let i = 1; i <= chunks; i++) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        controller.enqueue(
+          encoder.encode(
+            `<p><strong>Chunk ${i}</strong> arrived after ${delay}ms and can be parsed without buffering the full response.</p>`,
+          ),
+        );
+      }
+      controller.enqueue(encoder.encode(`<p><strong>complete</strong></p></article>`));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "x-accel-buffering": "no",
+    },
+  });
+}
+
 // ----- Page rendering -----
 
 function statusBadgeFor(channels: Channels, milestone: number): string {
@@ -1502,6 +1613,25 @@ Deno.serve({ port: PORT }, async (req) => {
 
     if (release === "v150" && sub === "/css-url-request-modifiers/referrer-echo") {
       return renderReferrerEcho(req);
+    }
+    if (release === "v151" && sub === "/cpu-performance-api/capability-echo") {
+      return renderV151CapabilityEcho(req);
+    }
+    if (
+      release === "v151" &&
+      sub === "/resource-timing-add-spec-compliant-service-worker-router-timing-fields/delayed-echo"
+    ) {
+      return await renderV151DelayedEcho(req);
+    }
+    if (
+      release === "v151" &&
+      sub ===
+        "/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/policy-echo"
+    ) {
+      return renderV151PolicyEcho(req);
+    }
+    if (release === "v151" && sub === "/renewed-html-insertion-streaming-methods/html-stream") {
+      return renderV151HtmlStream(req);
     }
 
     return (await readReleaseAsset(release, sub)) ??
