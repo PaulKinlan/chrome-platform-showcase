@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sequence diagram — Deprecated async MSE range removal — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { border: 2px solid var(--accent-amber); background: oklch(95% 0.05 90); padding: var(--space-3) var(--space-4); margin: 0 0 var(--space-5); font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55; }
+    .stage { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: 0 0 var(--space-5); }
+    .compare { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); }
+    @media (max-width: 700px) { .compare { grid-template-columns: 1fr; } }
+    .pane { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); }
+    .pane h4 { font-family: var(--font-mono); font-size: 0.76rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.08em; margin: 0 0 var(--space-3); display: flex; justify-content: space-between; }
+    .pane.bad h4 .tag { background: var(--accent-rose); color: var(--bg-ivory); padding: 0.1rem 0.4rem; font-size: 0.7rem; }
+    .pane.good h4 .tag { background: var(--accent-emerald); color: var(--bg-ivory); padding: 0.1rem 0.4rem; font-size: 0.7rem; }
+    .seq {
+      display: grid;
+      grid-template-columns: 4rem 1fr;
+      gap: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+    }
+    .seq .t { color: var(--text-muted); text-align: right; font-size: 0.78rem; padding-top: 0.3rem; }
+    .seq .m { background: var(--bg-paper); border: 2px solid var(--border-black); padding: 0.4rem 0.6rem; }
+    .seq .m.api { color: var(--accent-blue); }
+    .seq .m.event { color: var(--accent-emerald); }
+    .seq .m.error { color: var(--accent-rose); border-color: var(--accent-rose); border-width: 2px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Deprecated async MSE range removal</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v138</p>
+    <h1>Sequence trace</h1>
+    <p class="lede">Side-by-side timing diagram of the buggy old code path that v138 deprecates, vs the supported pattern. Highlights exactly where the race window opens up — and why the spec dropped the async behaviour to close it.</p>
+  </header>
+
+  <div class="warn-block">
+    <strong>Deprecation in Chrome 138.</strong> <code>SourceBuffer.remove(start, end)</code> while another operation is in flight previously deferred until the operation finished. v138 throws <code>InvalidStateError</code> instead — matching the spec.
+  </div>
+
+  <div class="stage">
+    <div class="compare">
+      <div class="pane bad">
+        <h4>pre-v138 (deprecated) <span class="tag">RACE</span></h4>
+        <div class="seq">
+          <div class="t">0ms</div><div class="m api">sourceBuffer.appendBuffer(chunkA)</div>
+          <div class="t">1ms</div><div class="m">updating = true</div>
+          <div class="t">2ms</div><div class="m api">sourceBuffer.remove(0, 5)   ← previously queued silently</div>
+          <div class="t">3ms</div><div class="m">remove() returns — but didn't run yet</div>
+          <div class="t">50ms</div><div class="m event">updateend fires for appendBuffer</div>
+          <div class="t">51ms</div><div class="m">remove() now actually starts</div>
+          <div class="t">52ms</div><div class="m">updating = true (again)</div>
+          <div class="t">100ms</div><div class="m event">updateend fires for remove</div>
+        </div>
+      </div>
+      <div class="pane good">
+        <h4>v138 (supported) <span class="tag">SYNC</span></h4>
+        <div class="seq">
+          <div class="t">0ms</div><div class="m api">sourceBuffer.appendBuffer(chunkA)</div>
+          <div class="t">1ms</div><div class="m">updating = true</div>
+          <div class="t">2ms</div><div class="m api">sourceBuffer.remove(0, 5)</div>
+          <div class="t">3ms</div><div class="m error">InvalidStateError thrown</div>
+          <div class="t">3ms</div><div class="m">your code: await waitForUpdateEnd()</div>
+          <div class="t">50ms</div><div class="m event">updateend fires for appendBuffer</div>
+          <div class="t">51ms</div><div class="m api">sourceBuffer.remove(0, 5)   ← retry safely</div>
+          <div class="t">52ms</div><div class="m">updating = true</div>
+          <div class="t">100ms</div><div class="m event">updateend fires for remove</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h3>The fix</h3>
+  <pre><code>// pre-v138 — works, but with hidden queueing
+sourceBuffer.appendBuffer(chunk);
+sourceBuffer.remove(0, 5);            // silently queued
+// (race: was the chunk part of the range to remove? maybe!)
+
+// v138 — explicit
+sourceBuffer.appendBuffer(chunk);
+await new Promise(r =&gt; sourceBuffer.addEventListener('updateend', r, {once: true}));
+sourceBuffer.remove(0, 5);            // safe now
+await new Promise(r =&gt; sourceBuffer.addEventListener('updateend', r, {once: true}));</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature page</a></li>
+      <li><a href="../mse-range-remove/">MSE range remove demo</a></li>
+      <li><a href="../migration-codemod/">Migration codemod demo</a></li>
+      <li><a href="https://www.w3.org/TR/media-source-2/" target="_blank" rel="noopener">MSE spec</a></li>
+      <li><a href="https://chromestatus.com/feature/5141213094543360" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
