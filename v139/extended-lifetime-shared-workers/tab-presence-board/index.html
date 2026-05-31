@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tab Presence Board — Extended Lifetime SharedWorkers — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-4) 0; }
+    .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; }
+    .ctl-btn.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); }
+    .panel h3 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; color: var(--text-muted); margin: 0 0 var(--space-3); }
+    .tab-list { display: flex; flex-direction: column; gap: var(--space-2); margin: var(--space-3) 0; min-height: 60px; }
+    .tab-item { display: flex; align-items: center; gap: var(--space-2); font-family: var(--font-mono); font-size: 0.82rem; padding: var(--space-2) var(--space-3); background: var(--bg-stone); border: 1px solid var(--border-black); }
+    .tab-item .tid { color: var(--accent-blue); font-weight: 700; }
+    .tab-item.self { border-left: 3px solid var(--accent-emerald); }
+    .tab-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-emerald); flex-shrink: 0; }
+    .count-row { font-family: var(--font-display); font-size: 2rem; color: var(--text-black); margin: var(--space-2) 0; }
+    .msg-row { display: flex; gap: var(--space-2); margin: var(--space-3) 0; }
+    .msg-input { flex: 1; border: 2px solid var(--border-black); padding: 0.5rem 0.7rem; font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-ivory); }
+    .msg-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; cursor: pointer; white-space: nowrap; }
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; height: 200px; overflow-y: auto; line-height: 1.6; }
+    .log-line { padding: 0.1rem 0; }
+    .log-line.join { color: var(--accent-emerald); }
+    .log-line.leave { color: var(--accent-rose); }
+    .log-line.msg { color: var(--accent-blue); }
+    .log-line.sys { color: var(--text-muted); }
+    .alive-badge { display: inline-flex; align-items: center; gap: var(--space-2); font-family: var(--font-mono); font-size: 0.78rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-black); background: var(--bg-stone); }
+    .alive-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-emerald); animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .support-warn { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); margin: var(--space-3) 0; }
+    pre { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); font-family: var(--font-mono); font-size: 0.82rem; overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v139/extended-lifetime-shared-workers/">&larr; Extended lifetime SharedWorkers</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>Tab Presence Board</h1>
+    <p class="lede">A <code>SharedWorker</code> tracks every connected tab and broadcasts join/leave events and messages. Open this page in multiple tabs. In Chrome 139+ with <code>extendedLifetime: true</code>, the worker keeps running even after every tab closes — reopen the page and the worker is still there.</p>
+  </header>
+
+  <div id="support-warn" style="display:none" class="support-warn"></div>
+
+  <div class="controls">
+    <button class="ctl-btn" id="open-tab-btn">Open new tab</button>
+  </div>
+
+  <div class="alive-badge" id="alive-badge">
+    <span class="alive-dot" id="alive-dot"></span>
+    <span id="alive-text">Worker alive — uptime: <code id="uptime">0s</code></span>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h3>Connected tabs</h3>
+      <div class="count-row" id="tab-count">—</div>
+      <div class="tab-list" id="tab-list"></div>
+    </div>
+
+    <div class="panel">
+      <h3>Message log</h3>
+      <div class="msg-row">
+        <input class="msg-input" id="msg-input" type="text" placeholder="Type a message&hellip;" maxlength="120">
+        <button class="msg-btn" id="msg-send">Broadcast</button>
+      </div>
+      <div class="log" id="msg-log"></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>SharedWorker code</h2>
+    <pre><code>const worker = new SharedWorker(URL.createObjectURL(new Blob([`
+  const ports = new Map();
+  let nextId = 1;
+  onconnect = ({ports: [port]}) => {
+    const id = nextId++;
+    ports.set(id, port);
+    port.postMessage({type:'id', id});
+    broadcast({type:'join', id, total: ports.size});
+    port.onmessage = ({data}) => {
+      if(data.type==='leave') {
+        ports.delete(id);
+        broadcast({type:'leave', id, total: ports.size});
+      } else if(data.type==='msg') {
+        broadcast({type:'msg', from:id, text:data.text});
+      } else if(data.type==='ping') {
+        broadcast({type:'tick', uptime: Date.now() - started});
+      }
+    };
+  };
+  function broadcast(msg){ ports.forEach(p => p.postMessage(msg)); }
+  const started = Date.now();
+  setInterval(() => broadcast({type:'tick', uptime: Date.now() - started}), 1000);
+`], {type: 'text/javascript'})), { extendedLifetime: true });</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v139/extended-lifetime-shared-workers/">Feature page</a></li>
+      <li><a href="/v139/extended-lifetime-shared-workers/cross-tab-state-bus/">Cross-Tab State Bus</a></li>
+      <li><a href="/v139/extended-lifetime-shared-workers/persistent-counter/">Persistent Counter</a></li>
+      <li><a href="https://chromestatus.com/feature/5138641357373440" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/workers.html#shared-workers" target="_blank" rel="noopener">SharedWorker spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(() => {
+  const tabCountEl = document.getElementById('tab-count');
+  const tabListEl = document.getElementById('tab-list');
+  const msgLog = document.getElementById('msg-log');
+  const msgInput = document.getElementById('msg-input');
+  const msgSend = document.getElementById('msg-send');
+  const uptimeEl = document.getElementById('uptime');
+  const aliveDot = document.getElementById('alive-dot');
+  const aliveText = document.getElementById('alive-text');
+  const supportWarn = document.getElementById('support-warn');
+
+  if (typeof SharedWorker === 'undefined') {
+    supportWarn.style.display = '';
+    supportWarn.textContent = 'SharedWorker is not supported in this browser. The Tab Presence Board requires SharedWorker. Try Chrome or Firefox.';
+    aliveDot.style.background = 'var(--accent-rose)';
+    aliveText.textContent = 'SharedWorker not supported';
+    return;
+  }
+
+  const workerSource = `
+    const ports = new Map();
+    let nextId = 1;
+    const started = Date.now();
+    onconnect = function({ports: [port]}) {
+      const id = nextId++;
+      ports.set(id, port);
+      port.postMessage({type:'id', id, total: ports.size});
+      broadcast({type:'join', id, total: ports.size});
+      port.onmessage = function({data}) {
+        if(data.type==='leave') {
+          ports.delete(id);
+          broadcast({type:'leave', id, total: ports.size});
+        } else if(data.type==='msg') {
+          broadcast({type:'msg', from:id, text:data.text});
+        }
+      };
+    };
+    function broadcast(msg) {
+      msg.uptime = Date.now() - started;
+      ports.forEach(function(p) { p.postMessage(msg); });
+    }
+    setInterval(function() {
+      broadcast({type:'tick', uptime: Date.now() - started});
+    }, 1000);
+  `;
+
+  const blob = new Blob([workerSource], { type: 'text/javascript' });
+  const url = URL.createObjectURL(blob);
+
+  let worker;
+  try {
+    worker = new SharedWorker(url, { name: 'tab-presence-board', extendedLifetime: true });
+  } catch (e) {
+    try {
+      worker = new SharedWorker(url, 'tab-presence-board');
+    } catch (e2) {
+      supportWarn.style.display = '';
+      supportWarn.textContent = 'SharedWorker construction failed: ' + e2.message;
+      return;
+    }
+  }
+
+  worker.port.start();
+
+  let myId = null;
+  const knownTabs = new Map();
+
+  function logLine(text, cls) {
+    const div = document.createElement('div');
+    div.className = 'log-line ' + (cls || '');
+    div.textContent = '[' + new Date().toTimeString().slice(0, 8) + '] ' + text;
+    msgLog.prepend(div);
+    while (msgLog.children.length > 40) msgLog.lastChild.remove();
+  }
+
+  function renderTabs() {
+    tabListEl.innerHTML = '';
+    tabCountEl.textContent = knownTabs.size;
+    knownTabs.forEach((name, id) => {
+      const item = document.createElement('div');
+      item.className = 'tab-item' + (id === myId ? ' self' : '');
+      item.innerHTML = `<span class="tab-dot"></span><span class="tid">Tab ${id}</span><span style="color:var(--text-muted);margin-left:auto;">${id === myId ? '(this tab)' : ''}</span>`;
+      tabListEl.appendChild(item);
+    });
+  }
+
+  worker.port.onmessage = ({ data }) => {
+    if (data.uptime !== undefined) {
+      uptimeEl.textContent = Math.floor(data.uptime / 1000) + 's';
+    }
+    if (data.type === 'id') {
+      myId = data.id;
+      knownTabs.set(myId, 'Tab ' + myId);
+      renderTabs();
+      logLine('connected as Tab ' + myId, 'join');
+    } else if (data.type === 'join') {
+      if (!knownTabs.has(data.id)) {
+        knownTabs.set(data.id, 'Tab ' + data.id);
+      }
+      renderTabs();
+      logLine('Tab ' + data.id + ' joined  (total: ' + data.total + ')', 'join');
+    } else if (data.type === 'leave') {
+      knownTabs.delete(data.id);
+      renderTabs();
+      logLine('Tab ' + data.id + ' left  (total: ' + data.total + ')', 'leave');
+    } else if (data.type === 'msg') {
+      logLine('Tab ' + data.from + ': ' + data.text, 'msg');
+    } else if (data.type === 'tick') {
+      // uptime handled above
+    }
+  };
+
+  window.addEventListener('beforeunload', () => {
+    worker.port.postMessage({ type: 'leave' });
+  });
+
+  msgSend.addEventListener('click', () => {
+    const text = msgInput.value.trim();
+    if (!text) return;
+    worker.port.postMessage({ type: 'msg', text });
+    msgInput.value = '';
+  });
+
+  msgInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') msgSend.click();
+  });
+
+  document.getElementById('open-tab-btn').addEventListener('click', () => {
+    window.open(location.href, '_blank');
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Beacon Delivery A/B Comparison — Fetch Retry — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { background: var(--bg-stone); border-left: 4px solid var(--accent-amber); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); }
+    .controls { display: flex; gap: var(--space-4); flex-wrap: wrap; align-items: flex-end; margin: var(--space-4) 0; }
+    .field { display: flex; flex-direction: column; gap: var(--space-2); font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); }
+    .field label { color: var(--text-muted); text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.04em; }
+    .field input[type="range"] { width: 180px; accent-color: var(--text-black); }
+    .field .val { font-weight: 600; color: var(--text-black); }
+    .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; }
+    .ctl-btn:hover { background: var(--bg-paper); color: var(--text-black); }
+    .ab-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 660px) { .ab-grid { grid-template-columns: 1fr; } }
+    .ab-col { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); }
+    .ab-header { padding: var(--space-3) var(--space-4); border-bottom: 2px solid var(--border-black); font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .ab-header.old { background: var(--bg-stone); color: var(--text-charcoal); }
+    .ab-header.new { background: var(--text-black); color: var(--bg-ivory); }
+    .ab-body { padding: var(--space-4); }
+    .stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-2); margin-bottom: var(--space-3); }
+    .stat { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2); text-align: center; }
+    .stat .num { font-family: var(--font-display); font-size: 1.4rem; color: var(--text-black); }
+    .stat .lbl { font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; }
+    .beacon-stream { min-height: 120px; max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.25rem; }
+    .beacon { display: flex; align-items: center; gap: var(--space-2); font-family: var(--font-mono); font-size: 0.72rem; padding: 0.25rem 0.5rem; border: 1px solid var(--border-black); background: var(--bg-ivory); animation: slide-in 0.2s ease; }
+    @keyframes slide-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+    .beacon.sending { color: var(--text-muted); background: var(--bg-stone); }
+    .beacon.delivered { color: var(--accent-emerald); background: var(--bg-paper); }
+    .beacon.lost { color: var(--accent-rose); font-weight: 600; }
+    .beacon.retried { color: var(--accent-blue); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot.green { background: var(--accent-emerald); }
+    .dot.red { background: var(--accent-rose); }
+    .dot.blue { background: var(--accent-blue); }
+    .dot.grey { background: var(--text-muted); }
+    .attempt-dots { display: flex; gap: 3px; margin-left: auto; }
+    .adot { width: 6px; height: 6px; border-radius: 50%; background: var(--bg-stone); border: 1px solid var(--border-black); }
+    .adot.ok { background: var(--accent-emerald); }
+    .adot.fail { background: var(--accent-rose); }
+    .callout { background: var(--bg-stone); border-left: 4px solid var(--accent-blue); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); }
+    .callout strong { color: var(--text-black); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v139/fetch-retry-for-keepalive-fetches/">&larr; Fetch retry for keepalive fetches</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>Beacon Delivery A/B Comparison</h1>
+    <p class="lede">Without retry, a keepalive beacon that hits a flaky network is silently lost. Chrome 139 lets you specify a retry policy — watch delivery rates diverge as you increase the simulated failure rate.</p>
+  </header>
+
+  <div class="warn-block">v139's <code>retry</code> option is behind an origin trial. This demo simulates the protocol in JavaScript so you can compare delivery rates without needing OT access.</div>
+
+  <div class="controls">
+    <div class="field">
+      <label for="fail-rate">network failure rate</label>
+      <input type="range" id="fail-rate" min="0" max="80" value="40" step="5">
+      <span class="val"><span id="fail-val">40</span>% failure</span>
+    </div>
+    <button class="ctl-btn" id="send-20">Send 20 beacons</button>
+    <button class="ctl-btn" id="clear">Clear</button>
+  </div>
+
+  <div class="ab-grid">
+    <div class="ab-col">
+      <div class="ab-header old">sendBeacon — no retry</div>
+      <div class="ab-body">
+        <div class="stats-row">
+          <div class="stat"><div class="num" id="a-delivered">0</div><div class="lbl">delivered</div></div>
+          <div class="stat"><div class="num" id="a-lost">0</div><div class="lbl">lost</div></div>
+          <div class="stat"><div class="num" id="a-rate">—</div><div class="lbl">delivery %</div></div>
+        </div>
+        <div class="beacon-stream" id="stream-a"></div>
+      </div>
+    </div>
+    <div class="ab-col">
+      <div class="ab-header new">fetch keepalive + retry (v139)</div>
+      <div class="ab-body">
+        <div class="stats-row">
+          <div class="stat"><div class="num" id="b-delivered">0</div><div class="lbl">delivered</div></div>
+          <div class="stat"><div class="num" id="b-lost">0</div><div class="lbl">lost</div></div>
+          <div class="stat"><div class="num" id="b-rate">—</div><div class="lbl">delivery %</div></div>
+        </div>
+        <div class="beacon-stream" id="stream-b"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>Why this matters:</strong> Analytics events fired on page unload (session end, conversion, exit intent) have no second chance with <code>sendBeacon</code>. A 40% failure rate means 40% of session-end data is silently lost. With v139 retry, the same flaky conditions produce near-complete delivery.
+  </div>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>// Before v139 — fire and forget, no retry
+navigator.sendBeacon("/analytics", JSON.stringify(event));
+
+// v139+ — keepalive fetch with retry policy
+fetch("/analytics", {
+  method: "POST",
+  body: JSON.stringify(event),
+  keepalive: true,
+  retry: {
+    maxAttempts: 3,
+    initialDelay: 500,
+    retryAfterUnload: true,
+  },
+});</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v139/fetch-retry-for-keepalive-fetches/">Feature page</a></li>
+      <li><a href="../beacon-survival/">Beacon Survival Simulator</a></li>
+      <li><a href="../retry-policy-builder/">Retry Policy Builder</a></li>
+      <li><a href="https://chromestatus.com/feature/5181984581877760" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  let aDelivered = 0, aLost = 0;
+  let bDelivered = 0, bLost = 0;
+  let beaconCounter = 0;
+
+  const failIn = document.getElementById('fail-rate');
+  const failVal = document.getElementById('fail-val');
+  failIn.addEventListener('input', () => { failVal.textContent = failIn.value; });
+
+  function failRate() { return +failIn.value / 100; }
+
+  function addBeacon(stream, cls, dotCls, label, attempts) {
+    const row = document.createElement('div');
+    row.className = 'beacon ' + cls;
+    const dot = document.createElement('span');
+    dot.className = 'dot ' + dotCls;
+    row.appendChild(dot);
+    const txt = document.createElement('span');
+    txt.textContent = label;
+    row.appendChild(txt);
+    if (attempts) {
+      const adots = document.createElement('div');
+      adots.className = 'attempt-dots';
+      attempts.forEach(ok => {
+        const d = document.createElement('span');
+        d.className = 'adot ' + (ok ? 'ok' : 'fail');
+        adots.appendChild(d);
+      });
+      row.appendChild(adots);
+    }
+    stream.prepend(row);
+    while (stream.children.length > 25) stream.lastChild.remove();
+  }
+
+  function updateStats() {
+    const aTotal = aDelivered + aLost;
+    const bTotal = bDelivered + bLost;
+    document.getElementById('a-delivered').textContent = aDelivered;
+    document.getElementById('a-lost').textContent = aLost;
+    document.getElementById('a-rate').textContent = aTotal ? Math.round(aDelivered / aTotal * 100) + '%' : '—';
+    document.getElementById('b-delivered').textContent = bDelivered;
+    document.getElementById('b-lost').textContent = bLost;
+    document.getElementById('b-rate').textContent = bTotal ? Math.round(bDelivered / bTotal * 100) + '%' : '—';
+  }
+
+  function trySend(fr) { return Math.random() >= fr; }
+
+  async function sendOne(id, baseDelay) {
+    const fr = failRate();
+    const streamA = document.getElementById('stream-a');
+    const streamB = document.getElementById('stream-b');
+    const label = 'beacon-' + id;
+
+    await new Promise(r => setTimeout(r, baseDelay));
+
+    // Column A: sendBeacon — single attempt
+    if (trySend(fr)) {
+      aDelivered++;
+      addBeacon(streamA, 'delivered', 'green', label + ' delivered', [true]);
+    } else {
+      aLost++;
+      addBeacon(streamA, 'lost', 'red', label + ' lost', [false]);
+    }
+
+    // Column B: fetch keepalive + retry (up to 3 attempts)
+    const maxAttempts = 3;
+    const attemptsB = [];
+    let success = false;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const ok = trySend(fr);
+      attemptsB.push(ok);
+      if (ok) { success = true; break; }
+      if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 200));
+    }
+    if (success) {
+      bDelivered++;
+      addBeacon(streamB, 'delivered', 'green', label + ' delivered (attempt ' + attemptsB.length + ')', attemptsB);
+    } else {
+      bLost++;
+      addBeacon(streamB, 'lost', 'red', label + ' lost after ' + maxAttempts + ' attempts', attemptsB);
+    }
+    updateStats();
+  }
+
+  document.getElementById('send-20').addEventListener('click', () => {
+    for (let i = 0; i < 20; i++) {
+      beaconCounter++;
+      sendOne(beaconCounter, i * 80);
+    }
+  });
+
+  document.getElementById('clear').addEventListener('click', () => {
+    aDelivered = 0; aLost = 0; bDelivered = 0; bLost = 0;
+    document.getElementById('stream-a').innerHTML = '';
+    document.getElementById('stream-b').innerHTML = '';
+    updateStats();
+  });
+</script>
+</body>
+</html>

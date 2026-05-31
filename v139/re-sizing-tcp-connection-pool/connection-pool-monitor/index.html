@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connection Pool Monitor — Re-sizing TCP Connection Pool — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .controls-row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-4) 0; }
+    .field { display: flex; flex-direction: column; gap: var(--space-1); font-family: var(--font-mono); font-size: 0.78rem; }
+    .field label { color: var(--text-muted); text-transform: uppercase; }
+    input[type=range] { accent-color: var(--text-black); }
+    .ctl-btn {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-2) var(--space-4);
+      font-family: var(--font-sans);
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .ctl-btn:hover { box-shadow: var(--flat-shadow-hover); }
+    .ctl-btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+    .toggle-row { display: inline-flex; border: 2px solid var(--border-black); }
+    .toggle-row button {
+      border: none;
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      padding: 0.35rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+    .toggle-row button.on { background: var(--text-black); color: var(--bg-ivory); }
+    .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--space-3); margin: var(--space-4) 0; }
+    @media (max-width: 640px) { .metrics-grid { grid-template-columns: repeat(2, 1fr); } }
+    .metric-card { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3); text-align: center; }
+    .metric-card .num { font-family: var(--font-display); font-size: 1.6rem; line-height: 1.1; }
+    .metric-card .lbl { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted); text-transform: uppercase; margin-top: var(--space-1); }
+    .metric-card .num.active { color: var(--accent-blue); }
+    .metric-card .num.queued { color: var(--accent-rose); }
+    .metric-card .num.idle { color: var(--accent-emerald); }
+    .pool-vis { margin: var(--space-4) 0; }
+    .pool-vis-label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: var(--space-2); }
+    .pool-slots { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: var(--space-3); }
+    .slot {
+      width: 18px;
+      height: 18px;
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      transition: background 0.1s;
+    }
+    .slot.active { background: var(--accent-blue); }
+    .slot.idle { background: var(--accent-emerald); }
+    .slot.disabled { background: var(--bg-stone); opacity: 0.3; }
+    .timeline-wrap { margin: var(--space-4) 0; }
+    .timeline-wrap h3 { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 var(--space-2); }
+    canvas#timeline { width: 100%; height: 160px; border: 2px solid var(--border-black); background: var(--bg-paper); display: block; }
+    .chart-legend { display: flex; gap: var(--space-4); margin-top: var(--space-2); font-family: var(--font-mono); font-size: 0.72rem; flex-wrap: wrap; }
+    .legend-swatch { display: inline-block; width: 12px; height: 12px; border: 1px solid var(--border-black); vertical-align: middle; margin-right: 3px; }
+    .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 640px) { .comparison { grid-template-columns: 1fr; } }
+    .cmp-panel { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); }
+    .cmp-panel h3 { font-family: var(--font-mono); font-size: 0.82rem; text-transform: uppercase; color: var(--text-muted); margin: 0 0 var(--space-3); }
+    .bar-row { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-2) 0; font-family: var(--font-mono); font-size: 0.75rem; }
+    .bar-track { flex: 1; height: 14px; background: var(--bg-stone); border: 1px solid var(--border-black); overflow: hidden; }
+    .bar-fill { height: 100%; transition: width 0.3s ease; }
+    .bar-fill.fixed { background: var(--accent-rose); }
+    .bar-fill.dynamic { background: var(--accent-emerald); }
+    .code-ref { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin: var(--space-4) 0; }
+    .code-ref h3 { font-family: var(--font-mono); font-size: 0.82rem; text-transform: uppercase; margin: 0 0 var(--space-3); }
+    .efficiency-badge { font-family: var(--font-mono); font-size: 1rem; font-weight: 600; padding: var(--space-1) var(--space-3); border: 2px solid var(--border-black); display: inline-block; margin-top: var(--space-2); }
+    .efficiency-badge.good { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .efficiency-badge.warn { background: var(--accent-rose); color: var(--bg-ivory); }
+    select { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: 0.3rem 0.5rem; font-family: var(--font-mono); font-size: 0.78rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v139/re-sizing-tcp-connection-pool/">&larr; Re-sizing TCP connection pool</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>Connection Pool Monitor</h1>
+    <p class="lede">Chrome 139 dynamically adjusts the TCP connection pool size based on available system memory. Configure the pool, simulate memory pressure, and watch how a fixed pool (Chrome 138) and a dynamic pool (Chrome 139) handle a 20-request burst differently.</p>
+  </header>
+
+  <div class="controls-row">
+    <div class="field">
+      <label for="pool-size">pool size: <span id="pool-size-val">32</span></label>
+      <input type="range" id="pool-size" min="6" max="64" value="32" step="2">
+    </div>
+    <div class="field">
+      <label>memory pressure</label>
+      <div class="toggle-row">
+        <button class="on" id="mem-low" data-level="low">Low</button>
+        <button id="mem-med" data-level="med">Medium</button>
+        <button id="mem-high" data-level="high">High</button>
+      </div>
+    </div>
+    <button class="ctl-btn" id="burst-btn">Request burst (20)</button>
+  </div>
+
+  <div class="metrics-grid">
+    <div class="metric-card">
+      <div class="num active" id="m-active">0</div>
+      <div class="lbl">active connections</div>
+    </div>
+    <div class="metric-card">
+      <div class="num idle" id="m-idle">0</div>
+      <div class="lbl">idle connections</div>
+    </div>
+    <div class="metric-card">
+      <div class="num queued" id="m-queued">0</div>
+      <div class="lbl">queued requests</div>
+    </div>
+    <div class="metric-card">
+      <div class="num" id="m-wait">0ms</div>
+      <div class="lbl">avg wait time</div>
+    </div>
+  </div>
+
+  <div class="pool-vis">
+    <p class="pool-vis-label">pool slots — <span style="color:var(--accent-blue)">active</span> / <span style="color:var(--accent-emerald)">idle</span> / empty</p>
+    <div class="pool-slots" id="pool-slots"></div>
+    <div>efficiency score: <span class="efficiency-badge good" id="efficiency-badge">100%</span></div>
+  </div>
+
+  <div class="timeline-wrap">
+    <h3>Rolling 30-second timeline</h3>
+    <canvas id="timeline" width="720" height="160"></canvas>
+    <div class="chart-legend">
+      <span><span class="legend-swatch" style="background:var(--accent-blue)"></span>active</span>
+      <span><span class="legend-swatch" style="background:var(--accent-emerald)"></span>idle</span>
+      <span><span class="legend-swatch" style="background:var(--accent-rose)"></span>queued</span>
+    </div>
+  </div>
+
+  <div class="comparison">
+    <div class="cmp-panel">
+      <h3>Chrome 138 — fixed pool (256)</h3>
+      <div class="bar-row">
+        <span style="width:64px">queue</span>
+        <div class="bar-track"><div class="bar-fill fixed" id="fixed-queue-bar" style="width:0%"></div></div>
+        <span id="fixed-queue-val">0</span>
+      </div>
+      <div class="bar-row">
+        <span style="width:64px">wait</span>
+        <div class="bar-track"><div class="bar-fill fixed" id="fixed-wait-bar" style="width:0%"></div></div>
+        <span id="fixed-wait-val">0ms</span>
+      </div>
+      <p style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);margin-top:var(--space-3)">Pool stays at 256 regardless of memory pressure. Under low memory, OS-level TCP failures occur before Chrome can throttle.</p>
+    </div>
+    <div class="cmp-panel">
+      <h3>Chrome 139 — dynamic pool</h3>
+      <div class="bar-row">
+        <span style="width:64px">queue</span>
+        <div class="bar-track"><div class="bar-fill dynamic" id="dyn-queue-bar" style="width:0%"></div></div>
+        <span id="dyn-queue-val">0</span>
+      </div>
+      <div class="bar-row">
+        <span style="width:64px">wait</span>
+        <div class="bar-track"><div class="bar-fill dynamic" id="dyn-wait-bar" style="width:0%"></div></div>
+        <span id="dyn-wait-val">0ms</span>
+      </div>
+      <p style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);margin-top:var(--space-3)">Pool shrinks under pressure, producing queue-wait overhead in exchange for avoiding OS-level socket allocation failures.</p>
+    </div>
+  </div>
+
+  <div class="code-ref">
+    <h3>Resource Timing API — measure connection wait</h3>
+    <pre><code>const [entry] = performance.getEntriesByName(url, 'resource');
+const connectionWait = entry.connectEnd - entry.connectStart;
+// connectStart: moment socket allocation began (waiting for pool slot if pool full)
+// connectEnd:   moment TCP handshake completed
+// if connectStart === connectEnd → connection was reused from idle pool
+console.log('TCP connect overhead:', connectionWait.toFixed(1), 'ms');</code></pre>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v139/re-sizing-tcp-connection-pool/">Feature page</a></li>
+      <li><a href="/v139/re-sizing-tcp-connection-pool/pool-exhaustion-simulator/">Pool Exhaustion Simulator</a></li>
+      <li><a href="/v139/re-sizing-tcp-connection-pool/sidechannel-leak/">Sidechannel Leak</a></li>
+      <li><a href="https://chromestatus.com/feature/5174924428738560" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const BURST_SIZE = 20;
+  const REQUEST_DURATION_MS = 1800;
+  const TICK_MS = 200;
+  const HISTORY_TICKS = 150;
+
+  let poolMax = 32;
+  let memLevel = 'low';
+  let activeConns = 0;
+  let idleConns = 0;
+  let queuedReqs = 0;
+  let totalServed = 0;
+  let totalWaitMs = 0;
+  let ticksSinceReset = 0;
+  let history = [];
+  let requestTimers = [];
+  let tickInterval = null;
+
+  function effectivePool() {
+    if (memLevel === 'low') return poolMax;
+    if (memLevel === 'med') return Math.max(6, Math.floor(poolMax * 0.6));
+    return Math.max(6, Math.floor(poolMax * 0.3));
+  }
+
+  function renderSlots() {
+    const pool = effectivePool();
+    const container = document.getElementById('pool-slots');
+    container.innerHTML = '';
+    for (let i = 0; i < poolMax; i++) {
+      const s = document.createElement('div');
+      if (i >= pool) {
+        s.className = 'slot disabled';
+        s.title = 'disabled (memory pressure)';
+      } else if (i < activeConns) {
+        s.className = 'slot active';
+        s.title = 'active';
+      } else if (i < activeConns + idleConns) {
+        s.className = 'slot idle';
+        s.title = 'idle';
+      } else {
+        s.className = 'slot';
+      }
+      container.appendChild(s);
+    }
+  }
+
+  function renderMetrics() {
+    document.getElementById('m-active').textContent = activeConns;
+    document.getElementById('m-idle').textContent = idleConns;
+    document.getElementById('m-queued').textContent = queuedReqs;
+    const avg = totalServed > 0 ? Math.round(totalWaitMs / totalServed) : 0;
+    document.getElementById('m-wait').textContent = avg + 'ms';
+
+    const eff = totalServed + queuedReqs > 0
+      ? Math.round(100 * totalServed / (totalServed + queuedReqs))
+      : 100;
+    const badge = document.getElementById('efficiency-badge');
+    badge.textContent = eff + '%';
+    badge.className = 'efficiency-badge ' + (eff >= 80 ? 'good' : 'warn');
+  }
+
+  function renderComparison() {
+    const fixedQ = Math.max(0, queuedReqs - Math.max(0, 256 - poolMax));
+    const dynQ = queuedReqs;
+    const fixedW = totalServed > 0 ? Math.round(totalWaitMs / totalServed * 0.3) : 0;
+    const dynW = totalServed > 0 ? Math.round(totalWaitMs / totalServed) : 0;
+
+    document.getElementById('fixed-queue-bar').style.width = Math.min(100, fixedQ * 5) + '%';
+    document.getElementById('fixed-queue-val').textContent = fixedQ;
+    document.getElementById('fixed-wait-bar').style.width = Math.min(100, fixedW / 20) + '%';
+    document.getElementById('fixed-wait-val').textContent = fixedW + 'ms';
+
+    document.getElementById('dyn-queue-bar').style.width = Math.min(100, dynQ * 5) + '%';
+    document.getElementById('dyn-queue-val').textContent = dynQ;
+    document.getElementById('dyn-wait-bar').style.width = Math.min(100, dynW / 20) + '%';
+    document.getElementById('dyn-wait-val').textContent = dynW + 'ms';
+  }
+
+  function drawTimeline() {
+    const canvas = document.getElementById('timeline');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    const PAD = 8;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, W, H);
+
+    const maxVal = Math.max(poolMax, 20);
+    const drawSeries = (key, color) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      history.forEach((snap, i) => {
+        const x = PAD + ((W - 2 * PAD) * i / HISTORY_TICKS);
+        const y = (H - PAD) - ((H - 2 * PAD) * Math.min(1, snap[key] / maxVal));
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    };
+
+    drawSeries('active', '#0022ff');
+    drawSeries('idle', '#0a8f5c');
+    drawSeries('queued', '#d11a2a');
+  }
+
+  function tick() {
+    ticksSinceReset++;
+    idleConns = Math.max(0, Math.floor(activeConns * 0.15 * Math.random()));
+    history.push({ active: activeConns, idle: idleConns, queued: queuedReqs });
+    if (history.length > HISTORY_TICKS) history.shift();
+
+    renderSlots();
+    renderMetrics();
+    renderComparison();
+    drawTimeline();
+  }
+
+  function drainQueue() {
+    const available = effectivePool() - activeConns;
+    if (available > 0 && queuedReqs > 0) {
+      const toStart = Math.min(available, queuedReqs);
+      queuedReqs -= toStart;
+      activeConns += toStart;
+      for (let i = 0; i < toStart; i++) {
+        const duration = REQUEST_DURATION_MS + Math.random() * 800;
+        totalServed++;
+        totalWaitMs += Math.max(0, ticksSinceReset * TICK_MS * 0.1);
+        setTimeout(() => {
+          activeConns = Math.max(0, activeConns - 1);
+          drainQueue();
+        }, duration);
+      }
+    }
+  }
+
+  function fireBurst() {
+    const pool = effectivePool();
+    const canStart = Math.min(BURST_SIZE, pool - activeConns);
+    const mustQueue = BURST_SIZE - canStart;
+
+    queuedReqs += mustQueue;
+    activeConns += canStart;
+
+    for (let i = 0; i < canStart; i++) {
+      const duration = REQUEST_DURATION_MS + Math.random() * 800;
+      totalServed++;
+      setTimeout(() => {
+        activeConns = Math.max(0, activeConns - 1);
+        drainQueue();
+      }, duration);
+    }
+
+    document.getElementById('burst-btn').disabled = true;
+    setTimeout(() => { document.getElementById('burst-btn').disabled = false; }, 5000);
+  }
+
+  document.getElementById('pool-size').addEventListener('input', function() {
+    poolMax = +this.value;
+    document.getElementById('pool-size-val').textContent = poolMax;
+    activeConns = Math.min(activeConns, effectivePool());
+    renderSlots();
+  });
+
+  document.querySelectorAll('.toggle-row button').forEach(btn => {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.toggle-row button').forEach(b => b.classList.remove('on'));
+      this.classList.add('on');
+      memLevel = this.dataset.level;
+      activeConns = Math.min(activeConns, effectivePool());
+      renderSlots();
+    });
+  });
+
+  document.getElementById('burst-btn').addEventListener('click', fireBurst);
+
+  tickInterval = setInterval(tick, TICK_MS);
+  tick();
+</script>
+</body>
+</html>

@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Port Entropy Visualizer — TCP Port Randomisation — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .two-up { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 680px) { .two-up { grid-template-columns: 1fr; } }
+    .sim-panel { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); }
+    .sim-panel h3 { font-family: var(--font-mono); font-size: 0.82rem; text-transform: uppercase; color: var(--text-muted); margin: 0 0 var(--space-3); }
+    .sim-panel h3 span { color: var(--text-black); font-size: 1rem; }
+    .port-grid { display: grid; grid-template-columns: repeat(10, 1fr); gap: 3px; margin: var(--space-3) 0; }
+    .port-cell {
+      aspect-ratio: 1;
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      font-family: var(--font-mono);
+      font-size: 0.52rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: default;
+      transition: background 0.15s;
+    }
+    .port-cell.used-seq { background: var(--accent-rose); color: var(--bg-ivory); }
+    .port-cell.used-rnd { background: var(--accent-blue); color: var(--bg-ivory); }
+    .port-cell.current { outline: 2px solid var(--text-black); outline-offset: -2px; }
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0; align-items: center; }
+    .ctl-btn {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-sans);
+      font-weight: 600;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+    .ctl-btn:hover { box-shadow: var(--flat-shadow-hover); }
+    .ctl-btn:active { box-shadow: var(--flat-shadow-active); }
+    .ctl-btn.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    .ctl-btn.secondary.on { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .metric { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); margin: var(--space-1) 0; display: flex; justify-content: space-between; gap: var(--space-3); }
+    .metric .val { font-weight: 600; }
+    .predict-box { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin: var(--space-3) 0; }
+    .predict-box h4 { font-family: var(--font-mono); font-size: 0.82rem; text-transform: uppercase; margin: 0 0 var(--space-2); }
+    .predict-input { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
+    .predict-input input[type=number] {
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      padding: 0.3rem 0.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      width: 120px;
+    }
+    .verdict { font-family: var(--font-mono); font-size: 0.82rem; padding: var(--space-2) var(--space-3); margin-top: var(--space-2); border: 1px solid var(--border-black); }
+    .verdict.correct { background: color-mix(in srgb, var(--accent-emerald) 15%, transparent); border-color: var(--accent-emerald); }
+    .verdict.wrong { background: color-mix(in srgb, var(--accent-rose) 15%, transparent); border-color: var(--accent-rose); }
+    .entropy-chart { margin: var(--space-4) 0; }
+    .entropy-chart h3 { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 var(--space-3); }
+    .chart-wrap { position: relative; }
+    canvas#entropy-canvas { width: 100%; height: 180px; border: 2px solid var(--border-black); background: var(--bg-paper); display: block; }
+    .chart-legend { display: flex; gap: var(--space-4); margin-top: var(--space-2); font-family: var(--font-mono); font-size: 0.75rem; }
+    .legend-dot { display: inline-block; width: 12px; height: 12px; border: 1px solid var(--border-black); vertical-align: middle; margin-right: 4px; }
+    .info-panel { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .info-panel h3 { font-family: var(--font-display); font-size: 1.05rem; margin: 0 0 var(--space-3); }
+    .badge { display: inline-block; font-family: var(--font-mono); font-size: 0.75rem; padding: 0.2rem 0.5rem; border: 1px solid var(--border-black); }
+    .badge.high { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .badge.low { background: var(--accent-rose); color: var(--bg-ivory); }
+    .reset-all { background: var(--bg-stone); color: var(--text-black); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-size: 0.85rem; cursor: pointer; }
+    .global-controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; align-items: center; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v139/randomizing-tcp-port-allocation-on-windows/">&larr; Randomizing TCP port allocation on Windows</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>Port Entropy Visualizer</h1>
+    <p class="lede">Chrome 139 on Windows switches ephemeral port allocation from predictable sequential assignment to random sampling within the 49152–65535 range. Step through two simulations side by side, measure the information entropy per allocation, and try to predict the next port before it's revealed.</p>
+  </header>
+
+  <div class="global-controls">
+    <button class="ctl-btn" id="step-both">Next port (both)</button>
+    <button class="ctl-btn secondary" id="auto-btn">Auto-run</button>
+    <button class="reset-all" id="reset-all">Reset</button>
+    <span style="font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted)">step <span id="step-count">0</span> / 50</span>
+  </div>
+
+  <div class="two-up">
+    <div class="sim-panel">
+      <h3>Sequential <span style="color:var(--accent-rose)">(old)</span></h3>
+      <div class="metric"><span>next port</span><span class="val" id="seq-next">49152</span></div>
+      <div class="metric"><span>entropy</span><span class="val" id="seq-entropy">0.00 bits</span></div>
+      <div class="metric"><span>used</span><span class="val" id="seq-used">0 / 50</span></div>
+      <div class="port-grid" id="seq-grid"></div>
+      <div class="predict-box">
+        <h4>Predict next port</h4>
+        <div class="predict-input">
+          <input type="number" id="seq-guess" min="49152" max="65535" placeholder="49152">
+          <button class="ctl-btn" id="seq-predict">Guess</button>
+        </div>
+        <div class="verdict" id="seq-verdict" style="display:none"></div>
+      </div>
+    </div>
+
+    <div class="sim-panel">
+      <h3>Randomized <span style="color:var(--accent-blue)">(Chrome 139)</span></h3>
+      <div class="metric"><span>last port</span><span class="val" id="rnd-last">—</span></div>
+      <div class="metric"><span>entropy</span><span class="val" id="rnd-entropy">14.00 bits</span></div>
+      <div class="metric"><span>used</span><span class="val" id="rnd-used">0 / 50</span></div>
+      <div class="port-grid" id="rnd-grid"></div>
+      <div class="predict-box">
+        <h4>Predict next port</h4>
+        <div class="predict-input">
+          <input type="number" id="rnd-guess" min="49152" max="65535" placeholder="49152">
+          <button class="ctl-btn" id="rnd-predict">Guess</button>
+        </div>
+        <div class="verdict" id="rnd-verdict" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="entropy-chart">
+    <h3>Collision probability as ports accumulate</h3>
+    <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted);margin:0 0 var(--space-3)">Birthday paradox: P ≈ k² / (2N) where k = ports in use, N = range size (16 384)</p>
+    <div class="chart-wrap">
+      <canvas id="entropy-canvas" width="720" height="180"></canvas>
+    </div>
+    <div class="chart-legend">
+      <span><span class="legend-dot" style="background:var(--accent-rose)"></span>sequential — collision risk grows quadratically</span>
+      <span><span class="legend-dot" style="background:var(--accent-blue)"></span>random — same math, but adversary can't exploit the curve</span>
+    </div>
+  </div>
+
+  <div class="info-panel">
+    <h3>Entropy explained</h3>
+    <p style="margin:0 0 var(--space-3)">Sequential allocation carries <strong>≈ 0 bits</strong> of entropy once the starting port is known — each subsequent port is trivially predictable. An attacker forging RST packets only needs the source IP, destination, and current port counter.</p>
+    <p style="margin:0 0 var(--space-3)">Random allocation from a range of <em>N</em> = 16 384 carries <strong>log₂(16 384) = 14 bits</strong> of entropy per pick, forcing the attacker to try up to 16 k guesses per connection hijack attempt.</p>
+    <div style="display:flex;gap:var(--space-3);flex-wrap:wrap;margin-top:var(--space-3)">
+      <div><span class="badge low">Sequential</span> <span style="font-family:var(--font-mono);font-size:0.82rem">≈ 0 bits per allocation</span></div>
+      <div><span class="badge high">Randomised (Chrome 139)</span> <span style="font-family:var(--font-mono);font-size:0.82rem">≈ 14 bits per allocation</span></div>
+    </div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v139/randomizing-tcp-port-allocation-on-windows/">Feature page</a></li>
+      <li><a href="/v139/randomizing-tcp-port-allocation-on-windows/birthday-collision/">Birthday Collision Calculator</a></li>
+      <li><a href="/v139/randomizing-tcp-port-allocation-on-windows/birthday-collision-simulator/">Birthday Collision Simulator</a></li>
+      <li><a href="https://chromestatus.com/feature/5106900286570496" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const RANGE_START = 49152;
+  const RANGE_END = 65535;
+  const RANGE_SIZE = RANGE_END - RANGE_START + 1;
+  const DISPLAY_COUNT = 50;
+
+  let seqPorts = [];
+  let rndPorts = [];
+  let seqNext = RANGE_START;
+  let step = 0;
+  let autoTimer = null;
+  let pendingSeqGuess = null;
+  let pendingRndGuess = null;
+
+  function randPort() {
+    return RANGE_START + Math.floor(Math.random() * RANGE_SIZE);
+  }
+
+  function buildGrid(containerId, ports, mode) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = '';
+    for (let i = 0; i < DISPLAY_COUNT; i++) {
+      const cell = document.createElement('div');
+      cell.className = 'port-cell';
+      if (i < ports.length) {
+        cell.textContent = ports[i] - RANGE_START;
+        cell.className = 'port-cell ' + (mode === 'seq' ? 'used-seq' : 'used-rnd');
+        if (i === ports.length - 1) cell.classList.add('current');
+        cell.title = ports[i];
+      }
+      container.appendChild(cell);
+    }
+  }
+
+  function seqEntropy() {
+    return step === 0 ? 14 : 0;
+  }
+
+  function drawChart() {
+    const canvas = document.getElementById('entropy-canvas');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    const PAD = 30;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg-paper').trim();
+    ctx.fillRect(0, 0, W, H);
+
+    const points = DISPLAY_COUNT + 1;
+    function probAt(k) { return Math.min(1, (k * k) / (2 * RANGE_SIZE)); }
+
+    ctx.strokeStyle = '#ccc';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const y = PAD + ((H - 2 * PAD) * i / 4);
+      ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(W - PAD, y); ctx.stroke();
+      ctx.fillStyle = '#666';
+      ctx.font = '10px monospace';
+      ctx.fillText((25 * (4 - i)) + '%', 2, y + 4);
+    }
+
+    function drawLine(color, offsetPoints) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let k = 0; k <= points; k++) {
+        const x = PAD + ((W - 2 * PAD) * k / points);
+        const p = probAt(k + offsetPoints);
+        const y = PAD + (H - 2 * PAD) * (1 - p);
+        k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    drawLine('#d11a2a', 0);
+    drawLine('#0022ff', 0);
+
+    if (step > 0) {
+      const xSeq = PAD + ((W - 2 * PAD) * step / points);
+      const ySeq = PAD + (H - 2 * PAD) * (1 - probAt(step));
+      ctx.fillStyle = '#d11a2a';
+      ctx.beginPath(); ctx.arc(xSeq, ySeq, 5, 0, 2 * Math.PI); ctx.fill();
+
+      ctx.fillStyle = '#0022ff';
+      ctx.beginPath(); ctx.arc(xSeq, ySeq, 5, 0, 2 * Math.PI); ctx.fill();
+
+      ctx.fillStyle = '#000';
+      ctx.font = '10px monospace';
+      ctx.fillText('k=' + step + ' P≈' + (probAt(step) * 100).toFixed(1) + '%', xSeq + 7, ySeq - 4);
+    }
+  }
+
+  function update() {
+    document.getElementById('seq-next').textContent = seqNext;
+    document.getElementById('seq-entropy').textContent = seqEntropy().toFixed(2) + ' bits';
+    document.getElementById('seq-used').textContent = seqPorts.length + ' / 50';
+
+    const rndEntr = Math.log2(RANGE_SIZE);
+    document.getElementById('rnd-last').textContent = rndPorts.length ? rndPorts[rndPorts.length - 1] : '—';
+    document.getElementById('rnd-entropy').textContent = rndEntr.toFixed(2) + ' bits';
+    document.getElementById('rnd-used').textContent = rndPorts.length + ' / 50';
+    document.getElementById('step-count').textContent = step;
+
+    buildGrid('seq-grid', seqPorts, 'seq');
+    buildGrid('rnd-grid', rndPorts, 'rnd');
+    drawChart();
+  }
+
+  function allocateNext() {
+    if (step >= 50) return;
+    const nextSeq = seqNext;
+    const nextRnd = randPort();
+
+    if (pendingSeqGuess !== null) {
+      const v = document.getElementById('seq-verdict');
+      v.style.display = 'block';
+      if (pendingSeqGuess === nextSeq) {
+        v.textContent = 'Correct! Sequential port was trivially predictable (' + nextSeq + ').';
+        v.className = 'verdict correct';
+      } else {
+        v.textContent = 'Wrong — but the correct answer (' + nextSeq + ') was trivially derivable. Try again with the next one.';
+        v.className = 'verdict wrong';
+      }
+      pendingSeqGuess = null;
+    }
+
+    if (pendingRndGuess !== null) {
+      const v = document.getElementById('rnd-verdict');
+      v.style.display = 'block';
+      if (pendingRndGuess === nextRnd) {
+        v.textContent = 'Lucky guess! Random port was ' + nextRnd + '. Odds were 1 in ' + RANGE_SIZE.toLocaleString() + '.';
+        v.className = 'verdict correct';
+      } else {
+        v.textContent = 'Missed. Random port was ' + nextRnd + '. With 14 bits of entropy, pure luck is the only strategy.';
+        v.className = 'verdict wrong';
+      }
+      pendingRndGuess = null;
+    }
+
+    seqPorts.push(nextSeq);
+    seqNext++;
+    rndPorts.push(nextRnd);
+    step++;
+    update();
+  }
+
+  function reset() {
+    seqPorts = [];
+    rndPorts = [];
+    seqNext = RANGE_START;
+    step = 0;
+    pendingSeqGuess = null;
+    pendingRndGuess = null;
+    document.getElementById('seq-verdict').style.display = 'none';
+    document.getElementById('rnd-verdict').style.display = 'none';
+    document.getElementById('seq-guess').value = '';
+    document.getElementById('rnd-guess').value = '';
+    stopAuto();
+    update();
+  }
+
+  function stopAuto() {
+    clearInterval(autoTimer);
+    autoTimer = null;
+    const btn = document.getElementById('auto-btn');
+    btn.textContent = 'Auto-run';
+    btn.classList.remove('on');
+  }
+
+  document.getElementById('step-both').addEventListener('click', () => { if (step < 50) allocateNext(); });
+
+  document.getElementById('auto-btn').addEventListener('click', function() {
+    if (autoTimer) {
+      stopAuto();
+    } else {
+      if (step >= 50) reset();
+      autoTimer = setInterval(() => {
+        if (step >= 50) { stopAuto(); return; }
+        allocateNext();
+      }, 300);
+      this.textContent = 'Stop';
+      this.classList.add('on');
+    }
+  });
+
+  document.getElementById('reset-all').addEventListener('click', reset);
+
+  document.getElementById('seq-predict').addEventListener('click', () => {
+    const g = parseInt(document.getElementById('seq-guess').value, 10);
+    if (isNaN(g)) return;
+    pendingSeqGuess = g;
+    allocateNext();
+  });
+
+  document.getElementById('rnd-predict').addEventListener('click', () => {
+    const g = parseInt(document.getElementById('rnd-guess').value, 10);
+    if (isNaN(g)) return;
+    pendingRndGuess = g;
+    allocateNext();
+  });
+
+  update();
+</script>
+</body>
+</html>

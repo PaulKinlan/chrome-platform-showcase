@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audio Mix Normalizer — Audio Level for RTC Encoded Frames — Chrome 139</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-4) 0; }
+    .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; }
+    .slider-row { display: flex; align-items: center; gap: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; }
+    .slider-row input[type="range"] { width: 180px; accent-color: var(--accent-blue); }
+    .participants { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-4); margin: var(--space-4) 0; }
+    .participant { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); }
+    .participant h3 { font-family: var(--font-mono); font-size: 0.82rem; text-transform: uppercase; color: var(--text-muted); margin: 0 0 var(--space-3); }
+    .bar-wrap { background: var(--bg-stone); border: 1px solid var(--border-black); height: 20px; position: relative; overflow: hidden; margin: var(--space-2) 0; }
+    .bar-fill { height: 100%; background: var(--accent-emerald); transition: width 120ms linear; }
+    .bar-fill.hot { background: var(--accent-rose); }
+    .meta { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); margin: var(--space-2) 0; }
+    .badge { display: inline-block; padding: 0.2rem 0.55rem; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 700; border: 1px solid transparent; margin-top: var(--space-2); }
+    .badge.boost { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .badge.cut { background: var(--accent-amber); color: var(--text-black); border-color: var(--accent-amber); }
+    .badge.heavy-cut { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .badge.neutral { background: var(--bg-stone); color: var(--text-charcoal); border-color: var(--border-black); }
+    .badge.pending { background: var(--bg-stone); color: var(--text-muted); border-color: var(--border-black); }
+    .support { font-family: var(--font-mono); font-size: 0.78rem; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-black); margin: var(--space-3) 0; }
+    .support.ok { background: var(--bg-stone); color: var(--accent-emerald); }
+    .support.sim { background: var(--bg-stone); color: var(--accent-amber); }
+    .scale-note { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); }
+    .scale-note strong { color: var(--text-black); }
+    pre { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); font-family: var(--font-mono); font-size: 0.82rem; overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v139/audio-level-for-rtc-encoded-frames/">&larr; Audio level for RTC encoded frames</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v139</p>
+    <h1>Audio Mix Normalizer</h1>
+    <p class="lede">Each <code>RTCEncodedAudioFrame</code> carries an <code>audioLevel</code> field on the 0–127 dBov scale (0 = maximum loudness, 127 = silence). A transform pipeline reads this per-frame without decoding and computes the gain correction needed to hit a target loudness.</p>
+  </header>
+
+  <div class="support" id="support-status">Checking RTCEncodedAudioFrame support&hellip;</div>
+
+  <div class="controls">
+    <button class="ctl-btn" id="normalize-btn">Normalize</button>
+    <div class="slider-row">
+      <label for="target-slider">target loudness</label>
+      <input type="range" id="target-slider" min="-40" max="0" value="-20" step="1">
+      <span id="target-display">&minus;20 dBov</span>
+    </div>
+  </div>
+
+  <div class="participants" id="participants"></div>
+
+  <div class="scale-note">
+    <strong>dBov scale:</strong> 0 = maximum possible amplitude (full scale), 127 = effectively silence. Lower numbers are louder. The gain factor for a participant is computed as <code>gain_dB = target_dBov &minus; participant_dBov</code>. A positive result means boost; negative means attenuate.
+  </div>
+
+  <section>
+    <h2>RTCEncodedTransform pattern</h2>
+    <pre><code>const sender = pc.getSenders().find(s => s.track.kind === 'audio');
+const { readable, writable } = sender.createEncodedStreams();
+
+const targetLevel = -20; // dBov
+
+readable.pipeThrough(new TransformStream({
+  transform(frame, controller) {
+    const meta = frame.getMetadata();
+    // meta.audioLevel: 0..127 dBov (Chrome 139+)
+    const gainDb = targetLevel - meta.audioLevel;
+    // gainDb > 0 → boost participant (they are quieter than target)
+    // gainDb < 0 → cut  participant (they are louder than target)
+
+    // Apply gain to the raw PCM in frame.data (Int16Array)
+    const pcm = new Int16Array(frame.data);
+    const factor = Math.pow(10, gainDb / 20);
+    for (let i = 0; i < pcm.length; i++) {
+      pcm[i] = Math.max(-32768, Math.min(32767, Math.round(pcm[i] * factor)));
+    }
+    controller.enqueue(frame);
+  }
+})).pipeTo(writable);</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="/v139/audio-level-for-rtc-encoded-frames/">Feature page</a></li>
+      <li><a href="/v139/audio-level-for-rtc-encoded-frames/encoded-frame-meter/">Encoded Frame Audio Level Meter</a></li>
+      <li><a href="https://chromestatus.com/feature/5206106602995712" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://www.w3.org/TR/webrtc-encoded-transform/" target="_blank" rel="noopener">WebRTC Encoded Transform spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(() => {
+  const supportEl = document.getElementById('support-status');
+  const participantsEl = document.getElementById('participants');
+  const targetSlider = document.getElementById('target-slider');
+  const targetDisplay = document.getElementById('target-display');
+  const normalizeBtn = document.getElementById('normalize-btn');
+
+  const hasApi = typeof RTCPeerConnection !== 'undefined' &&
+    typeof RTCRtpSender !== 'undefined' &&
+    ('createEncodedStreams' in RTCRtpSender.prototype);
+
+  if (hasApi) {
+    supportEl.textContent = 'RTCEncodedAudioFrame.audioLevel available — live transform supported';
+    supportEl.className = 'support ok';
+  } else {
+    supportEl.textContent = 'RTCEncodedAudioFrame not available in this context — running with simulated participants';
+    supportEl.className = 'support sim';
+  }
+
+  const NAMES = ['Alice', 'Bob', 'Carol', 'Dave'];
+  const BASE_LEVELS = [12, 45, 78, 30];
+
+  const state = NAMES.map((name, i) => ({
+    name,
+    level: BASE_LEVELS[i],
+    gainDb: null,
+  }));
+
+  function buildCards() {
+    participantsEl.innerHTML = '';
+    state.forEach((p, i) => {
+      const card = document.createElement('div');
+      card.className = 'participant';
+      card.innerHTML = `
+        <h3>Participant ${i + 1} &mdash; ${p.name}</h3>
+        <div class="meta"><span>audioLevel</span><span id="lv-${i}">—</span></div>
+        <div class="bar-wrap"><div class="bar-fill" id="bar-${i}" style="width:0%"></div></div>
+        <div class="meta"><span>dBov (lower = louder)</span><span id="db-${i}">—</span></div>
+        <div id="badge-${i}"><span class="badge pending">not normalized</span></div>
+      `;
+      participantsEl.appendChild(card);
+    });
+  }
+
+  function updateCard(i, normalized) {
+    const p = state[i];
+    document.getElementById(`lv-${i}`).textContent = p.level + ' / 127';
+    document.getElementById(`db-${i}`).textContent = '-' + p.level + ' dBov';
+
+    const loudnessPct = Math.round((1 - p.level / 127) * 100);
+    const fill = document.getElementById(`bar-${i}`);
+    fill.style.width = loudnessPct + '%';
+    fill.classList.toggle('hot', p.level < 20);
+
+    if (normalized && p.gainDb !== null) {
+      const badgeEl = document.getElementById(`badge-${i}`);
+      let cls, label;
+      if (p.gainDb > 3) {
+        cls = 'boost'; label = '+' + p.gainDb.toFixed(1) + ' dB boost';
+      } else if (p.gainDb >= -6) {
+        cls = 'cut'; label = p.gainDb.toFixed(1) + ' dB cut';
+      } else {
+        cls = 'heavy-cut'; label = p.gainDb.toFixed(1) + ' dB heavy cut';
+      }
+      if (Math.abs(p.gainDb) < 0.5) { cls = 'neutral'; label = '±0 dB (on target)'; }
+      badgeEl.innerHTML = `<span class="badge ${cls}">${label}</span>`;
+    }
+  }
+
+  let normalized = false;
+
+  function jitter(i) {
+    const base = BASE_LEVELS[i];
+    state[i].level = Math.max(0, Math.min(127, base + Math.round((Math.random() - 0.5) * 10)));
+    if (normalized) {
+      const target = parseInt(targetSlider.value, 10);
+      state[i].gainDb = -(target - (-state[i].level));
+    }
+  }
+
+  function tick() {
+    state.forEach((_, i) => {
+      jitter(i);
+      updateCard(i, normalized);
+    });
+    requestAnimationFrame(tick);
+  }
+
+  targetSlider.addEventListener('input', () => {
+    const v = parseInt(targetSlider.value, 10);
+    targetDisplay.textContent = (v <= 0 ? '' : '+') + v + ' dBov';
+    if (normalized) {
+      state.forEach((p, i) => {
+        p.gainDb = -(parseInt(targetSlider.value, 10) - (-p.level));
+        updateCard(i, true);
+      });
+    }
+  });
+
+  normalizeBtn.addEventListener('click', () => {
+    normalized = true;
+    const target = parseInt(targetSlider.value, 10);
+    state.forEach((p, i) => {
+      p.gainDb = -(target - (-p.level));
+      updateCard(i, true);
+    });
+  });
+
+  buildCards();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
