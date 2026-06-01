@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker Pool Calibrator — CPU Performance API — Chrome 151</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .device-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }
+    .stat-card { border: 2px solid var(--border-black); background: var(--bg-paper); padding: 0.5rem 0.65rem; }
+    .stat-label { font-family: var(--font-mono); font-size: 0.55rem; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.2rem; }
+    .stat-val { font-family: var(--font-mono); font-size: 1.1rem; color: var(--text-black); font-weight: 700; }
+    .controls { display: flex; gap: 0.75rem; align-items: flex-start; flex-wrap: wrap; margin-bottom: 1rem; }
+    .ctl-group { display: flex; flex-direction: column; gap: 0.2rem; }
+    .ctl-label { font-family: var(--font-mono); font-size: 0.58rem; color: var(--text-muted); }
+    .ctl-val { font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700; color: var(--text-black); }
+    input[type=range] { accent-color: var(--text-black); width: 140px; }
+    .run-btn { padding: 0.38rem 1rem; border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); font-family: var(--font-mono); font-size: 0.62rem; cursor: pointer; }
+    .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .chart-wrap { margin: 0.75rem 0; }
+    .chart-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.35rem; }
+    .chart-label { font-family: var(--font-mono); font-size: 0.58rem; color: var(--text-charcoal); width: 6rem; text-align: right; flex-shrink: 0; }
+    .chart-bar-bg { flex: 1; background: var(--bg-stone); border: 1px solid var(--border-black); height: 1.2rem; position: relative; overflow: hidden; }
+    .chart-bar { height: 100%; background: var(--text-black); transition: width 0.35s; }
+    .chart-bar.best { background: var(--accent-emerald); }
+    .chart-time { font-family: var(--font-mono); font-size: 0.57rem; color: var(--text-muted); width: 4.5rem; flex-shrink: 0; }
+    .recommendation { border: 2px solid var(--border-black); background: var(--bg-paper); padding: 0.6rem 0.75rem; margin-top: 0.75rem; }
+    .rec-head { font-family: var(--font-mono); font-size: 0.62rem; font-weight: 700; margin-bottom: 0.35rem; }
+    .rec-body { font-family: var(--font-mono); font-size: 0.58rem; color: var(--text-charcoal); line-height: 1.6; white-space: pre-wrap; }
+    .code-block { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-stone); font-family: var(--font-mono); font-size: 0.58rem; padding: 0.5rem 0.6rem; line-height: 1.65; overflow-x: auto; white-space: pre; margin-top: 0.5rem; position: relative; }
+    .copy-btn { position: absolute; top: 0.3rem; right: 0.3rem; padding: 0.15rem 0.4rem; border: 1px solid var(--bg-stone); background: var(--bg-stone); color: var(--text-black); font-family: var(--font-mono); font-size: 0.5rem; cursor: pointer; }
+    .status-line { font-family: var(--font-mono); font-size: 0.58rem; color: var(--text-muted); min-height: 1.2rem; margin-bottom: 0.25rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v151/cpu-performance-api/">&larr; CPU Performance API</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v151 · capabilities · performance</p>
+    <h1>Worker Pool Calibrator</h1>
+    <p class="lede">Reads your device's CPU tier, <code>hardwareConcurrency</code>, and <code>deviceMemory</code>, then runs a real parallel workload across 1–N worker threads to find the pool size where throughput peaks. The results drive a copyable pool-size recommendation that adapts to the tier.</p>
+  </header>
+
+  <div class="device-grid" id="device-grid">
+    <div class="stat-card"><div class="stat-label">CPU tier</div><div class="stat-val" id="stat-tier">—</div></div>
+    <div class="stat-card"><div class="stat-label">hardwareConcurrency</div><div class="stat-val" id="stat-hc">—</div></div>
+    <div class="stat-card"><div class="stat-label">deviceMemory (GB)</div><div class="stat-val" id="stat-dm">—</div></div>
+    <div class="stat-card"><div class="stat-label">Recommended pool</div><div class="stat-val" id="stat-rec">—</div></div>
+  </div>
+
+  <div class="controls">
+    <div class="ctl-group">
+      <span class="ctl-label">Tasks per run</span>
+      <input type="range" id="task-count" min="4" max="64" step="4" value="16">
+      <span class="ctl-val" id="task-count-val">16</span>
+    </div>
+    <div class="ctl-group">
+      <span class="ctl-label">Work per task (iterations × 100k)</span>
+      <input type="range" id="task-work" min="1" max="20" step="1" value="5">
+      <span class="ctl-val" id="task-work-val">5 × 100k</span>
+    </div>
+    <div class="ctl-group" style="justify-content:flex-end;margin-top:1.1rem;">
+      <button class="run-btn" id="run-btn" onclick="runCalibration()">Run calibration</button>
+    </div>
+  </div>
+
+  <div class="status-line" id="status">Click "Run calibration" to benchmark worker pool sizes.</div>
+
+  <div class="chart-wrap" id="chart-wrap">
+    <!-- bars rendered by JS -->
+  </div>
+
+  <div class="recommendation" id="recommendation" style="display:none">
+    <div class="rec-head">Recommendation</div>
+    <div class="rec-body" id="rec-body"></div>
+    <div class="code-block" id="rec-code">
+      <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+    </div>
+  </div>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const WORKER_SRC = `
+    onmessage = function(e) {
+      var iter = e.data.iter;
+      var acc = 0;
+      for (var i = 0; i < iter; i++) acc += Math.sqrt(i) * 0.7 - i * 0.3 + Math.log(i + 1);
+      postMessage({ id: e.data.id, acc: acc });
+    };
+  `;
+
+  let tier = null;
+  const hc = navigator.hardwareConcurrency || 2;
+  const dm = navigator.deviceMemory || null;
+
+  document.getElementById('stat-hc').textContent = hc;
+  document.getElementById('stat-dm').textContent = dm !== null ? dm : 'n/a';
+
+  async function readTier() {
+    if (navigator.cpu && typeof navigator.cpu.performance === 'function') {
+      try {
+        tier = await navigator.cpu.performance();
+        document.getElementById('stat-tier').textContent = tier;
+      } catch (_) {
+        document.getElementById('stat-tier').textContent = 'error';
+      }
+    } else {
+      document.getElementById('stat-tier').textContent = 'n/a';
+    }
+    updateRec();
+  }
+  readTier();
+
+  function derivedTier() {
+    if (tier !== null && typeof tier === 'number') return tier;
+    if (hc >= 8) return 3;
+    if (hc >= 4) return 2;
+    if (hc >= 2) return 1;
+    return 0;
+  }
+
+  function recommendedPool(t) {
+    if (t >= 4) return Math.min(hc, 8);
+    if (t === 3) return Math.min(hc, 6);
+    if (t === 2) return Math.max(2, Math.floor(hc * 0.75));
+    if (t === 1) return Math.max(1, Math.floor(hc * 0.5));
+    return 1;
+  }
+
+  function updateRec() {
+    const pool = recommendedPool(derivedTier());
+    document.getElementById('stat-rec').textContent = pool;
+  }
+
+  document.getElementById('task-count').addEventListener('input', function () {
+    document.getElementById('task-count-val').textContent = this.value;
+  });
+  document.getElementById('task-work').addEventListener('input', function () {
+    document.getElementById('task-work-val').textContent = this.value + ' × 100k';
+  });
+
+  function makeWorkerBlob() {
+    return URL.createObjectURL(new Blob([WORKER_SRC], { type: 'application/javascript' }));
+  }
+
+  async function runPoolSize(poolSize, taskCount, itersPerTask) {
+    return new Promise((resolve) => {
+      const blobUrl = makeWorkerBlob();
+      const workers = [];
+      for (let i = 0; i < poolSize; i++) workers.push(new Worker(blobUrl));
+
+      const t0 = performance.now();
+      let completed = 0;
+      let nextTask = 0;
+
+      function dispatch(worker) {
+        if (nextTask >= taskCount) return;
+        const id = nextTask++;
+        worker.onmessage = () => {
+          completed++;
+          if (completed >= taskCount) {
+            const elapsed = performance.now() - t0;
+            workers.forEach(w => w.terminate());
+            URL.revokeObjectURL(blobUrl);
+            resolve(elapsed);
+          } else {
+            dispatch(worker);
+          }
+        };
+        worker.postMessage({ id, iter: itersPerTask });
+      }
+
+      workers.forEach(w => dispatch(w));
+    });
+  }
+
+  window.runCalibration = async function () {
+    const btn = document.getElementById('run-btn');
+    btn.disabled = true;
+
+    const taskCount = parseInt(document.getElementById('task-count').value);
+    const itersPerTask = parseInt(document.getElementById('task-work').value) * 100000;
+    const maxPool = Math.min(hc * 2, 16);
+    const poolSizes = [];
+    for (let p = 1; p <= maxPool; p = p < 4 ? p + 1 : p * 2) {
+      if (!poolSizes.includes(p) && p <= maxPool) poolSizes.push(p);
+    }
+    if (!poolSizes.includes(hc)) poolSizes.push(hc);
+    poolSizes.sort((a, b) => a - b);
+
+    const status = document.getElementById('status');
+    const chartWrap = document.getElementById('chart-wrap');
+    chartWrap.innerHTML = '';
+
+    const times = {};
+    for (const ps of poolSizes) {
+      status.textContent = 'Benchmarking pool size ' + ps + '…';
+      await new Promise(r => setTimeout(r, 0));
+      const elapsed = await runPoolSize(ps, taskCount, itersPerTask);
+      times[ps] = elapsed;
+
+      const row = document.createElement('div');
+      row.className = 'chart-row';
+      row.dataset.pool = ps;
+      row.innerHTML = `<span class="chart-label">${ps} worker${ps !== 1 ? 's' : ''}</span><span class="chart-bar-bg"><span class="chart-bar" style="width:0%"></span></span><span class="chart-time">${elapsed.toFixed(0)} ms</span>`;
+      chartWrap.appendChild(row);
+    }
+
+    const maxTime = Math.max(...Object.values(times));
+    const minTime = Math.min(...Object.values(times));
+    let bestPool = poolSizes[0];
+    for (const [ps, t] of Object.entries(times)) {
+      if (t === minTime) bestPool = parseInt(ps);
+    }
+
+    for (const [ps, t] of Object.entries(times)) {
+      const row = chartWrap.querySelector(`[data-pool="${ps}"]`);
+      if (!row) continue;
+      const bar = row.querySelector('.chart-bar');
+      const pct = Math.round((t / maxTime) * 100);
+      bar.style.width = pct + '%';
+      if (t === minTime) bar.classList.add('best');
+    }
+
+    status.textContent = `Best: ${bestPool} workers at ${minTime.toFixed(0)} ms. Recommended tier-aware pool: ${recommendedPool(derivedTier())}.`;
+
+    const recPool = recommendedPool(derivedTier());
+    const t = derivedTier();
+    const recText = `Device tier:          ${tier !== null ? tier : t + ' (estimated)'}
+hardwareConcurrency:  ${hc}
+Measured best pool:   ${bestPool} workers (${minTime.toFixed(0)} ms for ${taskCount} tasks)
+Tier-aware pool:      ${recPool} workers
+
+Rationale: tier ${t} devices ${t >= 3 ? 'have sufficient CPU headroom to run up to ' + recPool + ' parallel workers' : 'may throttle under heavy parallel load; ' + recPool + ' workers balances throughput and thermal headroom'}.`;
+
+    document.getElementById('rec-body').textContent = recText;
+
+    const codeBlock = document.getElementById('rec-code');
+    codeBlock.childNodes.forEach(n => { if (n.nodeType === 3) n.remove(); });
+
+    const cpuCheck = tier !== null
+      ? `const tier = await navigator.cpu.performance(); // ${tier}`
+      : `const tier = navigator.hardwareConcurrency >= 8 ? 3 : navigator.hardwareConcurrency >= 4 ? 2 : 1; // estimated`;
+
+    const codeText = `async function getWorkerPoolSize() {
+  let tier = 2; // safe default
+  if (navigator.cpu?.performance) {
+    try { tier = await navigator.cpu.performance(); }
+    catch (_) {}
+  }
+
+  const hc = navigator.hardwareConcurrency || 2;
+  const poolMap = { 4: Math.min(hc, 8), 3: Math.min(hc, 6), 2: Math.max(2, (hc * 0.75)|0), 1: Math.max(1, (hc * 0.5)|0), 0: 1 };
+  return poolMap[Math.min(tier, 4)] ?? 2;
+}
+
+// Usage
+const poolSize = await getWorkerPoolSize(); // → ${recPool} on this device
+const workers = Array.from({ length: poolSize }, () => new Worker('worker.js'));`;
+
+    const copyBtn = codeBlock.querySelector('.copy-btn');
+    codeBlock.textContent = '';
+    codeBlock.appendChild(document.createTextNode(codeText));
+    codeBlock.appendChild(copyBtn);
+
+    document.getElementById('recommendation').style.display = '';
+    btn.disabled = false;
+  };
+
+  window.copyCode = function (btn) {
+    const block = btn.parentElement;
+    const text = block.textContent.replace('Copy', '').replace('Copied!', '').trim();
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = 'Copy', 1800);
+    });
+  };
+})();
+</script>
+</body>
+</html>
