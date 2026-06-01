@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Active Prerender Race — prefetchCache &amp; prerenderCache — Chrome 138</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+    .timeline {
+      position: relative; margin: var(--space-4) 0;
+    }
+    .tl-row {
+      display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3);
+    }
+    .tl-label {
+      font-family: var(--font-mono); font-size: 0.72rem; width: 160px; flex-shrink: 0;
+      color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .tl-bar {
+      flex: 1; height: 28px; border: 2px solid var(--border-black);
+      position: relative; overflow: hidden; background: var(--bg-stone);
+    }
+    .tl-fill {
+      height: 100%; width: 0%; background: var(--accent-blue);
+      transition: width 0.15s linear; position: absolute; top: 0; left: 0;
+    }
+    .tl-fill.active-prerender { background: var(--accent-emerald); }
+    .tl-fill.clear-site-data { background: var(--accent-rose); }
+    .tl-fill.navigate { background: var(--text-charcoal); }
+    .tl-text {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      display: flex; align-items: center; padding: 0 0.5rem;
+      font-family: var(--font-mono); font-size: 0.68rem; color: var(--bg-ivory);
+      white-space: nowrap; overflow: hidden;
+    }
+    .event-log {
+      background: var(--bg-stone); border: 1px solid var(--border-black);
+      font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.7;
+      padding: var(--space-2) var(--space-3); height: 200px; overflow-y: auto;
+    }
+    .entry { }
+    .entry.prerender { color: var(--accent-blue); }
+    .entry.clear { color: var(--accent-rose); }
+    .entry.navigate { color: var(--accent-emerald); }
+    .entry.skip { color: var(--text-muted); font-style: italic; }
+    .entry.result { color: var(--text-black); font-weight: 700; }
+    .entry.info { color: var(--text-muted); }
+
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .btn {
+      font-family: var(--font-mono); font-size: 0.8rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.9rem;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+      box-shadow: 2px 2px 0 var(--border-black);
+    }
+    .btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--border-black); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: 2px 2px 0 var(--border-black); }
+    .btn.primary { background: var(--text-black); color: var(--bg-ivory); }
+    .btn.primary:hover { background: var(--text-charcoal); }
+
+    .scenario-row {
+      display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0;
+    }
+    .scenario-btn {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      border: 2px solid var(--border-black); padding: 0.35rem 0.8rem;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+    }
+    .scenario-btn.active { background: var(--text-black); color: var(--bg-ivory); }
+
+    .outcome-box {
+      margin-top: var(--space-4); padding: var(--space-3) var(--space-4);
+      border: 2px solid var(--border-black); font-family: var(--font-mono);
+      font-size: 0.85rem; color: var(--text-black); background: var(--bg-stone);
+      min-height: 3rem; display: none;
+    }
+    .outcome-box.visible { display: block; }
+    .outcome-box.hit { border-color: var(--accent-emerald); background: var(--bg-paper); }
+    .outcome-box.miss { border-color: var(--accent-rose); background: var(--bg-paper); }
+
+    .spec-note { border-left: 4px solid var(--accent-blue); background: var(--bg-stone); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); margin: var(--space-4) 0; }
+    code { font-family: var(--font-mono); font-size: 0.88em; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; prefetchCache &amp; prerenderCache — Clear-Site-Data</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v138 &middot; performance</p>
+    <h1>Active Prerender Race: navigate while mutating</h1>
+    <p class="lede">The edge case that matters for e-commerce: the user has triggered a prerender of <code>/checkout</code>, the cart-mutation POST fires and returns <code>Clear-Site-Data: "prerenderCache"</code>, and then the user immediately clicks the link. The spec says: <strong>active prerenders are cancelled, not skipped</strong> — the navigation starts fresh as a regular load. This demo models that race with a controllable timeline.</p>
+  </header>
+
+  <div class="spec-note">
+    <strong>Spec rule (Chrome 138):</strong> When <code>Clear-Site-Data: "prerenderCache"</code> is received, any in-progress prerender for the cleared origin is <em>cancelled</em>. A subsequent navigation to the prerendered URL triggers a fresh fetch, not a speculative activation. Compare this to a prefetch hit, which is simply evicted.
+  </div>
+
+  <div class="stage">
+
+    <!-- Scenario selector -->
+    <div style="margin-bottom:var(--space-3)">
+      <span style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted)">Scenario:</span>
+      <div class="scenario-row" id="scenario-row">
+        <button class="scenario-btn active" data-scenario="race">Cart mutation BEFORE navigation (clear wins)</button>
+        <button class="scenario-btn" data-scenario="no-clear">No Clear-Site-Data (cache hit)</button>
+        <button class="scenario-btn" data-scenario="after">Navigation BEFORE clear (stale — clear too late)</button>
+      </div>
+    </div>
+
+    <!-- Timeline visualisation -->
+    <div class="timeline">
+      <div class="tl-row">
+        <span class="tl-label">Prerender /checkout</span>
+        <div class="tl-bar">
+          <div class="tl-fill active-prerender" id="bar-prerender"></div>
+          <div class="tl-text" id="text-prerender">waiting…</div>
+        </div>
+      </div>
+      <div class="tl-row">
+        <span class="tl-label">POST /cart mutation</span>
+        <div class="tl-bar">
+          <div class="tl-fill" id="bar-mutation"></div>
+          <div class="tl-text" id="text-mutation">waiting…</div>
+        </div>
+      </div>
+      <div class="tl-row">
+        <span class="tl-label">Clear-Site-Data</span>
+        <div class="tl-bar">
+          <div class="tl-fill clear-site-data" id="bar-clear"></div>
+          <div class="tl-text" id="text-clear">waiting…</div>
+        </div>
+      </div>
+      <div class="tl-row">
+        <span class="tl-label">Navigate /checkout</span>
+        <div class="tl-bar">
+          <div class="tl-fill navigate" id="bar-nav"></div>
+          <div class="tl-text" id="text-nav">waiting…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="controls">
+      <button class="btn primary" id="btn-run">▶ Run scenario</button>
+      <button class="btn" id="btn-reset">Reset</button>
+    </div>
+
+    <!-- Event log -->
+    <div class="event-log" id="event-log">
+      <div class="entry info">Select a scenario and click Run.</div>
+    </div>
+
+    <!-- Outcome -->
+    <div class="outcome-box" id="outcome-box"></div>
+
+  </div><!-- /.stage -->
+
+  <pre><code>// Scenario: cart mutation arrives before user navigates
+//
+// 1. Speculation rules prerender /checkout
+// &lt;script type="speculation-rules"&gt;
+//   {"prerender": [{"source": "list", "urls": ["/checkout"]}]}
+// &lt;/script&gt;
+//
+// 2. User adds item to cart — response cancels the prerender:
+// POST /cart/add
+// &lt;- Clear-Site-Data: "prerenderCache"
+//
+// 3. User clicks "Checkout" — prerender is GONE:
+//    → fresh navigation, correct cart total
+//    → no stale checkout page served from cache
+
+// If the user clicks BEFORE the mutation response:
+//    → prerender activates with stale cart total (race condition!)
+//    → merchant must also return Clear-Site-Data from /checkout itself</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../cart-mutation/">Cart-mutation invalidation — the Shopify pattern</a></li>
+      <li><a href="../prerender-invalidation-demo/">Prerender invalidation demo — selective header builder</a></li>
+      <li><a href="https://chromestatus.com/feature/4755745652080640" target="_blank" rel="noopener">ChromeStatus: prefetchCache and prerenderCache Clear-Site-Data values</a></li>
+      <li><a href="https://wicg.github.io/nav-speculation/prefetch.html#clear-site-data-patches" target="_blank" rel="noopener">Nav Speculation spec — Clear-Site-Data patches</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  let running = false;
+  let currentScenario = 'race';
+
+  const scenarios = {
+    race: {
+      desc: 'Cart mutation fires and Clear-Site-Data arrives BEFORE the user navigates.',
+      steps: [
+        { bar: 'prerender', pct: 100, text: 'Prerender /checkout started', cls: 'prerender', delay: 0 },
+        { bar: 'prerender', pct: 100, text: 'Prerender /checkout ACTIVE (warm)', cls: 'prerender', delay: 600 },
+        { bar: 'mutation', pct: 60, text: 'POST /cart/add in flight…', cls: 'clear', delay: 1000 },
+        { bar: 'mutation', pct: 100, text: 'POST /cart/add → 200 OK', cls: 'navigate', delay: 1600 },
+        { bar: 'clear', pct: 100, text: 'Clear-Site-Data: "prerenderCache"', cls: 'clear', delay: 1700 },
+        { bar: 'prerender', pct: 0, text: 'Prerender CANCELLED (evicted)', cls: 'skip', delay: 1800, resetBar: 'prerender' },
+        { bar: 'nav', pct: 100, text: 'User navigates → fresh fetch', cls: 'navigate', delay: 2600 },
+      ],
+      outcome: { type: 'miss', text: '✓ CORRECT: prerender evicted before navigation → /checkout fetched fresh with updated cart total.' }
+    },
+    'no-clear': {
+      desc: 'No Clear-Site-Data sent — prerender survives and activates instantly.',
+      steps: [
+        { bar: 'prerender', pct: 100, text: 'Prerender /checkout ACTIVE', cls: 'prerender', delay: 0 },
+        { bar: 'mutation', pct: 100, text: 'POST /cart/add → 200 (no Clear-Site-Data)', cls: 'navigate', delay: 800 },
+        { bar: 'clear', pct: 0, text: 'No Clear-Site-Data header sent', cls: 'skip', delay: 900 },
+        { bar: 'nav', pct: 100, text: 'User navigates → PRERENDER ACTIVATED ⚡', cls: 'prerender', delay: 1400 },
+      ],
+      outcome: { type: 'hit', text: '⚡ CACHE HIT: prerender activated — but cart total is STALE (item just added is not reflected).' }
+    },
+    after: {
+      desc: 'User navigates BEFORE the mutation response arrives — prerender activates with stale data.',
+      steps: [
+        { bar: 'prerender', pct: 100, text: 'Prerender /checkout ACTIVE', cls: 'prerender', delay: 0 },
+        { bar: 'mutation', pct: 30, text: 'POST /cart/add in flight…', cls: 'clear', delay: 400 },
+        { bar: 'nav', pct: 100, text: 'User clicks before response → PRERENDER ACTIVATED', cls: 'prerender', delay: 700 },
+        { bar: 'mutation', pct: 100, text: 'POST /cart/add response arrives', cls: 'navigate', delay: 1200 },
+        { bar: 'clear', pct: 100, text: 'Clear-Site-Data: "prerenderCache" (TOO LATE)', cls: 'skip', delay: 1300 },
+      ],
+      outcome: { type: 'miss', text: '⚠ STALE: user sees old checkout total — Clear-Site-Data arrived after navigation. Mitigate by also clearing on the /checkout response itself.' }
+    }
+  };
+
+  const log = document.getElementById('event-log');
+  function appendLog(text, cls) {
+    const el = document.createElement('div');
+    el.className = 'entry ' + (cls || '');
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+  }
+  function clearLog() { log.innerHTML = ''; }
+
+  function setBar(id, pct, text, textCls) {
+    const bar = document.getElementById('bar-' + id);
+    const txt = document.getElementById('text-' + id);
+    if (pct === 0) {
+      bar.style.width = '0%';
+      bar.className = 'tl-fill';
+    } else {
+      bar.style.width = pct + '%';
+    }
+    if (txt) { txt.textContent = text || ''; }
+  }
+
+  function resetAll() {
+    ['prerender','mutation','clear','nav'].forEach(id => {
+      setBar(id, 0, 'waiting…', '');
+    });
+    document.getElementById('outcome-box').className = 'outcome-box';
+    document.getElementById('outcome-box').textContent = '';
+  }
+
+  function runScenario(name) {
+    if (running) return;
+    running = true;
+    resetAll();
+    clearLog();
+    const sc = scenarios[name];
+    appendLog('Scenario: ' + sc.desc, 'info');
+
+    const timers = [];
+    for (const step of sc.steps) {
+      timers.push(setTimeout(() => {
+        if (step.resetBar) {
+          setBar(step.resetBar, 0, step.text, '');
+        } else {
+          setBar(step.bar, step.pct, step.text, '');
+        }
+        appendLog(step.text, step.cls || '');
+      }, step.delay));
+    }
+
+    const last = sc.steps[sc.steps.length - 1];
+    setTimeout(() => {
+      const ob = document.getElementById('outcome-box');
+      ob.textContent = sc.outcome.text;
+      ob.className = 'outcome-box visible ' + sc.outcome.type;
+      appendLog('→ ' + sc.outcome.text, 'result');
+      running = false;
+    }, last.delay + 500);
+  }
+
+  document.getElementById('btn-run').addEventListener('click', () => {
+    if (!running) runScenario(currentScenario);
+  });
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    running = false;
+    resetAll();
+    clearLog();
+    appendLog('Select a scenario and click Run.', 'info');
+  });
+
+  document.getElementById('scenario-row').addEventListener('click', (e) => {
+    const btn = e.target.closest('.scenario-btn');
+    if (!btn) return;
+    document.querySelectorAll('.scenario-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentScenario = btn.dataset.scenario;
+    resetAll();
+    clearLog();
+    appendLog('Scenario selected. Click ▶ Run to simulate.', 'info');
+  });
+})();
+</script>
+</body>
+</html>
