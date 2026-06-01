@@ -4667,7 +4667,7 @@ function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
 
 <script>
 (async () => {
-  const SUITES = ${JSON.stringify(all)};
+  const SUITES = ${JSON.stringify(all).replace(/</g, "\\u003c")};
   
   document.getElementById("ua").textContent = navigator.userAgent;
   
