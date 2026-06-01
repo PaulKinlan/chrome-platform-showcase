@@ -37,7 +37,10 @@ HTML or CSS unless the task specifically requires it.
 
 ### Slashcommands (Trigger via chat)
 
-- `/auto-research` (or "run showcase"): Starts the complete, autonomous auto-research workflow end-to-end. The agent will automatically run critiques, generate missing conformance suites, spin up browser automation on `http://localhost:3000/conformance/run-all`, collect all failures, repair the relevant demos/concepts in-place, and push clean, working commits for all features.
+- `/auto-research` (or "run showcase"): Starts the complete, autonomous auto-research workflow
+  end-to-end. The agent will automatically run critiques, generate missing conformance suites, spin
+  up browser automation on `http://localhost:3000/conformance/run-all`, collect all failures, repair
+  the relevant demos/concepts in-place, and push clean, working commits for all features.
 
 For a quick server smoke test after `deno task start`:
 

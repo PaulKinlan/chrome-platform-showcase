@@ -47,9 +47,13 @@ stash-race mitigation, the fmt gotcha, and current coverage per milestone — li
 
 For a critique pass, walk concept pages under the target milestone, skipping those with an existing
 `_questions.json`. Start the local server (`deno task start`) and test the actual changes and
-interactivity directly in the browser. 
+interactivity directly in the browser.
 
-Alternatively, **automate the entire workflow autonomously** by typing `/auto-research` in the chat. This will pull code, boot the local server, run all conformance tests in a background browser on `http://localhost:3000/conformance/run-all`, collect all failures, automatically repair the code files in-place, and push clean, working commits for all features. You can also inspect the current quality snapshot via `deno task auto-research`.
+Alternatively, **automate the entire workflow autonomously** by typing `/auto-research` in the chat.
+This will pull code, boot the local server, run all conformance tests in a background browser on
+`http://localhost:3000/conformance/run-all`, collect all failures, automatically repair the code
+files in-place, and push clean, working commits for all features. You can also inspect the current
+quality snapshot via `deno task auto-research`.
 
 ## The routine
 
