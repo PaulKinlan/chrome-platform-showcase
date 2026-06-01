@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Timeout Scope — Explicit resource management (async) — Chrome 131 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .scenario-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-3);
+      margin-bottom: var(--space-3);
+    }
+    @media (max-width: 560px) { .scenario-row { grid-template-columns: 1fr; } }
+    .scenario {
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-ivory);
+      overflow: hidden;
+    }
+    .sc-header {
+      padding: var(--space-2) var(--space-3);
+      background: var(--bg-stone);
+      border-bottom: 1.5px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-charcoal);
+    }
+    .sc-body { padding: var(--space-3); }
+    .sc-label {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 0.25rem;
+    }
+    .sc-value {
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      color: var(--text-black);
+      margin-bottom: var(--space-2);
+    }
+    .progress-bar {
+      height: 0.4rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      margin-bottom: var(--space-2);
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent-blue);
+      width: 0%;
+      transition: width 0.1s linear, background 0.2s;
+    }
+    .progress-fill.timeout { background: var(--accent-rose); }
+    .progress-fill.done { background: var(--accent-emerald); }
+    .sc-status {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      min-height: 1.2em;
+    }
+    .sc-status.ok { color: var(--accent-emerald); }
+    .sc-status.err { color: var(--accent-rose); }
+    .controls { display: flex; gap: var(--space-2); margin: var(--space-3) 0; align-items: center; flex-wrap: wrap; }
+    .param-row {
+      display: flex;
+      gap: var(--space-3);
+      margin-bottom: var(--space-3);
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .param-row label {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-charcoal);
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+    }
+    .param-row input[type="range"] { width: 8rem; }
+    .param-row output { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-black); min-width: 3rem; }
+    .event-log {
+      background: var(--bg-ivory);
+      border: 1.5px solid var(--border-black);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      height: 7rem;
+      overflow-y: auto;
+      color: var(--text-charcoal);
+      margin-top: var(--space-3);
+    }
+    .log-entry { padding: 0.1rem 0; border-bottom: 1px solid var(--bg-stone); }
+    .log-ts { color: var(--text-muted); margin-right: 0.4rem; }
+    .log-ok { color: var(--accent-emerald); }
+    .log-err { color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Explicit resource management (async)</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v131</p>
+    <h1>Timeout Scope</h1>
+    <p class="lede">Combine <code>AbortSignal.timeout()</code> with <code>await using</code> so a fetch and all its cascading cleanup are tied to a single scope. Left panel: request completes before the deadline — the scope exits cleanly. Right panel: request exceeds the timeout — the AbortController fires, fetch is cancelled, and the resource stack unwinds automatically.</p>
+  </header>
+
+  <section class="stage">
+    <div class="param-row">
+      <label>
+        request latency
+        <input type="range" id="latency" min="0.5" max="6" step="0.5" value="2">
+        <output id="latency-out">2.0 s</output>
+      </label>
+      <label>
+        timeout after
+        <input type="range" id="timeout" min="1" max="5" step="0.5" value="3">
+        <output id="timeout-out">3.0 s</output>
+      </label>
+    </div>
+
+    <div class="scenario-row">
+      <div class="scenario">
+        <div class="sc-header">✓ completes in time</div>
+        <div class="sc-body">
+          <div class="sc-label">elapsed</div>
+          <div class="sc-value" id="ok-elapsed">—</div>
+          <div class="progress-bar"><div class="progress-fill" id="ok-bar"></div></div>
+          <div class="sc-status" id="ok-status">ready</div>
+        </div>
+      </div>
+      <div class="scenario">
+        <div class="sc-header">✕ exceeds timeout</div>
+        <div class="sc-body">
+          <div class="sc-label">elapsed</div>
+          <div class="sc-value" id="err-elapsed">—</div>
+          <div class="progress-bar"><div class="progress-fill" id="err-bar"></div></div>
+          <div class="sc-status" id="err-status">ready</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="run-btn">Run both scenarios</button>
+      <button id="reset-btn" style="background: var(--bg-ivory); color: var(--text-black); border: 2px solid var(--border-black);">Reset</button>
+    </div>
+
+    <div class="event-log" id="log">
+      <div class="log-entry"><span class="log-ts">—</span>adjust sliders and click "Run both scenarios"</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>the code</h2>
+<pre><code>async function fetchWithTimeout(url, ms) {
+  // The DisposableStack unwinds automatically when the scope exits
+  await using stack = new AsyncDisposableStack();
+
+  // AbortController registered as a disposable resource
+  const controller = new AbortController();
+  stack.defer(async () => {
+    controller.abort(); // called even if fetch throws
+    console.log("AbortController cleaned up");
+  });
+
+  // Race fetch against a timeout signal
+  const timeoutSignal = AbortSignal.timeout(ms);
+  const anySignal = AbortSignal.any([controller.signal, timeoutSignal]);
+
+  const res = await fetch(url, { signal: anySignal });
+  const data = await res.json();
+  return data; // stack.disposeAsync() runs here → controller.abort()
+}
+
+// Usage
+try {
+  const data = await fetchWithTimeout("/api/slow", 3000);
+} catch (e) {
+  if (e.name === "TimeoutError") console.log("timed out — all resources disposed");
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Explicit resource management (async)</a> — feature index</li>
+      <li><a href="../abort-controller/">AbortController scope</a></li>
+      <li><a href="../component-lifecycle/">Component Lifecycle</a> — observer + timer cleanup</li>
+      <li><a href="https://chromestatus.com/feature/5071005145530368" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const log = document.getElementById("log");
+  let running = false;
+
+  function addLog(msg, cls) {
+    const ts = new Date().toLocaleTimeString("en", { hour12: false });
+    const div = document.createElement("div");
+    div.className = "log-entry";
+    div.innerHTML = `<span class="log-ts">${ts}</span><span class="${cls || ''}">${msg}</span>`;
+    log.insertBefore(div, log.firstChild);
+    while (log.children.length > 30) log.removeChild(log.lastChild);
+  }
+
+  const latencySlider = document.getElementById("latency");
+  const timeoutSlider = document.getElementById("timeout");
+  latencySlider.addEventListener("input", () => {
+    document.getElementById("latency-out").textContent = parseFloat(latencySlider.value).toFixed(1) + " s";
+  });
+  timeoutSlider.addEventListener("input", () => {
+    document.getElementById("timeout-out").textContent = parseFloat(timeoutSlider.value).toFixed(1) + " s";
+  });
+
+  function resetUI() {
+    ["ok", "err"].forEach((prefix) => {
+      document.getElementById(`${prefix}-elapsed`).textContent = "—";
+      const bar = document.getElementById(`${prefix}-bar`);
+      bar.style.width = "0%";
+      bar.className = "progress-fill";
+      const st = document.getElementById(`${prefix}-status`);
+      st.className = "sc-status";
+      st.textContent = "ready";
+    });
+  }
+
+  document.getElementById("reset-btn").addEventListener("click", () => { resetUI(); });
+
+  async function runScenario(prefix, requestLatencyMs, timeoutMs, shouldTimeout) {
+    const bar = document.getElementById(`${prefix}-bar`);
+    const elapsedEl = document.getElementById(`${prefix}-elapsed`);
+    const statusEl = document.getElementById(`${prefix}-status`);
+    statusEl.className = "sc-status";
+    statusEl.textContent = "running…";
+    bar.className = "progress-fill";
+
+    const start = Date.now();
+    const maxMs = Math.max(requestLatencyMs, timeoutMs);
+    let rafId;
+
+    function animateBar() {
+      const elapsed = Date.now() - start;
+      const pct = Math.min(100, (elapsed / maxMs) * 100);
+      bar.style.width = pct + "%";
+      elapsedEl.textContent = (elapsed / 1000).toFixed(1) + " s";
+      if (elapsed < maxMs + 200) rafId = requestAnimationFrame(animateBar);
+    }
+    rafId = requestAnimationFrame(animateBar);
+
+    // Simulate "using" semantics: register cleanup that always runs
+    let cleanupCalled = false;
+    function cleanup(reason) {
+      if (cleanupCalled) return;
+      cleanupCalled = true;
+      addLog(`[${prefix}] stack.disposeAsync() → AbortController.abort() (${reason})`, "");
+    }
+
+    await new Promise((resolve) => {
+      const timedOut = setTimeout(() => {
+        if (shouldTimeout && !cleanupCalled) {
+          cancelAnimationFrame(rafId);
+          bar.style.width = (timeoutMs / maxMs * 100) + "%";
+          bar.className = "progress-fill timeout";
+          const elapsed = Date.now() - start;
+          elapsedEl.textContent = (elapsed / 1000).toFixed(1) + " s";
+          statusEl.className = "sc-status err";
+          statusEl.textContent = "TimeoutError — AbortController aborted";
+          addLog(`[${prefix}] fetch exceeded ${timeoutMs}ms → TimeoutError`, "log-err");
+          cleanup("timeout");
+          resolve();
+        }
+      }, timeoutMs);
+
+      setTimeout(() => {
+        if (!cleanupCalled) {
+          clearTimeout(timedOut);
+          cancelAnimationFrame(rafId);
+          bar.style.width = (requestLatencyMs / maxMs * 100) + "%";
+          bar.className = "progress-fill done";
+          const elapsed = Date.now() - start;
+          elapsedEl.textContent = (elapsed / 1000).toFixed(1) + " s";
+          statusEl.className = "sc-status ok";
+          statusEl.textContent = "Response received — scope exited cleanly";
+          addLog(`[${prefix}] fetch completed in ${requestLatencyMs}ms — scope unwound`, "log-ok");
+          cleanup("scope exit");
+          resolve();
+        }
+      }, requestLatencyMs);
+    });
+  }
+
+  document.getElementById("run-btn").addEventListener("click", async () => {
+    if (running) return;
+    running = true;
+    resetUI();
+    const latency = parseFloat(latencySlider.value) * 1000;
+    const timeout = parseFloat(timeoutSlider.value) * 1000;
+
+    addLog(`starting: latency=${latency}ms, timeout=${timeout}ms`, "");
+    addLog(`left scenario: latency ${latency * 0.6 | 0}ms (completes before ${timeout}ms timeout)`, "");
+    addLog(`right scenario: latency ${latency * 1.4 | 0}ms (exceeds ${timeout}ms timeout)`, "");
+
+    await Promise.all([
+      runScenario("ok", latency * 0.6 | 0, timeout, false),
+      runScenario("err", latency * 1.4 | 0, timeout, true),
+    ]);
+    running = false;
+  });
+</script>
+</body>
+</html>
