@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rich Text Export — Deferred Clipboard — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+
+    /* Editor area */
+    .editor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 680px) { .editor-grid { grid-template-columns: 1fr; } }
+
+    .editor-panel { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); }
+    .panel-label { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+
+    .rich-editor {
+      background: var(--bg-ivory); border: 1px solid var(--border-black);
+      padding: var(--space-3); min-height: 140px; font-family: var(--font-serif); font-size: 0.9rem;
+      line-height: 1.7; color: var(--text-charcoal); outline: none;
+    }
+    .rich-editor:focus { border-color: var(--text-black); }
+    .rich-editor table { border-collapse: collapse; width: 100%; margin: 0.5em 0; font-size: 0.82rem; }
+    .rich-editor td, .rich-editor th { border: 1px solid var(--border-black); padding: 4px 8px; }
+    .rich-editor th { background: var(--bg-stone); font-weight: bold; }
+    .rich-editor mark { background: color-mix(in srgb, var(--accent-blue) 25%, transparent); }
+
+    .toolbar {
+      display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center;
+      background: var(--bg-stone); border: 1px solid var(--border-black); border-bottom: none;
+      padding: 4px var(--space-2);
+    }
+    .tool-btn {
+      font-family: var(--font-mono); font-size: 0.75rem;
+      border: 1px solid var(--border-black); padding: 2px 8px;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+    }
+    .tool-btn:hover { background: var(--bg-stone); }
+    .tool-sep { width: 1px; height: 18px; background: var(--border-black); }
+
+    .copy-btn-row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .copy-btn {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.9rem;
+      cursor: pointer; box-shadow: 2px 2px 0 var(--border-black);
+      background: var(--bg-ivory); color: var(--text-black);
+    }
+    .copy-btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--border-black); }
+    .copy-btn.deferred { background: var(--accent-emerald); }
+    .copy-btn.eager { background: var(--bg-stone); }
+    .copy-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: 2px 2px 0 var(--border-black); }
+
+    /* Callback log */
+    .callback-log {
+      background: var(--bg-stone); border: 1px solid var(--border-black); font-family: var(--font-mono);
+      font-size: 0.72rem; line-height: 1.6; padding: var(--space-2) var(--space-3); max-height: 220px;
+      overflow-y: auto; color: var(--text-charcoal);
+    }
+    .log-entry { padding: 2px 0; border-bottom: 1px solid color-mix(in srgb, var(--border-black) 30%, transparent); }
+    .log-entry:last-child { border-bottom: none; }
+    .log-time { color: var(--text-muted); margin-right: 8px; }
+    .log-fired { color: var(--accent-emerald); font-weight: bold; }
+    .log-skipped { color: var(--text-muted); font-style: italic; }
+    .log-info { color: var(--accent-blue); }
+    .log-warn { color: var(--accent-rose); }
+
+    /* Format matrix */
+    .format-matrix { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.75rem; margin: var(--space-3) 0; }
+    .format-matrix th, .format-matrix td { border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); text-align: center; }
+    .format-matrix th { background: var(--bg-stone); }
+    .format-matrix .fmt-name { text-align: left; }
+    .cell-registered { background: color-mix(in srgb, var(--accent-blue) 15%, transparent); }
+    .cell-fired { background: color-mix(in srgb, var(--accent-emerald) 20%, transparent); font-weight: bold; }
+    .cell-idle { background: var(--bg-ivory); color: var(--text-muted); }
+    .cell-none { background: var(--bg-stone); color: var(--text-muted); }
+
+    /* Paste target */
+    .paste-targets { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin: var(--space-3) 0; }
+    @media (max-width: 580px) { .paste-targets { grid-template-columns: 1fr; } }
+    .paste-target {
+      border: 2px dashed var(--border-black); padding: var(--space-3);
+      background: var(--bg-ivory); font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted);
+      min-height: 80px; cursor: text; position: relative;
+    }
+    .paste-target:focus { border-style: solid; border-color: var(--text-black); outline: none; }
+    .paste-target .target-label {
+      position: absolute; top: 6px; left: 8px;
+      font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted);
+    }
+    .paste-target .target-content { margin-top: 18px; }
+
+    /* Metrics row */
+    .metrics { display: flex; gap: var(--space-4); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .metric-box {
+      border: 1px solid var(--border-black); background: var(--bg-stone); padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-charcoal); min-width: 120px;
+    }
+    .metric-val { font-size: 1.4rem; font-weight: bold; color: var(--text-black); display: block; }
+    .metric-val.green { color: var(--accent-emerald); }
+
+    .note { background: var(--bg-stone); border-left: 4px solid var(--accent-blue); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+
+    code { font-family: var(--font-mono); font-size: 0.88em; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Deferred Clipboard Data Reads</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v149</p>
+    <h1>Rich Text Export</h1>
+    <p class="lede">A rich text editor that registers four clipboard formats — <code>text/html</code>, <code>text/plain</code>, <code>text/csv</code>, and <code>application/json</code> — all via <code>ClipboardItem.delayed()</code>. Only the format the paste target accepts is ever generated. No wasted serialization, no upfront cost.</p>
+  </header>
+
+  <div class="note">
+    <strong>Try it:</strong> Edit the table in the left panel. Click <strong>Deferred Copy</strong> then paste (Ctrl/Cmd+V) into each of the three paste targets on the right. Watch the callback log — only the format each target consumed triggers its generation callback.
+  </div>
+
+  <div class="stage">
+    <div class="editor-grid">
+      <div class="editor-panel">
+        <p class="panel-label">Rich Table Editor</p>
+        <div class="toolbar">
+          <button class="tool-btn" onclick="document.execCommand('bold')"><b>B</b></button>
+          <button class="tool-btn" onclick="document.execCommand('italic')"><i>I</i></button>
+          <div class="tool-sep"></div>
+          <button class="tool-btn" id="btn-highlight">Highlight</button>
+          <div class="tool-sep"></div>
+          <button class="tool-btn" id="btn-reset">Reset</button>
+        </div>
+        <div class="rich-editor" id="rich-editor" contenteditable="true"></div>
+        <div class="copy-btn-row">
+          <button class="copy-btn deferred" id="btn-deferred">Deferred Copy (Chrome 149)</button>
+          <button class="copy-btn eager" id="btn-eager">Eager Copy (old)</button>
+        </div>
+      </div>
+
+      <div class="editor-panel">
+        <p class="panel-label">Paste Targets</p>
+        <div class="paste-targets">
+          <div class="paste-target" contenteditable="true" data-format="html">
+            <span class="target-label">HTML / Rich text</span>
+            <div class="target-content">Click here, then Ctrl+V to paste rich HTML</div>
+          </div>
+          <div class="paste-target" contenteditable="true" data-format="plain">
+            <span class="target-label">Plain text</span>
+            <div class="target-content">Click here, then Ctrl+V to paste plain text</div>
+          </div>
+          <div class="paste-target" data-format="json" tabindex="0" id="json-target">
+            <span class="target-label">JSON</span>
+            <div class="target-content" id="json-content">Click here, then Ctrl+V to paste JSON</div>
+          </div>
+        </div>
+
+        <p class="panel-label" style="margin-top:var(--space-3)">Format callback activity</p>
+        <table class="format-matrix" id="format-matrix">
+          <thead>
+            <tr>
+              <th class="fmt-name">Format</th>
+              <th>Registered</th>
+              <th>Callback fired</th>
+              <th>Last paste cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr id="row-html"><td class="fmt-name">text/html</td><td class="cell-none">—</td><td class="cell-none">—</td><td class="cell-none">—</td></tr>
+            <tr id="row-plain"><td class="fmt-name">text/plain</td><td class="cell-none">—</td><td class="cell-none">—</td><td class="cell-none">—</td></tr>
+            <tr id="row-csv"><td class="fmt-name">text/csv</td><td class="cell-none">—</td><td class="cell-none">—</td><td class="cell-none">—</td></tr>
+            <tr id="row-json"><td class="fmt-name">application/json</td><td class="cell-none">—</td><td class="cell-none">—</td><td class="cell-none">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <p class="panel-label">Callback log</p>
+    <div class="callback-log" id="callback-log">
+      <div class="log-entry"><span class="log-info">Ready. Edit the table and click Deferred Copy to begin.</span></div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric-box">Copies made<span class="metric-val" id="m-copies">0</span></div>
+      <div class="metric-box">Callbacks fired<span class="metric-val" id="m-fired">0</span></div>
+      <div class="metric-box">Callbacks avoided<span class="metric-val green" id="m-avoided">0</span></div>
+      <div class="metric-box">Cost avoided (est.)<span class="metric-val green" id="m-saved">0 ms</span></div>
+    </div>
+  </div>
+
+  <pre><code>// Rich text editor registering 4 formats — all deferred
+async function deferredCopy(editorEl) {
+  const item = new ClipboardItem({
+    // text/html: serialise the contenteditable innerHTML
+    'text/html': ClipboardItem.delayed('text/html', async () => {
+      const html = '&lt;table&gt;' + editorEl.innerHTML + '&lt;/table&gt;';
+      log('text/html callback fired — ' + html.length + ' chars');
+      return new Blob([html], { type: 'text/html' });
+    }),
+
+    // text/plain: strip tags for plain-text paste targets
+    'text/plain': ClipboardItem.delayed('text/plain', async () => {
+      const plain = editorEl.innerText;
+      log('text/plain callback fired — ' + plain.length + ' chars');
+      return new Blob([plain], { type: 'text/plain' });
+    }),
+
+    // text/csv: walk the table cells and build CSV
+    'text/csv': ClipboardItem.delayed('text/csv', async () => {
+      const csv = tableToCSV(editorEl);
+      log('text/csv callback fired');
+      return new Blob([csv], { type: 'text/csv' });
+    }),
+
+    // application/json: structured representation
+    'application/json': ClipboardItem.delayed('application/json', async () => {
+      const json = JSON.stringify(tableToJSON(editorEl), null, 2);
+      log('application/json callback fired');
+      return new Blob([json], { type: 'application/json' });
+    }),
+  });
+
+  await navigator.clipboard.write([item]);
+  // None of the callbacks above have fired yet — they only run on paste.
+}
+
+// Only the format the paste target accepts will trigger its callback.
+// If you copy and never paste: zero callbacks fire, zero serialization cost.</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../format-matrix/">Format Matrix &mdash; five formats, four paste targets, live callback matrix</a></li>
+      <li><a href="../deferred-copy-demo/">Deferred Copy Demo &mdash; the basic ClipboardItem.delayed() pattern</a></li>
+      <li><a href="../clipboard-spy/">Clipboard Spy &mdash; timing comparison of eager vs deferred copy</a></li>
+      <li><a href="https://chromestatus.com/feature/5124936324087808" target="_blank" rel="noopener">ChromeStatus: Deferred Clipboard Data Reads</a></li>
+      <li><a href="https://www.w3.org/TR/clipboard-apis/" target="_blank" rel="noopener">Clipboard API W3C spec</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  // --- Initial rich table content ---
+  const INITIAL_HTML = `
+    <table>
+      <thead><tr><th>Product</th><th>Q1</th><th>Q2</th><th>Q3</th></tr></thead>
+      <tbody>
+        <tr><td>Widget A</td><td>142</td><td>189</td><td>217</td></tr>
+        <tr><td>Widget B</td><td>98</td><td>103</td><td>119</td></tr>
+        <tr><td><mark>Widget C</mark></td><td>67</td><td>88</td><td>134</td></tr>
+      </tbody>
+    </table>`;
+
+  const editor = document.getElementById('rich-editor');
+  editor.innerHTML = INITIAL_HTML;
+
+  document.getElementById('btn-reset').addEventListener('click', () => { editor.innerHTML = INITIAL_HTML; });
+  document.getElementById('btn-highlight').addEventListener('click', () => {
+    document.execCommand('insertHTML', false, '<mark>' + (window.getSelection().toString() || 'highlighted') + '</mark>');
+  });
+
+  // --- Logging ---
+  let copies = 0, fired = 0, avoided = 0, savedMs = 0;
+  const log = document.getElementById('callback-log');
+
+  function addLog(text, cls) {
+    const now = performance.now().toFixed(0);
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    entry.innerHTML = '<span class="log-time">+' + now + 'ms</span><span class="' + (cls || '') + '">' + text + '</span>';
+    log.insertBefore(entry, log.firstChild);
+  }
+
+  function updateMetrics() {
+    document.getElementById('m-copies').textContent = copies;
+    document.getElementById('m-fired').textContent = fired;
+    document.getElementById('m-avoided').textContent = avoided;
+    document.getElementById('m-saved').textContent = savedMs + ' ms';
+  }
+
+  function setRow(rowId, registered, cbFired, cost) {
+    const row = document.getElementById(rowId);
+    if (!row) return;
+    const cells = row.querySelectorAll('td');
+    cells[1].className = registered ? 'cell-registered' : 'cell-none';
+    cells[1].textContent = registered ? '✓' : '—';
+    cells[2].className = cbFired ? 'cell-fired' : (registered ? 'cell-idle' : 'cell-none');
+    cells[2].textContent = cbFired || (registered ? 'not fired' : '—');
+    cells[3].className = cost ? 'cell-fired' : (registered ? 'cell-idle' : 'cell-none');
+    cells[3].textContent = cost || (registered ? '—' : '—');
+  }
+
+  // --- Serializers ---
+  function tableToCSV(el) {
+    const rows = el.querySelectorAll('tr');
+    return Array.from(rows).map(r =>
+      Array.from(r.querySelectorAll('th,td')).map(c => '"' + c.textContent.replace(/"/g, '""') + '"').join(',')
+    ).join('\n');
+  }
+
+  function tableToJSON(el) {
+    const headerCells = el.querySelectorAll('thead th');
+    const headers = Array.from(headerCells).map(c => c.textContent.trim());
+    const bodyRows = el.querySelectorAll('tbody tr');
+    return {
+      headers,
+      rows: Array.from(bodyRows).map(row => {
+        const cells = row.querySelectorAll('td');
+        const obj = {};
+        headers.forEach((h, i) => { obj[h] = cells[i] ? cells[i].textContent.trim() : ''; });
+        return obj;
+      })
+    };
+  }
+
+  // --- Deferred copy ---
+  const btnDeferred = document.getElementById('btn-deferred');
+  const btnEager = document.getElementById('btn-eager');
+  let lastCopyType = null;
+  let rowStates = { html: false, plain: false, csv: false, json: false };
+
+  function resetRowStates() {
+    rowStates = { html: false, plain: false, csv: false, json: false };
+    setRow('row-html', false, '', '');
+    setRow('row-plain', false, '', '');
+    setRow('row-csv', false, '', '');
+    setRow('row-json', false, '', '');
+  }
+
+  const supportsDelayed = typeof ClipboardItem !== 'undefined' && typeof ClipboardItem.delayed === 'function';
+
+  btnDeferred.addEventListener('click', async () => {
+    if (!supportsDelayed) {
+      addLog('ClipboardItem.delayed() not available in this browser — falling back to eager copy', 'log-warn');
+      doEagerCopy();
+      return;
+    }
+    resetRowStates();
+    addLog('Deferred copy registered for 4 formats — no callbacks fired yet', 'log-info');
+    copies++;
+    avoided += 4; // potential callbacks; will be adjusted as they fire
+    savedMs += 40; // estimate
+    updateMetrics();
+    lastCopyType = 'deferred';
+
+    setRow('row-html', true, '', '');
+    setRow('row-plain', true, '', '');
+    setRow('row-csv', true, '', '');
+    setRow('row-json', true, '', '');
+
+    const htmlSnapshot = editor.innerHTML;
+    const item = new ClipboardItem({
+      'text/html': ClipboardItem.delayed('text/html', async () => {
+        const t0 = performance.now();
+        const html = '<table>' + htmlSnapshot + '</table>';
+        const cost = (performance.now() - t0).toFixed(1);
+        fired++; avoided--;
+        addLog('text/html callback fired — ' + html.length + ' chars serialized (' + cost + ' ms)', 'log-fired');
+        setRow('row-html', true, 'fired ✓', cost + ' ms');
+        updateMetrics();
+        return new Blob([html], { type: 'text/html' });
+      }),
+      'text/plain': ClipboardItem.delayed('text/plain', async () => {
+        const t0 = performance.now();
+        const plain = editor.innerText;
+        const cost = (performance.now() - t0).toFixed(1);
+        fired++; avoided--;
+        addLog('text/plain callback fired — ' + plain.length + ' chars (' + cost + ' ms)', 'log-fired');
+        setRow('row-plain', true, 'fired ✓', cost + ' ms');
+        updateMetrics();
+        return new Blob([plain], { type: 'text/plain' });
+      }),
+      'text/csv': ClipboardItem.delayed('text/csv', async () => {
+        const t0 = performance.now();
+        const csv = tableToCSV(editor);
+        const cost = (performance.now() - t0).toFixed(1);
+        fired++; avoided--;
+        addLog('text/csv callback fired — ' + csv.length + ' chars (' + cost + ' ms)', 'log-fired');
+        setRow('row-csv', true, 'fired ✓', cost + ' ms');
+        updateMetrics();
+        return new Blob([csv], { type: 'text/csv' });
+      }),
+      'application/json': ClipboardItem.delayed('application/json', async () => {
+        const t0 = performance.now();
+        const json = JSON.stringify(tableToJSON(editor), null, 2);
+        const cost = (performance.now() - t0).toFixed(1);
+        fired++; avoided--;
+        addLog('application/json callback fired — ' + json.length + ' chars (' + cost + ' ms)', 'log-fired');
+        setRow('row-json', true, 'fired ✓', cost + ' ms');
+        updateMetrics();
+        return new Blob([json], { type: 'application/json' });
+      }),
+    });
+
+    try {
+      await navigator.clipboard.write([item]);
+      addLog('Clipboard write complete — paste anywhere now', 'log-info');
+    } catch (e) {
+      addLog('Clipboard write failed: ' + e.message + ' (requires user gesture & HTTPS)', 'log-warn');
+    }
+  });
+
+  function doEagerCopy() {
+    resetRowStates();
+    copies++;
+    const t0 = performance.now();
+    const html = '<table>' + editor.innerHTML + '</table>';
+    const plain = editor.innerText;
+    const csv = tableToCSV(editor);
+    const json = JSON.stringify(tableToJSON(editor), null, 2);
+    const cost = (performance.now() - t0).toFixed(1);
+    fired += 4;
+    addLog('Eager copy: all 4 formats generated immediately (' + cost + ' ms total)', 'log-warn');
+    setRow('row-html', true, 'fired at copy', cost + ' ms');
+    setRow('row-plain', true, 'fired at copy', cost + ' ms');
+    setRow('row-csv', true, 'fired at copy', cost + ' ms');
+    setRow('row-json', true, 'fired at copy', cost + ' ms');
+    updateMetrics();
+    lastCopyType = 'eager';
+    // Eager clipboard write (plain text only — browser restrictions on eager multi-format)
+    try {
+      navigator.clipboard.writeText(plain).then(() => {
+        addLog('Eager clipboard write complete (text/plain only — use deferred for multi-format)', 'log-info');
+      });
+    } catch (e) {
+      addLog('Eager clipboard write: ' + e.message, 'log-warn');
+    }
+  }
+
+  btnEager.addEventListener('click', doEagerCopy);
+
+  // JSON paste target
+  document.getElementById('json-target').addEventListener('keydown', async function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+      e.preventDefault();
+      try {
+        const items = await navigator.clipboard.read();
+        for (const item of items) {
+          if (item.types.includes('application/json')) {
+            const blob = await item.getType('application/json');
+            const text = await blob.text();
+            document.getElementById('json-content').textContent = text;
+            addLog('Paste into JSON target: application/json consumed', 'log-info');
+            return;
+          }
+        }
+        addLog('Paste: no application/json format available in clipboard', 'log-skipped');
+      } catch (e) {
+        addLog('Paste read failed: ' + e.message, 'log-warn');
+      }
+    }
+  });
+})();
+</script>
+</body>
+</html>
