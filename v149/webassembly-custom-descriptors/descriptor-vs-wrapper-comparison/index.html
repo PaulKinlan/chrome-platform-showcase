@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Descriptor vs Wrapper Comparison — WebAssembly Custom Descriptors — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+    .two-col {
+      display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-4) 0;
+    }
+    @media (max-width: 720px) { .two-col { grid-template-columns: 1fr; } }
+
+    .panel {
+      border: 2px solid var(--border-black); background: var(--bg-ivory);
+    }
+    .panel-head {
+      background: var(--text-black); color: var(--bg-ivory);
+      padding: 8px 14px; font-family: var(--font-mono); font-size: 0.78rem;
+      text-transform: uppercase; letter-spacing: 0.07em;
+    }
+    .panel-head.new { background: #14532d; }
+    .panel-body { padding: var(--space-3); }
+
+    pre.snippet {
+      background: #111; color: #e2e8f0; border: none; padding: var(--space-3);
+      font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.55;
+      overflow-x: auto; margin: 0 0 var(--space-2);
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .kw  { color: #93c5fd; }
+    .fn  { color: #86efac; }
+    .cm  { color: #6b7280; }
+    .st  { color: #fde68a; }
+    .num { color: #f9a8d4; }
+
+    .btn {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.9rem;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+      box-shadow: 2px 2px 0 var(--border-black);
+    }
+    .btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--border-black); }
+    .btn-primary { background: var(--text-black); color: var(--bg-ivory); }
+    .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-2) 0; }
+
+    .result-box {
+      background: #0f172a; color: #e2e8f0; border: 1px solid var(--border-black);
+      padding: var(--space-3); font-family: var(--font-mono); font-size: 0.72rem;
+      line-height: 1.6; min-height: 120px;
+    }
+    .result-label {
+      font-family: var(--font-mono); font-size: 0.69rem; text-transform: uppercase;
+      letter-spacing: 0.07em; color: var(--text-muted); margin-bottom: 6px;
+    }
+
+    .trace-step {
+      display: flex; align-items: flex-start; gap: 10px;
+      border-left: 3px solid var(--border-black); padding: 8px 10px;
+      margin: 4px 0; background: var(--bg-paper);
+      font-family: var(--font-mono); font-size: 0.72rem;
+    }
+    .trace-step.active { border-left-color: var(--accent-blue); background: #eff6ff; }
+    .trace-step.done   { border-left-color: var(--accent-emerald); background: #f0fdf4; }
+    .trace-idx { color: var(--text-muted); min-width: 20px; }
+    .trace-label { color: var(--text-charcoal); flex: 1; }
+    .trace-badge {
+      font-size: 0.65rem; padding: 2px 6px; border: 1px solid var(--border-black);
+      color: var(--bg-ivory); background: var(--text-black); white-space: nowrap;
+    }
+    .trace-badge.new-way { background: #14532d; }
+
+    .metric-row { display: flex; justify-content: space-between; align-items: center;
+      padding: 6px 0; border-bottom: 1px solid var(--bg-stone);
+      font-family: var(--font-mono); font-size: 0.78rem; }
+    .metric-row:last-child { border-bottom: none; }
+    .metric-key { color: var(--text-charcoal); }
+    .metric-val { font-weight: bold; color: var(--text-black); }
+    .metric-val.better { color: var(--accent-emerald); }
+    .metric-val.worse  { color: var(--accent-rose); }
+
+    .chain-box {
+      display: flex; align-items: center; gap: 0; flex-wrap: wrap;
+      margin: 8px 0; font-family: var(--font-mono); font-size: 0.69rem;
+    }
+    .chain-node {
+      border: 1px solid var(--border-black); padding: 4px 8px;
+      background: var(--bg-ivory); color: var(--text-black);
+    }
+    .chain-node.highlight { background: var(--accent-blue); color: var(--bg-ivory); border-color: var(--accent-blue); }
+    .chain-arrow { padding: 0 4px; color: var(--text-muted); }
+    .chain-null { color: var(--text-muted); padding: 4px 8px; }
+
+    .step-controls { display: flex; gap: var(--space-2); align-items: center; margin: var(--space-3) 0; }
+    .step-indicator { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); }
+
+    h3.subsection { font-family: var(--font-serif); font-size: 0.9rem; font-weight: bold;
+      color: var(--text-black); margin: var(--space-3) 0 var(--space-2); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebAssembly Custom Descriptors</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v149</p>
+    <h1>Descriptor vs Wrapper Comparison</h1>
+    <p class="lede">Step through the execution lifecycle — object creation, method call, <code>instanceof</code> check, prototype chain traversal — for both the legacy JS wrapper class pattern and the new WasmGC custom descriptor pattern. Each step is annotated with what the JS engine actually does, and a metrics panel summarises the key differences.</p>
+  </header>
+
+  <div class="stage">
+    <h3 class="subsection">Step-by-step execution trace</h3>
+    <div class="step-controls">
+      <button class="btn btn-primary" id="btn-prev" disabled>&larr; Prev</button>
+      <button class="btn btn-primary" id="btn-next">Next &rarr;</button>
+      <button class="btn" id="btn-reset">Reset</button>
+      <span class="step-indicator" id="step-indicator">Step 1 of 6</span>
+    </div>
+
+    <div class="two-col">
+      <div>
+        <div style="font-family:var(--font-mono);font-size:0.72rem;text-transform:uppercase;letter-spacing:0.07em;color:var(--text-muted);margin-bottom:8px;">Legacy — JS wrapper class</div>
+        <div id="trace-legacy"></div>
+      </div>
+      <div>
+        <div style="font-family:var(--font-mono);font-size:0.72rem;text-transform:uppercase;letter-spacing:0.07em;color:var(--text-muted);margin-bottom:8px;">New — Custom descriptor (Chrome 149)</div>
+        <div id="trace-new"></div>
+      </div>
+    </div>
+
+    <div class="two-col" style="margin-top:var(--space-3)">
+      <div>
+        <div class="result-label">Prototype chain</div>
+        <div id="chain-legacy" class="chain-box"></div>
+        <div class="result-label" style="margin-top:8px">Output</div>
+        <div class="result-box" id="out-legacy">&nbsp;</div>
+      </div>
+      <div>
+        <div class="result-label">Prototype chain</div>
+        <div id="chain-new" class="chain-box"></div>
+        <div class="result-label" style="margin-top:8px">Output</div>
+        <div class="result-box" id="out-new">&nbsp;</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <h3 class="subsection">Side-by-side code</h3>
+    <div class="two-col">
+      <div class="panel">
+        <div class="panel-head">Legacy — JS wrapper class</div>
+        <div class="panel-body">
+          <pre class="snippet"><span class="cm">// 1. Wasm exports raw integer handles</span>
+<span class="cm">// wasmExports.counter_new() → id (i32)</span>
+<span class="cm">// wasmExports.counter_get(id) → i32</span>
+<span class="cm">// wasmExports.counter_inc(id) → void</span>
+
+<span class="cm">// 2. Hand-write a JS wrapper class</span>
+<span class="kw">class</span> <span class="fn">Counter</span> {
+  <span class="fn">constructor</span>() {
+    <span class="cm">// Every instance pays allocation cost</span>
+    <span class="kw">this</span>._id = wasmExports.counter_new();
+  }
+  <span class="fn">get</span>() {
+    <span class="kw">return</span> wasmExports.counter_get(<span class="kw">this</span>._id);
+  }
+  <span class="fn">inc</span>() {
+    wasmExports.counter_inc(<span class="kw">this</span>._id);
+  }
+}
+
+<span class="cm">// 3. Usage looks natural...</span>
+<span class="kw">const</span> c = <span class="kw">new</span> <span class="fn">Counter</span>();
+c.inc(); c.inc();
+console.log(c.get()); <span class="cm">// 2</span>
+
+<span class="cm">// ...but two extra indirections:</span>
+<span class="cm">// JS → wrapper method → wasmExports</span>
+<span class="cm">// And _id stored redundantly on JS side</span></pre>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head new">New — Custom descriptor (Chrome 149)</div>
+        <div class="panel-body">
+          <pre class="snippet"><span class="cm">;; In the .wat / Wasm binary:</span>
+<span class="cm">;; The struct declares its descriptor</span>
+(type $Counter (<span class="kw">struct</span>
+  (field $count i32)
+  (<span class="kw">descriptor</span> $CounterDesc)))
+
+<span class="cm">;; Descriptor wires up the JS prototype</span>
+(type $CounterDesc (<span class="kw">descriptor</span> $Counter
+  (field $proto (ref $JSObject))))
+
+<span class="cm">;; JS side: no wrapper class needed!</span>
+<span class="cm">// The module sets up the prototype once</span>
+<span class="kw">const</span> proto = wasmModule.counterProto;
+proto.get = <span class="kw">function</span>() { ... };
+proto.inc = <span class="kw">function</span>() { ... };
+
+<span class="cm">// Wasm struct IS the JS object</span>
+<span class="kw">const</span> c = wasmExports.counter_new();
+c.inc(); c.inc();
+console.log(c.get()); <span class="cm">// 2</span>
+
+<span class="cm">// One indirection: JS method → Wasm field</span>
+<span class="cm">// No _id, no redundant JS allocation</span></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <h3 class="subsection">Live simulation — create objects and call methods</h3>
+    <div class="controls">
+      <button class="btn btn-primary" id="btn-run-sim">Run simulation (10 objects × 100 calls)</button>
+      <button class="btn" id="btn-clear-sim">Clear</button>
+    </div>
+    <div class="two-col">
+      <div>
+        <div class="result-label">Legacy wrapper result</div>
+        <div class="result-box" id="sim-legacy">Click "Run simulation" to start.</div>
+      </div>
+      <div>
+        <div class="result-label">Custom descriptor (simulated) result</div>
+        <div class="result-box" id="sim-new">Click "Run simulation" to start.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <h3 class="subsection">Metrics comparison</h3>
+    <div class="two-col">
+      <div>
+        <div class="result-label">Legacy wrapper class</div>
+        <div id="metrics-legacy"></div>
+      </div>
+      <div>
+        <div class="result-label">Custom descriptor</div>
+        <div id="metrics-new"></div>
+      </div>
+    </div>
+  </div>
+
+  <pre><code>/* Chrome 149 — Custom descriptors let Wasm types own their JS prototype */
+
+/* Old way: every Wasm type needs a hand-written JS wrapper class.
+   Each wrapper instance duplicates the _id field on the JS heap. */
+class Counter { constructor() { this._id = wasm.counter_new(); } ... }
+
+/* New way: declare a descriptor in the Wasm binary.
+   The struct itself becomes the JS object — no _id, no wrapper class.
+   The prototype is wired up once at module instantiation time. */
+const c = wasmExports.counter_new(); // c IS the Wasm struct
+c instanceof Counter; // true — descriptor sets up the chain</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../prototype-bridge/">Prototype Bridge</a> — old vs new pattern overview</li>
+      <li><a href="../memory-footprint-demo/">Memory Footprint Demo</a> — per-instance allocation comparison</li>
+      <li><a href="../method-dispatch-bench/">Method Dispatch Bench</a> — timing three dispatch patterns</li>
+      <li><a href="../js-interop-explorer/">JS Interop Explorer</a> — live REPL with both patterns</li>
+      <li><a href="https://chromestatus.com/feature/6024844719947776" target="_blank" rel="noopener">ChromeStatus: WebAssembly Custom Descriptors</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+
+  // ---- STEP TRACE DATA ----
+  const STEPS = [
+    {
+      title: 'Module instantiation',
+      legacy: {
+        label: 'Compile Wasm module, export raw counter_new/counter_get/counter_inc functions as JS callables.',
+        badge: 'legacy',
+        chain: ['Counter.prototype', 'Object.prototype', 'null'],
+        chainHighlight: [],
+        output: '// module.exports = { counter_new, counter_get, counter_inc }\n// No prototype setup needed yet.',
+      },
+      new: {
+        label: 'Compile Wasm module. The descriptor field links $CounterDesc → JS prototype object. Chrome 149 wires it automatically.',
+        badge: 'new',
+        chain: ['wasmCounterProto', 'Object.prototype', 'null'],
+        chainHighlight: ['wasmCounterProto'],
+        output: '// Descriptor processed.\n// wasmCounterProto created with .get() and .inc() already attached.',
+      },
+    },
+    {
+      title: 'Object creation',
+      legacy: {
+        label: 'new Counter() — allocates JS wrapper object on heap, calls wasmExports.counter_new() to get an integer handle _id, stores it.',
+        badge: 'legacy',
+        chain: ['c (Counter instance)', 'Counter.prototype', 'Object.prototype', 'null'],
+        chainHighlight: ['c (Counter instance)'],
+        output: '// JS heap: { _id: 0 }    ← redundant id\n// Wasm heap: counter struct { count: 0 }\n// Two allocations: JS wrapper + Wasm struct',
+      },
+      new: {
+        label: 'wasmExports.counter_new() returns the Wasm struct directly as a JS object. No separate JS allocation.',
+        badge: 'new',
+        chain: ['c (Wasm struct)', 'wasmCounterProto', 'Object.prototype', 'null'],
+        chainHighlight: ['c (Wasm struct)'],
+        output: '// Wasm heap: counter struct { count: 0 }\n// c IS the struct — prototype set by descriptor\n// One allocation only',
+      },
+    },
+    {
+      title: 'Method call: c.inc()',
+      legacy: {
+        label: 'c.inc() → lookup "inc" on Counter.prototype → call wrapper → call wasmExports.counter_inc(this._id). Two indirections.',
+        badge: 'legacy',
+        chain: ['c', 'Counter.prototype', 'Object.prototype', 'null'],
+        chainHighlight: ['Counter.prototype'],
+        output: '// Dispatch path:\n// c → Counter.prototype.inc()\n//   → wasmExports.counter_inc(c._id)\n//   → Wasm counter_inc(0)    [2 hops]',
+      },
+      new: {
+        label: 'c.inc() → lookup "inc" on wasmCounterProto → call method with c as receiver → directly accesses Wasm field. One indirection.',
+        badge: 'new',
+        chain: ['c', 'wasmCounterProto', 'Object.prototype', 'null'],
+        chainHighlight: ['wasmCounterProto'],
+        output: '// Dispatch path:\n// c → wasmCounterProto.inc()\n//   → Wasm counter_inc via field ref [1 hop]\n// No redundant _id lookup',
+      },
+    },
+    {
+      title: 'Method call: c.get()',
+      legacy: {
+        label: 'c.get() → Counter.prototype.get() → wasmExports.counter_get(this._id). Two hops, JS _id read.',
+        badge: 'legacy',
+        chain: ['c', 'Counter.prototype', 'Object.prototype', 'null'],
+        chainHighlight: ['Counter.prototype'],
+        output: '// c._id = 0 (read from JS heap)\n// wasmExports.counter_get(0) → 1\n// Result: 1',
+      },
+      new: {
+        label: 'c.get() → wasmCounterProto.get() → reads Wasm field directly from struct. No JS-side id.',
+        badge: 'new',
+        chain: ['c', 'wasmCounterProto', 'Object.prototype', 'null'],
+        chainHighlight: ['wasmCounterProto'],
+        output: '// c.$count (read from Wasm struct field)\n// Result: 1\n// No JS heap access for the counter value',
+      },
+    },
+    {
+      title: 'instanceof check',
+      legacy: {
+        label: 'c instanceof Counter — walks the prototype chain: c.__proto__ === Counter.prototype? Yes.',
+        badge: 'legacy',
+        chain: ['c', 'Counter.prototype ✓', 'Object.prototype', 'null'],
+        chainHighlight: ['Counter.prototype ✓'],
+        output: '// c instanceof Counter → true\n// c instanceof OtherClass → false\n// Works via normal JS prototype chain',
+      },
+      new: {
+        label: 'c instanceof Counter — walks the chain: c.__proto__ === wasmCounterProto? Descriptor links this to Counter. True.',
+        badge: 'new',
+        chain: ['c', 'wasmCounterProto ✓', 'Object.prototype', 'null'],
+        chainHighlight: ['wasmCounterProto ✓'],
+        output: '// c instanceof Counter → true\n// Wasm struct participates in JS type checks\n// No special "isWasmCounter()" helper needed',
+      },
+    },
+    {
+      title: 'Memory layout (N=1000 instances)',
+      legacy: {
+        label: 'Each of 1000 Counter instances has a JS object on the heap with _id. Total: JS overhead × 1000 + Wasm structs × 1000.',
+        badge: 'legacy',
+        chain: ['instance₀ {_id}', 'instance₁ {_id}', '...', 'instance₉₉₉ {_id}'],
+        chainHighlight: [],
+        output: '// JS heap: ~40 bytes × 1000 = ~40 KB\n//  (shape + _id field + pointer to Counter.proto)\n// Wasm heap: struct × 1000\n// Counter.prototype: shared (1 copy)',
+      },
+      new: {
+        label: 'Each of 1000 Counter instances IS a Wasm struct. Descriptor is shared at the type level — one copy for all instances.',
+        badge: 'new',
+        chain: ['struct₀', 'struct₁', '...', 'struct₉₉₉'],
+        chainHighlight: [],
+        output: '// JS heap: near zero (struct refs only)\n// Wasm heap: struct × 1000\n// Descriptor object: shared (1 copy)\n// Savings: ~40 KB JS heap for 1000 instances',
+      },
+    },
+  ];
+
+  let currentStep = 0;
+
+  function renderChain(containerId, nodes, highlights) {
+    const box = document.getElementById(containerId);
+    box.innerHTML = '';
+    nodes.forEach((n, i) => {
+      const node = document.createElement('span');
+      node.className = 'chain-node' + (highlights.includes(n) ? ' highlight' : '');
+      node.textContent = n;
+      box.appendChild(node);
+      if (i < nodes.length - 1) {
+        const arr = document.createElement('span');
+        arr.className = 'chain-arrow';
+        arr.textContent = '→';
+        box.appendChild(arr);
+      }
+    });
+  }
+
+  function renderTrace(containerId, steps, current, side) {
+    const box = document.getElementById(containerId);
+    box.innerHTML = '';
+    steps.forEach((step, i) => {
+      const div = document.createElement('div');
+      div.className = 'trace-step' + (i === current ? ' active' : i < current ? ' done' : '');
+      div.innerHTML = `<span class="trace-idx">${i + 1}.</span>
+        <span class="trace-label">${step.title}: ${step[side].label}</span>
+        <span class="trace-badge ${side === 'new' ? 'new-way' : ''}">${step[side].badge}</span>`;
+      box.appendChild(div);
+    });
+  }
+
+  function updateStep() {
+    const step = STEPS[currentStep];
+    renderTrace('trace-legacy', STEPS, currentStep, 'legacy');
+    renderTrace('trace-new',    STEPS, currentStep, 'new');
+    renderChain('chain-legacy', step.legacy.chain, step.legacy.chainHighlight);
+    renderChain('chain-new',    step.new.chain,    step.new.chainHighlight);
+    document.getElementById('out-legacy').textContent = step.legacy.output;
+    document.getElementById('out-new').textContent    = step.new.output;
+    document.getElementById('step-indicator').textContent = `Step ${currentStep + 1} of ${STEPS.length}: ${step.title}`;
+    document.getElementById('btn-prev').disabled = currentStep === 0;
+    document.getElementById('btn-next').disabled = currentStep === STEPS.length - 1;
+  }
+
+  document.getElementById('btn-next').addEventListener('click', () => { if (currentStep < STEPS.length - 1) { currentStep++; updateStep(); } });
+  document.getElementById('btn-prev').addEventListener('click', () => { if (currentStep > 0) { currentStep--; updateStep(); } });
+  document.getElementById('btn-reset').addEventListener('click', () => { currentStep = 0; updateStep(); });
+
+  updateStep();
+
+  // ---- SIMULATION ----
+  function fmtMs(n) { return n.toFixed(3) + ' ms'; }
+
+  function runLegacy(objectCount, callsEach) {
+    // Simulate the legacy pattern: wrapper objects with _id
+    class LegacyCounter {
+      constructor(id) { this._id = id; this._count = 0; }
+      get() { return this._count; }
+      inc() { this._count++; }
+    }
+    const t0 = performance.now();
+    const objs = [];
+    for (let i = 0; i < objectCount; i++) objs.push(new LegacyCounter(i));
+    const createTime = performance.now() - t0;
+
+    const t1 = performance.now();
+    for (let j = 0; j < callsEach; j++) for (const c of objs) c.inc();
+    const callTime = performance.now() - t1;
+
+    const finalVal = objs[0].get();
+    return { createTime, callTime, finalVal, heapNote: '_id field + wrapper per object' };
+  }
+
+  function runNew(objectCount, callsEach) {
+    // Simulate the custom descriptor pattern: struct IS the JS object, shared proto
+    const counterProto = {
+      get() { return this.$count; },
+      inc() { this.$count++; },
+    };
+    function makeStruct(id) {
+      const s = Object.create(counterProto);
+      s.$id = id;
+      s.$count = 0;
+      return s;
+    }
+    const t0 = performance.now();
+    const objs = [];
+    for (let i = 0; i < objectCount; i++) objs.push(makeStruct(i));
+    const createTime = performance.now() - t0;
+
+    const t1 = performance.now();
+    for (let j = 0; j < callsEach; j++) for (const c of objs) c.inc();
+    const callTime = performance.now() - t1;
+
+    const finalVal = objs[0].get();
+    return { createTime, callTime, finalVal, heapNote: 'struct fields only; proto shared' };
+  }
+
+  document.getElementById('btn-run-sim').addEventListener('click', () => {
+    const N = 10, M = 100;
+    const lr = runLegacy(N, M);
+    const nr = runNew(N, M);
+
+    document.getElementById('sim-legacy').textContent =
+      `Created ${N} wrapper objects\nCalled .inc() ${M} times each\n\n` +
+      `Create time:  ${fmtMs(lr.createTime)}\n` +
+      `Method calls: ${fmtMs(lr.callTime)}\n` +
+      `Final value:  ${lr.finalVal}\n\n` +
+      `Heap model: ${lr.heapNote}`;
+
+    document.getElementById('sim-new').textContent =
+      `Created ${N} descriptor-style structs\nCalled .inc() ${M} times each\n\n` +
+      `Create time:  ${fmtMs(nr.createTime)}\n` +
+      `Method calls: ${fmtMs(nr.callTime)}\n` +
+      `Final value:  ${nr.finalVal}\n\n` +
+      `Heap model: ${nr.heapNote}`;
+
+    renderMetrics(lr, nr);
+  });
+
+  document.getElementById('btn-clear-sim').addEventListener('click', () => {
+    document.getElementById('sim-legacy').textContent = 'Click "Run simulation" to start.';
+    document.getElementById('sim-new').textContent    = 'Click "Run simulation" to start.';
+    document.getElementById('metrics-legacy').innerHTML = '';
+    document.getElementById('metrics-new').innerHTML    = '';
+  });
+
+  function metricRow(key, valStr, cls) {
+    return `<div class="metric-row">
+      <span class="metric-key">${key}</span>
+      <span class="metric-val ${cls}">${valStr}</span>
+    </div>`;
+  }
+
+  function renderMetrics(lr, nr) {
+    document.getElementById('metrics-legacy').innerHTML =
+      metricRow('Pattern', 'JS wrapper class', '') +
+      metricRow('Allocations / instance', '2 (JS obj + Wasm struct)', 'worse') +
+      metricRow('Prototype', 'Counter.prototype (shared)', '') +
+      metricRow('Extra JS fields', '_id (redundant)', 'worse') +
+      metricRow('instanceof', 'c instanceof Counter', '') +
+      metricRow('Indirection per call', '2 (wrapper → wasm)', 'worse') +
+      metricRow('Boilerplate', 'Full class definition', 'worse');
+
+    document.getElementById('metrics-new').innerHTML =
+      metricRow('Pattern', 'Custom descriptor', '') +
+      metricRow('Allocations / instance', '1 (Wasm struct only)', 'better') +
+      metricRow('Prototype', 'descriptor proto (shared)', '') +
+      metricRow('Extra JS fields', 'none', 'better') +
+      metricRow('instanceof', 'c instanceof Counter', '') +
+      metricRow('Indirection per call', '1 (proto → wasm field)', 'better') +
+      metricRow('Boilerplate', 'None (descriptor in .wasm)', 'better');
+  }
+
+  // Render initial empty metrics
+  renderMetrics({}, {});
+
+})();
+</script>
+</body>
+</html>
