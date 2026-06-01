@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker Processor — MediaStreamTrackProcessor Frame Counters — Chrome 150</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+    .layout { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 640px) { .layout { grid-template-columns: 1fr; } }
+
+    .panel { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); }
+    .panel-title { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.07em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+
+    canvas { display: block; width: 100%; border: 1px solid var(--border-black); background: #111; }
+
+    .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); margin: var(--space-3) 0; }
+    .stat-box { background: var(--bg-paper); border: 2px solid var(--border-black);
+      padding: var(--space-3); text-align: center; }
+    .stat-value { font-family: var(--font-mono); font-size: 1.6rem; font-weight: bold;
+      color: var(--text-black); line-height: 1; }
+    .stat-label { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.06em; margin-top: 4px; }
+    .stat-delta { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-charcoal); margin-top: 2px; }
+    .stat-box.warn .stat-value { color: var(--accent-rose); }
+
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .ctrl-label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); }
+    .btn {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.9rem;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+      box-shadow: 2px 2px 0 var(--border-black);
+    }
+    .btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--border-black); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: 2px 2px 0 var(--border-black); }
+    .btn-primary { background: var(--text-black); color: var(--bg-ivory); }
+
+    input[type=range] { width: 120px; }
+
+    .msg-log { height: 160px; overflow-y: auto; background: #111; border: 1px solid var(--border-black);
+      padding: var(--space-2); font-family: var(--font-mono); font-size: 0.7rem; color: #aaa; }
+    .msg-log .msg-main { color: #e8e6df; }
+    .msg-log .msg-worker { color: #7ec8a4; }
+    .msg-log .msg-warn { color: var(--accent-rose); }
+    .msg-log .msg-info { color: #89c4f4; }
+
+    .thread-diagram { display: flex; gap: var(--space-3); align-items: flex-start; margin: var(--space-3) 0; }
+    .thread-box { flex: 1; border: 2px solid var(--border-black); padding: var(--space-3);
+      background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.75rem;
+      color: var(--text-charcoal); }
+    .thread-box h4 { margin: 0 0 var(--space-2); font-size: 0.75rem; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--text-black); }
+    .thread-arrow { align-self: center; font-size: 1.2rem; color: var(--text-muted); flex-shrink: 0; }
+    .thread-item { padding: 2px 0; border-bottom: 1px dotted var(--border-black); }
+    .thread-item:last-child { border-bottom: none; }
+
+    .note { background: var(--bg-stone); border-left: 4px solid var(--accent-blue);
+      padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.8rem;
+      color: var(--text-charcoal); margin-bottom: var(--space-3); }
+    code { font-family: var(--font-mono); font-size: 0.88em; }
+
+    #discard-bar-wrap { margin: var(--space-2) 0; }
+    .bar-track { background: var(--bg-stone); border: 1px solid var(--border-black); height: 18px; }
+    .bar-fill { height: 100%; background: var(--accent-rose); transition: width 0.3s; }
+    .bar-fill.ok { background: var(--accent-emerald); }
+    .bar-label { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-charcoal);
+      margin-top: 3px; }
+    #worker-status { font-family: var(--font-mono); font-size: 0.78rem;
+      color: var(--text-charcoal); padding: var(--space-2) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; MediaStreamTrackProcessor frame counters</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v150</p>
+    <h1>Worker Processor</h1>
+    <p class="lede">Move the <code>MediaStreamTrackProcessor</code> into a dedicated Worker thread — the recommended architecture for heavy per-frame transforms — and read <code>totalFrames</code> / <code>discardedFrames</code> from the worker back to the main thread via <code>postMessage</code>. The main thread only receives the health stats, never the raw frames.</p>
+  </header>
+
+  <div class="note">
+    This demo uses a canvas-based synthetic <code>MediaStream</code> (no camera permission required). The processor lives in an inline <code>Blob</code> Worker. Counter stats are sent to main thread at 1 Hz. Slow down the consumer with the slider to induce frame drops.
+  </div>
+
+  <div class="stage">
+    <div class="layout">
+      <div>
+        <p class="panel-title">Source (main thread)</p>
+        <canvas id="source-canvas" width="320" height="180"></canvas>
+        <div id="worker-status">Worker: idle</div>
+        <div class="controls">
+          <button class="btn btn-primary" id="btn-start">Start</button>
+          <button class="btn" id="btn-stop" disabled>Stop</button>
+          <span class="ctrl-label">Consumer delay:</span>
+          <input type="range" id="delay-slider" min="0" max="80" value="0">
+          <span class="ctrl-label" id="delay-val">0 ms</span>
+        </div>
+      </div>
+      <div>
+        <p class="panel-title">Frame counter stats (posted from worker)</p>
+        <div class="stat-grid">
+          <div class="stat-box" id="box-total">
+            <div class="stat-value" id="stat-total">0</div>
+            <div class="stat-label">totalFrames</div>
+            <div class="stat-delta" id="delta-total">+0/s</div>
+          </div>
+          <div class="stat-box" id="box-discard">
+            <div class="stat-value" id="stat-discard">0</div>
+            <div class="stat-label">discardedFrames</div>
+            <div class="stat-delta" id="delta-discard">+0/s</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-value" id="stat-rate">0</div>
+            <div class="stat-label">fps (producer)</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-value" id="stat-health">—</div>
+            <div class="stat-label">health</div>
+          </div>
+        </div>
+        <div id="discard-bar-wrap">
+          <div class="bar-track"><div class="bar-fill ok" id="discard-bar" style="width:0%"></div></div>
+          <div class="bar-label" id="discard-pct-label">Discard rate: 0%</div>
+        </div>
+      </div>
+    </div>
+
+    <p class="panel-title">postMessage log (worker → main)</p>
+    <div class="msg-log" id="msg-log"></div>
+  </div>
+
+  <h2>Architecture</h2>
+  <div class="thread-diagram">
+    <div class="thread-box">
+      <h4>Main thread</h4>
+      <div class="thread-item">Canvas draw loop (30 fps)</div>
+      <div class="thread-item"><code>canvas.captureStream(30)</code></div>
+      <div class="thread-item">Transfer track to Worker via <code>postMessage</code></div>
+      <div class="thread-item">Receive counter stats @ 1 Hz</div>
+      <div class="thread-item">Update UI</div>
+    </div>
+    <div class="thread-arrow">⇄</div>
+    <div class="thread-box">
+      <h4>Dedicated Worker</h4>
+      <div class="thread-item"><code>new MediaStreamTrackProcessor(track)</code></div>
+      <div class="thread-item">Pull frames from <code>.readable</code></div>
+      <div class="thread-item">Simulated per-frame work (configurable delay)</div>
+      <div class="thread-item"><code>frame.close()</code></div>
+      <div class="thread-item">Post <code>{ totalFrames, discardedFrames }</code> @ 1 Hz</div>
+    </div>
+  </div>
+
+  <pre><code>// main.js
+const track = canvas.captureStream(30).getVideoTracks()[0];
+const worker = new Worker(workerUrl);
+worker.postMessage({ type: 'start', track }, [track]);
+
+worker.onmessage = ({ data }) => {
+  if (data.type === 'stats') {
+    console.log(data.totalFrames, data.discardedFrames);
+  }
+};
+
+// worker.js
+self.onmessage = ({ data }) => {
+  if (data.type !== 'start') return;
+  const processor = new MediaStreamTrackProcessor({ track: data.track });
+  const reader = processor.readable.getReader();
+
+  setInterval(() => {
+    self.postMessage({
+      type: 'stats',
+      totalFrames: processor.totalFrames,
+      discardedFrames: processor.discardedFrames,
+    });
+  }, 1000);
+
+  (async () => {
+    while (true) {
+      const { done, value: frame } = await reader.read();
+      if (done) break;
+      // ... per-frame work ...
+      frame.close();
+    }
+  })();
+};</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../pipeline-meter/">Pipeline Meter</a> — live totalFrames / discardedFrames readout</li>
+      <li><a href="../health-monitor/">Pipeline Health Monitor</a> — health chart and discard rate alert</li>
+      <li><a href="../counters-api-explorer/">Counters API Explorer</a> — feature-detect and probe the API</li>
+      <li><a href="https://chromestatus.com/feature/6267249280286720" target="_blank" rel="noopener">ChromeStatus: MediaStreamTrackProcessor frame counters</a></li>
+      <li><a href="https://w3c.github.io/mediacapture-transform/" target="_blank" rel="noopener">Insertable Streams of Media spec</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const PROD_FPS = 30;
+
+  /* ── worker source (inline blob) ── */
+  const WORKER_SRC = `
+self.onmessage = function(e) {
+  if (e.data.type === 'start') {
+    startProcessing(e.data.track, e.data.consumerDelay);
+  } else if (e.data.type === 'delay') {
+    self._consumerDelay = e.data.value;
+  }
+};
+
+function startProcessing(track, initDelay) {
+  self._consumerDelay = initDelay || 0;
+
+  var supported = (typeof MediaStreamTrackProcessor !== 'undefined')
+    && ('totalFrames' in MediaStreamTrackProcessor.prototype);
+
+  self.postMessage({ type: 'supported', value: supported });
+
+  if (!supported) {
+    simulateFallback();
+    return;
+  }
+
+  var processor = new MediaStreamTrackProcessor({ track: track });
+  var reader = processor.readable.getReader();
+
+  var statsInterval = setInterval(function() {
+    self.postMessage({
+      type: 'stats',
+      totalFrames: processor.totalFrames,
+      discardedFrames: processor.discardedFrames,
+    });
+  }, 1000);
+
+  function loop() {
+    reader.read().then(function(result) {
+      if (result.done) { clearInterval(statsInterval); return; }
+      var frame = result.value;
+      var delay = self._consumerDelay;
+      if (delay > 0) {
+        setTimeout(function() { frame.close(); loop(); }, delay);
+      } else {
+        frame.close();
+        loop();
+      }
+    }).catch(function(err) {
+      clearInterval(statsInterval);
+      self.postMessage({ type: 'error', message: String(err) });
+    });
+  }
+  loop();
+}
+
+var _simTotal = 0, _simDiscard = 0;
+function simulateFallback() {
+  var last = Date.now();
+  setInterval(function() {
+    var now = Date.now(), elapsed = (now - last) / 1000;
+    last = now;
+    var produced = Math.round(30 * elapsed);
+    var delay = self._consumerDelay || 0;
+    var frameTime = 1000 / 30;
+    var discarded = delay > frameTime ? Math.round(produced * Math.min(0.95, delay / 33.3 - 0.8)) : 0;
+    _simTotal += produced;
+    _simDiscard += Math.max(0, discarded);
+    self.postMessage({ type: 'stats', totalFrames: _simTotal, discardedFrames: _simDiscard, simulated: true });
+  }, 1000);
+}
+`.trim();
+
+  /* ── state ── */
+  let worker = null;
+  let animFrame = null;
+  let running = false;
+  let prevTotal = 0, prevDiscard = 0;
+  let consumerDelay = 0;
+  let supported = null;
+
+  /* ── canvas source ── */
+  const canvas = document.getElementById('source-canvas');
+  const ctx = canvas.getContext('2d');
+  let frameCount = 0;
+
+  function drawFrame() {
+    const t = performance.now() / 1000;
+    ctx.fillStyle = '#0a0a12';
+    ctx.fillRect(0, 0, 320, 180);
+
+    // Animated waveform
+    ctx.beginPath();
+    ctx.strokeStyle = '#7ec8a4';
+    ctx.lineWidth = 2;
+    for (let x = 0; x < 320; x++) {
+      const y = 90 + Math.sin((x / 30) + t * 3) * 30 + Math.sin((x / 12) + t * 5) * 10;
+      x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Frame counter
+    ctx.fillStyle = '#e8e6df';
+    ctx.font = '12px monospace';
+    ctx.fillText('frame ' + (++frameCount), 8, 20);
+    ctx.fillText((t).toFixed(2) + 's', 8, 36);
+
+    if (running) animFrame = requestAnimationFrame(drawFrame);
+  }
+
+  /* ── UI elements ── */
+  const btnStart = document.getElementById('btn-start');
+  const btnStop  = document.getElementById('btn-stop');
+  const delaySlider = document.getElementById('delay-slider');
+  const delayVal    = document.getElementById('delay-val');
+  const statusEl    = document.getElementById('worker-status');
+  const msgLog      = document.getElementById('msg-log');
+  const statTotal   = document.getElementById('stat-total');
+  const statDiscard = document.getElementById('stat-discard');
+  const deltaTotal  = document.getElementById('delta-total');
+  const deltaDiscard= document.getElementById('delta-discard');
+  const statRate    = document.getElementById('stat-rate');
+  const statHealth  = document.getElementById('stat-health');
+  const discardBar  = document.getElementById('discard-bar');
+  const discardPct  = document.getElementById('discard-pct-label');
+  const boxDiscard  = document.getElementById('box-discard');
+
+  function addLog(text, cls) {
+    const line = document.createElement('div');
+    line.className = cls || '';
+    line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + text;
+    msgLog.appendChild(line);
+    msgLog.scrollTop = msgLog.scrollHeight;
+  }
+
+  delaySlider.addEventListener('input', () => {
+    consumerDelay = parseInt(delaySlider.value);
+    delayVal.textContent = consumerDelay + ' ms';
+    if (worker) worker.postMessage({ type: 'delay', value: consumerDelay });
+  });
+
+  btnStart.addEventListener('click', start);
+  btnStop.addEventListener('click', stop);
+
+  function start() {
+    if (running) return;
+    running = true;
+    frameCount = 0;
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+    prevTotal = 0;
+    prevDiscard = 0;
+    statusEl.textContent = 'Worker: starting…';
+    addLog('Starting canvas source + worker…', 'msg-info');
+
+    // Start canvas draw
+    drawFrame();
+
+    // Capture stream
+    let stream;
+    try {
+      stream = canvas.captureStream(PROD_FPS);
+    } catch (e) {
+      addLog('captureStream() failed: ' + e.message, 'msg-warn');
+      running = false;
+      btnStart.disabled = false;
+      btnStop.disabled = true;
+      return;
+    }
+    const track = stream.getVideoTracks()[0];
+
+    // Create worker from blob
+    const blob = new Blob([WORKER_SRC], { type: 'application/javascript' });
+    const url  = URL.createObjectURL(blob);
+    worker = new Worker(url);
+    URL.revokeObjectURL(url);
+
+    worker.onmessage = ({ data }) => {
+      if (data.type === 'supported') {
+        supported = data.value;
+        if (!supported) {
+          addLog('MediaStreamTrackProcessor.totalFrames not available — running simulation', 'msg-warn');
+          statusEl.textContent = 'Worker: simulated (Chrome 150 not available)';
+        } else {
+          addLog('Chrome 150 API confirmed: totalFrames + discardedFrames supported', 'msg-worker');
+          statusEl.textContent = 'Worker: running (real API)';
+        }
+      } else if (data.type === 'stats') {
+        const dTotal   = data.totalFrames - prevTotal;
+        const dDiscard = data.discardedFrames - prevDiscard;
+        prevTotal   = data.totalFrames;
+        prevDiscard = data.discardedFrames;
+
+        statTotal.textContent   = data.totalFrames.toLocaleString();
+        statDiscard.textContent = data.discardedFrames.toLocaleString();
+        deltaTotal.textContent  = '+' + dTotal + '/s';
+        deltaDiscard.textContent= '+' + dDiscard + '/s';
+        statRate.textContent    = dTotal;
+
+        const pct = data.totalFrames > 0
+          ? (data.discardedFrames / data.totalFrames * 100)
+          : 0;
+        const pctStr = pct.toFixed(1) + '%';
+        discardPct.textContent = 'Discard rate: ' + pctStr;
+        discardBar.style.width = Math.min(100, pct) + '%';
+        const isWarn = pct > 10;
+        discardBar.classList.toggle('ok', !isWarn);
+        boxDiscard.classList.toggle('warn', isWarn);
+        statHealth.textContent = pct < 5 ? 'Good' : pct < 20 ? 'Fair' : 'Poor';
+
+        const simNote = data.simulated ? ' (sim)' : '';
+        addLog(
+          'total=' + data.totalFrames + ' discarded=' + data.discardedFrames +
+          ' Δtotal=+' + dTotal + ' Δdiscarded=+' + dDiscard + simNote,
+          'msg-worker'
+        );
+      } else if (data.type === 'error') {
+        addLog('Worker error: ' + data.message, 'msg-warn');
+        statusEl.textContent = 'Worker: error';
+      }
+    };
+
+    worker.onerror = (e) => {
+      addLog('Worker uncaught: ' + e.message, 'msg-warn');
+    };
+
+    // Transfer track to worker (transferable)
+    try {
+      worker.postMessage({ type: 'start', track, consumerDelay }, [track]);
+      addLog('Track transferred to worker', 'msg-info');
+    } catch (e) {
+      // transferable track not supported — pass without transfer
+      worker.postMessage({ type: 'start', track, consumerDelay });
+      addLog('Track sent to worker (no transfer, fallback path)', 'msg-info');
+    }
+  }
+
+  function stop() {
+    running = false;
+    if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+    if (worker) { worker.terminate(); worker = null; }
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+    statusEl.textContent = 'Worker: stopped';
+    addLog('Stopped.', 'msg-main');
+  }
+
+  // init draw one frame for preview
+  drawFrame();
+  running = false;
+  if (animFrame) cancelAnimationFrame(animFrame);
+})();
+</script>
+</body>
+</html>
