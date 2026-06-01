@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>N-participant captions — Web Speech API + MediaStreamTrack — Chrome 135</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .caps {
+      display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0;
+    }
+    .pill {
+      font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+      padding: 0.2rem 0.55rem; border: 1px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal);
+    }
+    .pill.ok  { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .pill.bad { background: var(--accent-rose);    color: var(--bg-ivory); border-color: var(--accent-rose); }
+
+    /* ── Conference stage ── */
+    .conf-stage {
+      border: 2px solid var(--border-black); box-shadow: var(--flat-shadow);
+      margin: 0 0 var(--space-4);
+    }
+    .conf-header {
+      background: var(--bg-stone); border-bottom: 2px solid var(--border-black);
+      padding: var(--space-2) var(--space-4);
+      display: flex; justify-content: space-between; align-items: center;
+      font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted);
+      flex-wrap: wrap; gap: var(--space-2);
+    }
+    .conf-header .title { font-weight: bold; color: var(--text-black); }
+    .counter-badge {
+      font-family: var(--font-mono); font-size: 0.7rem;
+      padding: 2px 8px; border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+    }
+
+    /* Participant grid */
+    .participant-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 0; background: var(--bg-stone);
+    }
+
+    .participant-lane {
+      border: 1px solid var(--border-black); border-width: 0 1px 1px 0;
+      background: var(--bg-paper); padding: var(--space-3);
+      display: flex; flex-direction: column; gap: var(--space-2);
+    }
+
+    .lane-header {
+      display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
+    }
+    .lane-avatar {
+      width: 32px; height: 32px; border: 2px solid var(--border-black);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1rem; background: var(--bg-stone); flex-shrink: 0;
+    }
+    .lane-name {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: bold; flex: 1;
+    }
+    .lane-type {
+      font-family: var(--font-mono); font-size: 0.65rem; padding: 2px 6px;
+      border: 1px solid var(--border-black); background: var(--bg-stone); color: var(--text-muted);
+    }
+    .lane-type.real { background: var(--accent-blue); color: var(--bg-ivory); border-color: var(--accent-blue); }
+    .lane-type.synthetic { background: var(--bg-stone); }
+
+    .lane-status {
+      display: flex; align-items: center; gap: var(--space-2);
+      font-family: var(--font-mono); font-size: 0.7rem;
+    }
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--text-muted); flex-shrink: 0;
+    }
+    .status-dot.active   { background: var(--accent-emerald); }
+    .status-dot.error    { background: var(--accent-rose); }
+    .status-dot.stopped  { background: var(--text-muted); }
+
+    /* VU meter */
+    .vu-track {
+      height: 6px; background: var(--bg-stone); border: 1px solid var(--border-black);
+    }
+    .vu-fill {
+      height: 100%; width: 0; transition: width 60ms linear;
+      background: var(--accent-blue);
+    }
+
+    /* Transcript */
+    .lane-transcript {
+      font-family: var(--font-serif); font-size: 0.85rem; line-height: 1.5;
+      min-height: 60px; color: var(--text-charcoal);
+      border: 1px solid var(--border-black); padding: var(--space-2);
+      background: var(--bg-stone); overflow-y: auto; max-height: 80px;
+    }
+    .lane-transcript .interim { color: var(--text-muted); font-style: italic; }
+
+    /* Lane actions */
+    .lane-actions {
+      display: flex; gap: var(--space-2);
+    }
+    .lane-btn {
+      font-family: var(--font-mono); font-size: 0.7rem;
+      border: 1px solid var(--border-black); padding: 0.2rem 0.5rem;
+      background: var(--bg-ivory); color: var(--text-black); cursor: pointer;
+    }
+    .lane-btn.remove { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .lane-btn.remove:hover { opacity: 0.85; }
+
+    /* ── Add participant button ── */
+    .add-strip {
+      border-top: 2px solid var(--border-black); background: var(--bg-stone);
+      padding: var(--space-3) var(--space-4);
+      display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap;
+    }
+    .add-strip button { font-size: 0.82rem; }
+
+    /* ── Info callout ── */
+    .info-callout {
+      border: 2px solid var(--border-black); padding: var(--space-4);
+      background: var(--bg-stone); margin: 0 0 var(--space-4);
+      font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal);
+    }
+    .info-callout strong { color: var(--text-black); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; MediaStreamTrack + Web Speech API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v135</p>
+    <h1>N-participant captions</h1>
+    <p class="lede">Before Chrome 135, <code>SpeechRecognition</code> only used the default microphone. Now you can bind any <code>MediaStreamTrack</code> — one per remote participant — and run N recognisers simultaneously. This page lets you add participants dynamically. <strong>Participant 1</strong> uses your real microphone and produces live captions. Added participants use a synthetic audio source to show the pattern when the real remote tracks arrive.</p>
+  </header>
+
+  <div class="caps">
+    <span class="pill" id="srPill">SpeechRecognition: ?</span>
+    <span class="pill" id="mstPill">mediaStreamTrack: ?</span>
+  </div>
+
+  <div class="info-callout">
+    <strong>Real conference scenario:</strong> In production, participant tracks come from a WebRTC <code>RTCPeerConnection</code>'s <code>ontrack</code> event. You pass each <code>event.track</code> directly to a new <code>SpeechRecognition</code> instance. Participants added here use a synthetic OscillatorNode as the track source — the API pattern is identical; only the audio content differs.
+  </div>
+
+  <div class="conf-stage">
+    <div class="conf-header">
+      <span class="title">Conference call — live captions</span>
+      <span class="counter-badge" id="srCount">0 recognisers active</span>
+    </div>
+
+    <div class="participant-grid" id="participantGrid"><!-- lanes injected by JS --></div>
+
+    <div class="add-strip">
+      <button id="addBtn">+ Add participant</button>
+      <button id="stopAllBtn" disabled>⏹ Stop all</button>
+      <span style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);" id="countNote">0 / 6 participants</span>
+    </div>
+  </div>
+
+  <section>
+    <h2>the pattern</h2>
+<pre><code>// In a real WebRTC conference:
+peerConnection.ontrack = ({ track }) => {
+  const lane = createLane(track.label);
+  startRecognition(lane, track);
+};
+
+function startRecognition(lane, track) {
+  const rec = new SpeechRecognition();
+  rec.mediaStreamTrack = track;  // Chrome 135+
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.onresult = e => lane.updateTranscript(e.results);
+  rec.onend    = () => { if (!lane.stopped) rec.start(); };
+  rec.start();
+  track.addEventListener('ended', () => {
+    lane.stopped = true;
+    rec.abort();
+    lane.remove();
+  });
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">MediaStreamTrack + Web Speech API</a> — feature index</li>
+      <li><a href="../captioned-meeting/">Per-participant captions</a></li>
+      <li><a href="../multi-source-captions/">Multi-source captions</a></li>
+      <li><a href="../processed-audio-transcription/">Processed audio transcription</a></li>
+      <li><a href="https://chromestatus.com/feature/5178378197139456" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const srPill  = document.getElementById('srPill');
+const mstPill = document.getElementById('mstPill');
+
+srPill.textContent  = SR ? 'SpeechRecognition: yes' : 'SpeechRecognition: no';
+srPill.className    = 'pill ' + (SR ? 'ok' : 'bad');
+
+let mstSupported = false;
+if (SR) { try { const t = new SR(); mstSupported = 'mediaStreamTrack' in t; } catch {} }
+mstPill.textContent = mstSupported ? 'mediaStreamTrack: yes' : 'mediaStreamTrack: no (no per-track binding)';
+mstPill.className   = 'pill ' + (mstSupported ? 'ok' : 'bad');
+
+const EMOJIS  = ['🧑', '👩', '👨', '🧓', '👦', '👧'];
+const NAMES   = ['You (mic)', 'Alex', 'Sam', 'Jordan', 'Taylor', 'Morgan'];
+const MAX     = 6;
+
+let lanes      = [];
+let micStream  = null;
+let audioCtx   = null;
+let srCount    = 0;
+
+const grid      = document.getElementById('participantGrid');
+const addBtn    = document.getElementById('addBtn');
+const stopAllBtn= document.getElementById('stopAllBtn');
+const srCountEl = document.getElementById('srCount');
+const countNote = document.getElementById('countNote');
+
+function updateCounters() {
+  const active = lanes.filter(l => l.active).length;
+  srCountEl.textContent = `${active} recogniser${active !== 1 ? 's' : ''} active`;
+  countNote.textContent = `${lanes.length} / ${MAX} participants`;
+  addBtn.disabled  = lanes.length >= MAX;
+  stopAllBtn.disabled = active === 0;
+}
+
+async function createMicTrack() {
+  if (!micStream) {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  }
+  return micStream.getAudioTracks()[0];
+}
+
+function createSyntheticTrack() {
+  if (!audioCtx) audioCtx = new AudioContext();
+  const osc  = audioCtx.createOscillator();
+  const dest = audioCtx.createMediaStreamDestination();
+  osc.frequency.value = 440 + Math.random() * 200;
+  osc.type = 'sine';
+  osc.connect(dest);
+  osc.start();
+  const track = dest.stream.getAudioTracks()[0];
+  track._osc = osc;
+  return track;
+}
+
+function buildAnalyser(track) {
+  if (!audioCtx) audioCtx = new AudioContext();
+  const src  = audioCtx.createMediaStreamSource(new MediaStream([track]));
+  const anal = audioCtx.createAnalyser();
+  anal.fftSize = 256;
+  src.connect(anal);
+  return anal;
+}
+
+async function addLane(isFirst) {
+  if (lanes.length >= MAX) return;
+
+  const idx   = lanes.length;
+  const name  = NAMES[idx]  || `Speaker ${idx + 1}`;
+  const emoji = EMOJIS[idx] || '🎤';
+  const isReal = (idx === 0);
+
+  const lane = {
+    idx, name, emoji, isReal,
+    track: null, analyser: null,
+    rec: null, transcript: '', active: false, stopped: false,
+    rafId: null, el: null,
+  };
+
+  // Build DOM
+  const el = document.createElement('div');
+  el.className = 'participant-lane';
+  el.innerHTML = `
+    <div class="lane-header">
+      <div class="lane-avatar">${emoji}</div>
+      <span class="lane-name">${name}</span>
+      <span class="lane-type ${isReal ? 'real' : 'synthetic'}">${isReal ? 'real mic' : 'synthetic'}</span>
+    </div>
+    <div class="lane-status">
+      <div class="status-dot" id="dot-${idx}"></div>
+      <span id="status-${idx}">connecting…</span>
+    </div>
+    <div class="vu-track"><div class="vu-fill" id="vu-${idx}"></div></div>
+    <div class="lane-transcript" id="tr-${idx}">—</div>
+    <div class="lane-actions">
+      <button class="lane-btn remove" id="rm-${idx}">Remove</button>
+    </div>
+  `;
+  grid.appendChild(el);
+  lane.el = el;
+
+  el.querySelector(`#rm-${idx}`).addEventListener('click', () => removeLane(lane));
+  lanes.push(lane);
+  updateCounters();
+
+  // Acquire track
+  let track;
+  try {
+    track = isReal ? await createMicTrack() : createSyntheticTrack();
+  } catch (err) {
+    setStatus(lane, 'error', 'mic denied: ' + err.message);
+    return;
+  }
+  lane.track = track;
+  lane.analyser = buildAnalyser(track);
+
+  // VU meter
+  const vuFill = document.getElementById(`vu-${idx}`);
+  const buf    = new Uint8Array(lane.analyser.frequencyBinCount);
+  function drawVU() {
+    if (!lane.analyser) return;
+    lane.analyser.getByteTimeDomainData(buf);
+    let s = 0;
+    for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; s += v * v; }
+    vuFill.style.width = (Math.min(Math.sqrt(s / buf.length) * 500, 100)).toFixed(1) + '%';
+    lane.rafId = requestAnimationFrame(drawVU);
+  }
+  lane.rafId = requestAnimationFrame(drawVU);
+
+  // Start SpeechRecognition
+  if (!SR) {
+    setStatus(lane, 'error', 'SpeechRecognition unavailable');
+    return;
+  }
+
+  const trEl = document.getElementById(`tr-${idx}`);
+
+  function startSR() {
+    const rec = new SR();
+    if (mstSupported) rec.mediaStreamTrack = track;
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = 'en-US';
+
+    rec.onstart = () => {
+      lane.active = true;
+      setStatus(lane, 'active', isReal ? 'listening…' : 'listening (synthetic track)');
+      updateCounters();
+    };
+    rec.onresult = (e) => {
+      let final = '', interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) final += t + ' '; else interim += t;
+      }
+      lane.transcript += final;
+      trEl.innerHTML  = (lane.transcript || '') + (interim ? `<span class="interim">${interim}</span>` : '') || '—';
+    };
+    rec.onerror = (e) => {
+      if (e.error !== 'aborted' && e.error !== 'no-speech') {
+        setStatus(lane, 'error', 'error: ' + e.error);
+      }
+    };
+    rec.onend = () => {
+      lane.active = false;
+      updateCounters();
+      if (!lane.stopped) startSR();
+    };
+    try { rec.start(); } catch {}
+    lane.rec = rec;
+  }
+
+  track.addEventListener('ended', () => stopLane(lane));
+  startSR();
+  setStatus(lane, 'active', isReal ? 'waiting for mic…' : 'synthetic track active');
+  updateCounters();
+}
+
+function setStatus(lane, state, text) {
+  const dot = document.getElementById(`dot-${lane.idx}`);
+  const lbl = document.getElementById(`status-${lane.idx}`);
+  if (dot) { dot.className = 'status-dot ' + state; }
+  if (lbl) { lbl.textContent = text; }
+}
+
+function stopLane(lane) {
+  lane.stopped = true;
+  lane.active  = false;
+  if (lane.rec) { try { lane.rec.abort(); } catch {} lane.rec = null; }
+  if (lane.rafId) { cancelAnimationFrame(lane.rafId); lane.rafId = null; }
+  if (lane.track && lane.track._osc) { lane.track._osc.stop(); }
+  if (lane.track && !lane.isReal)    { lane.track.stop(); }
+  setStatus(lane, 'stopped', 'stopped');
+  const vu = document.getElementById(`vu-${lane.idx}`);
+  if (vu) vu.style.width = '0';
+  updateCounters();
+}
+
+function removeLane(lane) {
+  stopLane(lane);
+  lane.el.remove();
+  lanes = lanes.filter(l => l !== lane);
+  updateCounters();
+}
+
+addBtn.addEventListener('click', () => addLane(lanes.length === 0));
+
+stopAllBtn.addEventListener('click', () => {
+  lanes.forEach(stopLane);
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+});
+
+// Auto-add first participant
+addLane(true);
+</script>
+</body>
+</html>
