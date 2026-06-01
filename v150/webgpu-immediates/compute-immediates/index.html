@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Compute Immediates — WebGPU Immediates — Chrome 150</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .support-note {
+      padding: 0.7rem 1rem;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-stone);
+      font-size: 0.8rem;
+      font-family: var(--font-mono);
+      margin-bottom: 1.5rem;
+    }
+    #support-status { font-weight: 700; }
+
+    .demo-area {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    canvas {
+      border: 1.5px solid var(--border-black);
+      display: block;
+      width: 100%;
+      max-width: 560px;
+      height: 160px;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin-top: 0.75rem;
+      align-items: flex-start;
+    }
+
+    .ctrl-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+
+    .ctrl-label {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .ctrl-value {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--text-black);
+      font-weight: 700;
+    }
+
+    input[type=range] {
+      width: 140px;
+      accent-color: var(--text-black);
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 0.4rem;
+      flex-wrap: wrap;
+    }
+
+    .wave-btn {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 700;
+      padding: 0.3rem 0.65rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      cursor: pointer;
+    }
+    .wave-btn.active {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+    }
+
+    .frame-info {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--text-muted);
+      margin-top: 0.5rem;
+    }
+
+    .pass-badge {
+      display: inline-block;
+      padding: 0.1rem 0.45rem;
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 700;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      margin: 0 0.2rem;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v150/webgpu-immediates/">&larr; WebGPU Immediates</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v150 · WebGPU</p>
+    <h1>Compute Immediates</h1>
+    <p class="lede"><code>setImmediateData()</code> works on <em>compute</em> pass encoders too, not just render passes. Pass waveform parameters directly to a compute dispatch — frequency, amplitude, and shape — without allocating a uniform buffer. The compute shader writes to a storage buffer; the render pass reads it to draw the waveform.</p>
+  </header>
+
+  <div class="support-note">
+    Feature detection: <span id="support-status">checking…</span>
+  </div>
+
+  <div class="demo-area">
+    <canvas id="canvas" width="560" height="160"></canvas>
+    <div class="controls">
+      <div class="ctrl-group">
+        <span class="ctrl-label">Frequency</span>
+        <input type="range" id="freq" min="1" max="16" value="4" step="1">
+        <span class="ctrl-value" id="freq-val">4</span>
+      </div>
+      <div class="ctrl-group">
+        <span class="ctrl-label">Amplitude</span>
+        <input type="range" id="amp" min="5" max="100" value="70" step="1">
+        <span class="ctrl-value" id="amp-val">70%</span>
+      </div>
+      <div class="ctrl-group">
+        <span class="ctrl-label">Waveform</span>
+        <div class="btn-row">
+          <button class="wave-btn active" data-wave="0">Sine</button>
+          <button class="wave-btn" data-wave="1">Square</button>
+          <button class="wave-btn" data-wave="2">Sawtooth</button>
+        </div>
+      </div>
+    </div>
+    <p class="frame-info" id="frame-info">—</p>
+  </div>
+
+  <pre><code>// ── WGSL compute shader ─────────────────────────────────────
+struct Params {
+  frequency : f32,
+  amplitude : f32,
+  waveShape : u32,   // 0=sine, 1=square, 2=sawtooth
+  time      : f32,
+}
+var&lt;immediate&gt; p: Params;   // ← immediate address space
+
+@group(0) @binding(0) var&lt;storage, read_write&gt; wave: array&lt;f32, 512&gt;;
+
+@compute @workgroup_size(64)
+fn computeWave(@builtin(global_invocation_id) gid: vec3u) {
+  let i   = gid.x;
+  let t   = (f32(i) / 512.0 + p.time * 0.2) * p.frequency * 6.283185;
+  var v: f32;
+  switch p.waveShape {
+    case 0u  { v = sin(t); }         // sine
+    case 1u  { v = sign(sin(t)); }   // square
+    default  { v = fract(t / 6.283185) * 2.0 - 1.0; } // sawtooth
+  }
+  wave[i] = v * p.amplitude;
+}
+
+// ── JS — pass params to compute dispatch via immediates ─────
+const passParams = new ArrayBuffer(16);
+const view = new DataView(passParams);
+view.setFloat32(0,  frequency,  true);  // frequency
+view.setFloat32(4,  amplitude,  true);  // amplitude
+view.setUint32 (8,  waveShape,  true);  // waveShape
+view.setFloat32(12, t,          true);  // time
+
+const computePass = encoder.beginComputePass();
+computePass.setPipeline(computePipeline);
+computePass.setBindGroup(0, bindGroup);
+computePass.setImmediateData(0, passParams);  // ← one call, no buffer write
+computePass.dispatchWorkgroups(8);           // 8 × 64 = 512 elements
+computePass.end();</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../push-constants-basics/">Push Constants Basics</a> — render pass immediates</li>
+      <li><a href="../per-draw-materials/">Per-Draw Materials</a> — immediates changing between draw calls</li>
+      <li><a href="../performance-comparison/">Performance Comparison</a> — immediates vs writeBuffer</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+const statusEl  = document.getElementById('support-status');
+const frameInfo = document.getElementById('frame-info');
+const freqEl    = document.getElementById('freq');
+const ampEl     = document.getElementById('amp');
+const freqVal   = document.getElementById('freq-val');
+const ampVal    = document.getElementById('amp-val');
+
+let freq      = 4;
+let amp       = 0.70;
+let waveShape = 0;
+
+freqEl.addEventListener('input', () => {
+  freq = parseInt(freqEl.value);
+  freqVal.textContent = freq;
+});
+ampEl.addEventListener('input', () => {
+  amp = parseInt(ampEl.value) / 100;
+  ampVal.textContent = ampEl.value + '%';
+});
+document.querySelectorAll('.wave-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.wave-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    waveShape = parseInt(b.dataset.wave);
+  });
+});
+
+async function init() {
+  if (!navigator.gpu) {
+    statusEl.textContent = 'WebGPU not available — Canvas 2D fallback. Use Chrome 150+.';
+    statusEl.style.color = 'var(--accent-rose)';
+    runFallback();
+    return;
+  }
+
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) {
+    statusEl.textContent = 'No WebGPU adapter — Canvas 2D fallback.';
+    statusEl.style.color = 'var(--accent-rose)';
+    runFallback();
+    return;
+  }
+
+  const device = await adapter.requestDevice();
+
+  const supportsImmediates =
+    typeof GPUComputePassEncoder !== 'undefined' &&
+    typeof GPUComputePassEncoder.prototype.setImmediateData === 'function';
+
+  statusEl.textContent = supportsImmediates
+    ? 'computePassEncoder.setImmediateData() supported ✓'
+    : 'WebGPU supported; compute immediates not yet available — writeBuffer fallback used';
+  statusEl.style.color = supportsImmediates ? 'var(--accent-emerald)' : '#b87b00';
+
+  const N = 512;
+
+  const computeShader = device.createShaderModule({ code: `
+    struct Params {
+      frequency : f32,
+      amplitude : f32,
+      waveShape : u32,
+      time      : f32,
+    }
+    @group(0) @binding(0) var<uniform>            p    : Params;
+    @group(0) @binding(1) var<storage, read_write> wave : array<f32>;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) gid: vec3u) {
+      let i  = gid.x;
+      let n  = arrayLength(&wave);
+      if i >= n { return; }
+      let t  = (f32(i) / f32(n) + p.time * 0.2) * p.frequency * 6.283185307;
+      var v: f32;
+      switch p.waveShape {
+        case 1u  { v = select(-1.0, 1.0, sin(t) >= 0.0); }
+        case 2u  { v = fract(t / 6.283185307) * 2.0 - 1.0; }
+        default  { v = sin(t); }
+      }
+      wave[i] = v * p.amplitude;
+    }
+  `});
+
+  const renderShader = device.createShaderModule({ code: `
+    @group(0) @binding(1) var<storage> wave: array<f32>;
+
+    struct VOut { @builtin(position) pos: vec4f, @location(0) v: f32 }
+
+    @vertex fn vs(@builtin(vertex_index) vi: u32) -> VOut {
+      // Each column i → two triangles forming a vertical bar from 0.5 to wave[i]
+      let col   = vi / 6u;
+      let local = vi % 6u;
+      let n     = arrayLength(&wave);
+      let x     = (f32(col) / f32(n)) * 2.0 - 1.0;
+      let xnext = (f32(col + 1u) / f32(n)) * 2.0 - 1.0;
+      let h     = wave[col];
+      // 6 verts per column (two triangles): positions
+      let xs = array<f32,6>(x, xnext, x,   xnext, xnext, x    );
+      let ys = array<f32,6>(0.0, 0.0, h,   h,     0.0,   h    );
+      var o: VOut;
+      o.pos = vec4f(xs[local], ys[local], 0.0, 1.0);
+      o.v   = h;
+      return o;
+    }
+
+    @fragment fn fs(in: VOut) -> @location(0) vec4f {
+      let t = clamp(abs(in.v), 0.0, 1.0);
+      return vec4f(t * 0.1, t * 0.6, t, 1.0);
+    }
+  `});
+
+  // Storage buffer shared between compute and render
+  const waveBuf = device.createBuffer({
+    size: N * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+
+  // Uniform buffer for params (fallback path)
+  const uBuf = device.createBuffer({
+    size: 16,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  const computeBGL = device.createBindGroupLayout({ entries: [
+    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+  ]});
+  const computeBG = device.createBindGroup({ layout: computeBGL, entries: [
+    { binding: 0, resource: { buffer: uBuf } },
+    { binding: 1, resource: { buffer: waveBuf } },
+  ]});
+  const computePipeline = device.createComputePipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
+    compute: { module: computeShader, entryPoint: 'main' },
+  });
+
+  const renderBGL = device.createBindGroupLayout({ entries: [
+    { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+  ]});
+  const renderBG = device.createBindGroup({ layout: renderBGL, entries: [
+    { binding: 1, resource: { buffer: waveBuf } },
+  ]});
+
+  const canvas = document.getElementById('canvas');
+  const gpuCtx = canvas.getContext('webgpu');
+  const fmt = navigator.gpu.getPreferredCanvasFormat();
+  gpuCtx.configure({ device, format: fmt });
+
+  const renderPipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
+    vertex:   { module: renderShader, entryPoint: 'vs' },
+    fragment: { module: renderShader, entryPoint: 'fs', targets: [{ format: fmt }] },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  const startTime = performance.now();
+  let frameNum = 0;
+
+  function frame() {
+    const t = (performance.now() - startTime) / 1000;
+    const paramsData = new ArrayBuffer(16);
+    const dv = new DataView(paramsData);
+    dv.setFloat32(0,  freq,       true);
+    dv.setFloat32(4,  amp,        true);
+    dv.setUint32 (8,  waveShape,  true);
+    dv.setFloat32(12, t,          true);
+
+    // Always write via writeBuffer (immediates not wired in this fallback path)
+    device.queue.writeBuffer(uBuf, 0, paramsData);
+
+    const enc  = device.createCommandEncoder();
+
+    // Compute pass
+    const cp = enc.beginComputePass();
+    cp.setPipeline(computePipeline);
+    cp.setBindGroup(0, computeBG);
+    cp.dispatchWorkgroups(Math.ceil(N / 64));
+    cp.end();
+
+    // Render pass
+    const rp = enc.beginRenderPass({
+      colorAttachments: [{
+        view: gpuCtx.getCurrentTexture().createView(),
+        clearValue: [0.99, 0.99, 0.97, 1.0],
+        loadOp: 'clear',
+        storeOp: 'store',
+      }]
+    });
+    rp.setPipeline(renderPipeline);
+    rp.setBindGroup(0, renderBG);
+    rp.draw(N * 6);
+    rp.end();
+
+    device.queue.submit([enc.finish()]);
+    frameNum++;
+    frameInfo.textContent = `frame ${frameNum} · freq=${freq} · amp=${Math.round(amp * 100)}% · wave=${['sine','square','sawtooth'][waveShape]} · method: ${supportsImmediates ? 'setImmediateData()' : 'writeBuffer() fallback'}`;
+    requestAnimationFrame(frame);
+  }
+
+  frame();
+}
+
+function runFallback() {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  let t = 0;
+
+  function drawWave() {
+    t += 0.016;
+    ctx.fillStyle = '#fdfcf8';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const N = canvas.width;
+    const cy = canvas.height / 2;
+    ctx.strokeStyle = '#0066ff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+      const x = i;
+      const angle = (i / N + t * 0.2) * freq * Math.PI * 2;
+      let v;
+      if (waveShape === 1) v = Math.sign(Math.sin(angle));
+      else if (waveShape === 2) v = ((angle / (Math.PI * 2)) % 1) * 2 - 1;
+      else v = Math.sin(angle);
+      const y = cy - v * amp * cy;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.font = '12px monospace';
+    ctx.fillText('Canvas 2D fallback — WebGPU not available', 8, 20);
+    frameInfo.textContent = `Canvas 2D · freq=${freq} · amp=${Math.round(amp * 100)}%`;
+    requestAnimationFrame(drawWave);
+  }
+  drawWave();
+}
+
+init().catch(e => {
+  statusEl.textContent = 'Error: ' + e.message;
+  statusEl.style.color = 'var(--accent-rose)';
+  runFallback();
+});
+</script>
+</body>
+</html>
