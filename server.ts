@@ -2890,7 +2890,7 @@ async function renderIndex(channels: Channels): Promise<string> {
     <section>
       <h2>releases</h2>
       <ol class="release-list">${cards}</ol>
-      <p class="note">Or jump straight to <a href="/features">the full feature catalogue</a> to search across every release at once. Release cards show stable rollout ranges from ChromeStatus and Chromium Dash schedules when available.</p>
+      <p class="note">Or jump straight to <a href="/features">the full feature catalogue</a>, <a href="/categories/">browse by category</a> (identity, on-device AI, CSS layout, WebGPU, privacy…), or read the <a href="/critiques/">self-critique</a> — a reviewer agent's open-questions list for every concept on the site. Release cards show stable rollout ranges from ChromeStatus and Chromium Dash schedules when available.</p>
     </section>
 
     <section class="how">
