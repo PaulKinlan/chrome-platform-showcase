@@ -8,8 +8,8 @@
 Inspired by Karpathy's "auto research" idea: the system reviews its own output, writes down what's
 missing, and turns those gaps into the next batch of work. Three moving parts:
 
-1. **Auto-research (self-critique)** — a reviewer agent grades each concept page against a rubric
-   and writes open questions to disk.
+1. **Auto-research (self-critique)** — a reviewer agent tests each concept page in the browser,
+   grades it against a rubric, and writes open questions to disk.
 2. **Conformance** — per-feature assertion suites that run client-side, so each browser sees its own
    live pass/fail against what the spec actually promises.
 3. **Goal-setting** — the open questions from step 1 become the work-list for the next build pass.
@@ -114,13 +114,22 @@ Launch them with the `Agent` tool, `run_in_background: true`. Coverage as of 202
 > For milestone **v<N>**, walk every concept page (`v<N>/<feature>/<concept>/index.html`). **Skip
 > any page that already has a sibling `_questions.json`** — idempotent resume. For each remaining
 > page: read its HTML, read the feature index, fetch `chromestatus.com/api/v0/features/<id>` (strip
-> the `)]}'` prefix) and the spec if linked. Score the six-criterion rubric in `lib/critique.ts`
-> honestly — partial/fail are useful, don't inflate. Write the `CritiqueReport` JSON to
+> the `)]}'` prefix) and the spec if linked. Start the local server (`deno task start`) in the
+> background, then use browser automation or a browser subagent to navigate to the concept page and
+> test its actual interactivity/changes in the browser. Verify that there are no unhandled console
+> errors or broken layouts. **Browser version exception**: Milestone `v<N>` might represent a future
+> release (e.g., `v150` Canary) that is newer than the browser environment you are running. If the
+> API is missing or fails feature-detection because the browser is too old, **do not fail the page
+> or the run**. Instead, verify that the page has capability detection and displays a clean,
+> friendly fallback warning or a behind-a-flag note rather than completely crashing, throwing
+> unhandled exceptions, or rendering a broken blank screen. Do not score the page as `fail` on the
+> rubric solely due to lack of browser support, as long as this fallback behavior is correctly
+> implemented. Score the six-criterion rubric in `lib/critique.ts` honestly — partial/fail are
+> useful, don't inflate. Write the `CritiqueReport` JSON to
 > `v<N>/<feature>/<concept>/_questions.json`. Use the exact shape of
 > `v149/css-gap-decorations/rule-builder/_questions.json`. Commit and push **each file on its own**
 > with a single bash call:
-> `git add <file> && git commit -m "critique: v<N>/<feature>/<concept>" &&
-> git push` (see the race
+> `git add <file> && git commit -m "critique: v<N>/<feature>/<concept>" && git push` (see the race
 > note below). Keep `reviewer` set to your subagent id.
 
 ### Per-subagent prompt skeleton (conformance pass)

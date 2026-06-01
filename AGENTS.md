@@ -101,10 +101,15 @@ Site routes discover these files automatically:
   conformance page.
 
 For a critique pass, walk concept pages under the target milestone, skip any concept that already
-has a sibling `_questions.json`, read the concept HTML and feature index, fetch the ChromeStatus
-feature detail and linked spec where possible, then score the six rubric fields in
-`lib/critique.ts`. Be honest: `partial` and `fail` are useful. The most important output is
-`openQuestions`, with `severity` and `suggestedSlug` when a new concept page should be built.
+has a sibling `_questions.json`. Start the local server (`deno task start`) and test the actual
+changes/interactivity in the browser (using a browser subagent or devtools). Verify that the page is
+robust and check its `/conformance/` page. If the browser being used is older than the target
+milestone `v<N>` (e.g. testing `v150` Canary on an older Chrome version), do not fail the page or
+the run solely because the API is unsupported. Instead, verify that capability detection works and
+the page degrades gracefully with a clean fallback warning/banner rather than completely failing,
+rendering a blank screen, or throwing uncaught console crashes. Score the six rubric fields in
+`lib/critique.ts` honestly. The most important output is `openQuestions`, with `severity` and
+`suggestedSlug` when a new concept page should be built.
 
 For a conformance pass, skip features that already have `conformance.json`. Write 3-10 assertions
 covering distinct spec contracts. Use only real `css-supports`, `exists`, `typeof`, `script`, or

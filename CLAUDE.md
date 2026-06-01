@@ -45,6 +45,15 @@ stash-race mitigation, the fmt gotcha, and current coverage per milestone — li
 [`.claude/auto-research.md`](.claude/auto-research.md). Browse the output at `/critiques` and
 `/conformance` on the live site.
 
+For a critique pass, walk concept pages under the target milestone, skipping those with an existing
+`_questions.json`. Start the local server (`deno task start`) and test the actual changes and
+interactivity directly in the browser (using a browser subagent or devtools). Inspect console logs
+and check the `/conformance/` page. If the browser used for testing is older than the target
+milestone `v<N>` (e.g. testing `v150` Canary on an older Chrome version), do not fail the page or
+the run. Instead, verify that capability detection is correctly implemented and the page degrades
+gracefully with a friendly fallback warning or behind-a-flag notice rather than completely failing,
+rendering a blank screen, or throwing unhandled exceptions.
+
 ## The routine
 
 Cron `0 */2 * * *` (every 2 hours, top of hour UTC). Runs in Anthropic's cloud as a Claude Code
