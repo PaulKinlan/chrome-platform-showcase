@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Streaming pipeline — explicit resource management async — Chrome 134</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .support-note {
+      padding: 0.75rem 1rem;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-stone);
+      font-size: 0.82rem;
+      margin-bottom: 1.5rem;
+    }
+
+    /* Pipeline visualization */
+    .pipeline {
+      border: 2px solid var(--border-black);
+      margin-bottom: 1.5rem;
+    }
+
+    .pipeline-head {
+      padding: 0.4rem 0.75rem;
+      background: var(--bg-stone);
+      border-bottom: 1.5px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .pipeline-body {
+      padding: 0.75rem;
+      background: var(--bg-paper);
+      display: flex;
+      gap: 0.4rem;
+      align-items: stretch;
+      flex-wrap: wrap;
+      min-height: 5rem;
+    }
+
+    .stage {
+      border: 1.5px solid var(--border-black);
+      min-width: 7rem;
+      flex: 1;
+    }
+
+    .stage-head {
+      padding: 0.25rem 0.5rem;
+      background: var(--bg-stone);
+      border-bottom: 1px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .stage-body {
+      padding: 0.4rem 0.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      text-align: center;
+      min-height: 3rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.2rem;
+    }
+
+    .stage-status {
+      font-size: 0.55rem;
+      padding: 0.1rem 0.3rem;
+      border: 1px solid var(--border-black);
+    }
+
+    .status-idle    { background: var(--bg-stone); color: var(--text-muted); }
+    .status-open    { background: #e6f4ea; color: #065f46; border-color: #86efac; }
+    .status-active  { background: #dbeafe; color: #1d4ed8; border-color: #93c5fd; }
+    .status-closed  { background: var(--bg-stone); color: var(--text-muted); }
+    .status-error   { background: #ffeef0; color: #991b1b; border-color: #fca5a5; }
+    .status-disposed{ background: var(--bg-stone); color: var(--text-muted); border-style: dashed; }
+
+    .stage-arrow {
+      display: flex;
+      align-items: center;
+      padding: 0 0.1rem;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      align-self: center;
+    }
+
+    /* Controls */
+    .controls {
+      border: 2px solid var(--border-black);
+      margin-bottom: 1.5rem;
+    }
+
+    .controls-head {
+      padding: 0.4rem 0.75rem;
+      background: var(--bg-stone);
+      border-bottom: 1.5px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .controls-body {
+      padding: 0.75rem;
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .scenario-btn {
+      padding: 0.35rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 700;
+      cursor: pointer;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+    }
+
+    .scenario-btn:hover { background: var(--bg-ivory); }
+    .scenario-btn.active { background: var(--text-black); color: var(--bg-ivory); }
+    .scenario-btn:disabled { opacity: 0.5; cursor: default; }
+
+    /* Log */
+    .log-panel {
+      border: 2px solid var(--border-black);
+      margin-bottom: 1.5rem;
+    }
+
+    .log-head {
+      padding: 0.4rem 0.75rem;
+      background: var(--bg-stone);
+      border-bottom: 1.5px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 700;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .log-body {
+      padding: 0.5rem 0.75rem;
+      max-height: 12rem;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      line-height: 1.8;
+      background: var(--bg-paper);
+    }
+
+    .log-open    { color: var(--accent-emerald); }
+    .log-close   { color: var(--text-muted); }
+    .log-data    { color: var(--accent-blue); }
+    .log-error   { color: var(--accent-rose); }
+    .log-dispose { color: #b87b00; }
+    .log-sys     { color: var(--text-charcoal); font-weight: 700; }
+
+    pre { margin: 0 0 1.5rem; }
+    pre code { font-size: 0.65rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v134/explicit-resource-management-async/">&larr; Explicit resource management (async)</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v134 · javascript</p>
+    <h1>Streaming pipeline</h1>
+    <p class="lede"><code>AsyncDisposableStack</code> manages a multi-stage streaming pipeline: HTTP reader → decoder → transformer → writer. If any stage throws, the stack unwinds in LIFO order — every open stream is closed even if earlier cleanup fails. No <code>try/finally</code> nesting required.</p>
+  </header>
+
+  <div class="support-note">
+    <code>Symbol.asyncDispose</code>: <span id="support-status">checking…</span>
+  </div>
+
+  <!-- Pipeline visualization -->
+  <div class="pipeline">
+    <div class="pipeline-head">
+      <span>Streaming pipeline stages</span>
+      <span id="pipeline-status" style="font-weight:400; color:var(--text-muted); font-size:0.6rem">idle</span>
+    </div>
+    <div class="pipeline-body" id="pipeline-body">
+      <div class="stage" id="stage-reader">
+        <div class="stage-head">HTTP Reader</div>
+        <div class="stage-body">
+          <div id="reader-icon">📥</div>
+          <span class="stage-status status-idle" id="reader-status">idle</span>
+        </div>
+      </div>
+      <div class="stage-arrow">→</div>
+      <div class="stage" id="stage-decoder">
+        <div class="stage-head">Decoder</div>
+        <div class="stage-body">
+          <div id="decoder-icon">🔤</div>
+          <span class="stage-status status-idle" id="decoder-status">idle</span>
+        </div>
+      </div>
+      <div class="stage-arrow">→</div>
+      <div class="stage" id="stage-transform">
+        <div class="stage-head">Transformer</div>
+        <div class="stage-body">
+          <div id="transform-icon">⚙</div>
+          <span class="stage-status status-idle" id="transform-status">idle</span>
+        </div>
+      </div>
+      <div class="stage-arrow">→</div>
+      <div class="stage" id="stage-writer">
+        <div class="stage-head">Writer</div>
+        <div class="stage-body">
+          <div id="writer-icon">💾</div>
+          <span class="stage-status status-idle" id="writer-status">idle</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scenarios -->
+  <div class="controls">
+    <div class="controls-head">Scenarios</div>
+    <div class="controls-body" id="scenarios">
+      <button class="scenario-btn" id="btn-happy" onclick="run('happy')">Happy path</button>
+      <button class="scenario-btn" id="btn-throw-transform" onclick="run('throw-transform')">Throw in transformer</button>
+      <button class="scenario-btn" id="btn-throw-decoder" onclick="run('throw-decoder')">Throw in decoder</button>
+      <button class="scenario-btn" id="btn-cancel" onclick="run('cancel')">Cancel mid-stream</button>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="log-panel">
+    <div class="log-head">
+      <span>Execution log</span>
+      <button style="padding:0.2rem 0.4rem;font-family:var(--font-mono);font-size:0.6rem;border:1.5px solid var(--border-black);background:var(--bg-stone);cursor:pointer" onclick="clearLog()">clear</button>
+    </div>
+    <div class="log-body" id="log-body">
+      <span style="color:var(--text-muted)">Choose a scenario to run…</span>
+    </div>
+  </div>
+
+  <pre><code>// AsyncDisposableStack manages a 4-stage streaming pipeline.
+// If any stage throws, all earlier stages are disposed in LIFO order.
+
+async function runPipeline(scenario) {
+  await using stack = new AsyncDisposableStack();
+
+  // Acquire each stage — add to stack immediately so it's cleaned up on throw
+  const reader = await openHttpReader(url);
+  stack.defer(async () => { await reader.cancel(); log('Reader cancelled'); });
+
+  const decoder = new TextDecoderStream();
+  stack.defer(async () => { await decoder.readable.cancel(); log('Decoder closed'); });
+
+  const transformer = new TransformStream({ ... });
+  stack.defer(async () => { await transformer.readable.cancel(); log('Transformer closed'); });
+
+  const writer = await openFileWriter(path);
+  stack.defer(async () => { await writer.close(); log('Writer closed'); });
+
+  // Pipeline is open; process stream
+  for await (const chunk of reader.pipeThrough(decoder).pipeThrough(transformer)) {
+    await writer.write(chunk);
+    if (scenario === 'throw-transform') throw new Error('transformer failed');
+  }
+
+  // Happy path: stack disposes all stages in LIFO order when block exits
+}
+
+// On throw, stack unwinds: Writer → Transformer → Decoder → Reader
+// All disposers run even if an earlier one throws</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../await-using/">await using</a></li>
+      <li><a href="../db-transaction/">Async transaction</a></li>
+      <li><a href="../async-stack/">AsyncDisposableStack</a></li>
+      <li><a href="../async-resource-monitor/">Async Resource Monitor</a></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5087324181102592" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://tc39.es/proposal-explicit-resource-management" target="_blank" rel="noopener">TC39 spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+// Feature detection
+const supported = typeof Symbol.asyncDispose !== 'undefined'
+  && typeof AsyncDisposableStack !== 'undefined';
+const statusEl = document.getElementById('support-status');
+statusEl.textContent = supported
+  ? 'supported ✓ — native AsyncDisposableStack active'
+  : 'not supported — simulation mode (same visual result)';
+statusEl.style.color = supported ? 'var(--accent-emerald)' : 'var(--accent-rose)';
+
+// Simulated stage state
+const stages = {
+  reader:    { id: 'reader',    icon: '📥', name: 'HTTP Reader'  },
+  decoder:   { id: 'decoder',   icon: '🔤', name: 'Decoder'      },
+  transform: { id: 'transform', icon: '⚙',  name: 'Transformer'  },
+  writer:    { id: 'writer',    icon: '💾', name: 'Writer'       },
+};
+
+const stageOrder = ['reader', 'decoder', 'transform', 'writer'];
+
+function setStageStatus(id, status, text) {
+  const el = document.getElementById(id + '-status');
+  if (!el) return;
+  el.className = 'stage-status status-' + status;
+  el.textContent = text || status;
+}
+
+function resetStages() {
+  stageOrder.forEach(id => setStageStatus(id, 'idle', 'idle'));
+  document.getElementById('pipeline-status').textContent = 'idle';
+  document.getElementById('pipeline-status').style.color = 'var(--text-muted)';
+}
+
+// Log
+const logEl = document.getElementById('log-body');
+let logLines = [];
+let hasLog = false;
+
+function log(type, msg) {
+  if (!hasLog) { logEl.innerHTML = ''; hasLog = true; }
+  const cls = `log-${type}`;
+  const ts = new Date().toISOString().slice(11, 23);
+  logLines.push(`<span class="${cls}">[${ts}] ${escHtml(msg)}</span>`);
+  if (logLines.length > 60) logLines.shift();
+  logEl.innerHTML = logLines.join('<br>');
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function clearLog() {
+  logLines = [];
+  hasLog = false;
+  logEl.innerHTML = '<span style="color:var(--text-muted)">Choose a scenario to run…</span>';
+}
+
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Disposer registry (simulates AsyncDisposableStack LIFO)
+let disposers = [];
+function pushDisposer(name, fn) {
+  disposers.push({ name, fn });
+}
+
+async function disposeAll(reason) {
+  log('sys', `Disposing stack (LIFO) — reason: ${reason}`);
+  const toDispose = [...disposers].reverse();
+  disposers = [];
+  for (const { name, fn } of toDispose) {
+    try {
+      await fn();
+      log('dispose', `[dispose] ${name} → closed`);
+    } catch (e) {
+      log('error', `[dispose] ${name} threw: ${e.message}`);
+    }
+  }
+}
+
+function disableButtons(disabled) {
+  document.querySelectorAll('.scenario-btn').forEach(b => b.disabled = disabled);
+}
+
+async function run(scenario) {
+  disableButtons(true);
+  resetStages();
+  disposers = [];
+
+  document.getElementById('pipeline-status').textContent = 'running…';
+  document.getElementById('pipeline-status').style.color = 'var(--accent-blue)';
+
+  log('sys', `=== Scenario: ${scenario} ===`);
+
+  try {
+    // Stage 1: HTTP Reader
+    await delay(200);
+    setStageStatus('reader', 'open', 'open');
+    log('open', 'HTTP Reader: opened (simulated ReadableStream)');
+    pushDisposer('HTTP Reader', async () => {
+      setStageStatus('reader', 'disposed', 'disposed');
+      await delay(60);
+    });
+
+    // Stage 2: Decoder
+    await delay(150);
+    setStageStatus('decoder', 'open', 'open');
+    log('open', 'Decoder: TextDecoderStream attached');
+    pushDisposer('Decoder', async () => {
+      setStageStatus('decoder', 'disposed', 'disposed');
+      await delay(40);
+    });
+
+    // Stage 3: Transformer
+    await delay(150);
+    setStageStatus('transform', 'open', 'open');
+    log('open', 'Transformer: TransformStream started');
+    pushDisposer('Transformer', async () => {
+      setStageStatus('transform', 'disposed', 'disposed');
+      await delay(40);
+    });
+
+    if (scenario === 'throw-decoder') {
+      setStageStatus('decoder', 'error', 'error!');
+      log('error', 'Decoder: unexpected encoding error thrown');
+      throw new Error('TextDecoder: invalid UTF-8 sequence at offset 1024');
+    }
+
+    // Stage 4: Writer
+    await delay(150);
+    setStageStatus('writer', 'open', 'open');
+    log('open', 'Writer: FileSystemWritableFileStream opened');
+    pushDisposer('Writer', async () => {
+      setStageStatus('writer', 'disposed', 'disposed');
+      await delay(50);
+    });
+
+    // Stream data
+    const chunks = 5;
+    for (let i = 1; i <= chunks; i++) {
+      setStageStatus('reader',    'active', `chunk ${i}/${chunks}`);
+      setStageStatus('decoder',   'active', `chunk ${i}/${chunks}`);
+      setStageStatus('transform', 'active', `chunk ${i}/${chunks}`);
+      setStageStatus('writer',    'active', `chunk ${i}/${chunks}`);
+      log('data', `Chunk ${i}/${chunks}: reader → decoder → transform → writer`);
+      await delay(120);
+
+      if (scenario === 'throw-transform' && i === 3) {
+        setStageStatus('transform', 'error', 'error!');
+        log('error', `Transformer: business rule violation at chunk ${i}`);
+        throw new Error('Transformer: invalid record format');
+      }
+
+      if (scenario === 'cancel' && i === 2) {
+        log('sys', 'Pipeline cancelled by user request');
+        throw new Error('Cancelled');
+      }
+    }
+
+    // Happy path
+    stageOrder.forEach(id => setStageStatus(id, 'closed', 'done'));
+    log('sys', 'Pipeline complete — all data written');
+    document.getElementById('pipeline-status').textContent = '✓ complete';
+    document.getElementById('pipeline-status').style.color = 'var(--accent-emerald)';
+
+    // Stack unwinds on exit
+    await disposeAll('normal exit');
+
+  } catch (err) {
+    log('error', `Pipeline error: ${err.message}`);
+    document.getElementById('pipeline-status').textContent = '✗ error — unwinding';
+    document.getElementById('pipeline-status').style.color = 'var(--accent-rose)';
+
+    await disposeAll('exception: ' + err.message);
+
+    document.getElementById('pipeline-status').textContent = '✗ disposed';
+  }
+
+  disableButtons(false);
+}
+</script>
+</body>
+</html>
