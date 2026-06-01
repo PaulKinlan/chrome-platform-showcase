@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Processed audio transcription — Web Speech API + MediaStreamTrack — Chrome 135</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0;
+    }
+    .caps {
+      display: flex; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-3);
+    }
+    .pill {
+      font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+      padding: 0.2rem 0.55rem; border: 1px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal);
+    }
+    .pill.ok  { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
+    .pill.bad { background: var(--accent-rose);    color: var(--bg-ivory); border-color: var(--accent-rose); }
+
+    /* ── Pipeline visualiser ── */
+    .pipeline {
+      display: flex; align-items: center; gap: 0; flex-wrap: wrap;
+      margin: var(--space-3) 0; font-family: var(--font-mono); font-size: 0.75rem;
+    }
+    .pipe-node {
+      border: 2px solid var(--border-black); padding: 0.3rem 0.65rem;
+      background: var(--bg-stone); color: var(--text-charcoal); white-space: nowrap;
+    }
+    .pipe-node.active { background: var(--accent-blue); color: var(--bg-ivory); border-color: var(--accent-blue); }
+    .pipe-node.filter { background: var(--accent-amber); color: var(--text-black); border-color: var(--accent-amber); }
+    .pipe-arrow { font-size: 1rem; color: var(--text-muted); padding: 0 4px; }
+    .pipe-bypass {
+      font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-muted);
+      margin: var(--space-1) 0 0 var(--space-3);
+    }
+
+    /* ── Two-panel grid ── */
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
+    @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+    .panel { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); }
+    .panel h3 { margin: 0 0 var(--space-2); font-size: 0.95rem; border: none; padding: 0; }
+
+    /* VU meters */
+    .vu-wrap { display: flex; flex-direction: column; gap: 4px; margin: var(--space-2) 0; }
+    .vu-row { display: flex; align-items: center; gap: var(--space-2); font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-muted); }
+    .vu-track { flex: 1; height: 10px; background: var(--bg-paper); border: 1px solid var(--border-black); overflow: hidden; }
+    .vu-fill { height: 100%; width: 0; transition: width 50ms linear; }
+    .vu-fill.raw  { background: var(--accent-blue); }
+    .vu-fill.proc { background: var(--accent-amber); }
+
+    /* Transcript area */
+    .transcript {
+      font-family: var(--font-serif); font-size: 1rem; line-height: 1.6;
+      min-height: 120px; color: var(--text-charcoal);
+    }
+    .transcript .interim { color: var(--text-muted); }
+
+    /* Filter controls */
+    .filter-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 500px) { .filter-grid { grid-template-columns: 1fr; } }
+    .fctl { display: flex; flex-direction: column; gap: 4px; }
+    .fctl label { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); }
+    .fctl input[type=range] { width: 100%; }
+    .fctl .val { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-charcoal); }
+
+    /* Route selector */
+    .route-bar {
+      display: flex; gap: 0; border: 2px solid var(--border-black); margin: var(--space-3) 0;
+    }
+    .route-btn {
+      flex: 1; font-family: var(--font-mono); font-size: 0.8rem;
+      border: none; border-right: 2px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal);
+      padding: 0.45rem var(--space-3); cursor: pointer;
+    }
+    .route-btn:last-child { border-right: none; }
+    .route-btn[aria-pressed=true] { background: var(--text-black); color: var(--bg-ivory); }
+
+    .warn-block {
+      background: var(--bg-stone); border: 2px solid var(--accent-rose);
+      padding: var(--space-3); margin: var(--space-3) 0;
+      font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-charcoal);
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; MediaStreamTrack + Web Speech API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v135</p>
+    <h1>Processed audio transcription</h1>
+    <p class="lede">The new <code>mediaStreamTrack</code> property lets you feed <em>any</em> track into <code>SpeechRecognition</code> — including one created by Web Audio. This demo routes mic audio through a <code>BiquadFilterNode</code> (highpass to strip rumble, or lowpass to attenuate noise) and feeds the processed output into the recogniser while displaying both raw and processed levels side-by-side.</p>
+  </header>
+
+  <div id="warnBlock" class="warn-block" hidden></div>
+
+  <div class="stage">
+    <div class="caps">
+      <span class="pill" id="srPill">SpeechRecognition: ?</span>
+      <span class="pill" id="mstPill">mediaStreamTrack: ?</span>
+    </div>
+
+    <!-- Route selector -->
+    <div class="route-bar" role="group" aria-label="Audio route">
+      <button class="route-btn" aria-pressed="true"  id="rRaw"  data-route="raw">Raw mic → SR</button>
+      <button class="route-btn" aria-pressed="false" id="rProc" data-route="proc">Filtered mic → SR</button>
+    </div>
+
+    <!-- Pipeline visualiser -->
+    <div id="pipeline" class="pipeline">
+      <div class="pipe-node active">getUserMedia</div>
+      <span class="pipe-arrow">→</span>
+      <div class="pipe-node active" id="filterNode" style="display:none">BiquadFilter</div>
+      <span class="pipe-arrow" id="filterArrow" style="display:none">→</span>
+      <div class="pipe-node active">MediaStreamDestination</div>
+      <span class="pipe-arrow">→</span>
+      <div class="pipe-node active">SpeechRecognition</div>
+    </div>
+
+    <div class="grid">
+      <!-- Left: Audio meters -->
+      <div class="panel">
+        <h3>Audio levels</h3>
+        <div class="vu-wrap">
+          <div class="vu-row">
+            <span>Raw mic</span>
+            <div class="vu-track"><div class="vu-fill raw" id="vuRaw"></div></div>
+          </div>
+          <div class="vu-row">
+            <span>Filtered</span>
+            <div class="vu-track"><div class="vu-fill proc" id="vuProc"></div></div>
+          </div>
+        </div>
+
+        <!-- Filter controls -->
+        <div id="filterControls">
+          <div style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-charcoal);margin-bottom:var(--space-2);">Filter settings (active in filtered mode)</div>
+          <div class="filter-grid">
+            <div class="fctl">
+              <label for="fType">Type</label>
+              <select id="fType" style="font-family:var(--font-mono);font-size:0.78rem;border:1px solid var(--border-black);padding:0.2rem;background:var(--bg-ivory);">
+                <option value="highpass" selected>highpass (remove rumble)</option>
+                <option value="lowpass">lowpass (attenuate noise)</option>
+                <option value="bandpass">bandpass (voice range)</option>
+                <option value="notch">notch (remove hum)</option>
+              </select>
+            </div>
+            <div class="fctl">
+              <label for="fFreq">Cutoff: <span class="val" id="fFreqVal">800 Hz</span></label>
+              <input type="range" id="fFreq" min="80" max="4000" value="800">
+            </div>
+            <div class="fctl">
+              <label for="fQ">Q factor: <span class="val" id="fQVal">1.0</span></label>
+              <input type="range" id="fQ" min="0.1" max="10" step="0.1" value="1.0">
+            </div>
+            <div class="fctl">
+              <label for="fGain">Gain (dB): <span class="val" id="fGainVal">0</span></label>
+              <input type="range" id="fGain" min="-20" max="20" value="0">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Transcript -->
+      <div class="panel">
+        <h3>Live transcript</h3>
+        <div class="transcript" id="transcript">&mdash;</div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:var(--space-3);margin-top:var(--space-2);">
+      <button id="startBtn">Start</button>
+      <button id="stopBtn" disabled>Stop</button>
+    </div>
+  </div>
+
+  <section>
+    <h2>how it works</h2>
+<pre><code>// 1. Capture mic
+const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+const micTrack = stream.getAudioTracks()[0];
+const ctx = new AudioContext();
+
+// 2. Build the filter chain
+const src    = ctx.createMediaStreamSource(new MediaStream([micTrack]));
+const filter = ctx.createBiquadFilter();
+filter.type      = 'highpass';
+filter.frequency.value = 800;  // strip sub-800 Hz rumble
+const dest   = ctx.createMediaStreamDestination();
+src.connect(filter);
+filter.connect(dest);
+
+// 3. Feed the processed track into SpeechRecognition
+const rec = new SpeechRecognition();
+rec.mediaStreamTrack = dest.stream.getAudioTracks()[0]; // Chrome 135+
+rec.continuous = true;
+rec.interimResults = true;
+rec.start();</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">MediaStreamTrack + Web Speech API</a> &mdash; feature index</li>
+      <li><a href="../live-transcription-bench/">Live transcription bench</a></li>
+      <li><a href="../sr-track/">SpeechRecognition track binding</a></li>
+      <li><a href="https://chromestatus.com/feature/5178378197139456" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const srPill  = document.getElementById('srPill');
+const mstPill = document.getElementById('mstPill');
+const warnBlock = document.getElementById('warnBlock');
+
+srPill.textContent  = SR ? 'SpeechRecognition: yes' : 'SpeechRecognition: no';
+srPill.className    = 'pill ' + (SR ? 'ok' : 'bad');
+
+// Check mediaStreamTrack property on a dummy SR instance
+let mstSupported = false;
+if (SR) {
+  try { const t = new SR(); mstSupported = 'mediaStreamTrack' in t; } catch {}
+}
+mstPill.textContent = mstSupported ? 'mediaStreamTrack: yes' : 'mediaStreamTrack: no (fallback)';
+mstPill.className   = 'pill ' + (mstSupported ? 'ok' : 'bad');
+
+// State
+let audioCtx = null, micStream = null, recognition = null;
+let rawAnalyser = null, procAnalyser = null;
+let filter = null, dest = null;
+let rafId = null;
+let route = 'raw';   // 'raw' or 'proc'
+let transcript = '';
+
+// Route selector
+document.querySelectorAll('.route-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    route = btn.dataset.route;
+    document.querySelectorAll('.route-btn').forEach(b => b.setAttribute('aria-pressed', b.dataset.route === route ? 'true' : 'false'));
+    updatePipeline();
+    // restart recognition if running
+    if (recognition) { stopAll(); startAll(); }
+  });
+});
+
+function updatePipeline() {
+  const filterNode  = document.getElementById('filterNode');
+  const filterArrow = document.getElementById('filterArrow');
+  filterNode.style.display  = route === 'proc' ? '' : 'none';
+  filterArrow.style.display = route === 'proc' ? '' : 'none';
+}
+
+// Filter controls
+const fType = document.getElementById('fType');
+const fFreq = document.getElementById('fFreq');
+const fQ    = document.getElementById('fQ');
+const fGain = document.getElementById('fGain');
+
+fType.addEventListener('change', () => { if (filter) filter.type = fType.value; });
+fFreq.addEventListener('input', () => {
+  document.getElementById('fFreqVal').textContent = fFreq.value + ' Hz';
+  if (filter) filter.frequency.value = +fFreq.value;
+});
+fQ.addEventListener('input', () => {
+  document.getElementById('fQVal').textContent = parseFloat(fQ.value).toFixed(1);
+  if (filter) filter.Q.value = +fQ.value;
+});
+fGain.addEventListener('input', () => {
+  document.getElementById('fGainVal').textContent = fGain.value;
+  if (filter) filter.gain.value = +fGain.value;
+});
+
+// VU meter animation
+function drawMeters() {
+  const raw256  = new Uint8Array(rawAnalyser  ? rawAnalyser.frequencyBinCount  : 0);
+  const proc256 = new Uint8Array(procAnalyser ? procAnalyser.frequencyBinCount : 0);
+  if (rawAnalyser)  rawAnalyser.getByteTimeDomainData(raw256);
+  if (procAnalyser) procAnalyser.getByteTimeDomainData(proc256);
+
+  const rms = arr => {
+    if (!arr.length) return 0;
+    let s = 0;
+    for (let i = 0; i < arr.length; i++) { const v = (arr[i] - 128) / 128; s += v * v; }
+    return Math.sqrt(s / arr.length);
+  };
+  const rawRms  = rms(raw256);
+  const procRms = rms(proc256);
+
+  document.getElementById('vuRaw').style.width  = (Math.min(rawRms  * 400, 100)).toFixed(1) + '%';
+  document.getElementById('vuProc').style.width = (Math.min(procRms * 400, 100)).toFixed(1) + '%';
+
+  rafId = requestAnimationFrame(drawMeters);
+}
+
+async function startAll() {
+  if (!SR) {
+    showWarn('SpeechRecognition not available in this browser.'); return;
+  }
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    showWarn('Microphone access denied: ' + err.message); return;
+  }
+
+  audioCtx = new AudioContext();
+  const micTrack = micStream.getAudioTracks()[0];
+
+  // Raw analyser — always connected to the mic
+  const rawSrc   = audioCtx.createMediaStreamSource(micStream);
+  rawAnalyser    = audioCtx.createAnalyser();
+  rawAnalyser.fftSize = 256;
+  rawSrc.connect(rawAnalyser);
+
+  // Filter chain
+  filter = audioCtx.createBiquadFilter();
+  filter.type             = fType.value;
+  filter.frequency.value  = +fFreq.value;
+  filter.Q.value          = +fQ.value;
+  filter.gain.value       = +fGain.value;
+
+  dest = audioCtx.createMediaStreamDestination();
+  procAnalyser = audioCtx.createAnalyser();
+  procAnalyser.fftSize = 256;
+
+  rawSrc.connect(filter);
+  filter.connect(procAnalyser);
+  filter.connect(dest);
+
+  // Pick the track to feed SR
+  const srTrack = route === 'proc'
+    ? dest.stream.getAudioTracks()[0]
+    : micTrack;
+
+  recognition = new SR();
+  recognition.continuous     = true;
+  recognition.interimResults = true;
+  recognition.lang           = 'en-US';
+
+  if (mstSupported) {
+    recognition.mediaStreamTrack = srTrack;
+  }
+
+  recognition.onresult = (e) => {
+    let final = '', interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) final += t + ' '; else interim += t;
+    }
+    transcript += final;
+    const el = document.getElementById('transcript');
+    el.innerHTML = transcript + (interim ? `<span class="interim">${interim}</span>` : '');
+  };
+  recognition.onerror = e => {
+    if (e.error !== 'aborted') showWarn('SR error: ' + e.error);
+  };
+  recognition.onend = () => {
+    // restart for continuous transcription
+    if (recognition) { try { recognition.start(); } catch {} }
+  };
+
+  recognition.start();
+  rafId = requestAnimationFrame(drawMeters);
+
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('stopBtn').disabled  = false;
+}
+
+function stopAll() {
+  if (recognition) {
+    recognition.onend = null;
+    try { recognition.abort(); } catch {}
+    recognition = null;
+  }
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (audioCtx)  { audioCtx.close(); audioCtx = null; }
+  rawAnalyser = procAnalyser = null; filter = null; dest = null;
+  document.getElementById('vuRaw').style.width  = '0';
+  document.getElementById('vuProc').style.width = '0';
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('stopBtn').disabled  = true;
+}
+
+function showWarn(msg) {
+  warnBlock.textContent = msg;
+  warnBlock.hidden = false;
+}
+
+document.getElementById('startBtn').addEventListener('click', startAll);
+document.getElementById('stopBtn').addEventListener('click',  stopAll);
+
+updatePipeline();
+</script>
+</body>
+</html>
