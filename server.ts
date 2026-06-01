@@ -4696,7 +4696,7 @@ function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
       
       for (const assertion of suite.assertions) {
         html.push(\`<tr data-index="\${index}" data-milestone="\${suite.release}" data-verdict="na">
-          <td><a href="\${suiteUrl}" target="_blank"><strong>\${suite.release}</strong> · \.../\${suite.featureSlug}</a></td>
+          <td><a href="\${suiteUrl}" target="_blank"><strong>\${suite.release}</strong> · \${suite.featureSlug}</a></td>
           <td><code>\${assertion.id}</code></td>
           <td>\${assertion.description}\${assertion.specSection ? \` <a class="spec-link" href="\${assertion.specSection}" target="_blank">spec ↗</a>\` : ''}</td>
           <td><span class="kind">\${assertion.kind}</span></td>
@@ -4806,9 +4806,8 @@ function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
       // Progress
       progressBar.style.width = ((i + 1) / total * 100) + "%";
       
-      // Console log
       if (!ok) {
-        console.warn(\`❌ [\${res.release}] \.../\${res.featureSlug} / \.../\${res.id} (\&res.kind): \${detail || "failed"}\`);
+        console.warn(\`❌ [\${res.release}] \${res.featureSlug} / \${res.id} (\${res.kind}): \${detail || "failed"}\`);
       }
       
       // Yield to avoid freezing UI
