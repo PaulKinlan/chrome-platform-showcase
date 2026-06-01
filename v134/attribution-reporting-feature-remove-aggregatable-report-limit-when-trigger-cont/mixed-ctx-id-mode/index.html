@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mixed-mode partial trigger_context_id adoption — Attribution Reporting — Chrome 134</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+    .mode-tabs {
+      display: flex; border: 2px solid var(--border-black); margin-bottom: var(--space-4); overflow: hidden;
+    }
+    .mode-tab {
+      flex: 1; font-family: var(--font-mono); font-size: 0.75rem; text-align: center;
+      padding: 0.5rem 0.4rem; cursor: pointer; border: none; background: var(--bg-stone);
+      color: var(--text-charcoal); border-right: 1px solid var(--border-black);
+    }
+    .mode-tab:last-child { border-right: none; }
+    .mode-tab.active { background: var(--text-black); color: var(--bg-ivory); }
+    .sliders { display: flex; gap: var(--space-5); flex-wrap: wrap; margin-bottom: var(--space-4); }
+    .slider-group { display: flex; flex-direction: column; gap: 4px; }
+    .slider-group label {
+      font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted);
+    }
+    .slider-group strong { font-family: var(--font-mono); font-size: 0.88rem; }
+    input[type="range"] { width: 200px; }
+    .mode-note {
+      background: var(--bg-stone); border-left: 4px solid var(--accent-blue);
+      padding: var(--space-3) var(--space-4); font-family: var(--font-mono);
+      font-size: 0.8rem; color: var(--text-charcoal); margin-bottom: var(--space-4);
+    }
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); margin-bottom: var(--space-4); }
+    @media (max-width: 560px) { .metrics { grid-template-columns: 1fr; } }
+    .metric-box { border: 1px solid var(--border-black); padding: var(--space-3); background: var(--bg-stone); }
+    .metric-box .mkey { font-family: var(--font-mono); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 4px; }
+    .metric-box .mval { font-family: var(--font-mono); font-size: 1.5rem; font-weight: 700; }
+    .mval.good { color: var(--accent-emerald); }
+    .mval.bad { color: var(--accent-rose); }
+    .mval.neutral { color: var(--text-black); }
+    .hist-title { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: var(--space-2); }
+    .hist-row { display: flex; align-items: center; gap: var(--space-2); margin-bottom: 6px; }
+    .hist-label { font-family: var(--font-mono); font-size: 0.72rem; width: 120px; flex-shrink: 0; color: var(--text-charcoal); }
+    .hist-bar-wrap { flex: 1; height: 18px; background: var(--bg-stone); border: 1px solid var(--border-black); }
+    .hist-bar { height: 100%; transition: width 0.3s; }
+    .hist-count { font-family: var(--font-mono); font-size: 0.75rem; font-weight: 700; width: 32px; text-align: right; flex-shrink: 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Attribution Reporting: Remove Aggregatable Report Limit</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v134</p>
+    <h1>Mixed-mode: partial trigger_context_id adoption</h1>
+    <p class="lede">Real campaigns migrate gradually. A <code>/checkout</code> page updated to include <code>trigger_context_id</code> coexists with older <code>/cart</code> pages that haven't been touched. Triggers with a context ID are unlimited; triggers without one still hit the per-source cap. Move the sliders to see the partial uplift as adoption grows.</p>
+  </header>
+
+  <div class="stage">
+
+    <div class="mode-tabs" id="mode-tabs">
+      <button class="mode-tab" data-mode="none">Pre-v134: no ctx_id</button>
+      <button class="mode-tab active" data-mode="mixed">Mixed (partial adoption)</button>
+      <button class="mode-tab" data-mode="all">Full v134: all ctx_id</button>
+    </div>
+
+    <div class="sliders">
+      <div class="slider-group">
+        <label>Total conversions to simulate</label>
+        <input type="range" id="sl-fires" min="5" max="60" value="30" step="1">
+        <strong><span id="fires-val">30</span> conversions</strong>
+      </div>
+      <div class="slider-group">
+        <label>Per-source cap (source registration field)</label>
+        <input type="range" id="sl-cap" min="1" max="20" value="20" step="1">
+        <strong>cap = <span id="cap-val">20</span></strong>
+      </div>
+      <div class="slider-group" id="mix-ctrl">
+        <label>% of triggers with trigger_context_id</label>
+        <input type="range" id="sl-mix" min="0" max="100" value="50" step="5">
+        <strong><span id="mix-val">50</span>% carry ctx_id</strong>
+      </div>
+    </div>
+
+    <div class="mode-note" id="mode-note"></div>
+
+    <div class="metrics">
+      <div class="metric-box"><div class="mkey">Conversions fired</div><div class="mval neutral" id="m-fired">—</div></div>
+      <div class="metric-box"><div class="mkey">Reports sent</div><div class="mval good" id="m-sent">—</div></div>
+      <div class="metric-box"><div class="mkey">Dropped (capped)</div><div class="mval bad" id="m-dropped">—</div></div>
+    </div>
+
+    <div class="hist-title">Breakdown</div>
+    <div id="histogram"></div>
+
+  </div>
+
+  <pre><code>// Trigger without ctx_id → counts against per-source cap:
+// { "event_trigger_data": [{ "trigger_data": "1" }] }
+//
+// Trigger with ctx_id → cap is NOT enforced (Chrome 134):
+// { "event_trigger_data": [{ "trigger_data": "1" }],
+//   "trigger_context_id": "order-789" }
+//
+// Mixed campaign: old flows (no ctx_id) are capped; new flows are not.
+// The uplift scales linearly with the fraction of triggers carrying ctx_id.
+// A campaign at 50% adoption gets ~50% of the way to the unlimited ceiling.</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../source-and-trigger-pair/">Source &amp; Trigger Pair — both registration headers side by side</a></li>
+      <li><a href="../trigger-volume-probe/">Trigger Volume Probe — full cap vs unlimited comparison</a></li>
+      <li><a href="https://chromestatus.com/feature/5079048977645568" target="_blank" rel="noopener">ChromeStatus: Attribution Reporting remove aggregatable report limit</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  let mode = 'mixed';
+
+  const slFires = document.getElementById('sl-fires');
+  const slCap   = document.getElementById('sl-cap');
+  const slMix   = document.getElementById('sl-mix');
+
+  function update() {
+    const fires  = +slFires.value;
+    const cap    = +slCap.value;
+    const mixPct = +slMix.value;
+
+    document.getElementById('fires-val').textContent = fires;
+    document.getElementById('cap-val').textContent   = cap;
+    document.getElementById('mix-val').textContent   = mixPct;
+
+    let withCtx, withoutCtx;
+    if (mode === 'none')       { withCtx = 0;      withoutCtx = fires; }
+    else if (mode === 'all')   { withCtx = fires;  withoutCtx = 0; }
+    else { withCtx = Math.round(fires * mixPct / 100); withoutCtx = fires - withCtx; }
+
+    const sentCtx     = withCtx;
+    const sentNoCtx   = Math.min(withoutCtx, cap);
+    const droppedNoCtx = withoutCtx - sentNoCtx;
+    const sent    = sentCtx + sentNoCtx;
+    const dropped = droppedNoCtx;
+
+    document.getElementById('m-fired').textContent   = fires;
+    document.getElementById('m-sent').textContent    = sent;
+    document.getElementById('m-dropped').textContent = dropped;
+
+    const note = document.getElementById('mode-note');
+    if (mode === 'none') {
+      note.innerHTML = '<strong>Pre-v134:</strong> No triggers carry <code>trigger_context_id</code>. All ' + fires + ' conversions count against the cap of ' + cap + '.';
+    } else if (mode === 'all') {
+      note.innerHTML = '<strong>Full v134 adoption:</strong> All triggers carry <code>trigger_context_id</code>. The cap of ' + cap + ' is irrelevant — all ' + fires + ' conversions fire.';
+    } else {
+      note.innerHTML = '<strong>Mixed adoption (' + mixPct + '%):</strong> ' + withCtx + ' triggers carry <code>trigger_context_id</code> (unlimited). ' + withoutCtx + ' do not (capped at ' + cap + ').';
+    }
+
+    const max = fires || 1;
+    const rows = [
+      { label: 'ctx_id triggers', count: sentCtx,      color: 'var(--accent-emerald)' },
+      { label: 'no ctx_id: sent', count: sentNoCtx,    color: 'var(--accent-blue)'    },
+      { label: 'no ctx_id: drop', count: droppedNoCtx, color: 'var(--accent-rose)'    },
+    ];
+
+    const hist = document.getElementById('histogram');
+    hist.innerHTML = '';
+    rows.forEach(r => {
+      const row = document.createElement('div');
+      row.className = 'hist-row';
+      row.innerHTML =
+        '<span class="hist-label">' + r.label + '</span>' +
+        '<div class="hist-bar-wrap"><div class="hist-bar" style="width:' + (r.count / max * 100).toFixed(0) + '%;background:' + r.color + '"></div></div>' +
+        '<span class="hist-count">' + r.count + '</span>';
+      hist.appendChild(row);
+    });
+  }
+
+  document.getElementById('mode-tabs').addEventListener('click', e => {
+    const btn = e.target.closest('.mode-tab');
+    if (!btn) return;
+    mode = btn.dataset.mode;
+    document.querySelectorAll('.mode-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('mix-ctrl').style.visibility = mode === 'mixed' ? 'visible' : 'hidden';
+    update();
+  });
+
+  [slFires, slCap, slMix].forEach(el => el.addEventListener('input', update));
+
+  update();
+})();
+</script>
+</body>
+</html>
