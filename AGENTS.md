@@ -29,10 +29,15 @@ deno check server.ts
 deno task check
 deno task audit
 deno task start
+deno task auto-research   # Starts the local server and displays the quality/conformance status
 ```
 
 `deno fmt` intentionally excludes HTML, CSS, and generated demo JSON/JS. Do not mass-format demo
 HTML or CSS unless the task specifically requires it.
+
+### Slashcommands (Trigger via chat)
+
+- `/auto-research` (or "run showcase"): Starts the complete, autonomous auto-research workflow end-to-end. The agent will automatically run critiques, generate missing conformance suites, spin up browser automation on `http://localhost:3000/conformance/run-all`, collect all failures, repair the relevant demos/concepts in-place, and push clean, working commits for all features.
 
 For a quick server smoke test after `deno task start`:
 
