@@ -4421,12 +4421,12 @@ function renderConformancePage(s: ConformanceSuite): string {
 </main>
 
 <script>
-(() => {
+(async () => {
   document.getElementById("ua").textContent = navigator.userAgent;
   const rows = document.querySelectorAll("#rows tr");
   let pass = 0, fail = 0;
 
-  function runAssertion(kind, test, expect) {
+  async function runAssertion(kind, test, expect) {
     try {
       if (kind === "css-supports") {
         // CSS.supports accepts either ("prop: value") or ("prop", "value");
@@ -4455,13 +4455,15 @@ function renderConformancePage(s: ConformanceSuite): string {
       if (kind === "script") {
         // eslint-disable-next-line no-new-func
         const result = new Function("return (" + test + ")")();
-        return { ok: !!result, detail: String(result) };
+        const resolved = (result instanceof Promise) ? await result : result;
+        return { ok: !!resolved, detail: String(resolved) };
       }
       if (kind === "throws") {
         try {
           // eslint-disable-next-line no-new-func
-          new Function("return (" + test + ")")();
-          return { ok: false, detail: "no throw" };
+          const result = new Function("return (" + test + ")")();
+          const resolved = (result instanceof Promise) ? await result : result;
+          return { ok: false, detail: "no throw (resolved to " + resolved + ")" };
         } catch (e) {
           return { ok: true, detail: e && e.name ? e.name : "threw" };
         }
@@ -4476,7 +4478,7 @@ function renderConformancePage(s: ConformanceSuite): string {
     const kind = row.dataset.kind;
     const test = row.dataset.test;
     const expect = row.dataset.expect;
-    const { ok, detail } = runAssertion(kind, test, expect);
+    const { ok, detail } = await runAssertion(kind, test, expect);
     const cell = row.querySelector("[data-verdict]");
     cell.classList.remove("verdict-na");
     cell.classList.add(ok ? "verdict-pass" : "verdict-fail");
