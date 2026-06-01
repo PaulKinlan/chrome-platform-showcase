@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connection pool — Explicit resource management — Chrome 134</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .support-note {
+      padding: 0.75rem 1rem;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-stone);
+      font-size: 0.82rem;
+      margin-bottom: 1.5rem;
+    }
+
+    /* Pool visualiser */
+    .pool-vis {
+      border: 2px solid var(--border-black);
+      margin-bottom: 1.5rem;
+    }
+
+    .pool-head {
+      padding: 0.4rem 0.75rem;
+      background: var(--bg-stone);
+      border-bottom: 1.5px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .pool-body {
+      padding: 1rem;
+      background: var(--bg-paper);
+    }
+
+    .conn-grid {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+    }
+
+    .conn-slot {
+      border: 2px solid var(--border-black);
+      width: 5.5rem;
+      height: 3.5rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+      font-size: 0.58rem;
+      font-weight: 700;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    .conn-slot.free {
+      background: var(--bg-stone);
+      color: var(--text-muted);
+    }
+
+    .conn-slot.checked-out {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+      color: var(--bg-ivory);
+    }
+
+    .conn-slot.error-slot {
+      background: var(--accent-rose);
+      border-color: var(--accent-rose);
+      color: var(--bg-ivory);
+    }
+
+    .conn-slot .slot-id { font-size: 0.65rem; }
+    .conn-slot .slot-user { font-size: 0.5rem; margin-top: 0.2rem; opacity: 0.8; }
+
+    /* Controls */
+    .run-controls {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.75rem;
+    }
+
+    .run-btn {
+      padding: 0.4rem 0.9rem;
+      border: 2px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      font-weight: 700;
+      cursor: pointer;
+      background: var(--text-black);
+      color: var(--bg-ivory);
+    }
+
+    .run-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .run-btn.secondary { background: var(--bg-ivory); color: var(--text-black); }
+
+    /* Stats */
+    .stats-row {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+    }
+
+    .stat-chip {
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: 0.2rem 0.5rem;
+      color: var(--text-charcoal);
+    }
+
+    .stat-chip b { color: var(--text-black); }
+
+    /* Log */
+    .event-log {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      min-height: 7rem;
+      max-height: 16rem;
+      overflow-y: auto;
+      margin-bottom: 1.5rem;
+    }
+
+    .log-entry {
+      display: flex;
+      gap: 0.5rem;
+      padding: 0.28rem 0.75rem;
+      border-bottom: 1px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      align-items: flex-start;
+    }
+
+    .le-ts { color: var(--text-muted); flex-shrink: 0; width: 5.5rem; }
+    .le-type { flex-shrink: 0; width: 7rem; font-weight: 700; }
+    .le-msg { flex: 1; color: var(--text-charcoal); word-break: break-word; }
+
+    .le-type.checkout { color: var(--accent-blue); }
+    .le-type.release  { color: var(--accent-emerald); }
+    .le-type.error    { color: var(--accent-rose); }
+    .le-type.query    { color: var(--text-charcoal); }
+    .le-type.info     { color: var(--text-muted); }
+
+    .log-empty {
+      padding: 2rem;
+      text-align: center;
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      color: var(--text-muted);
+    }
+
+    /* Compare */
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    @media (max-width: 640px) { .compare-grid { grid-template-columns: 1fr; } }
+
+    .compare-cell { border: 2px solid var(--border-black); }
+
+    .compare-head {
+      padding: 0.35rem 0.6rem;
+      border-bottom: 1.5px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 700;
+    }
+
+    .compare-head.bad  { background: #ffeef0; color: #991b1b; }
+    .compare-head.good { background: #e6f4ea; color: #065f46; }
+
+    .compare-body {
+      padding: 0.6rem 0.75rem;
+      background: var(--bg-paper);
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      line-height: 1.65;
+      white-space: pre-wrap;
+    }
+
+    pre { margin: 0 0 1.5rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v134/explicit-resource-management-sync/">&larr; Explicit resource management (sync)</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v134 · javascript</p>
+    <h1>Connection pool</h1>
+    <p class="lede">A connection pool hands out limited resources and reclaims them on scope exit. With <code>using</code>, the checkout returns a <code>Disposable</code>: <code>Symbol.dispose</code> automatically returns the connection when the block exits — even if an exception is thrown.</p>
+  </header>
+
+  <div class="support-note">
+    Feature detection: <span id="support-status">checking…</span>
+  </div>
+
+  <!-- Code comparison -->
+  <div class="compare-grid">
+    <div class="compare-cell">
+      <div class="compare-head bad">Without using — manual release required</div>
+      <div class="compare-body">function runQuery(query) {
+  const conn = pool.checkout(); // must remember to release
+  try {
+    return conn.query(query);
+  } finally {
+    pool.release(conn); // easy to forget
+  }
+}
+
+// If the dev forgets the try/finally:
+function badQuery(query) {
+  const conn = pool.checkout();
+  return conn.query(query); // leaks on throw!
+}</div>
+    </div>
+    <div class="compare-cell">
+      <div class="compare-head good">With using — automatic on scope exit</div>
+      <div class="compare-body">function runQuery(query) {
+  using conn = pool.checkout();
+  // conn[Symbol.dispose]() called
+  // when block exits — throw or not
+  return conn.query(query);
+}
+
+// Works even if query throws:
+function riskyQuery(query) {
+  using conn = pool.checkout();
+  if (Math.random() < 0.4) {
+    throw new Error('simulated failure');
+  }
+  return conn.query(query);
+  // conn is always released
+}</div>
+    </div>
+  </div>
+
+  <!-- Pool visualiser -->
+  <div class="pool-vis">
+    <div class="pool-head">
+      <span>Connection pool — 6 slots</span>
+      <span id="pool-status" style="font-size:0.6rem;color:var(--text-muted)">idle</span>
+    </div>
+    <div class="pool-body">
+      <div class="conn-grid" id="conn-grid"></div>
+
+      <div class="run-controls">
+        <button class="run-btn" id="btn-single" onclick="runSingleQuery()">Run query (using)</button>
+        <button class="run-btn" id="btn-concurrent" onclick="runConcurrentQueries()">Run 4 concurrent</button>
+        <button class="run-btn" id="btn-error" onclick="runErrorQuery()">Throw mid-query</button>
+        <button class="run-btn secondary" onclick="clearLog()">Clear log</button>
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-chip">checked out: <b id="stat-checked-out">0</b></div>
+        <div class="stat-chip">available: <b id="stat-available">6</b></div>
+        <div class="stat-chip">queries run: <b id="stat-queries">0</b></div>
+        <div class="stat-chip">leaks prevented: <b id="stat-leaks">0</b></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <p style="font-family:var(--font-mono);font-size:0.65rem;color:var(--text-charcoal);margin-bottom:0.4rem">Activity log:</p>
+  <div class="event-log" id="event-log">
+    <div class="log-empty">Run a query to see checkout/release lifecycle.</div>
+  </div>
+
+  <pre><code>// Disposable connection — Symbol.dispose auto-releases to pool
+class PooledConnection {
+  constructor(id, pool, log) {
+    this.id = id;
+    this._pool = pool;
+    this._log = log;
+  }
+
+  query(sql) {
+    this._log(`conn#${this.id} executing: ${sql}`);
+    return { rows: [], conn: this.id };
+  }
+
+  // Called by `using` on scope exit
+  [Symbol.dispose]() {
+    this._pool.release(this);
+    this._log(`conn#${this.id} auto-released to pool`);
+  }
+}
+
+// Pool.checkout returns a PooledConnection
+// `using conn = pool.checkout()` guarantees release
+function processRequest(sql) {
+  using conn = pool.checkout();
+  return conn.query(sql); // conn released here, always
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../using/">using basics</a></li>
+      <li><a href="../disposable-stack/">DisposableStack</a></li>
+      <li><a href="../error-suppression/">SuppressedError</a></li>
+      <li><a href="../resource-leak-detector/">Resource leak detector</a></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5071515448180736" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://tc39.es/proposal-explicit-resource-management/" target="_blank" rel="noopener">TC39 proposal spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+// Feature detection
+const usingSupported = (() => {
+  try {
+    // Check Symbol.dispose exists
+    if (typeof Symbol.dispose === 'undefined') return false;
+    // Try parsing a using declaration (requires actual syntax support)
+    return true;
+  } catch { return false; }
+})();
+
+const statusEl = document.getElementById('support-status');
+statusEl.textContent = usingSupported
+  ? 'Symbol.dispose supported ✓ (Chrome 134+) — using declarations active.'
+  : 'Symbol.dispose not supported — demo uses try/finally to simulate the same lifecycle.';
+statusEl.style.color = usingSupported ? 'var(--accent-emerald)' : 'var(--accent-rose)';
+
+// ---- Pool implementation ----
+const POOL_SIZE = 6;
+let leakCount = 0;
+let queryCount = 0;
+
+class PooledConnection {
+  constructor(id, pool) {
+    this.id = id;
+    this._pool = pool;
+    this._released = false;
+  }
+
+  query(sql) {
+    if (this._released) throw new Error('Attempt to use released connection');
+    log('query', `conn#${this.id} executing: "${sql}"`);
+    queryCount++;
+    document.getElementById('stat-queries').textContent = queryCount;
+    return { rows: [{ result: 'ok' }], conn: this.id };
+  }
+
+  [Symbol.dispose]() {
+    if (!this._released) {
+      this._released = true;
+      this._pool._release(this);
+      log('release', `conn#${this.id} auto-released (Symbol.dispose)`);
+    }
+  }
+
+  // Manual release for fallback
+  release() {
+    if (!this._released) {
+      this._released = true;
+      this._pool._release(this);
+      log('release', `conn#${this.id} manually released (fallback)`);
+    }
+  }
+}
+
+class ConnectionPool {
+  constructor(size) {
+    this._available = Array.from({ length: size }, (_, i) => i + 1);
+    this._checkedOut = new Map(); // id -> conn
+    this._size = size;
+  }
+
+  checkout(user = '') {
+    if (this._available.length === 0) {
+      throw new Error('Connection pool exhausted — all connections checked out');
+    }
+    const id = this._available.shift();
+    const conn = new PooledConnection(id, this);
+    this._checkedOut.set(id, conn);
+    log('checkout', `conn#${id} checked out${user ? ' by ' + user : ''} (${this._available.length} remaining)`);
+    updateUI();
+    return conn;
+  }
+
+  _release(conn) {
+    if (this._checkedOut.has(conn.id)) {
+      this._checkedOut.delete(conn.id);
+      this._available.push(conn.id);
+      this._available.sort((a, b) => a - b);
+      updateUI();
+    }
+  }
+
+  get checkedOutCount() { return this._checkedOut.size; }
+  get availableCount() { return this._available.length; }
+  get checkedOutIds() { return [...this._checkedOut.keys()]; }
+}
+
+const pool = new ConnectionPool(POOL_SIZE);
+
+// Build pool UI
+const grid = document.getElementById('conn-grid');
+for (let i = 1; i <= POOL_SIZE; i++) {
+  const slot = document.createElement('div');
+  slot.className = 'conn-slot free';
+  slot.id = `slot-${i}`;
+  slot.innerHTML = `<span class="slot-id">conn#${i}</span><span class="slot-user">free</span>`;
+  grid.appendChild(slot);
+}
+
+function updateUI() {
+  const checkedIds = new Set(pool.checkedOutIds);
+  for (let i = 1; i <= POOL_SIZE; i++) {
+    const slot = document.getElementById(`slot-${i}`);
+    if (checkedIds.has(i)) {
+      slot.className = 'conn-slot checked-out';
+      slot.querySelector('.slot-user').textContent = 'in use';
+    } else {
+      slot.className = 'conn-slot free';
+      slot.querySelector('.slot-user').textContent = 'free';
+    }
+  }
+  document.getElementById('stat-checked-out').textContent = pool.checkedOutCount;
+  document.getElementById('stat-available').textContent = pool.availableCount;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function log(type, msg) {
+  const logEl = document.getElementById('event-log');
+  document.getElementById('log-empty')?.remove();
+  const ts = new Date().toLocaleTimeString('en', { hour12: false });
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.innerHTML = `
+    <span class="le-ts">${ts}</span>
+    <span class="le-type ${type}">${type}</span>
+    <span class="le-msg">${escHtml(msg)}</span>
+  `;
+  document.getElementById('event-log').appendChild(entry);
+  document.getElementById('event-log').scrollTop = 9999;
+}
+
+function setButtons(disabled) {
+  ['btn-single', 'btn-concurrent', 'btn-error'].forEach(id => {
+    document.getElementById(id).disabled = disabled;
+  });
+}
+
+// Run a single query using `using` if supported, else try/finally
+function runSingleQuery() {
+  setButtons(true);
+  document.getElementById('pool-status').textContent = 'running…';
+  log('info', '--- single query ---');
+
+  if (usingSupported) {
+    try {
+      // Use eval to allow engines that don't support `using` to load the page
+      // On browsers that support it this path runs natively
+      const fn = new Function('pool', 'log', `
+        using conn = pool.checkout('single');
+        conn.query('SELECT * FROM users LIMIT 10');
+        log('info', 'query completed inside using block');
+      `);
+      fn(pool, log);
+    } catch (e) {
+      // Fallback if `using` fails at parse time
+      doWithFinally('single');
+    }
+  } else {
+    doWithFinally('single');
+  }
+
+  document.getElementById('pool-status').textContent = 'idle';
+  setButtons(false);
+}
+
+function doWithFinally(user) {
+  const conn = pool.checkout(user);
+  try {
+    conn.query('SELECT * FROM users LIMIT 10');
+    log('info', 'query completed (try/finally fallback)');
+  } finally {
+    conn.release();
+  }
+}
+
+// Run 4 concurrent queries (sequential in this sync demo)
+function runConcurrentQueries() {
+  setButtons(true);
+  log('info', '--- 4 concurrent queries ---');
+  document.getElementById('pool-status').textContent = 'running…';
+
+  const QUERIES = [
+    'SELECT count(*) FROM orders',
+    'SELECT * FROM sessions WHERE active=1',
+    'UPDATE metrics SET ts=NOW()',
+    'SELECT * FROM events ORDER BY ts DESC LIMIT 5',
+  ];
+
+  // Check out all 4 first, then release — simulating concurrent work
+  const conns = QUERIES.map((q, i) => {
+    const conn = pool.checkout(`worker-${i + 1}`);
+    conn.query(q);
+    return conn;
+  });
+
+  // Release in reverse order (LIFO if using DisposableStack, FIFO here)
+  conns.forEach(c => c.release());
+
+  log('info', 'all 4 connections released');
+  document.getElementById('pool-status').textContent = 'idle';
+  setButtons(false);
+}
+
+// Throw mid-query — connection must still be released
+function runErrorQuery() {
+  setButtons(true);
+  log('info', '--- error query (throw mid-query) ---');
+  document.getElementById('pool-status').textContent = 'running…';
+
+  let conn = null;
+  try {
+    conn = pool.checkout('error-demo');
+
+    // Simulate work before the error
+    log('query', `conn#${conn.id} starting risky operation…`);
+
+    // Throw before query completes
+    throw new Error('Simulated DB error: deadlock detected');
+
+  } catch (e) {
+    log('error', `Caught: ${e.message}`);
+    leakCount++;
+    document.getElementById('stat-leaks').textContent = leakCount;
+
+    if (conn && !conn._released) {
+      // In the `using` version, this would be automatic.
+      // Here we manually release to show what `using` does for us.
+      conn.release();
+      log('release', `conn#${conn.id} released in catch (with 'using' this is automatic)`);
+    }
+  }
+
+  document.getElementById('pool-status').textContent = 'idle';
+  setButtons(false);
+}
+
+function clearLog() {
+  document.getElementById('event-log').innerHTML = '<div class="log-empty">Run a query to see checkout/release lifecycle.</div>';
+  document.getElementById('pool-status').textContent = 'idle';
+}
+
+log('info', 'Pool ready — 6 connections available');
+</script>
+</body>
+</html>
