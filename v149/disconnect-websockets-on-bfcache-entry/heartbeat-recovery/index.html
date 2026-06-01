@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Heartbeat Recovery — WebSocket BFCache — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+
+    /* Connection visualiser */
+    .conn-diagram { display: flex; gap: var(--space-4); align-items: flex-start; flex-wrap: wrap; margin: var(--space-3) 0; }
+    .conn-box {
+      border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3);
+      flex: 1; min-width: 200px;
+    }
+    .conn-label { font-family: var(--font-mono); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+    .conn-state {
+      font-family: var(--font-mono); font-size: 0.88rem; font-weight: bold; padding: 4px 10px;
+      border: 2px solid var(--border-black); display: inline-block; margin: var(--space-1) 0;
+    }
+    .state-connected { background: color-mix(in srgb, var(--accent-emerald) 25%, transparent); }
+    .state-closed { background: color-mix(in srgb, var(--accent-rose) 20%, transparent); }
+    .state-frozen { background: color-mix(in srgb, var(--accent-blue) 20%, transparent); }
+    .state-reconnecting { background: color-mix(in srgb, var(--text-muted) 20%, transparent); }
+
+    .heartbeat-pulse {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-charcoal); margin: var(--space-2) 0;
+    }
+    .pulse-dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--border-black); }
+    .dot-alive { background: var(--accent-emerald); animation: pulse-anim 1s infinite; }
+    .dot-stopped { background: var(--bg-stone); }
+    .dot-reconnecting { background: var(--accent-blue); }
+    @keyframes pulse-anim { 0%,100%{transform:scale(1)} 50%{transform:scale(1.3)} }
+
+    /* Controls */
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .btn {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.9rem;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+      box-shadow: 2px 2px 0 var(--border-black);
+    }
+    .btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--border-black); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: 2px 2px 0 var(--border-black); }
+    .ctrl-label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); }
+    .range-input { accent-color: var(--text-black); cursor: pointer; width: 110px; }
+    .ctrl-val { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); min-width: 40px; }
+
+    /* Timeline */
+    .timeline { border: 1px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-2) var(--space-3); max-height: 200px; overflow-y: auto; font-family: var(--font-mono); font-size: 0.7rem; line-height: 1.5; color: var(--text-charcoal); margin: var(--space-2) 0; }
+    .tl-entry { display: flex; gap: var(--space-3); padding: 2px 0; border-bottom: 1px solid color-mix(in srgb, var(--border-black) 20%, transparent); }
+    .tl-entry:last-child { border-bottom: none; }
+    .tl-time { color: var(--text-muted); flex-shrink: 0; min-width: 65px; }
+    .tl-hb { color: var(--accent-emerald); }
+    .tl-close { color: var(--accent-rose); }
+    .tl-restore { color: var(--accent-blue); }
+    .tl-miss { color: var(--accent-rose); font-style: italic; }
+
+    /* Metrics */
+    .metrics { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .metric { border: 1px solid var(--border-black); background: var(--bg-stone); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.72rem; }
+    .metric-val { font-size: 1.2rem; font-weight: bold; color: var(--text-black); display: block; }
+
+    .note { background: var(--bg-stone); border-left: 4px solid var(--accent-blue); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+    code { font-family: var(--font-mono); font-size: 0.88em; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Disconnect WebSockets on BFCache Entry</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v149</p>
+    <h1>Heartbeat Recovery</h1>
+    <p class="lede">Many WebSocket clients send periodic heartbeats (ping/pong or application-level keepalives) to keep the connection alive and detect server-side disconnects. When Chrome 149 closes the WebSocket on BFCache entry, the heartbeat timer must be cancelled on freeze and restarted with a fresh connection on restore — otherwise the restored page sends heartbeats to a dead socket.</p>
+  </header>
+
+  <div class="note">
+    Simulate a <strong>BFCache freeze/restore</strong> cycle and watch the heartbeat lifecycle. A correctly-written handler cancels the heartbeat interval in <code>pagehide</code>, reconnects in <code>pageshow(persisted:true)</code>, and restarts the heartbeat. An incorrect handler keeps the old interval running and detects the dead socket eventually via a missed pong.
+  </div>
+
+  <div class="controls">
+    <button class="btn" id="btn-connect" disabled>Connect WebSocket</button>
+    <button class="btn" id="btn-freeze">Simulate BFCache freeze</button>
+    <button class="btn" id="btn-restore" disabled>Simulate restore</button>
+    <button class="btn" id="btn-reset">Reset</button>
+    <div style="display:flex;align-items:center;gap:var(--space-2)">
+      <span class="ctrl-label">Heartbeat interval:</span>
+      <input type="range" id="hb-interval" class="range-input" min="500" max="3000" step="250" value="1500">
+      <span class="ctrl-val" id="hb-val">1.5s</span>
+    </div>
+  </div>
+
+  <div class="stage">
+    <div class="conn-diagram">
+      <div class="conn-box">
+        <p class="conn-label">WebSocket State</p>
+        <div class="conn-state" id="ws-state-box">SIMULATED</div>
+        <div class="heartbeat-pulse">
+          <span class="pulse-dot" id="hb-dot"></span>
+          <span id="hb-label">Heartbeat not started</span>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:0.7rem;color:var(--text-muted);margin-top:var(--space-1)">
+          HB interval: <span id="hb-interval-label">—</span><br>
+          Last ping: <span id="last-ping">—</span><br>
+          Missed pongs: <span id="missed-pongs">0</span>
+        </div>
+      </div>
+      <div class="conn-box">
+        <p class="conn-label">BFCache State</p>
+        <div class="conn-state state-reconnecting" id="bfcache-state">Active</div>
+        <div style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-charcoal);margin-top:var(--space-2)">
+          Freeze count: <span id="freeze-count">0</span><br>
+          Restore count: <span id="restore-count">0</span>
+        </div>
+      </div>
+      <div class="conn-box">
+        <p class="conn-label">Handler Mode</p>
+        <div class="toggle-group" style="margin:var(--space-1) 0">
+          <button class="toggle-btn active" data-mode="correct">Correct</button>
+          <button class="toggle-btn" data-mode="buggy">Buggy</button>
+        </div>
+        <div style="font-family:var(--font-mono);font-size:0.68rem;color:var(--text-charcoal);margin-top:var(--space-2);line-height:1.5" id="mode-desc">
+          Correct: cancels interval on freeze, reconnects + restarts on restore.
+        </div>
+      </div>
+    </div>
+
+    <div class="timeline" id="timeline">
+      <div class="tl-entry"><span class="tl-time">0ms</span><span>Simulation ready. Connect to begin.</span></div>
+    </div>
+
+    <div class="metrics">
+      <div class="metric">Heartbeats sent<span class="metric-val" id="m-hb">0</span></div>
+      <div class="metric">Missed pongs<span class="metric-val" id="m-miss">0</span></div>
+      <div class="metric">Reconnects<span class="metric-val" id="m-recon">0</span></div>
+      <div class="metric">HB after dead socket<span class="metric-val" id="m-dead">0</span></div>
+    </div>
+  </div>
+
+  <pre><code>// Correct pattern: cancel heartbeat on freeze, restart on restore
+
+let ws = null;
+let heartbeatTimer = null;
+const HB_INTERVAL = 15000; // 15 seconds
+
+function connect() {
+  ws = new WebSocket('wss://example.com/ws');
+  ws.addEventListener('open', () => startHeartbeat());
+  ws.addEventListener('close', () => stopHeartbeat());
+  ws.addEventListener('message', (e) => {
+    if (e.data === 'pong') resetMissedPongs();
+  });
+}
+
+function startHeartbeat() {
+  stopHeartbeat(); // always clear before starting
+  heartbeatTimer = setInterval(() => {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send('ping');
+    }
+  }, HB_INTERVAL);
+}
+
+function stopHeartbeat() {
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
+}
+
+// Chrome 149: WebSocket is closed on BFCache entry
+window.addEventListener('pagehide', (e) => {
+  if (e.persisted) {
+    stopHeartbeat(); // cancel — socket is closed by Chrome 149
+  }
+});
+
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted) {
+    connect();      // reconnect on restore
+    // startHeartbeat() is called by the 'open' event
+  }
+});</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../reconnect-on-restore/">Reconnect on Restore &mdash; the core reconnect pattern</a></li>
+      <li><a href="../navigation-walkthrough/">Navigation Walkthrough &mdash; full back-navigation cycle</a></li>
+      <li><a href="../state-audit/">State Audit &mdash; what state survives BFCache</a></li>
+      <li><a href="https://chromestatus.com/feature/5065003623366656" target="_blank" rel="noopener">ChromeStatus: Disconnect WebSockets on BFCache entry</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Page_Visibility_API" target="_blank" rel="noopener">MDN — Page Lifecycle API</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  let hbInterval = 1500;
+  let mode = 'correct';
+  let wsState = 'CLOSED'; // simulated
+  let heartbeatTimer = null;
+  let hbSent = 0, missed = 0, reconnects = 0, deadHb = 0;
+  let freezeCount = 0, restoreCount = 0;
+  let frozen = false;
+  let startTime = performance.now();
+  let missedPongs = 0;
+
+  const timeline = document.getElementById('timeline');
+
+  function ts() { return ((performance.now() - startTime) / 1000).toFixed(2) + 's'; }
+
+  function addLog(text, cls) {
+    const entry = document.createElement('div');
+    entry.className = 'tl-entry';
+    entry.innerHTML = '<span class="tl-time">' + ts() + '</span><span class="' + (cls || '') + '">' + text + '</span>';
+    timeline.insertBefore(entry, timeline.firstChild);
+    while (timeline.children.length > 40) timeline.removeChild(timeline.lastChild);
+  }
+
+  function updateMetrics() {
+    document.getElementById('m-hb').textContent = hbSent;
+    document.getElementById('m-miss').textContent = missed;
+    document.getElementById('m-recon').textContent = reconnects;
+    document.getElementById('m-dead').textContent = deadHb;
+    document.getElementById('missed-pongs').textContent = missedPongs;
+  }
+
+  function setWsState(state) {
+    wsState = state;
+    const box = document.getElementById('ws-state-box');
+    box.textContent = state;
+    box.className = 'conn-state ' +
+      (state === 'OPEN' ? 'state-connected' : state === 'FROZEN' || state === 'RECONNECTING' ? 'state-frozen' : 'state-closed');
+  }
+
+  function setHbIndicator(active) {
+    const dot = document.getElementById('hb-dot');
+    const label = document.getElementById('hb-label');
+    dot.className = 'pulse-dot ' + (active ? 'dot-alive' : frozen ? 'dot-stopped' : 'dot-stopped');
+    label.textContent = active ? 'Heartbeat running' : frozen ? 'Heartbeat stopped (frozen)' : 'Heartbeat stopped';
+  }
+
+  function startHeartbeat() {
+    stopHeartbeat();
+    setHbIndicator(true);
+    addLog('Heartbeat started — interval ' + hbInterval + 'ms', 'tl-hb');
+    document.getElementById('hb-interval-label').textContent = (hbInterval / 1000).toFixed(2) + 's';
+    heartbeatTimer = setInterval(() => {
+      if (wsState === 'OPEN') {
+        hbSent++;
+        missedPongs++;
+        document.getElementById('last-ping').textContent = ts();
+        addLog('→ ping sent (ws: ' + wsState + ')', 'tl-hb');
+        // Simulate pong after 50ms
+        setTimeout(() => {
+          if (wsState === 'OPEN') {
+            missedPongs = Math.max(0, missedPongs - 1);
+            addLog('← pong received', 'tl-hb');
+            document.getElementById('missed-pongs').textContent = missedPongs;
+          } else {
+            missed++;
+            addLog('✗ pong timeout — socket is ' + wsState, 'tl-miss');
+            document.getElementById('missed-pongs').textContent = missedPongs;
+          }
+        }, 50);
+      } else {
+        // Sending on dead socket
+        if (mode === 'buggy') {
+          deadHb++;
+          hbSent++;
+          addLog('→ ping sent to ' + wsState + ' socket — DEAD SOCKET! (buggy handler)', 'tl-miss');
+        }
+      }
+      updateMetrics();
+    }, hbInterval);
+  }
+
+  function stopHeartbeat() {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+    setHbIndicator(false);
+  }
+
+  function simulateConnect() {
+    setWsState('OPEN');
+    startHeartbeat();
+    addLog('WebSocket connected (simulated)', 'tl-restore');
+    reconnects++;
+    document.getElementById('btn-connect').disabled = true;
+    document.getElementById('btn-freeze').disabled = false;
+    updateMetrics();
+  }
+
+  function simulateFreeze() {
+    freezeCount++;
+    frozen = true;
+    document.getElementById('freeze-count').textContent = freezeCount;
+    document.getElementById('bfcache-state').textContent = 'Frozen (BFCache)';
+    document.getElementById('bfcache-state').className = 'conn-state state-frozen';
+    addLog('pagehide(persisted:true) — page entering BFCache', 'tl-close');
+
+    // Chrome 149 closes the WebSocket
+    setWsState('CLOSED');
+    addLog('Chrome 149 closes WebSocket on BFCache entry', 'tl-close');
+
+    if (mode === 'correct') {
+      stopHeartbeat();
+      addLog('Correct handler: heartbeat interval cancelled', 'tl-close');
+    } else {
+      // Buggy: leave heartbeat running (it will now fire on dead socket)
+      addLog('⚠ Buggy handler: heartbeat interval NOT cancelled — will fire on dead socket!', 'tl-miss');
+    }
+
+    document.getElementById('btn-freeze').disabled = true;
+    document.getElementById('btn-restore').disabled = false;
+  }
+
+  function simulateRestore() {
+    restoreCount++;
+    frozen = false;
+    document.getElementById('restore-count').textContent = restoreCount;
+    document.getElementById('bfcache-state').textContent = 'Active';
+    document.getElementById('bfcache-state').className = 'conn-state state-reconnecting';
+    addLog('pageshow(persisted:true) — page restored from BFCache', 'tl-restore');
+
+    if (mode === 'correct') {
+      setWsState('RECONNECTING');
+      setTimeout(() => {
+        setWsState('OPEN');
+        reconnects++;
+        addLog('Correct handler: reconnected — heartbeat restarted', 'tl-restore');
+        startHeartbeat();
+        updateMetrics();
+      }, 300);
+    } else {
+      // Buggy: no reconnect, heartbeat was still running and already firing on dead socket
+      addLog('⚠ Buggy handler: no reconnect — heartbeat continues on dead socket', 'tl-miss');
+    }
+
+    document.getElementById('btn-restore').disabled = true;
+    document.getElementById('btn-freeze').disabled = false;
+    updateMetrics();
+  }
+
+  document.getElementById('btn-connect').addEventListener('click', simulateConnect);
+  document.getElementById('btn-freeze').addEventListener('click', simulateFreeze);
+  document.getElementById('btn-restore').addEventListener('click', simulateRestore);
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    stopHeartbeat();
+    setWsState('CLOSED');
+    frozen = false;
+    hbSent = 0; missed = 0; reconnects = 0; deadHb = 0; missedPongs = 0; freezeCount = 0; restoreCount = 0;
+    startTime = performance.now();
+    updateMetrics();
+    document.getElementById('freeze-count').textContent = 0;
+    document.getElementById('restore-count').textContent = 0;
+    document.getElementById('bfcache-state').textContent = 'Active';
+    document.getElementById('bfcache-state').className = 'conn-state state-reconnecting';
+    document.getElementById('last-ping').textContent = '—';
+    document.getElementById('missed-pongs').textContent = 0;
+    document.getElementById('hb-interval-label').textContent = '—';
+    document.getElementById('btn-connect').disabled = false;
+    document.getElementById('btn-freeze').disabled = true;
+    document.getElementById('btn-restore').disabled = true;
+    timeline.innerHTML = '<div class="tl-entry"><span class="tl-time">0.00s</span><span>Simulation reset.</span></div>';
+  });
+
+  document.getElementById('hb-interval').addEventListener('input', function () {
+    hbInterval = parseInt(this.value);
+    document.getElementById('hb-val').textContent = (hbInterval / 1000).toFixed(2) + 's';
+  });
+
+  document.querySelectorAll('[data-mode]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      mode = btn.dataset.mode;
+      document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+      document.getElementById('mode-desc').textContent = mode === 'correct'
+        ? 'Correct: cancels interval on freeze, reconnects + restarts on restore.'
+        : 'Buggy: leaves interval running on freeze, no reconnect on restore — heartbeats hit dead socket.';
+    });
+  });
+
+  // Init
+  document.getElementById('btn-freeze').disabled = true;
+  document.getElementById('btn-restore').disabled = true;
+  document.getElementById('btn-connect').disabled = false;
+})();
+</script>
+</body>
+</html>
