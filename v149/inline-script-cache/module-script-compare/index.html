@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Module vs Classic Script Cache — Inline Script Cache — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+
+    .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 640px) { .compare-grid { grid-template-columns: 1fr; } }
+    .compare-panel { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); }
+    .panel-label { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+
+    /* Script editor */
+    .script-display { background: var(--bg-ivory); border: 1px solid var(--border-black); font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.5; padding: var(--space-2) var(--space-3); max-height: 160px; overflow-y: auto; }
+
+    /* Caching indicators */
+    .cache-indicator { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; margin: var(--space-2) 0; }
+    .indicator-dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--border-black); }
+    .dot-cached { background: var(--accent-emerald); }
+    .dot-uncached { background: var(--bg-stone); }
+    .dot-ineligible { background: var(--accent-rose); }
+    .indicator-label { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-charcoal); }
+
+    /* Properties table */
+    .prop-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.73rem; margin: var(--space-2) 0; }
+    .prop-table td { border: 1px solid color-mix(in srgb, var(--border-black) 40%, transparent); padding: 4px 8px; }
+    .prop-table td:first-child { color: var(--text-muted); background: var(--bg-stone); }
+    .val-yes { color: var(--accent-emerald); font-weight: bold; }
+    .val-no { color: var(--accent-rose); }
+    .val-maybe { color: var(--accent-blue); }
+
+    /* Bar chart */
+    .bar-row { display: flex; align-items: center; gap: var(--space-2); margin: 3px 0; font-family: var(--font-mono); font-size: 0.7rem; }
+    .bar-label { width: 100px; text-align: right; color: var(--text-muted); flex-shrink: 0; }
+    .bar { height: 16px; background: var(--accent-blue); border: 1px solid var(--border-black); transition: width 0.4s ease; }
+    .bar.warm { background: var(--accent-emerald); }
+    .bar.ineligible { background: var(--accent-rose); }
+    .bar-val { color: var(--text-charcoal); flex-shrink: 0; }
+
+    /* Controls */
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .ctrl-label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); }
+    .btn {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.9rem;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+      box-shadow: 2px 2px 0 var(--border-black);
+    }
+    .btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--border-black); }
+    .range-input { accent-color: var(--text-black); cursor: pointer; width: 130px; }
+    .ctrl-val { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); min-width: 45px; }
+
+    /* Eligibility checklist */
+    .checklist { list-style: none; margin: var(--space-2) 0; padding: 0; }
+    .checklist li { font-family: var(--font-mono); font-size: 0.72rem; padding: 2px 0; color: var(--text-charcoal); }
+    .check-ok:before { content: "✓ "; color: var(--accent-emerald); }
+    .check-fail:before { content: "✗ "; color: var(--accent-rose); }
+    .check-na:before { content: "— "; color: var(--text-muted); }
+
+    .note { background: var(--bg-stone); border-left: 4px solid var(--accent-blue); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+    code { font-family: var(--font-mono); font-size: 0.88em; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Inline Script Cache</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v149</p>
+    <h1>Module vs Classic Script Cache</h1>
+    <p class="lede">Chrome 149 extends V8's bytecode cache to inline scripts. The caching model differs for <code>&lt;script type="module"&gt;</code> vs classic <code>&lt;script&gt;</code>: classic scripts cache the compiled bytecode as a whole; modules cache each module instance separately and can benefit from the module cache on repeated instantiation. Adjust size and content to see how eligibility changes.</p>
+  </header>
+
+  <div class="note">
+    Drag the <strong>size slider</strong> to simulate scripts of different lengths. Check the eligibility rules column — a module script has slightly different eligibility criteria than a classic script. The bar chart compares cold (first parse) and warm (from cache) compile times for each type.
+  </div>
+
+  <div class="controls">
+    <div style="display:flex;align-items:center;gap:var(--space-2)">
+      <span class="ctrl-label">Script size:</span>
+      <input type="range" id="size-slider" class="range-input" min="100" max="10000" step="100" value="2000">
+      <span class="ctrl-val" id="size-val">2 KB</span>
+    </div>
+    <button class="btn" id="btn-simulate">Simulate load</button>
+    <button class="btn" id="btn-reset">Reset</button>
+  </div>
+
+  <div class="stage">
+    <div class="compare-grid">
+      <div class="compare-panel">
+        <p class="panel-label">Classic script (<code>&lt;script&gt;</code>)</p>
+        <div class="script-display" id="classic-display">
+          <span style="color:var(--text-muted)">&lt;script&gt;</span><br>
+          // 2000 bytes of business logic<br>
+          function processData(d) { … }<br>
+          function renderChart(c) { … }<br>
+          processData(window.__data);<br>
+          <span style="color:var(--text-muted)">&lt;/script&gt;</span>
+        </div>
+
+        <div class="cache-indicator">
+          <span class="indicator-dot" id="classic-dot"></span>
+          <span class="indicator-label" id="classic-status">Checking…</span>
+        </div>
+
+        <ul class="checklist" id="classic-checklist"></ul>
+
+        <p class="panel-label" style="margin-top:var(--space-3)">Timing (simulated)</p>
+        <div id="classic-bars"></div>
+        <div class="prop-table-wrap">
+          <table class="prop-table">
+            <tr><td>Cache key</td><td>SHA-256 of full body</td></tr>
+            <tr><td>Cache scope</td><td>whole script body</td></tr>
+            <tr><td>Module graph</td><td class="val-no">N/A — single unit</td></tr>
+            <tr><td>Re-eval on change</td><td>Full recompile</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <div class="compare-panel">
+        <p class="panel-label">Module script (<code>&lt;script type="module"&gt;</code>)</p>
+        <div class="script-display" id="module-display">
+          <span style="color:var(--text-muted)">&lt;script type="module"&gt;</span><br>
+          import { process } from './data.js';<br>
+          import { render } from './chart.js';<br>
+          const data = await fetch('/api/data');<br>
+          render(await process(data));<br>
+          <span style="color:var(--text-muted)">&lt;/script&gt;</span>
+        </div>
+
+        <div class="cache-indicator">
+          <span class="indicator-dot" id="module-dot"></span>
+          <span class="indicator-label" id="module-status">Checking…</span>
+        </div>
+
+        <ul class="checklist" id="module-checklist"></ul>
+
+        <p class="panel-label" style="margin-top:var(--space-3)">Timing (simulated)</p>
+        <div id="module-bars"></div>
+        <div class="prop-table-wrap">
+          <table class="prop-table">
+            <tr><td>Cache key</td><td>Per-module URL or hash</td></tr>
+            <tr><td>Cache scope</td><td>Module instance graph</td></tr>
+            <tr><td>Module graph</td><td class="val-yes">Shared across documents</td></tr>
+            <tr><td>Re-eval on change</td><td>Only changed modules recompile</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <pre><code>&lt;!-- Classic inline script: V8 bytecode cache in Chrome 149 --&gt;
+&lt;script&gt;
+  // Cached as a single bytecode unit after first visit.
+  // Key: SHA-256(script_body)
+  // Eligible when: size &gt; ~1KB, no eval()/with/new Function(),
+  //                no document.write(), stable content across visits.
+  function init() { /* … */ }
+  init();
+&lt;/script&gt;
+
+&lt;!-- Module inline script: also cached, but module-graph-aware --&gt;
+&lt;script type="module"&gt;
+  // Each imported module is cached separately in the module map.
+  // The inline module itself benefits from V8's code cache.
+  // Changes to imported modules do NOT invalidate the inline cache.
+  import { setup } from '/lib/setup.js';  // cached in module map
+  await setup();
+&lt;/script&gt;
+
+// Key difference: classic scripts cache as one monolithic unit;
+// module scripts participate in the module cache and each imported
+// file is cached independently — partial invalidation is possible.</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../cold-vs-warm/">Cold vs Warm &mdash; the basic inline script cache pattern</a></li>
+      <li><a href="../cache-impact-analyzer/">Cache Impact Analyzer &mdash; check any script for eligibility</a></li>
+      <li><a href="../size-threshold-explorer/">Size Threshold Explorer &mdash; how size affects eligibility</a></li>
+      <li><a href="https://chromestatus.com/feature/5181396360388608" target="_blank" rel="noopener">ChromeStatus: Inline Script Cache</a></li>
+      <li><a href="https://developer.chrome.com/blog/v8-release-9-6" target="_blank" rel="noopener">V8 script caching blog post</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const SIZE_THRESHOLD_MIN = 1024; // bytes — below this, not worth caching
+  const SIZE_THRESHOLD_MAX = 500 * 1024; // 500KB upper limit
+
+  const sizeSlider = document.getElementById('size-slider');
+  const sizeVal = document.getElementById('size-val');
+  let currentSize = 2000;
+  let simCount = 0;
+
+  function formatSize(bytes) {
+    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return bytes + ' B';
+  }
+
+  function checkClassicEligibility(size) {
+    return {
+      sizeOk: size >= SIZE_THRESHOLD_MIN,
+      noEval: true, // assume clean script
+      noDocWrite: true,
+      noWith: true,
+      stableContent: simCount > 0,
+    };
+  }
+
+  function checkModuleEligibility(size) {
+    return {
+      sizeOk: size >= SIZE_THRESHOLD_MIN,
+      noEval: true,
+      hasDynamicImport: size > 5000, // larger modules more likely to use dynamic import
+      moduleMapCacheAvailable: simCount > 0,
+    };
+  }
+
+  function buildChecklist(items) {
+    return items.map(([label, ok, optional]) => {
+      const cls = ok === 'na' ? 'check-na' : ok ? 'check-ok' : 'check-fail';
+      return '<li class="' + cls + '">' + label + (optional ? ' <span style="color:var(--text-muted)">(optional)</span>' : '') + '</li>';
+    }).join('');
+  }
+
+  function renderBar(container, rows) {
+    container.innerHTML = rows.map(([label, value, maxVal, warm]) => {
+      const pct = Math.round((value / maxVal) * 100);
+      const barCls = 'bar' + (warm ? ' warm' : '') + (value === 0 ? ' ineligible' : '');
+      return '<div class="bar-row"><span class="bar-label">' + label + '</span>' +
+             '<div class="' + barCls + '" style="width:' + Math.max(4, pct * 1.4) + 'px"></div>' +
+             '<span class="bar-val">' + value + 'ms</span></div>';
+    }).join('');
+  }
+
+  function simulate() {
+    simCount++;
+    const size = currentSize;
+
+    // Classic
+    const classicEl = checkClassicEligibility(size);
+    const classicEligible = classicEl.sizeOk && classicEl.noEval && classicEl.noDocWrite && classicEl.noWith;
+    const classicCold = classicEligible ? Math.round(size * 0.012) : Math.round(size * 0.014);
+    const classicWarm = classicEligible && simCount > 1 ? Math.round(classicCold * 0.15) : classicCold;
+
+    const classicDot = document.getElementById('classic-dot');
+    classicDot.className = 'indicator-dot ' + (classicEligible ? (simCount > 1 ? 'dot-cached' : 'dot-uncached') : 'dot-ineligible');
+    document.getElementById('classic-status').textContent =
+      classicEligible ? (simCount > 1 ? 'Cached — warm compile' : 'Eligible — first visit (cold)') : 'Ineligible — size too small';
+
+    document.getElementById('classic-checklist').innerHTML = buildChecklist([
+      ['Size > 1 KB (' + formatSize(size) + ')', classicEl.sizeOk],
+      ['No eval() / new Function()', classicEl.noEval],
+      ['No document.write()', classicEl.noDocWrite],
+      ['No with() statement', classicEl.noWith],
+      ['Stable content (same hash)', classicEl.stableContent],
+    ]);
+
+    const barMax = Math.max(classicCold, 120);
+    renderBar(document.getElementById('classic-bars'), [
+      ['Cold (1st visit)', classicCold, barMax, false],
+      ['Warm (2nd visit)', simCount > 1 && classicEligible ? classicWarm : classicCold, barMax, simCount > 1 && classicEligible],
+    ]);
+
+    // Module
+    const moduleEl = checkModuleEligibility(size);
+    const moduleEligible = moduleEl.sizeOk && moduleEl.noEval;
+    const moduleCold = moduleEligible ? Math.round(size * 0.010) : Math.round(size * 0.012);
+    const moduleWarm = moduleEligible && simCount > 1 ? Math.round(moduleCold * 0.20) : moduleCold;
+    const importedModulesWarm = moduleEligible && simCount > 1 ? Math.round(moduleCold * 0.05) : Math.round(moduleCold * 0.6);
+
+    const moduleDot = document.getElementById('module-dot');
+    moduleDot.className = 'indicator-dot ' + (moduleEligible ? (simCount > 1 ? 'dot-cached' : 'dot-uncached') : 'dot-ineligible');
+    document.getElementById('module-status').textContent =
+      moduleEligible ? (simCount > 1 ? 'Cached — module map + bytecode warm' : 'Eligible — first visit (cold)') : 'Ineligible — size too small';
+
+    document.getElementById('module-checklist').innerHTML = buildChecklist([
+      ['Size > 1 KB (' + formatSize(size) + ')', moduleEl.sizeOk],
+      ['No eval() in module', moduleEl.noEval],
+      ['Module map cached (imports)', moduleEl.moduleMapCacheAvailable],
+      ['Dynamic import()', moduleEl.hasDynamicImport ? 'na' : null, true],
+    ].filter(Boolean));
+
+    renderBar(document.getElementById('module-bars'), [
+      ['Inline module cold', moduleCold, barMax, false],
+      ['Inline module warm', simCount > 1 && moduleEligible ? moduleWarm : moduleCold, barMax, simCount > 1 && moduleEligible],
+      ['Imports warm', importedModulesWarm, barMax, simCount > 1 && moduleEligible],
+    ]);
+  }
+
+  sizeSlider.addEventListener('input', function () {
+    currentSize = parseInt(this.value);
+    sizeVal.textContent = formatSize(currentSize);
+    simulate();
+  });
+
+  document.getElementById('btn-simulate').addEventListener('click', simulate);
+
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    simCount = 0;
+    simulate();
+  });
+
+  simulate();
+})();
+</script>
+</body>
+</html>

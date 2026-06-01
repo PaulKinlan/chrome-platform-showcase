@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scroll Progress Tracker — Programmatic Scroll Promise — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+
+    /* Progress bar */
+    .progress-bar-wrap {
+      border: 2px solid var(--border-black); background: var(--bg-stone); height: 28px;
+      position: relative; overflow: hidden; margin: var(--space-3) 0;
+    }
+    .progress-fill {
+      height: 100%; background: var(--accent-blue); transition: width 0.1s linear;
+      width: 0%;
+    }
+    .progress-label {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+      font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-black);
+      white-space: nowrap; mix-blend-mode: difference; color: var(--bg-ivory);
+    }
+
+    /* Chapter markers */
+    .chapters-row { display: flex; gap: 0; border: 2px solid var(--border-black); overflow: hidden; margin: 0 0 var(--space-3); }
+    .chapter-marker {
+      flex: 1; height: 10px; position: relative; cursor: pointer;
+      border-right: 1px solid var(--border-black); transition: background 0.2s;
+      background: var(--bg-stone);
+    }
+    .chapter-marker:last-child { border-right: none; }
+    .chapter-marker.reached { background: var(--accent-blue); }
+    .chapter-marker.current { background: var(--accent-emerald); }
+    .chapter-marker:hover { filter: brightness(0.85); }
+
+    /* Chapter scroll area */
+    .chapter-scroller {
+      height: 280px; overflow-y: scroll; border: 1px solid var(--border-black);
+      background: var(--bg-ivory); scroll-behavior: smooth; position: relative;
+    }
+    .chapter-block {
+      padding: var(--space-4) var(--space-4);
+      border-bottom: 2px solid var(--border-black); min-height: 120px;
+    }
+    .chapter-block:last-child { border-bottom: none; }
+    .chapter-block h3 { font-family: var(--font-mono); font-size: 0.88rem; color: var(--text-black); margin: 0 0 var(--space-2); }
+    .chapter-block p { font-family: var(--font-sans); font-size: 0.82rem; line-height: 1.6; color: var(--text-charcoal); margin: 0; }
+    .chapter-num { font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-muted); margin: 0 0 4px; }
+
+    /* Controls */
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin: var(--space-3) 0; }
+    .btn {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.9rem;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+      box-shadow: 2px 2px 0 var(--border-black);
+    }
+    .btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--border-black); }
+    .btn.active { background: var(--accent-emerald); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: 2px 2px 0 var(--border-black); }
+    .ctrl-label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); }
+    .speed-group { display: flex; border: 2px solid var(--border-black); overflow: hidden; }
+    .speed-btn {
+      font-family: var(--font-mono); font-size: 0.72rem; padding: 0.3rem 0.6rem;
+      border: none; cursor: pointer; background: var(--bg-stone); color: var(--text-charcoal);
+      border-right: 1px solid var(--border-black);
+    }
+    .speed-btn:last-child { border-right: none; }
+    .speed-btn.active { background: var(--text-black); color: var(--bg-ivory); }
+
+    /* Log */
+    .scroll-log {
+      background: var(--bg-stone); border: 1px solid var(--border-black); font-family: var(--font-mono);
+      font-size: 0.72rem; line-height: 1.5; padding: var(--space-2) var(--space-3); max-height: 140px;
+      overflow-y: auto; color: var(--text-charcoal); margin: var(--space-2) 0;
+    }
+    .log-ok { color: var(--accent-emerald); }
+    .log-interrupt { color: var(--accent-rose); }
+    .log-info { color: var(--accent-blue); }
+
+    /* Status row */
+    .status-row { display: flex; gap: var(--space-4); flex-wrap: wrap; margin: var(--space-2) 0; }
+    .status-box { border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.72rem; min-width: 100px; }
+    .status-val { font-size: 1.2rem; font-weight: bold; color: var(--text-black); display: block; }
+
+    .note { background: var(--bg-stone); border-left: 4px solid var(--accent-blue); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+    code { font-family: var(--font-mono); font-size: 0.88em; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Programmatic Scroll Promise</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v149</p>
+    <h1>Scroll Progress Tracker</h1>
+    <p class="lede">Programmatic <code>scrollTo()</code> returns a Promise that resolves with <code>{ interrupted: false }</code> on completion or <code>{ interrupted: true }</code> if another scroll interrupts it. Chain each chapter scroll sequentially using <code>await</code> — the progress bar only advances when each scroll <em>actually lands</em>, not on a timer.</p>
+  </header>
+
+  <div class="note">
+    Click <strong>Start tour</strong> to scroll through all five chapters automatically. <strong>Interrupt</strong> at any time — the Promise resolves with <code>&#123; interrupted: true &#125;</code> and the progress bar pauses. <strong>Resume</strong> to continue from the interrupted chapter. Click any chapter in the chapter strip to jump directly.
+  </div>
+
+  <div class="controls">
+    <button class="btn" id="btn-start">▶ Start tour</button>
+    <button class="btn" id="btn-interrupt" disabled>⊘ Interrupt</button>
+    <button class="btn" id="btn-resume" disabled>↩ Resume</button>
+    <button class="btn" id="btn-reset">↺ Reset</button>
+    <span class="ctrl-label">Speed:</span>
+    <div class="speed-group">
+      <button class="speed-btn" data-speed="fast">Fast</button>
+      <button class="speed-btn active" data-speed="normal">Normal</button>
+      <button class="speed-btn" data-speed="slow">Slow</button>
+    </div>
+  </div>
+
+  <div class="chapters-row" id="chapters-row">
+    <!-- populated by JS -->
+  </div>
+
+  <div class="progress-bar-wrap">
+    <div class="progress-fill" id="progress-fill"></div>
+    <span class="progress-label" id="progress-label">0 / 5 chapters</span>
+  </div>
+
+  <div class="stage">
+    <div class="chapter-scroller" id="chapter-scroller">
+      <!-- populated by JS -->
+    </div>
+
+    <div class="status-row">
+      <div class="status-box">Current chapter<span class="status-val" id="stat-chapter">—</span></div>
+      <div class="status-box">Completed<span class="status-val" id="stat-done">0</span></div>
+      <div class="status-box">Interruptions<span class="status-val" id="stat-interrupts">0</span></div>
+      <div class="status-box">Status<span class="status-val" id="stat-status">—</span></div>
+    </div>
+
+    <div class="scroll-log" id="scroll-log">
+      <div><span class="log-info">Click "Start tour" to begin the promise-driven scroll sequence.</span></div>
+    </div>
+  </div>
+
+  <pre><code>// Promise-chained chapter scroll with progress tracking
+async function runTour(chapters, scroller) {
+  for (let i = 0; i &lt; chapters.length; i++) {
+    const chapter = chapters[i];
+    const targetY = chapter.offsetTop;
+
+    updateProgress(i, 'scrolling');
+
+    const result = await scroller.scrollTo({
+      top: targetY,
+      behavior: 'smooth',
+    });
+
+    if (result.interrupted) {
+      // User scrolled away — pause here and wait for resume
+      log('Chapter ' + (i+1) + ' interrupted — awaiting resume…');
+      await waitForResume();       // user clicks Resume button
+      i--;                         // retry the interrupted chapter
+      continue;
+    }
+
+    updateProgress(i + 1, 'reached');
+    log('Chapter ' + (i+1) + ' ✓ — promise resolved { interrupted: false }');
+  }
+}
+
+// Without promises, you'd need setTimeout guesses or IntersectionObserver
+// to know if a programmatic scroll "landed". The promise makes it precise.</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../guided-tour/">Guided Tour &mdash; 5-stop highlighted tour with recovery</a></li>
+      <li><a href="../animation-sequencer/">Animation Sequencer &mdash; await-chained scroll animations</a></li>
+      <li><a href="../scroll-sequencing-with-recovery/">Scroll Sequencing with Recovery &mdash; retry-on-interrupt pattern</a></li>
+      <li><a href="https://chromestatus.com/feature/5231704718065664" target="_blank" rel="noopener">ChromeStatus: Programmatic Scroll Promise</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Element/scrollTo" target="_blank" rel="noopener">MDN — Element.scrollTo()</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const CHAPTERS = [
+    { title: 'Chapter 1 — The Promise API', body: 'Chrome 149 makes <code>element.scrollTo()</code> return a Promise. The Promise resolves when the scroll animation completes, with a result object: <code>{ interrupted: false }</code> for success or <code>{ interrupted: true }</code> when another scroll interrupts this one.' },
+    { title: 'Chapter 2 — Sequential Scroll Chains', body: 'Because each scroll returns a Promise, you can <code>await</code> it before starting the next. No more <code>setTimeout</code> guesses. The next scroll only begins when the previous one actually finishes — regardless of how long the animation takes.' },
+    { title: 'Chapter 3 — Interrupt & Recovery', body: 'User scroll gestures or another programmatic scroll will interrupt an in-flight scrollTo(). The Promise resolves immediately with <code>{ interrupted: true }</code> so your code can pause, ask the user, or retry from the interrupted position.' },
+    { title: 'Chapter 4 — Progress Tracking', body: 'Chain each chapter scroll with <code>await</code> and update a progress bar only after each Promise resolves with <code>interrupted: false</code>. The bar genuinely reflects the user\'s position in the sequence, not a pre-computed timer.' },
+    { title: 'Chapter 5 — Real-world Patterns', body: 'Guided tours, onboarding flows, section-by-section readers, and auto-play presentations all benefit from promise-chained scrolling. The browser owns the animation — your code just reacts to promise resolution.' },
+  ];
+
+  const SPEEDS = { fast: 200, normal: 800, slow: 2000 };
+  let speed = 'normal';
+  let tourRunning = false;
+  let interrupted = false;
+  let resumeResolve = null;
+  let currentChapter = -1;
+  let completedChapters = 0;
+  let interruptionCount = 0;
+
+  // Build DOM
+  const scroller = document.getElementById('chapter-scroller');
+  const chaptersRow = document.getElementById('chapters-row');
+  const log = document.getElementById('scroll-log');
+  const progressFill = document.getElementById('progress-fill');
+  const progressLabel = document.getElementById('progress-label');
+
+  CHAPTERS.forEach((ch, i) => {
+    // scroller blocks
+    const block = document.createElement('div');
+    block.className = 'chapter-block';
+    block.id = 'chapter-' + i;
+    block.innerHTML = '<p class="chapter-num">Chapter ' + (i+1) + ' / ' + CHAPTERS.length + '</p>' +
+                      '<h3>' + ch.title + '</h3>' +
+                      '<p>' + ch.body + '</p>';
+    scroller.appendChild(block);
+
+    // chapter strip marker
+    const marker = document.createElement('div');
+    marker.className = 'chapter-marker';
+    marker.title = 'Jump to: ' + ch.title;
+    marker.addEventListener('click', () => {
+      const target = document.getElementById('chapter-' + i);
+      scroller.scrollTo({ top: target.offsetTop, behavior: 'smooth' });
+    });
+    chaptersRow.appendChild(marker);
+  });
+
+  function addLog(text, cls) {
+    const entry = document.createElement('div');
+    entry.innerHTML = '<span class="' + (cls || '') + '">' + text + '</span>';
+    log.insertBefore(entry, log.firstChild);
+    while (log.children.length > 30) log.removeChild(log.lastChild);
+  }
+
+  function setProgress(done) {
+    const pct = (done / CHAPTERS.length) * 100;
+    progressFill.style.width = pct + '%';
+    progressLabel.textContent = done + ' / ' + CHAPTERS.length + ' chapters';
+    completedChapters = done;
+    document.getElementById('stat-done').textContent = done;
+  }
+
+  function setChapterMarkers(current, done) {
+    document.querySelectorAll('.chapter-marker').forEach((m, i) => {
+      m.className = 'chapter-marker' +
+        (i < done ? ' reached' : '') +
+        (i === current ? ' current' : '');
+    });
+  }
+
+  function setStat(ch, status) {
+    document.getElementById('stat-chapter').textContent = ch >= 0 ? (ch+1) : '—';
+    document.getElementById('stat-status').textContent = status;
+    document.getElementById('stat-interrupts').textContent = interruptionCount;
+  }
+
+  function supportsScrollPromise() {
+    // Feature detect: scrollTo returns a promise
+    const dummy = document.createElement('div');
+    dummy.style.overflow = 'scroll';
+    dummy.style.height = '10px';
+    document.body.appendChild(dummy);
+    const result = dummy.scrollTo({ top: 0, behavior: 'smooth' });
+    document.body.removeChild(dummy);
+    return result instanceof Promise;
+  }
+
+  async function waitForResume() {
+    return new Promise(resolve => { resumeResolve = resolve; });
+  }
+
+  async function runTour(startChapter) {
+    const hasPromise = supportsScrollPromise();
+    if (!hasPromise) {
+      addLog('scrollTo() promise not available in this browser — using scroll + setTimeout simulation', 'log-info');
+    }
+
+    for (let i = startChapter; i < CHAPTERS.length; i++) {
+      if (!tourRunning) break;
+      currentChapter = i;
+      setStat(i, 'scrolling…');
+      setChapterMarkers(i, completedChapters);
+      addLog('Scrolling to chapter ' + (i+1) + '…', 'log-info');
+
+      const target = document.getElementById('chapter-' + i);
+      let scrollResult;
+
+      if (hasPromise) {
+        scrollResult = await scroller.scrollTo({ top: target.offsetTop, behavior: 'smooth' });
+      } else {
+        // Fallback: simulate with timeout
+        scroller.scrollTo({ top: target.offsetTop, behavior: 'smooth' });
+        await new Promise(r => setTimeout(r, SPEEDS[speed]));
+        scrollResult = { interrupted: false };
+      }
+
+      if (!tourRunning) break;
+
+      if (scrollResult && scrollResult.interrupted) {
+        interruptionCount++;
+        document.getElementById('btn-resume').disabled = false;
+        document.getElementById('btn-interrupt').disabled = true;
+        setStat(i, 'interrupted');
+        addLog('Chapter ' + (i+1) + ' interrupted — { interrupted: true } — click Resume', 'log-interrupt');
+        await waitForResume();
+        resumeResolve = null;
+        if (!tourRunning) break;
+        addLog('Resuming from chapter ' + (i+1), 'log-info');
+        i--; // retry
+        continue;
+      }
+
+      // Completed
+      setProgress(i + 1);
+      setChapterMarkers(i + 1, i + 1);
+      setStat(i, '✓ complete');
+      addLog('Chapter ' + (i+1) + ' ✓ — promise resolved { interrupted: false }', 'log-ok');
+
+      // Pause between chapters
+      if (i < CHAPTERS.length - 1) {
+        await new Promise(r => setTimeout(r, SPEEDS[speed] * 0.6));
+      }
+    }
+
+    if (tourRunning && currentChapter === CHAPTERS.length - 1) {
+      addLog('Tour complete! All ' + CHAPTERS.length + ' chapters visited.', 'log-ok');
+      setStat(currentChapter, 'done ✓');
+    }
+    tourRunning = false;
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-interrupt').disabled = true;
+    document.getElementById('btn-resume').disabled = true;
+  }
+
+  document.getElementById('btn-start').addEventListener('click', () => {
+    if (tourRunning) return;
+    tourRunning = true;
+    interrupted = false;
+    document.getElementById('btn-start').disabled = true;
+    document.getElementById('btn-interrupt').disabled = false;
+    document.getElementById('btn-resume').disabled = true;
+    addLog('Tour started — promise-chained scrollTo() running…', 'log-info');
+    runTour(0);
+  });
+
+  document.getElementById('btn-interrupt').addEventListener('click', () => {
+    // Simulate user interruption by scrolling the container
+    const currentPos = scroller.scrollTop;
+    scroller.scrollTo({ top: currentPos + 40, behavior: 'instant' });
+    addLog('Manual interrupt triggered', 'log-interrupt');
+  });
+
+  document.getElementById('btn-resume').addEventListener('click', () => {
+    if (resumeResolve) {
+      resumeResolve();
+      document.getElementById('btn-resume').disabled = true;
+      document.getElementById('btn-interrupt').disabled = false;
+    }
+  });
+
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    tourRunning = false;
+    if (resumeResolve) { resumeResolve(); resumeResolve = null; }
+    currentChapter = -1;
+    interruptionCount = 0;
+    setProgress(0);
+    setChapterMarkers(-1, 0);
+    setStat(-1, '—');
+    scroller.scrollTo({ top: 0, behavior: 'smooth' });
+    document.getElementById('btn-start').disabled = false;
+    document.getElementById('btn-interrupt').disabled = true;
+    document.getElementById('btn-resume').disabled = true;
+    log.innerHTML = '<div><span class="log-info">Reset. Click "Start tour" to begin.</span></div>';
+  });
+
+  document.querySelectorAll('.speed-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      speed = btn.dataset.speed;
+      document.querySelectorAll('.speed-btn').forEach(b => b.classList.toggle('active', b.dataset.speed === speed));
+    });
+  });
+})();
+</script>
+</body>
+</html>
