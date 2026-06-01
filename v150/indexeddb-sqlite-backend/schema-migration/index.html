@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Schema migration — IndexedDB SQLite backend — Chrome 150</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0;
+    }
+    .version-track {
+      display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center;
+      margin: var(--space-3) 0;
+    }
+    .version-card {
+      border: 2px solid var(--border-black); padding: var(--space-3); background: var(--bg-stone);
+      font-family: var(--font-mono); font-size: 0.78rem; min-width: 160px; flex: 1;
+    }
+    .version-card.active { border-color: var(--accent-blue); background: var(--bg-ivory); }
+    .version-card.done { border-color: var(--accent-emerald); }
+    .version-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); margin: 0 0 var(--space-1); }
+    .version-num { font-size: 1.1rem; font-weight: 700; color: var(--text-black); }
+
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .btn {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.9rem;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+      box-shadow: 2px 2px 0 var(--border-black);
+    }
+    .btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--border-black); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: 2px 2px 0 var(--border-black); }
+    .btn.primary { background: var(--text-black); color: var(--bg-ivory); }
+    .btn.danger { border-color: var(--accent-rose); color: var(--accent-rose); }
+
+    .schema-view { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: var(--space-3); margin: var(--space-3) 0; }
+    .store-card { border: 2px solid var(--border-black); padding: var(--space-2) var(--space-3); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.75rem; }
+    .store-card.new-store { border-color: var(--accent-blue); }
+    .store-card.migrated { border-color: var(--accent-emerald); }
+    .store-name { font-weight: 700; font-size: 0.82rem; margin-bottom: var(--space-1); }
+    .store-detail { color: var(--text-muted); font-size: 0.68rem; }
+    .store-badge { display: inline-block; font-size: 0.62rem; font-weight: 700; padding: 0.1em 0.4em; border: 1px solid var(--border-black); margin-left: 4px; }
+    .badge-new { background: var(--accent-blue); color: var(--bg-ivory); }
+    .badge-mod { background: var(--accent-emerald); color: var(--text-black); }
+    .badge-del { background: var(--accent-rose); color: var(--bg-ivory); text-decoration: line-through; }
+
+    .log { background: var(--bg-stone); border: 1px solid var(--border-black); font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6; padding: var(--space-2) var(--space-3); max-height: 200px; overflow-y: auto; margin: var(--space-3) 0; }
+    .log .ok { color: var(--accent-emerald); }
+    .log .err { color: var(--accent-rose); }
+    .log .inf { color: var(--accent-blue); }
+    .log .dim { color: var(--text-muted); }
+
+    .data-preview { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 0.75rem; margin: var(--space-2) 0; }
+    .data-preview th, .data-preview td { border: 1px solid var(--border-black); padding: var(--space-1) var(--space-2); text-align: left; }
+    .data-preview th { background: var(--bg-stone); }
+    .data-preview .new-col { background: color-mix(in srgb, var(--accent-blue) 8%, transparent); }
+
+    .migration-steps { border-left: 3px solid var(--border-black); padding-left: var(--space-3); margin: var(--space-3) 0; }
+    .step { font-family: var(--font-mono); font-size: 0.78rem; margin-bottom: var(--space-2); padding: var(--space-2); background: var(--bg-stone); }
+    .step.done { border-left: 3px solid var(--accent-emerald); }
+    .step.pending { border-left: 3px solid var(--accent-blue); opacity: 0.6; }
+    .step.error { border-left: 3px solid var(--accent-rose); }
+
+    .integrity-result { font-family: var(--font-mono); font-size: 0.8rem; padding: var(--space-2) var(--space-3); border: 2px solid var(--border-black); margin: var(--space-2) 0; }
+    .integrity-result.ok { border-color: var(--accent-emerald); }
+    .integrity-result.fail { border-color: var(--accent-rose); }
+
+    .note { background: var(--bg-stone); border-left: 4px solid var(--accent-blue); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
+    code { font-family: var(--font-mono); font-size: 0.88em; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; IndexedDB SQLite backend</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v150</p>
+    <h1>Schema migration</h1>
+    <p class="lede"><code>onupgradeneeded</code> is IndexedDB's migration hook — it runs once per version bump inside an atomic transaction. The Chrome 150 SQLite backend makes these upgrades more reliable: if the migration aborts or the browser crashes mid-upgrade, the database rolls back to its prior version cleanly rather than leaving it in a partial state.</p>
+  </header>
+
+  <div class="note">
+    Walk through three schema versions: v1 (users store), v2 (add posts + full-name index), v3 (migrate data + remove legacy field). After each upgrade, run the integrity check to confirm all records survived and the schema is correct.
+  </div>
+
+  <div class="stage">
+
+    <div class="version-track">
+      <div class="version-card" id="vc-0">
+        <p class="version-label">Starting point</p>
+        <p class="version-num">v0</p>
+        <p style="font-size:0.68rem;color:var(--text-muted);margin:0">No database yet</p>
+      </div>
+      <div style="font-size:1.5rem;color:var(--text-muted)">→</div>
+      <div class="version-card" id="vc-1">
+        <p class="version-label">Version 1</p>
+        <p class="version-num">v1</p>
+        <p style="font-size:0.68rem;color:var(--text-muted);margin:0">users (id, name, email)</p>
+      </div>
+      <div style="font-size:1.5rem;color:var(--text-muted)">→</div>
+      <div class="version-card" id="vc-2">
+        <p class="version-label">Version 2</p>
+        <p class="version-num">v2</p>
+        <p style="font-size:0.68rem;color:var(--text-muted);margin:0">+ posts + fullName index</p>
+      </div>
+      <div style="font-size:1.5rem;color:var(--text-muted)">→</div>
+      <div class="version-card" id="vc-3">
+        <p class="version-label">Version 3</p>
+        <p class="version-num">v3</p>
+        <p style="font-size:0.68rem;color:var(--text-muted);margin:0">migrate name → firstName/lastName</p>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button class="btn primary" id="btn-v1">Migrate to v1</button>
+      <button class="btn" id="btn-v2" disabled>Migrate to v2</button>
+      <button class="btn" id="btn-v3" disabled>Migrate to v3</button>
+      <button class="btn" id="btn-check" disabled>Integrity check</button>
+      <button class="btn danger" id="btn-reset">Delete &amp; reset</button>
+    </div>
+
+    <div style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);margin-bottom:4px">Current schema:</div>
+    <div class="schema-view" id="schema-view">
+      <div class="store-card"><span class="store-name" style="color:var(--text-muted)">— no stores —</span></div>
+    </div>
+
+    <div style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);margin-bottom:4px">Migration log:</div>
+    <div class="log" id="migration-log"><span class="inf">Click "Migrate to v1" to start.</span></div>
+
+    <div id="data-section" style="display:none">
+      <div style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);margin-bottom:4px">Data after migration:</div>
+      <div id="data-preview-host"></div>
+    </div>
+
+    <div class="integrity-result" id="integrity-result" style="display:none"></div>
+
+  </div>
+
+  <pre><code>// Schema migration via onupgradeneeded — atomic per version
+const request = indexedDB.open('showcase-demo', 3);
+
+request.onupgradeneeded = (event) => {
+  const db = event.target.result;
+  const oldVersion = event.oldVersion;
+
+  // Each case falls through to run all upgrades from current to target
+  switch (oldVersion) {
+    case 0:
+      // v1: create users store
+      const users = db.createObjectStore('users', { keyPath: 'id', autoIncrement: true });
+      users.createIndex('email', 'email', { unique: true });
+      // fall through
+
+    case 1:
+      // v2: add posts store and fullName index on users
+      const posts = db.createObjectStore('posts', { keyPath: 'id', autoIncrement: true });
+      posts.createIndex('authorId', 'authorId');
+      // Modify existing store: add new index (data stays intact)
+      const usersStore = event.target.transaction.objectStore('users');
+      usersStore.createIndex('name', 'name', { unique: false });
+      // fall through
+
+    case 2:
+      // v3: split 'name' into 'firstName'/'lastName'
+      // Use the transaction to migrate records in-place
+      const tx = event.target.transaction;
+      const store = tx.objectStore('users');
+      store.openCursor().onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (!cursor) return;
+        const record = cursor.value;
+        const parts = (record.name || '').split(' ');
+        record.firstName = parts[0] || '';
+        record.lastName  = parts.slice(1).join(' ') || '';
+        delete record.name;
+        cursor.update(record);
+        cursor.continue();
+      };
+      store.deleteIndex('name'); // remove old index
+      store.createIndex('lastName', 'lastName');
+      break;
+  }
+};
+
+// Chrome 150 SQLite backend: if onupgradeneeded throws or browser crashes,
+// the entire upgrade transaction rolls back — no partial schema states.</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../write-integrity-test/">Write Integrity Test &mdash; concurrent writes and durability</a></li>
+      <li><a href="../concurrent-writers/">Concurrent Writers &mdash; parallel transaction behaviour</a></li>
+      <li><a href="https://chromestatus.com/feature/5140174539022336" target="_blank" rel="noopener">ChromeStatus: IndexedDB SQLite backend</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API/Using_IndexedDB#version_changes_while_a_web_app_is_open_in_another_tab" target="_blank" rel="noopener">MDN — IDB version changes</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const DB_NAME = 'showcase-idb-migration-demo';
+  let db = null;
+  let currentVersion = 0;
+
+  const log = document.getElementById('migration-log');
+  function appendLog(msg, cls) {
+    const d = document.createElement('div');
+    d.innerHTML = msg;
+    if (cls) d.className = cls;
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function setVersionCard(v, state) {
+    const el = document.getElementById('vc-' + v);
+    if (el) {
+      el.className = 'version-card ' + (state === 'active' ? 'active' : state === 'done' ? 'done' : '');
+    }
+  }
+
+  function renderSchema(storeNames, indexes) {
+    const host = document.getElementById('schema-view');
+    host.innerHTML = '';
+    if (!storeNames || storeNames.length === 0) {
+      host.innerHTML = '<div class="store-card"><span class="store-name" style="color:var(--text-muted)">— no stores —</span></div>';
+      return;
+    }
+    storeNames.forEach(name => {
+      const card = document.createElement('div');
+      card.className = 'store-card';
+      const idxList = (indexes[name] || []).join(', ') || 'none';
+      card.innerHTML = `<div class="store-name">${name}</div><div class="store-detail">indexes: ${idxList}</div>`;
+      host.appendChild(card);
+    });
+  }
+
+  function getSchemaInfo(database) {
+    const storeNames = Array.from(database.objectStoreNames);
+    const indexes = {};
+    // we can't easily get indexes without a transaction, so we store them as we create
+    return { storeNames };
+  }
+
+  function migrateToVersion(targetVersion) {
+    return new Promise((resolve, reject) => {
+      if (db) { db.close(); db = null; }
+      appendLog(`Opening database at version ${targetVersion}…`, 'inf');
+      const req = indexedDB.open(DB_NAME, targetVersion);
+
+      req.onupgradeneeded = (event) => {
+        const database = event.target.result;
+        const tx = event.target.transaction;
+        const oldVersion = event.oldVersion;
+        appendLog(`onupgradeneeded: v${oldVersion} → v${targetVersion}`, 'inf');
+
+        try {
+          if (oldVersion < 1) {
+            // v1: users store
+            const users = database.createObjectStore('users', { keyPath: 'id', autoIncrement: true });
+            users.createIndex('email', 'email', { unique: true });
+            users.createIndex('name', 'name');
+            appendLog('  ✓ created objectStore "users" with indexes: email, name', 'ok');
+
+            // Seed some data
+            const seed = [
+              { name: 'Alice Smith', email: 'alice@example.com', joinedAt: Date.now() - 86400000 * 30 },
+              { name: 'Bob Jones',   email: 'bob@example.com',   joinedAt: Date.now() - 86400000 * 10 },
+              { name: 'Carol White', email: 'carol@example.com', joinedAt: Date.now() - 86400000 * 5  },
+            ];
+            seed.forEach(u => users.add(u));
+            appendLog('  ✓ seeded 3 users', 'ok');
+          }
+
+          if (oldVersion < 2) {
+            // v2: posts store + new fullName index
+            const posts = database.createObjectStore('posts', { keyPath: 'id', autoIncrement: true });
+            posts.createIndex('authorId', 'authorId');
+            appendLog('  ✓ created objectStore "posts" with index: authorId', 'ok');
+
+            // Seed posts
+            const postsStore = tx.objectStore('posts');
+            postsStore.add({ authorId: 1, title: 'Hello World', body: 'First post!', createdAt: Date.now() });
+            postsStore.add({ authorId: 2, title: 'Getting Started', body: 'My first entry.', createdAt: Date.now() });
+            appendLog('  ✓ seeded 2 posts', 'ok');
+          }
+
+          if (oldVersion < 3) {
+            // v3: split name → firstName + lastName
+            const usersStore = tx.objectStore('users');
+            // Delete old name index, add new indexes
+            if (Array.from(usersStore.indexNames).includes('name')) {
+              usersStore.deleteIndex('name');
+              appendLog('  ✓ dropped index "name"', 'ok');
+            }
+            usersStore.createIndex('lastName', 'lastName');
+            appendLog('  ✓ added index "lastName"', 'ok');
+
+            // Migrate existing records
+            usersStore.openCursor().onsuccess = (e) => {
+              const cursor = e.target.result;
+              if (!cursor) return;
+              const rec = { ...cursor.value };
+              if (rec.name) {
+                const parts = rec.name.split(' ');
+                rec.firstName = parts[0] || '';
+                rec.lastName  = parts.slice(1).join(' ') || '';
+                delete rec.name;
+                cursor.update(rec);
+              }
+              cursor.continue();
+            };
+            appendLog('  ✓ queued cursor migration: name → firstName/lastName', 'ok');
+          }
+        } catch (e) {
+          appendLog('  ✗ upgrade error: ' + e.message, 'err');
+          reject(e);
+        }
+      };
+
+      req.onsuccess = (event) => {
+        db = event.target.result;
+        currentVersion = db.version;
+        appendLog(`Database opened at v${currentVersion}`, 'ok');
+        resolve(db);
+      };
+
+      req.onerror = (event) => {
+        appendLog('Error: ' + event.target.error, 'err');
+        reject(event.target.error);
+      };
+    });
+  }
+
+  async function showData() {
+    if (!db) return;
+    const host = document.getElementById('data-preview-host');
+    host.innerHTML = '';
+
+    const storeNames = Array.from(db.objectStoreNames);
+    for (const storeName of storeNames) {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const records = await new Promise((resolve, reject) => {
+        const req = store.getAll();
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+
+      if (records.length === 0) continue;
+
+      const label = document.createElement('div');
+      label.style.fontFamily = 'var(--font-mono)';
+      label.style.fontSize = '0.72rem';
+      label.style.color = 'var(--text-muted)';
+      label.style.marginBottom = '4px';
+      label.textContent = storeName + ' (' + records.length + ' records):';
+      host.appendChild(label);
+
+      const keys = Object.keys(records[0]);
+      const table = document.createElement('table');
+      table.className = 'data-preview';
+      const thead = document.createElement('thead');
+      const hrow = document.createElement('tr');
+      keys.forEach(k => {
+        const th = document.createElement('th');
+        th.textContent = k;
+        if (k === 'firstName' || k === 'lastName') th.className = 'new-col';
+        hrow.appendChild(th);
+      });
+      thead.appendChild(hrow);
+      table.appendChild(thead);
+      const tbody = document.createElement('tbody');
+      records.forEach(rec => {
+        const tr = document.createElement('tr');
+        keys.forEach(k => {
+          const td = document.createElement('td');
+          const v = rec[k];
+          td.textContent = typeof v === 'number' && v > 1e12 ? new Date(v).toLocaleDateString() : String(v ?? '');
+          if (k === 'firstName' || k === 'lastName') td.className = 'new-col';
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      host.appendChild(table);
+    }
+
+    document.getElementById('data-section').style.display = '';
+  }
+
+  async function integrityCheck() {
+    if (!db) return;
+    const result = document.getElementById('integrity-result');
+    result.style.display = '';
+    result.textContent = 'Running integrity check…';
+    result.className = 'integrity-result';
+
+    const issues = [];
+    const storeNames = Array.from(db.objectStoreNames);
+
+    // Check v1 schema
+    if (!storeNames.includes('users')) issues.push('missing users store');
+
+    // Check v2+ schema
+    if (currentVersion >= 2 && !storeNames.includes('posts')) issues.push('missing posts store');
+
+    // Check v3 migration
+    if (currentVersion >= 3) {
+      const tx = db.transaction('users', 'readonly');
+      const store = tx.objectStore('users');
+      const records = await new Promise((resolve, reject) => {
+        const req = store.getAll();
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      const badRecords = records.filter(r => r.name !== undefined);
+      if (badRecords.length > 0) issues.push(`${badRecords.length} user(s) still have legacy "name" field`);
+      const missingMigrated = records.filter(r => r.firstName === undefined || r.lastName === undefined);
+      if (missingMigrated.length > 0) issues.push(`${missingMigrated.length} user(s) missing firstName/lastName`);
+    }
+
+    if (issues.length === 0) {
+      result.textContent = '✓ Integrity check passed — schema is correct, all records migrated successfully';
+      result.className = 'integrity-result ok';
+      appendLog('Integrity check: PASSED', 'ok');
+    } else {
+      result.textContent = '✗ Integrity issues: ' + issues.join('; ');
+      result.className = 'integrity-result fail';
+      appendLog('Integrity check: FAILED — ' + issues.join('; '), 'err');
+    }
+  }
+
+  async function updateUI() {
+    const storeNames = db ? Array.from(db.objectStoreNames) : [];
+    const indexes = {};
+    if (db) {
+      storeNames.forEach(name => {
+        const tx = db.transaction(name, 'readonly');
+        const store = tx.objectStore(name);
+        indexes[name] = Array.from(store.indexNames);
+      });
+    }
+    renderSchema(storeNames, indexes);
+
+    // Update version cards
+    for (let v = 0; v <= 3; v++) {
+      if (v < currentVersion) setVersionCard(v, 'done');
+      else if (v === currentVersion) setVersionCard(v, 'active');
+      else setVersionCard(v, '');
+    }
+
+    document.getElementById('btn-v1').disabled = currentVersion >= 1;
+    document.getElementById('btn-v2').disabled = currentVersion !== 1;
+    document.getElementById('btn-v3').disabled = currentVersion !== 2;
+    document.getElementById('btn-check').disabled = currentVersion === 0;
+
+    await showData();
+  }
+
+  document.getElementById('btn-v1').addEventListener('click', async () => {
+    try {
+      await migrateToVersion(1);
+      await updateUI();
+    } catch (e) { appendLog('Migration failed: ' + e, 'err'); }
+  });
+
+  document.getElementById('btn-v2').addEventListener('click', async () => {
+    try {
+      await migrateToVersion(2);
+      await updateUI();
+    } catch (e) { appendLog('Migration failed: ' + e, 'err'); }
+  });
+
+  document.getElementById('btn-v3').addEventListener('click', async () => {
+    try {
+      await migrateToVersion(3);
+      await updateUI();
+    } catch (e) { appendLog('Migration failed: ' + e, 'err'); }
+  });
+
+  document.getElementById('btn-check').addEventListener('click', integrityCheck);
+
+  document.getElementById('btn-reset').addEventListener('click', async () => {
+    if (db) { db.close(); db = null; }
+    currentVersion = 0;
+    const req = indexedDB.deleteDatabase(DB_NAME);
+    req.onsuccess = () => {
+      appendLog('Database deleted. Start fresh with v1.', 'inf');
+      log.innerHTML = '<span class="inf">Database deleted. Click "Migrate to v1" to start.</span>';
+      document.getElementById('integrity-result').style.display = 'none';
+      document.getElementById('data-section').style.display = 'none';
+      updateUI();
+    };
+    req.onerror = () => appendLog('Delete failed', 'err');
+  });
+
+  // Init
+  updateUI();
+})();
+</script>
+</body>
+</html>
