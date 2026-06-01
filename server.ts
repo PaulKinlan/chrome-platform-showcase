@@ -4045,6 +4045,7 @@ async function renderCategoryPage(slug: string, channels: Channels): Promise<str
 
 import type { CritiqueReport } from "./lib/critique.ts";
 import { scoreVerdicts } from "./lib/critique.ts";
+import type { ConformanceAssertion, ConformanceSuite } from "./lib/conformance.ts";
 
 async function readCritique(path: string): Promise<CritiqueReport | null> {
   try {
@@ -4272,6 +4273,292 @@ function renderCritiqueDetail(c: CritiqueReport): string {
 </html>`;
 }
 
+// ----- Conformance: spec-vs-implementation probes -----
+//
+// A conformance suite is a list of assertions against a feature's contract.
+// We render a page per suite that runs the assertions live in the visitor's
+// browser, so the verdict reflects what the visitor's browser ACTUALLY does
+// — Chrome stable, Chrome canary, Firefox, Safari each see their own truth.
+// The rollup gives a per-feature view of how many checks exist; the future
+// nightly-headless job will turn this into a real cross-browser matrix.
+
+async function readConformance(path: string): Promise<ConformanceSuite | null> {
+  try {
+    const text = await Deno.readTextFile(path);
+    return JSON.parse(text) as ConformanceSuite;
+  } catch {
+    return null;
+  }
+}
+
+async function collectConformanceSuites(): Promise<ConformanceSuite[]> {
+  const out: ConformanceSuite[] = [];
+  try {
+    for await (const entry of Deno.readDir(".")) {
+      if (!entry.isDirectory || !/^v\d+$/.test(entry.name)) continue;
+      const release = entry.name;
+      for await (const fd of Deno.readDir(release)) {
+        if (!fd.isDirectory) continue;
+        const featureSuite = await readConformance(
+          `${release}/${fd.name}/conformance.json`,
+        );
+        if (featureSuite) out.push(featureSuite);
+        try {
+          for await (const cd of Deno.readDir(`${release}/${fd.name}`)) {
+            if (!cd.isDirectory) continue;
+            const conceptSuite = await readConformance(
+              `${release}/${fd.name}/${cd.name}/conformance.json`,
+            );
+            if (conceptSuite) out.push(conceptSuite);
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return out;
+}
+
+function renderConformancePage(s: ConformanceSuite): string {
+  const label = s.conceptSlug
+    ? `${s.release} · ${s.featureSlug} / ${s.conceptSlug}`
+    : `${s.release} · ${s.featureSlug}`;
+  const back = s.conceptSlug
+    ? `/${s.release}/${s.featureSlug}/${s.conceptSlug}/`
+    : `/${s.release}/${s.featureSlug}/`;
+
+  const rows = s.assertions.map((a) => {
+    return `<tr data-id="${escapeHTML(a.id)}" data-kind="${escapeHTML(a.kind)}" data-test="${
+      escapeHTML(a.test)
+    }"${a.expect ? ` data-expect="${escapeHTML(a.expect)}"` : ""}>
+      <td><code>${escapeHTML(a.id)}</code></td>
+      <td>${escapeHTML(a.description)}${
+      a.specSection
+        ? ` <a class="spec-link" href="${
+          escapeHTML(a.specSection)
+        }" target="_blank" rel="noopener">spec ↗</a>`
+        : ""
+    }</td>
+      <td><span class="kind">${escapeHTML(a.kind)}</span></td>
+      <td class="verdict-cell"><span class="verdict verdict-na" data-verdict>…</span></td>
+      <td class="detail-cell" data-detail></td>
+    </tr>`;
+  }).join("");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>conformance — ${escapeHTML(label)}</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    main { max-width: 1000px; }
+    .meta { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .summary { display: flex; gap: var(--space-4); flex-wrap: wrap; margin: var(--space-3) 0 var(--space-5); }
+    .stat { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-3) var(--space-4); min-width: 120px; }
+    .stat .n { font-family: var(--font-display); font-size: 2.2rem; color: var(--text-black); font-variant-numeric: tabular-nums; line-height: 1; }
+    .stat .label { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+    table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.85rem; }
+    th, td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border-black); text-align: left; vertical-align: top; }
+    th { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); background: var(--bg-stone); }
+    .kind { font-size: 0.72rem; color: var(--text-muted); padding: 0.1rem 0.4rem; border: 1px solid var(--border-black); background: var(--bg-stone); }
+    .verdict { padding: 0.15rem 0.55rem; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; border: 1px solid var(--border-black); }
+    .verdict-pass { background: color-mix(in srgb, var(--accent-emerald) 14%, var(--bg-paper)); color: var(--accent-emerald); border-color: var(--accent-emerald); }
+    .verdict-fail { background: color-mix(in srgb, var(--accent-rose) 14%, var(--bg-paper)); color: var(--accent-rose); border-color: var(--accent-rose); }
+    .verdict-na { background: var(--bg-stone); color: var(--text-muted); }
+    .detail-cell { font-size: 0.78rem; color: var(--text-muted); max-width: 260px; word-break: break-word; }
+    .spec-link { font-size: 0.78rem; color: var(--accent-blue); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="${escapeHTML(back)}">&larr; back to ${escapeHTML(label)}</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">conformance · ${escapeHTML(s.release)}</p>
+    <h1>${escapeHTML(label)} — conformance probe</h1>
+    <p class="lede">${s.assertions.length} assertion${
+    s.assertions.length === 1 ? "" : "s"
+  } drawn from the spec. Each is a single contract the spec text makes; the verdict reflects what THIS browser does right now. Open the page in Chrome stable / canary / Firefox / Safari to see the matrix manually.</p>
+    <div class="meta">
+      <span>browser: <strong id="ua">…</strong></span>
+      ${
+    s.specUrl
+      ? `<span>spec: <a href="${escapeHTML(s.specUrl)}" target="_blank" rel="noopener">${
+        escapeHTML(s.specUrl)
+      }</a></span>`
+      : ""
+  }
+      <span>chromestatus: <a href="https://chromestatus.com/feature/${s.chromestatusId}" target="_blank" rel="noopener">#${s.chromestatusId}</a></span>
+      <span>generated ${escapeHTML(s.generatedAt)} by ${escapeHTML(s.author)}</span>
+    </div>
+  </header>
+
+  <div class="summary">
+    <div class="stat"><div class="n" id="n-pass">0</div><div class="label">pass</div></div>
+    <div class="stat"><div class="n" id="n-fail">0</div><div class="label">fail</div></div>
+    <div class="stat"><div class="n">${s.assertions.length}</div><div class="label">total</div></div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>id</th>
+        <th>contract</th>
+        <th>kind</th>
+        <th>verdict</th>
+        <th>detail</th>
+      </tr>
+    </thead>
+    <tbody id="rows">${rows}</tbody>
+  </table>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(() => {
+  document.getElementById("ua").textContent = navigator.userAgent;
+  const rows = document.querySelectorAll("#rows tr");
+  let pass = 0, fail = 0;
+
+  function runAssertion(kind, test, expect) {
+    try {
+      if (kind === "css-supports") {
+        // CSS.supports accepts either ("prop: value") or ("prop", "value");
+        // we pass the raw declaration form.
+        return { ok: !!CSS.supports(test), detail: "" };
+      }
+      if (kind === "exists") {
+        // Walk a dotted path against the global.
+        const parts = test.split(".");
+        let cur = globalThis;
+        for (const p of parts) {
+          if (cur == null) return { ok: false, detail: "missing at " + p };
+          cur = cur[p];
+        }
+        return { ok: cur !== undefined, detail: cur === undefined ? "undefined" : "" };
+      }
+      if (kind === "typeof") {
+        const parts = test.split(".");
+        let cur = globalThis;
+        for (const p of parts) {
+          if (cur == null) return { ok: false, detail: "missing at " + p };
+          cur = cur[p];
+        }
+        return { ok: typeof cur === expect, detail: "typeof = " + typeof cur };
+      }
+      if (kind === "script") {
+        // eslint-disable-next-line no-new-func
+        const result = new Function("return (" + test + ")")();
+        return { ok: !!result, detail: String(result) };
+      }
+      if (kind === "throws") {
+        try {
+          // eslint-disable-next-line no-new-func
+          new Function("return (" + test + ")")();
+          return { ok: false, detail: "no throw" };
+        } catch (e) {
+          return { ok: true, detail: e && e.name ? e.name : "threw" };
+        }
+      }
+      return { ok: false, detail: "unknown kind" };
+    } catch (e) {
+      return { ok: false, detail: (e && e.message) ? e.message : String(e) };
+    }
+  }
+
+  for (const row of rows) {
+    const kind = row.dataset.kind;
+    const test = row.dataset.test;
+    const expect = row.dataset.expect;
+    const { ok, detail } = runAssertion(kind, test, expect);
+    const cell = row.querySelector("[data-verdict]");
+    cell.classList.remove("verdict-na");
+    cell.classList.add(ok ? "verdict-pass" : "verdict-fail");
+    cell.textContent = ok ? "pass" : "fail";
+    if (detail) row.querySelector("[data-detail]").textContent = detail;
+    if (ok) pass++; else fail++;
+  }
+  document.getElementById("n-pass").textContent = pass;
+  document.getElementById("n-fail").textContent = fail;
+})();
+</script>
+</body>
+</html>`;
+}
+
+async function renderConformanceIndex(): Promise<string> {
+  const all = await collectConformanceSuites();
+  all.sort((a, b) => {
+    const am = Number(a.release.slice(1));
+    const bm = Number(b.release.slice(1));
+    if (am !== bm) return bm - am;
+    return a.featureSlug.localeCompare(b.featureSlug);
+  });
+  const totalAssertions = all.reduce((n, s) => n + s.assertions.length, 0);
+  const rows = all.map((s) => {
+    const label = s.conceptSlug
+      ? `${s.release} · ${s.featureSlug} / ${s.conceptSlug}`
+      : `${s.release} · ${s.featureSlug}`;
+    const href = s.conceptSlug
+      ? `/${s.release}/${s.featureSlug}/${s.conceptSlug}/conformance/`
+      : `/${s.release}/${s.featureSlug}/conformance/`;
+    return `<tr>
+      <td><a href="${escapeHTML(href)}">${escapeHTML(label)}</a></td>
+      <td class="num">${s.assertions.length}</td>
+      <td>${
+      s.assertions.map((a) => `<code class="kind">${escapeHTML(a.kind)}</code>`).join(" ")
+    }</td>
+    </tr>`;
+  }).join("");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>conformance — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    main { max-width: 1000px; }
+    table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.85rem; }
+    th, td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border-black); text-align: left; vertical-align: top; }
+    th { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); background: var(--bg-stone); }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .kind { font-size: 0.72rem; color: var(--text-muted); padding: 0.05rem 0.35rem; border: 1px solid var(--border-black); background: var(--bg-stone); margin-right: 0.2rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/">&larr; home</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">conformance</p>
+    <h1>spec-vs-implementation probes</h1>
+    <p class="lede">Each suite is a list of assertions drawn from the spec text. Click into one and your browser runs the assertions live — Chrome stable, Chrome canary, Firefox, and Safari each give their own verdict. This is the live "does it actually work the way the spec says" matrix.</p>
+    <p class="updated-line">${all.length} suite${
+    all.length === 1 ? "" : "s"
+  } · ${totalAssertions} total assertion${totalAssertions === 1 ? "" : "s"}</p>
+  </header>
+
+  <table>
+    <thead><tr><th>page</th><th>assertions</th><th>kinds</th></tr></thead>
+    <tbody>${
+    rows ||
+    `<tr><td colspan="3">No conformance suites yet. Generate them with the conformance-author subagent.</td></tr>`
+  }</tbody>
+  </table>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>`;
+}
+
 async function knownReleaseMilestones(channels: Channels): Promise<Set<number>> {
   // Always accept the three live channels plus the previous stable (since
   // chromestatus's "stable" is the next cut, the previous mstone is what most
@@ -4319,6 +4606,33 @@ Deno.serve({ port: PORT }, async (req) => {
     } catch (err) {
       return new Response(`Failed to render features: ${err}`, { status: 502 });
     }
+  }
+
+  if (path === "/conformance" || path === "/conformance/") {
+    try {
+      return new Response(await renderConformanceIndex(), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    } catch (err) {
+      return new Response(`Failed to render conformance: ${err}`, { status: 502 });
+    }
+  }
+
+  // Per-page conformance at /v<N>/<feature>/conformance/ or
+  // /v<N>/<feature>/<concept>/conformance/.
+  const confMatch = path.match(/^\/(v\d+)\/([^/]+)(?:\/([^/]+))?\/conformance\/?$/);
+  if (confMatch) {
+    const [, release, featureSlug, conceptSlug] = confMatch;
+    const filePath = conceptSlug
+      ? `${release}/${featureSlug}/${conceptSlug}/conformance.json`
+      : `${release}/${featureSlug}/conformance.json`;
+    const suite = await readConformance(filePath);
+    if (!suite) {
+      return new Response("No conformance suite yet for this page", { status: 404 });
+    }
+    return new Response(renderConformancePage(suite), {
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
   }
 
   if (path === "/critiques" || path === "/critiques/") {
