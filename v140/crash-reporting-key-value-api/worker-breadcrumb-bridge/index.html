@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker Breadcrumb Bridge — Crash Reporting key-value API — Chrome 140</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+    .arch-grid {
+      display: grid; grid-template-columns: 1fr auto 1fr; gap: var(--space-3);
+      align-items: start; margin: var(--space-4) 0;
+    }
+    @media (max-width: 640px) { .arch-grid { grid-template-columns: 1fr; } }
+    .arch-panel {
+      border: 2px solid var(--border-black); background: var(--bg-stone);
+      padding: var(--space-3);
+    }
+    .arch-panel h4 {
+      font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.07em; color: var(--text-muted); margin: 0 0 var(--space-2);
+    }
+    .arch-arrow {
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; font-family: var(--font-mono); font-size: 0.72rem;
+      color: var(--text-muted); gap: 4px; padding-top: var(--space-4);
+    }
+    @media (max-width: 640px) { .arch-arrow { flex-direction: row; justify-content: start; } }
+    .arrow-sym { font-size: 1.2rem; color: var(--accent-blue); }
+
+    .event-log {
+      height: 180px; overflow-y: auto; border: 1px solid var(--border-black);
+      background: var(--bg-ivory); padding: var(--space-2);
+      font-family: var(--font-mono); font-size: 0.75rem; line-height: 1.6;
+    }
+    .event-log .entry { color: var(--text-charcoal); }
+    .event-log .entry.worker { color: var(--accent-blue); }
+    .event-log .entry.main { color: var(--accent-emerald); }
+    .event-log .entry.crash { color: var(--accent-rose); font-weight: 700; }
+    .event-log .entry.system { color: var(--text-muted); }
+
+    .kv-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.78rem; margin: var(--space-2) 0; }
+    .kv-table th, .kv-table td { border: 1px solid var(--border-black); padding: 0.3rem 0.6rem; }
+    .kv-table th { background: var(--bg-stone); color: var(--text-muted); text-transform: uppercase; font-size: 0.68rem; letter-spacing: 0.05em; }
+    .kv-table .src-worker td:first-child { color: var(--accent-blue); }
+    .kv-table .src-main td:first-child { color: var(--accent-emerald); }
+
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .btn {
+      font-family: var(--font-mono); font-size: 0.8rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.9rem;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+      box-shadow: 2px 2px 0 var(--border-black);
+    }
+    .btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--border-black); }
+    .btn.danger { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .btn.danger:hover { background: var(--accent-rose); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: 2px 2px 0 var(--border-black); }
+
+    .payload {
+      background: var(--bg-stone); border: 2px solid var(--border-black);
+      padding: var(--space-3) var(--space-4); font-family: var(--font-mono);
+      font-size: 0.75rem; white-space: pre-wrap; line-height: 1.6; display: none;
+    }
+    .payload.visible { display: block; }
+
+    .badge {
+      display: inline-block; font-family: var(--font-mono); font-size: 0.68rem;
+      padding: 0.1em 0.5em; background: var(--text-black); color: var(--bg-ivory);
+    }
+    .badge.worker { background: var(--accent-blue); color: var(--bg-ivory); }
+    .badge.main { background: var(--accent-emerald); color: var(--text-black); }
+    .note { border-left: 4px solid var(--accent-blue); background: var(--bg-stone); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); margin: var(--space-4) 0; }
+    code { font-family: var(--font-mono); font-size: 0.88em; }
+    #api-probe { font-family: var(--font-mono); font-size: 0.78rem; margin: var(--space-2) 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Crash Reporting key-value API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v140</p>
+    <h1>Worker Breadcrumb Bridge</h1>
+    <p class="lede">A <code>Worker</code> (and <code>SharedWorker</code>) does not have access to the main thread's <code>window.crashReporter</code>. The real pattern is a <em>bridge</em>: the worker <code>postMessage</code>s structured breadcrumb objects to the main thread, which stamps them into <code>crashReporter.set()</code>. This demo simulates a CPU-intensive worker posting incremental progress keys that survive into a crash report.</p>
+  </header>
+
+  <div class="note" id="api-note" style="display:none">
+    <strong>window.crashReporter not available</strong> in this browser. The demo simulates the API surface so you can explore the pattern. <a href="https://chromestatus.com/feature/6228675846209536" target="_blank" rel="noopener">ChromeStatus entry</a>
+  </div>
+  <div id="api-probe"></div>
+
+  <div class="stage">
+
+    <!-- Architecture diagram -->
+    <div class="arch-grid">
+      <div class="arch-panel">
+        <h4><span class="badge worker">Worker thread</span></h4>
+        <p style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-charcoal)">Runs CPU work. Has no access to <code>crashReporter</code>. Posts breadcrumbs via <code>postMessage</code>.</p>
+        <div class="event-log" id="worker-log"><span class="entry system">[ waiting for worker to start ]</span></div>
+      </div>
+      <div class="arch-arrow">
+        <span class="arrow-sym">→</span>
+        <span>postMessage</span>
+        <span class="arrow-sym">←</span>
+        <span>control</span>
+      </div>
+      <div class="arch-panel">
+        <h4><span class="badge main">Main thread</span></h4>
+        <p style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-charcoal)">Receives messages. Calls <code>crashReporter.set(key, value)</code> to stamp into the crash payload.</p>
+        <div class="event-log" id="main-log"><span class="entry system">[ waiting for messages ]</span></div>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="controls">
+      <button class="btn" id="btn-start">Start worker</button>
+      <button class="btn" id="btn-tick" disabled>Advance work step</button>
+      <button class="btn danger" id="btn-crash" disabled>Simulate crash</button>
+      <button class="btn" id="btn-reset">Reset</button>
+    </div>
+
+    <!-- KV Store -->
+    <h3 style="font-family:var(--font-mono);font-size:0.85rem;color:var(--text-charcoal);margin:var(--space-4) 0 var(--space-2)">Live <code>crashReporter</code> key store</h3>
+    <div style="overflow-x:auto">
+      <table class="kv-table" id="kv-table">
+        <thead><tr><th>key</th><th>value</th><th>source</th></tr></thead>
+        <tbody id="kv-body"><tr><td colspan="3" style="color:var(--text-muted);text-align:center">—</td></tr></tbody>
+      </table>
+    </div>
+
+    <!-- Crash payload -->
+    <h3 style="font-family:var(--font-mono);font-size:0.85rem;color:var(--text-charcoal);margin:var(--space-4) 0 var(--space-2)">Simulated Reporting API crash payload</h3>
+    <div class="payload" id="crash-payload"></div>
+    <p id="crash-hint" style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted)">Start the worker and click "Simulate crash" to see the payload.</p>
+
+  </div><!-- /.stage -->
+
+  <pre><code>// ── Worker (worker.js) — no access to crashReporter ──────────
+self.onmessage = ({ data }) => {
+  if (data.type === 'tick') {
+    // Post breadcrumb to main thread
+    self.postMessage({
+      type: 'breadcrumb',
+      key: `worker_step_${data.step}`,
+      value: `chunk_${data.step}_done at ${Date.now()}`
+    });
+  }
+};
+
+// ── Main thread — stamps breadcrumbs via postMessage bridge ──
+const worker = new Worker('worker.js');
+
+worker.onmessage = ({ data }) => {
+  if (data.type === 'breadcrumb') {
+    // crashReporter only exists on the main Document
+    window.crashReporter?.set(data.key, data.value);
+    console.log('Stamped:', data.key, '=', data.value);
+  }
+};
+
+// Advance work
+worker.postMessage({ type: 'tick', step: 1 });</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../breadcrumb-trail/">Breadcrumb Trail — main-thread walk with simulated crash</a></li>
+      <li><a href="../memory-watermark/">Memory Watermark — OOM reporting pattern</a></li>
+      <li><a href="https://chromestatus.com/feature/6228675846209536" target="_blank" rel="noopener">ChromeStatus: Crash Reporting key-value API</a></li>
+      <li><a href="https://wicg.github.io/crash-reporting/" target="_blank" rel="noopener">WICG Crash Reporting spec</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  // Feature probe
+  const hasApi = typeof window.crashReporter !== 'undefined';
+  if (!hasApi) {
+    document.getElementById('api-note').style.display = 'block';
+    document.getElementById('api-probe').textContent = '⚠ window.crashReporter: not found (simulating)';
+  } else {
+    document.getElementById('api-probe').textContent = '✓ window.crashReporter: available';
+  }
+
+  // ── Simulated API ─────────────────────────────────────────────
+  const kvStore = new Map(); // key → { value, source }
+
+  const crashReporterSim = {
+    set(key, value) {
+      kvStore.set(key, { value, source: 'main' });
+      renderKv();
+    }
+  };
+  const cr = hasApi ? window.crashReporter : crashReporterSim;
+
+  // ── Worker simulation (inline blob) ──────────────────────────
+  const workerSrc = `
+    let step = 0;
+    self.onmessage = function(e) {
+      if (e.data.type === 'tick') {
+        step++;
+        const now = new Date().toISOString().slice(11,23);
+        self.postMessage({
+          type: 'breadcrumb',
+          key: 'worker_step_' + step,
+          value: 'chunk_' + step + '_done @ ' + now
+        });
+      } else if (e.data.type === 'context') {
+        self.postMessage({
+          type: 'breadcrumb',
+          key: 'worker_context',
+          value: e.data.value
+        });
+      }
+    };
+  `;
+  let worker = null;
+  let started = false;
+  let tickCount = 0;
+
+  const btnStart = document.getElementById('btn-start');
+  const btnTick = document.getElementById('btn-tick');
+  const btnCrash = document.getElementById('btn-crash');
+  const btnReset = document.getElementById('btn-reset');
+
+  function logWorker(text, cls) {
+    appendLog('worker-log', text, cls);
+  }
+  function logMain(text, cls) {
+    appendLog('main-log', text, cls);
+  }
+  function appendLog(id, text, cls) {
+    const el = document.getElementById(id);
+    // Clear placeholder
+    if (el.querySelector('.entry.system')?.textContent.startsWith('[ waiting')) {
+      el.innerHTML = '';
+    }
+    const span = document.createElement('div');
+    span.className = 'entry ' + (cls || '');
+    span.textContent = text;
+    el.appendChild(span);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function renderKv() {
+    const body = document.getElementById('kv-body');
+    if (kvStore.size === 0) {
+      body.innerHTML = '<tr><td colspan="3" style="color:var(--text-muted);text-align:center">—</td></tr>';
+      return;
+    }
+    body.innerHTML = '';
+    for (const [k, {value, source}] of kvStore) {
+      const tr = document.createElement('tr');
+      tr.className = 'src-' + source;
+      tr.innerHTML = `<td>${k}</td><td>${value}</td><td>${source}</td>`;
+      body.appendChild(tr);
+    }
+  }
+
+  function startWorker() {
+    const blob = new Blob([workerSrc], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    worker = new Worker(url);
+
+    worker.onmessage = function ({ data }) {
+      if (data.type === 'breadcrumb') {
+        logWorker('→ postMessage: ' + data.key + ' = ' + data.value, 'worker');
+        logMain('← received breadcrumb: ' + data.key, 'main');
+        cr.set(data.key, data.value);
+        logMain('✓ crashReporter.set(' + JSON.stringify(data.key) + ', ...)', 'main');
+      }
+    };
+
+    // Stamp initial context from main thread
+    const now = new Date().toISOString().slice(11,23);
+    cr.set('worker_started_at', now);
+    kvStore.get('worker_started_at') // already set
+    logMain('crashReporter.set("worker_started_at", "' + now + '")', 'main');
+    logWorker('Worker started', 'worker');
+
+    // Also send a context message to worker
+    worker.postMessage({ type: 'context', value: 'task_queue_v2' });
+
+    started = true;
+    btnStart.disabled = true;
+    btnTick.disabled = false;
+    btnCrash.disabled = false;
+  }
+
+  function tick() {
+    tickCount++;
+    logWorker('← tick command received (step ' + tickCount + ')', 'worker');
+    worker.postMessage({ type: 'tick' });
+  }
+
+  function crash() {
+    logMain('💥 CRASH', 'crash');
+    logWorker('💥 worker terminated', 'crash');
+    btnTick.disabled = true;
+    btnCrash.disabled = true;
+
+    // Build payload
+    const keys = {};
+    for (const [k, {value}] of kvStore) keys[k] = value;
+    const payload = {
+      type: 'crash',
+      url: location.href,
+      timestamp: new Date().toISOString(),
+      crash_id: 'sim_' + Math.random().toString(36).slice(2,9),
+      crash_reporter_data: keys
+    };
+    const el = document.getElementById('crash-payload');
+    el.textContent = JSON.stringify(payload, null, 2);
+    el.classList.add('visible');
+    document.getElementById('crash-hint').style.display = 'none';
+
+    if (worker) { worker.terminate(); worker = null; }
+  }
+
+  function reset() {
+    kvStore.clear();
+    renderKv();
+    tickCount = 0;
+    started = false;
+    if (worker) { worker.terminate(); worker = null; }
+    document.getElementById('worker-log').innerHTML = '<span class="entry system">[ waiting for worker to start ]</span>';
+    document.getElementById('main-log').innerHTML = '<span class="entry system">[ waiting for messages ]</span>';
+    document.getElementById('crash-payload').textContent = '';
+    document.getElementById('crash-payload').classList.remove('visible');
+    document.getElementById('crash-hint').style.display = '';
+    btnStart.disabled = false;
+    btnTick.disabled = true;
+    btnCrash.disabled = true;
+  }
+
+  btnStart.addEventListener('click', startWorker);
+  btnTick.addEventListener('click', tick);
+  btnCrash.addEventListener('click', crash);
+  btnReset.addEventListener('click', reset);
+})();
+</script>
+</body>
+</html>
