@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Compatibility Rendering — WebGPU Compatibility Mode — Chrome 148</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .demo-area {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    canvas {
+      border: 1.5px solid var(--border-black);
+      display: block;
+      max-width: 100%;
+    }
+
+    .adapter-badge {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 700;
+      padding: 0.2rem 0.6rem;
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      border: 1.5px solid var(--border-black);
+    }
+
+    .compat-note {
+      padding: 0.65rem 0.9rem;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-stone);
+      font-size: 0.78rem;
+      font-family: var(--font-mono);
+      color: var(--text-charcoal);
+      line-height: 1.5;
+      margin-bottom: 1.5rem;
+    }
+
+    .support-note {
+      padding: 0.7rem 1rem;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-stone);
+      font-size: 0.8rem;
+      font-family: var(--font-mono);
+      margin-bottom: 1.5rem;
+    }
+    #support-status { font-weight: 700; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v148/webgpu-compatibility-mode/">&larr; WebGPU Compatibility Mode</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v148 · WebGPU</p>
+    <h1>Compatibility Rendering</h1>
+    <p class="lede">A shader designed to run identically in both core and compatibility mode. It deliberately avoids fine derivatives, storage buffers in the vertex stage, and per-attachment blend states — the features removed in compat.</p>
+  </header>
+
+  <div class="support-note">
+    Feature detection: <span id="support-status">checking…</span>
+  </div>
+
+  <div class="compat-note">
+    The WGSL shader below uses only features present in both core and compatibility mode: <code>dpdx</code>/<code>dpdy</code> (coarse, not fine), uniform blend state, no vertex storage buffers. The result is a shader that runs everywhere WebGPU runs — including older devices where only the compat adapter is available.
+  </div>
+
+  <div class="demo-area">
+    <canvas id="canvas" width="420" height="280"></canvas>
+    <span class="adapter-badge" id="adapter-badge">Detecting adapter…</span>
+  </div>
+
+  <pre><code>// WGSL — compatible with both core and compat mode
+// Avoids: dpdxFine, dpdyFine, storage buffers in vertex stage,
+//         linear interpolation, cube array textures
+
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+  // Full-screen triangle — no vertex buffer needed
+  var p = array&lt;vec2f,3&gt;(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));
+  var out: VSOut;
+  out.pos = vec4f(p[vi], 0, 1);
+  out.uv  = (p[vi] + vec2f(1)) * 0.5;
+  return out;
+}
+
+@fragment fn fs(in: VSOut) -> @location(0) vec4f {
+  let uv = in.uv;
+  // dpdx/dpdy (coarse) — OK in compat; dpdxFine is NOT
+  let edge = abs(dpdx(uv.x)) + abs(dpdy(uv.y));
+  let grid = step(0.02, fract(uv * 8.0));
+  return vec4f(grid.x * grid.y * 0.8, uv.x * 0.5, uv.y * 0.7, 1);
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../adapter-detection/">Adapter Detection</a></li>
+      <li><a href="../feature-limits/">Feature Limits</a></li>
+      <li><a href="../compat-vs-core/">Compat vs Core Comparison</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+const statusEl = document.getElementById('support-status');
+const adapterBadge = document.getElementById('adapter-badge');
+
+async function init() {
+  if (!navigator.gpu) {
+    statusEl.textContent = 'WebGPU not available — Canvas 2D fallback shown';
+    statusEl.style.color = '#b87b00';
+    adapterBadge.textContent = 'WebGPU unavailable — canvas 2D fallback';
+    run2d();
+    return;
+  }
+
+  // Try compatibility adapter first, then fall back to default
+  let adapter = null;
+  let adapterType = 'unknown';
+
+  try {
+    adapter = await navigator.gpu.requestAdapter({ featureLevel: 'compatibility' });
+    adapterType = 'compatibility';
+  } catch {}
+
+  if (!adapter) {
+    try { adapter = await navigator.gpu.requestAdapter(); adapterType = 'core (compat not available)'; } catch {}
+  }
+
+  if (!adapter) {
+    statusEl.textContent = 'No WebGPU adapter — Canvas 2D used';
+    statusEl.style.color = '#b87b00';
+    adapterBadge.textContent = 'No adapter';
+    run2d();
+    return;
+  }
+
+  statusEl.textContent = `WebGPU available — adapter: ${adapterType}`;
+  statusEl.style.color = 'var(--accent-emerald)';
+  adapterBadge.textContent = `Adapter: ${adapterType}`;
+
+  const device = await adapter.requestDevice().catch(() => null);
+  if (!device) { run2d(); return; }
+
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('webgpu');
+  const fmt = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format: fmt });
+
+  // Compat-safe WGSL shader
+  const code = `
+    struct VSOut {
+      @builtin(position) pos: vec4f,
+      @location(0) uv: vec2f
+    }
+
+    @vertex fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+      var p = array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));
+      var out: VSOut;
+      out.pos = vec4f(p[vi], 0, 1);
+      out.uv = (p[vi] + vec2f(1)) * 0.5;
+      return out;
+    }
+
+    struct Uni { time: f32 }
+    @group(0) @binding(0) var<uniform> u: Uni;
+
+    @fragment fn fs(in: VSOut) -> @location(0) vec4f {
+      let uv = in.uv;
+      // coarse derivatives only — compat safe
+      let edge_x = abs(dpdx(uv.x));
+      let edge_y = abs(dpdy(uv.y));
+      let grid = step(0.025, fract(uv * 10.0));
+      let wave = sin(uv.x * 6.28 * 3.0 + u.time) * 0.5 + 0.5;
+      let col = vec3f(
+        grid.x * grid.y * wave,
+        uv.x * (0.4 + wave * 0.3),
+        uv.y * 0.7
+      );
+      return vec4f(col, 1.0);
+    }
+  `;
+
+  const mod = device.createShaderModule({ code });
+  const ubuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const bgl = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: {} }] });
+  const bg = device.createBindGroup({ layout: bgl, entries: [{ binding: 0, resource: { buffer: ubuf } }] });
+  const pipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [bgl] }),
+    vertex: { module: mod, entryPoint: 'vs' },
+    fragment: { module: mod, entryPoint: 'fs', targets: [{ format: fmt }] },
+    primitive: { topology: 'triangle-list' }
+  });
+
+  const start = performance.now();
+  function frame() {
+    device.queue.writeBuffer(ubuf, 0, new Float32Array([(performance.now() - start) / 1000]));
+    const cmd = device.createCommandEncoder();
+    const pass = cmd.beginRenderPass({
+      colorAttachments: [{ view: ctx.getCurrentTexture().createView(), clearValue: [0.96,0.94,0.91,1], loadOp:'clear', storeOp:'store' }]
+    });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bg);
+    pass.draw(3);
+    pass.end();
+    device.queue.submit([cmd.finish()]);
+    requestAnimationFrame(frame);
+  }
+  frame();
+}
+
+function run2d() {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  let t = 0;
+  function draw() {
+    t += 0.02;
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    for (let i = 0; i < 10; i++) {
+      for (let j = 0; j < 10; j++) {
+        const wave = Math.sin(i/10 * 6.28 * 3 + t) * 0.5 + 0.5;
+        ctx.fillStyle = `rgba(${Math.round(wave*200)},${Math.round(i/10*100+50)},${Math.round(j/10*180)},0.8)`;
+        ctx.fillRect(i*(W/10), j*(H/10), W/10-1, H/10-1);
+      }
+    }
+    requestAnimationFrame(draw);
+  }
+  draw();
+}
+
+init().catch(() => run2d());
+</script>
+</body>
+</html>
