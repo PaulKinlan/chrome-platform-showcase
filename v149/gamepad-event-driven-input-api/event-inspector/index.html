@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Event Inspector — Gamepad Event-Driven Input API — Chrome 149</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+    .layout { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
+    @media (max-width: 640px) { .layout { grid-template-columns: 1fr; } }
+
+    .panel { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); height: 100%; box-sizing: border-box; }
+    .panel-title { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.07em; color: var(--text-muted); margin: 0 0 var(--space-2); }
+
+    /* Event object tree */
+    .obj-tree { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-charcoal);
+      background: #111; border: 1px solid var(--border-black); padding: var(--space-3);
+      overflow-x: auto; }
+    .prop { padding: 2px 0; }
+    .prop-key { color: #89c4f4; }
+    .prop-val { color: #a5f3c0; }
+    .prop-str { color: #fcd34d; }
+    .prop-bool-true  { color: #86efac; }
+    .prop-bool-false { color: var(--accent-rose); }
+    .prop-num  { color: #c4b5fd; }
+    .indent { padding-left: 16px; }
+    .brace { color: #e8e6df; }
+
+    /* Diff highlight */
+    .diff-changed { background: rgba(134, 239, 172, 0.15); border-left: 2px solid #86efac; padding-left: 4px; }
+
+    /* Gamepad snapshot */
+    .snap-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin: var(--space-2) 0; }
+    .btn-cell { border: 1px solid var(--border-black); padding: 4px 6px; text-align: center;
+      font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-charcoal); background: var(--bg-ivory); }
+    .btn-cell.pressed { background: var(--accent-blue); color: var(--bg-ivory); border-color: var(--accent-blue); }
+
+    .axis-row { display: flex; align-items: center; gap: var(--space-2); margin: 4px 0; }
+    .axis-label { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted);
+      width: 40px; flex-shrink: 0; }
+    .axis-track { flex: 1; height: 8px; background: var(--bg-stone); border: 1px solid var(--border-black);
+      position: relative; }
+    .axis-fill { position: absolute; top: 0; height: 100%; background: var(--accent-blue); transition: left 0.05s, width 0.05s; }
+    .axis-val { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-charcoal);
+      width: 40px; text-align: right; }
+
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center;
+      margin: var(--space-3) 0; }
+    .ctrl-label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); }
+    .btn {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.9rem;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+      box-shadow: 2px 2px 0 var(--border-black);
+    }
+    .btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--border-black); }
+    .btn-primary { background: var(--text-black); color: var(--bg-ivory); }
+
+    .sim-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: var(--space-3) 0; }
+    .sim-btn {
+      font-family: var(--font-mono); font-size: 0.72rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.2rem;
+      cursor: pointer; background: var(--bg-stone); color: var(--text-charcoal); text-align: center;
+      user-select: none;
+    }
+    .sim-btn:active, .sim-btn.held { background: var(--text-black); color: var(--bg-ivory); }
+    .sim-btn-wide { grid-column: span 2; }
+    .sim-axis-row { grid-column: span 4; display: flex; gap: 6px; align-items: center; }
+
+    .stat-row { display: flex; gap: var(--space-4); font-family: var(--font-mono); font-size: 0.78rem;
+      color: var(--text-charcoal); flex-wrap: wrap; margin: var(--space-2) 0; }
+    .stat-item strong { color: var(--text-black); }
+
+    .event-log { height: 200px; overflow-y: auto; background: #111; border: 1px solid var(--border-black);
+      padding: var(--space-2); font-family: var(--font-mono); font-size: 0.7rem; }
+    .log-event  { color: #a5f3c0; }
+    .log-poll   { color: #89c4f4; }
+    .log-info   { color: #fcd34d; }
+    .log-warn   { color: var(--accent-rose); }
+
+    .warn-block { border: 2px solid var(--accent-rose); background: var(--bg-paper);
+      padding: var(--space-3) var(--space-4); margin: var(--space-3) 0; font-family: var(--font-mono);
+      font-size: 0.78rem; color: var(--text-charcoal); }
+    .warn-block strong { color: var(--accent-rose); }
+    code { font-family: var(--font-mono); font-size: 0.88em; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Gamepad Event-Driven Input API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v149 · origin trial</p>
+    <h1>Event Inspector</h1>
+    <p class="lede">Inspect the raw <code>rawgamepadinputchange</code> event object — its <code>gamepad</code> property, which button or axis triggered it, and how that snapshot compares to what <code>navigator.getGamepads()</code> returns at the same moment. Use keyboard simulation if no physical gamepad is connected.</p>
+  </header>
+
+  <div id="support-banner"></div>
+
+  <div class="controls">
+    <span class="ctrl-label">Source:</span>
+    <span id="source-label" style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-charcoal)">No gamepad detected</span>
+    <button class="btn btn-primary" id="btn-clear">Clear log</button>
+    <button class="btn" id="btn-snap">Poll snapshot now</button>
+  </div>
+
+  <div class="stat-row">
+    <span class="stat-item">Events: <strong id="stat-events">0</strong></span>
+    <span class="stat-item">Poll calls: <strong id="stat-polls">0</strong></span>
+    <span class="stat-item">Last event: <strong id="stat-last">—</strong></span>
+    <span class="stat-item">Gamepad ID: <strong id="stat-id" style="font-size:0.7rem">—</strong></span>
+  </div>
+
+  <div class="layout">
+    <div class="panel">
+      <p class="panel-title">rawgamepadinputchange event object</p>
+      <div class="obj-tree" id="event-tree"><span style="color:#555">Waiting for event…</span></div>
+    </div>
+    <div class="panel">
+      <p class="panel-title">navigator.getGamepads() snapshot (polled)</p>
+      <div class="obj-tree" id="poll-tree"><span style="color:#555">Click "Poll snapshot now" or connect a gamepad</span></div>
+    </div>
+  </div>
+
+  <h3 style="font-family:var(--font-mono);font-size:0.85rem;margin:var(--space-4) 0 var(--space-2)">Live gamepad state</h3>
+  <div class="layout">
+    <div>
+      <p class="ctrl-label" style="margin-bottom:var(--space-2)">Buttons (event-driven)</p>
+      <div class="snap-grid" id="event-buttons"></div>
+    </div>
+    <div>
+      <p class="ctrl-label" style="margin-bottom:var(--space-2)">Axes (event-driven)</p>
+      <div id="event-axes"></div>
+    </div>
+  </div>
+
+  <h3 style="font-family:var(--font-mono);font-size:0.85rem;margin:var(--space-4) 0 var(--space-2)">Keyboard simulation (no gamepad required)</h3>
+  <div class="sim-grid" id="sim-grid">
+    <button class="sim-btn" data-btn="12">↑ (B12)</button>
+    <button class="sim-btn" data-btn="13">↓ (B13)</button>
+    <button class="sim-btn" data-btn="14">← (B14)</button>
+    <button class="sim-btn" data-btn="15">→ (B15)</button>
+    <button class="sim-btn" data-btn="0">A (B0)</button>
+    <button class="sim-btn" data-btn="1">B (B1)</button>
+    <button class="sim-btn" data-btn="2">X (B2)</button>
+    <button class="sim-btn" data-btn="3">Y (B3)</button>
+    <button class="sim-btn" data-btn="4">L1 (B4)</button>
+    <button class="sim-btn" data-btn="5">R1 (B5)</button>
+    <button class="sim-btn" data-btn="6">L2 (B6)</button>
+    <button class="sim-btn" data-btn="7">R2 (B7)</button>
+    <div class="sim-axis-row">
+      <span class="ctrl-label">L-stick X:</span>
+      <input type="range" id="sim-axis0" min="-100" max="100" value="0" style="flex:1">
+      <span id="sim-axis0-val" class="ctrl-label">0.00</span>
+    </div>
+    <div class="sim-axis-row">
+      <span class="ctrl-label">L-stick Y:</span>
+      <input type="range" id="sim-axis1" min="-100" max="100" value="0" style="flex:1">
+      <span id="sim-axis1-val" class="ctrl-label">0.00</span>
+    </div>
+  </div>
+
+  <p class="ctrl-label" style="margin:var(--space-3) 0 var(--space-2)">Event log</p>
+  <div class="event-log" id="event-log"></div>
+
+  <pre style="margin-top:var(--space-4)"><code>// rawgamepadinputchange event object shape
+window.addEventListener('rawgamepadinputchange', (e) => {
+  // e is a GamepadEvent
+  e.type;         // "rawgamepadinputchange"
+  e.timeStamp;    // DOMHighResTimeStamp — sub-frame precision
+  e.gamepad;      // Gamepad snapshot at the moment of input
+
+  // Gamepad snapshot
+  e.gamepad.id;          // "Xbox Wireless Controller (STANDARD GAMEPAD Vendor:...)"
+  e.gamepad.index;       // 0
+  e.gamepad.timestamp;   // DOMHighResTimeStamp — same as e.timeStamp
+  e.gamepad.connected;   // true
+  e.gamepad.buttons;     // GamepadButton[17] — pressed, touched, value
+  e.gamepad.axes;        // Float64Array[4] — range -1..1
+  e.gamepad.mapping;     // "standard"
+});</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../latency-comparator/">Latency Comparator</a> — event vs poll timing</li>
+      <li><a href="../button-timeline/">Button Timeline</a> — sub-frame button transitions</li>
+      <li><a href="../combo-detector/">Combo Detector</a> — fighting-game combos via event-driven input</li>
+      <li><a href="https://chromestatus.com/feature/5989275208253440" target="_blank" rel="noopener">ChromeStatus: Gamepad Event-Driven Input API</a></li>
+      <li><a href="https://w3c.github.io/gamepad/" target="_blank" rel="noopener">Gamepad spec</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  const NUM_BUTTONS = 16;
+  const NUM_AXES = 4;
+
+  let eventCount = 0;
+  let pollCount = 0;
+  let lastEventTs = null;
+
+  // Simulated gamepad state
+  const simState = {
+    id: 'Simulated Gamepad (Chrome Platform Showcase)',
+    index: 0,
+    connected: true,
+    mapping: 'standard',
+    timestamp: 0,
+    buttons: Array.from({ length: NUM_BUTTONS }, () => ({ pressed: false, touched: false, value: 0 })),
+    axes: new Array(NUM_AXES).fill(0),
+  };
+
+  // Real gamepad index
+  let realGamepadIndex = null;
+
+  /* ── support check ── */
+  const supported = ('rawgamepadinputchange' in window) || ('ongamepadinputchange' in window);
+  const banner = document.getElementById('support-banner');
+  if (!supported) {
+    banner.innerHTML = `<div class="warn-block"><strong>Origin trial not active</strong> — <code>rawgamepadinputchange</code> is not available in this browser. The simulation below fires synthetic events through the same inspector, so you can see the event shape. Connect a real gamepad and enable the origin trial to see live data.</div>`;
+  }
+
+  /* ── DOM refs ── */
+  const eventTree  = document.getElementById('event-tree');
+  const pollTree   = document.getElementById('poll-tree');
+  const eventBtns  = document.getElementById('event-buttons');
+  const eventAxes  = document.getElementById('event-axes');
+  const eventLog   = document.getElementById('event-log');
+  const sourceLabel= document.getElementById('source-label');
+  const statEvents = document.getElementById('stat-events');
+  const statPolls  = document.getElementById('stat-polls');
+  const statLast   = document.getElementById('stat-last');
+  const statId     = document.getElementById('stat-id');
+
+  /* ── initial button/axis UI ── */
+  for (let i = 0; i < NUM_BUTTONS; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'btn-cell';
+    cell.id = 'eb-' + i;
+    cell.textContent = 'B' + i;
+    eventBtns.appendChild(cell);
+  }
+
+  const AXIS_NAMES = ['L-X', 'L-Y', 'R-X', 'R-Y'];
+  for (let i = 0; i < NUM_AXES; i++) {
+    const row = document.createElement('div');
+    row.className = 'axis-row';
+    row.innerHTML = `
+      <div class="axis-label">${AXIS_NAMES[i] || 'A'+i}</div>
+      <div class="axis-track"><div class="axis-fill" id="ea-fill-${i}" style="left:50%;width:0%"></div></div>
+      <div class="axis-val" id="ea-val-${i}">0.00</div>
+    `;
+    eventAxes.appendChild(row);
+  }
+
+  /* ── helpers ── */
+  function addLog(text, cls) {
+    const line = document.createElement('div');
+    line.className = cls || 'log-info';
+    line.textContent = '[' + performance.now().toFixed(1) + 'ms] ' + text;
+    eventLog.appendChild(line);
+    eventLog.scrollTop = eventLog.scrollHeight;
+  }
+
+  function renderTree(container, data, prev) {
+    container.innerHTML = renderObj(data, prev, 0);
+  }
+
+  function renderObj(obj, prev, depth) {
+    if (obj === null) return '<span class="prop-val">null</span>';
+    if (typeof obj === 'boolean') return `<span class="${obj ? 'prop-bool-true' : 'prop-bool-false'}">${obj}</span>`;
+    if (typeof obj === 'number') return `<span class="prop-num">${obj.toFixed ? obj.toFixed(4) : obj}</span>`;
+    if (typeof obj === 'string') return `<span class="prop-str">"${obj}"</span>`;
+    if (Array.isArray(obj)) {
+      if (obj.length === 0) return '<span class="brace">[]</span>';
+      const items = obj.map((v, i) => {
+        const prevV = prev && prev[i];
+        const changed = prev && JSON.stringify(v) !== JSON.stringify(prevV);
+        return `<div class="prop indent${changed ? ' diff-changed' : ''}"><span class="prop-num">${i}</span>: ${renderObj(v, prevV, depth+1)}</div>`;
+      });
+      if (depth > 1) return `<span class="brace">[</span>${items.join('')}<span class="brace">]</span>`;
+      return `<span class="brace">[</span>${items.join('')}<span class="brace">]</span>`;
+    }
+    if (typeof obj === 'object') {
+      const entries = Object.entries(obj);
+      if (entries.length === 0) return '<span class="brace">{}</span>';
+      const items = entries.map(([k, v]) => {
+        const prevV = prev && prev[k];
+        const changed = prev && JSON.stringify(v) !== JSON.stringify(prevV);
+        return `<div class="prop indent${changed ? ' diff-changed' : ''}"><span class="prop-key">${k}</span>: ${renderObj(v, prevV, depth+1)}</div>`;
+      });
+      return `<span class="brace">{</span>${items.join('')}<span class="brace">}</span>`;
+    }
+    return String(obj);
+  }
+
+  function gamepadToObj(gp) {
+    if (!gp) return null;
+    return {
+      type: 'rawgamepadinputchange',
+      timeStamp: +(performance.now().toFixed(3)),
+      gamepad: {
+        id: gp.id,
+        index: gp.index,
+        connected: gp.connected,
+        timestamp: +(gp.timestamp ? gp.timestamp.toFixed(3) : performance.now().toFixed(3)),
+        mapping: gp.mapping,
+        buttons: Array.from(gp.buttons).map(b => ({
+          pressed: b.pressed,
+          touched: b.touched || false,
+          value: +(b.value ? b.value.toFixed(4) : (b.pressed ? 1 : 0)),
+        })),
+        axes: Array.from(gp.axes).map(a => +(a.toFixed ? a.toFixed(4) : a)),
+      },
+    };
+  }
+
+  function simStateToObj() {
+    return {
+      type: 'rawgamepadinputchange',
+      timeStamp: +(performance.now().toFixed(3)),
+      gamepad: {
+        id: simState.id,
+        index: simState.index,
+        connected: simState.connected,
+        timestamp: +(performance.now().toFixed(3)),
+        mapping: simState.mapping,
+        buttons: simState.buttons.map(b => ({ pressed: b.pressed, touched: b.touched, value: b.pressed ? 1 : 0 })),
+        axes: simState.axes.map(a => +(a.toFixed(4))),
+      },
+    };
+  }
+
+  let prevEventObj = null;
+
+  function handleGamepadEvent(gpObj, source) {
+    eventCount++;
+    statEvents.textContent = eventCount;
+    lastEventTs = performance.now();
+    statLast.textContent = lastEventTs.toFixed(1) + 'ms';
+    if (gpObj.gamepad) statId.textContent = gpObj.gamepad.id.slice(0, 40) + (gpObj.gamepad.id.length > 40 ? '…' : '');
+
+    renderTree(eventTree, gpObj, prevEventObj);
+    prevEventObj = gpObj;
+
+    // Update button UI
+    if (gpObj.gamepad) {
+      gpObj.gamepad.buttons.forEach((b, i) => {
+        const cell = document.getElementById('eb-' + i);
+        if (cell) cell.classList.toggle('pressed', b.pressed);
+      });
+      // Update axis UI
+      gpObj.gamepad.axes.forEach((v, i) => {
+        const fill = document.getElementById('ea-fill-' + i);
+        const val  = document.getElementById('ea-val-'  + i);
+        if (fill) {
+          const pct = Math.abs(v) * 50;
+          const left = v < 0 ? (50 - pct) : 50;
+          fill.style.left  = left + '%';
+          fill.style.width = pct + '%';
+          fill.style.background = Math.abs(v) > 0.5 ? 'var(--accent-rose)' : 'var(--accent-blue)';
+        }
+        if (val) val.textContent = v.toFixed(2);
+      });
+    }
+
+    const pressedBtns = gpObj.gamepad
+      ? gpObj.gamepad.buttons.filter(b => b.pressed).map((_, i) => 'B' + i).join(',') || 'none'
+      : '';
+    addLog(`[${source}] buttons=[${pressedBtns}] axes=[${gpObj.gamepad ? gpObj.gamepad.axes.map(a => a.toFixed(2)).join(',') : ''}]`, 'log-event');
+  }
+
+  function pollGamepadNow() {
+    pollCount++;
+    statPolls.textContent = pollCount;
+    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const gp = gamepads[realGamepadIndex !== null ? realGamepadIndex : 0];
+    if (gp) {
+      const obj = gamepadToObj(gp);
+      renderTree(pollTree, obj, null);
+      addLog('Polled: getGamepads()[' + (realGamepadIndex || 0) + '] ts=' + (gp.timestamp || 0).toFixed(3), 'log-poll');
+    } else {
+      renderTree(pollTree, simStateToObj(), null);
+      addLog('Polled (sim state, no real gamepad)', 'log-poll');
+    }
+  }
+
+  /* ── real gamepad events ── */
+  window.addEventListener('gamepadconnected', (e) => {
+    realGamepadIndex = e.gamepad.index;
+    sourceLabel.textContent = 'Connected: ' + e.gamepad.id.slice(0, 50);
+    addLog('Gamepad connected: ' + e.gamepad.id, 'log-info');
+  });
+  window.addEventListener('gamepaddisconnected', (e) => {
+    if (e.gamepad.index === realGamepadIndex) realGamepadIndex = null;
+    sourceLabel.textContent = 'Gamepad disconnected';
+    addLog('Gamepad disconnected', 'log-warn');
+  });
+
+  if (supported) {
+    window.addEventListener('rawgamepadinputchange', (e) => {
+      const obj = gamepadToObj(e.gamepad);
+      handleGamepadEvent(obj, 'rawgamepadinputchange');
+    });
+  }
+
+  document.getElementById('btn-clear').addEventListener('click', () => {
+    eventLog.innerHTML = '';
+  });
+  document.getElementById('btn-snap').addEventListener('click', pollGamepadNow);
+
+  /* ── simulation ── */
+  function fireSimEvent(label) {
+    const obj = simStateToObj();
+    handleGamepadEvent(obj, 'sim:' + label);
+  }
+
+  document.querySelectorAll('[data-btn]').forEach(btn => {
+    const idx = parseInt(btn.dataset.btn);
+    btn.addEventListener('mousedown', () => {
+      simState.buttons[idx].pressed = true;
+      btn.classList.add('held');
+      fireSimEvent('B' + idx + ':press');
+    });
+    btn.addEventListener('mouseup', () => {
+      simState.buttons[idx].pressed = false;
+      btn.classList.remove('held');
+      fireSimEvent('B' + idx + ':release');
+    });
+    btn.addEventListener('mouseleave', () => {
+      if (simState.buttons[idx].pressed) {
+        simState.buttons[idx].pressed = false;
+        btn.classList.remove('held');
+        fireSimEvent('B' + idx + ':release');
+      }
+    });
+  });
+
+  ['0','1'].forEach(i => {
+    const slider = document.getElementById('sim-axis' + i);
+    const valEl  = document.getElementById('sim-axis' + i + '-val');
+    slider.addEventListener('input', () => {
+      const v = parseInt(slider.value) / 100;
+      simState.axes[parseInt(i)] = v;
+      valEl.textContent = v.toFixed(2);
+      fireSimEvent('axis' + i + ':' + v.toFixed(2));
+    });
+  });
+
+  addLog('Event inspector ready. Use simulation buttons or connect a gamepad.', 'log-info');
+  if (!supported) addLog('rawgamepadinputchange not available — simulation only', 'log-warn');
+})();
+</script>
+</body>
+</html>
