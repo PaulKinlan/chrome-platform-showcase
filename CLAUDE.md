@@ -28,7 +28,22 @@ public/styles.css     Shared design system. Editorial / print-inspired. Uses CSS
 v<N>/                 One folder per Chrome milestone. Each contains <feature-slug>/index.html + concept subfolders.
 .claude/
   routine-prompt.md   Source of truth for the routine prompt. Update this AND the live routine when changing rules.
+  auto-research.md    How the self-critique loop, conformance probes, and goal-setting work + how to re-run them.
+lib/
+  critique.ts         Data model for self-critique reports (_questions.json). See .claude/auto-research.md.
+  conformance.ts      Data model for spec-conformance suites (conformance.json). See .claude/auto-research.md.
 ```
+
+## Auto-research, conformance & goal-setting
+
+Beyond building demos, the corpus grades and hardens itself. A reviewer pass writes a critique
+(`_questions.json`) next to each concept page; a conformance pass writes assertion suites
+(`conformance.json`) that run live in the visitor's browser; the critiques' open questions become
+the work-list for the next build pass. This is a **manual, local-session** workflow (not the remote
+routine). Full operator instructions — rubric, assertion kinds, the per-subagent prompts, the
+stash-race mitigation, the fmt gotcha, and current coverage per milestone — live in
+[`.claude/auto-research.md`](.claude/auto-research.md). Browse the output at `/critiques` and
+`/conformance` on the live site.
 
 ## The routine
 
