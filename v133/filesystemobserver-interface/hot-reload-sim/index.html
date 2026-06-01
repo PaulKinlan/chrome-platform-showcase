@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hot-reload simulation — FileSystemObserver — Chrome 133</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .support-note {
+      padding: 0.75rem 1rem;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-stone);
+      font-size: 0.82rem;
+      margin-bottom: 1.5rem;
+    }
+
+    /* Split pane layout */
+    .split-pane {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    @media (max-width: 640px) { .split-pane { grid-template-columns: 1fr; } }
+
+    .pane {
+      border: 2px solid var(--border-black);
+    }
+
+    .pane-head {
+      padding: 0.4rem 0.75rem;
+      border-bottom: 1.5px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .pane-head.editor-head { background: var(--bg-stone); }
+    .pane-head.preview-head { background: var(--bg-stone); }
+
+    .editor-area {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      width: 100%;
+      height: 18rem;
+      box-sizing: border-box;
+      padding: 0.75rem;
+      border: none;
+      background: var(--bg-paper);
+      color: var(--text-black);
+      resize: none;
+      outline: none;
+      line-height: 1.6;
+    }
+
+    .editor-area:focus { outline: 2px solid var(--accent-blue); outline-offset: -2px; }
+
+    /* Preview pane */
+    .preview-body {
+      padding: 1rem;
+      min-height: 18rem;
+      background: var(--bg-paper);
+    }
+
+    .preview-rendered {
+      font-size: 0.82rem;
+      line-height: 1.6;
+      color: var(--text-black);
+    }
+
+    .preview-rendered h1 { font-family: var(--font-mono); font-size: 1rem; font-weight: 700; margin: 0 0 0.5rem; }
+    .preview-rendered h2 { font-family: var(--font-mono); font-size: 0.85rem; font-weight: 700; margin: 0.75rem 0 0.3rem; }
+    .preview-rendered p  { margin: 0 0 0.5rem; }
+    .preview-rendered code { background: var(--bg-stone); padding: 0.1rem 0.3rem; font-family: var(--font-mono); font-size: 0.75rem; }
+
+    /* Reload flash */
+    @keyframes reload-flash {
+      0%   { background: #e6f4ea; }
+      100% { background: var(--bg-paper); }
+    }
+
+    .preview-body.reloading {
+      animation: reload-flash 0.4s ease-out forwards;
+    }
+
+    /* Status bar */
+    .status-bar {
+      border: 2px solid var(--border-black);
+      margin-bottom: 1.5rem;
+      display: flex;
+      gap: 0;
+    }
+
+    .status-cell {
+      flex: 1;
+      padding: 0.4rem 0.75rem;
+      border-right: 1px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+    }
+
+    .status-cell:last-child { border-right: none; }
+    .status-label { color: var(--text-muted); }
+    .status-value { font-weight: 700; color: var(--text-black); }
+
+    /* Change log */
+    .change-log {
+      border: 2px solid var(--border-black);
+      margin-bottom: 1.5rem;
+    }
+
+    .change-log-head {
+      padding: 0.4rem 0.75rem;
+      background: var(--bg-stone);
+      border-bottom: 1.5px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 700;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .change-log-body {
+      padding: 0.5rem 0.75rem;
+      max-height: 8rem;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      line-height: 1.8;
+      background: var(--bg-paper);
+    }
+
+    .log-reload   { color: var(--accent-emerald); }
+    .log-change   { color: var(--accent-blue); }
+    .log-start    { color: var(--text-muted); }
+
+    /* Save button */
+    .save-btn {
+      padding: 0.2rem 0.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.6rem;
+      font-weight: 700;
+      cursor: pointer;
+      border: 1.5px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+    }
+
+    .save-btn:hover { background: var(--text-charcoal); }
+
+    pre { margin: 0 0 1.5rem; }
+    pre code { font-size: 0.65rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v133/filesystemobserver-interface/">&larr; FileSystemObserver</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v133 · storage</p>
+    <h1>Hot-reload simulation</h1>
+    <p class="lede">A minimal hot-reload loop: edit Markdown in the left pane, press Save, and a <code>FileSystemObserver</code> fires to re-render the preview on the right — exactly how Vite/webpack dev-server HMR works, but in a single tab using the Origin Private File System.</p>
+  </header>
+
+  <div class="support-note">
+    <code>FileSystemObserver</code>: <span id="support-status">checking…</span>
+  </div>
+
+  <!-- Status bar -->
+  <div class="status-bar">
+    <div class="status-cell">
+      <span class="status-label">Observer</span><br>
+      <span class="status-value" id="observer-status">—</span>
+    </div>
+    <div class="status-cell">
+      <span class="status-label">File</span><br>
+      <span class="status-value" id="file-status">—</span>
+    </div>
+    <div class="status-cell">
+      <span class="status-label">Reloads</span><br>
+      <span class="status-value" id="reload-count">0</span>
+    </div>
+    <div class="status-cell">
+      <span class="status-label">Last change</span><br>
+      <span class="status-value" id="last-change">—</span>
+    </div>
+  </div>
+
+  <!-- Split pane -->
+  <div class="split-pane">
+    <div class="pane">
+      <div class="pane-head editor-head">
+        <span>index.md — editor</span>
+        <button class="save-btn" id="save-btn" onclick="saveFile()">Save ⌘S</button>
+      </div>
+      <textarea class="editor-area" id="editor" spellcheck="false"></textarea>
+    </div>
+    <div class="pane">
+      <div class="pane-head preview-head">
+        <span>Preview</span>
+        <span id="preview-label" style="font-weight:400;color:var(--text-muted);font-size:0.6rem">live preview</span>
+      </div>
+      <div class="preview-body" id="preview-body">
+        <div class="preview-rendered" id="preview-rendered">Initialising…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Change log -->
+  <div class="change-log">
+    <div class="change-log-head">
+      <span>FileSystemObserver events</span>
+      <button style="padding:0.2rem 0.4rem;font-family:var(--font-mono);font-size:0.6rem;border:1.5px solid var(--border-black);background:var(--bg-stone);cursor:pointer" onclick="clearLog()">clear</button>
+    </div>
+    <div class="change-log-body" id="change-log">
+      <span class="log-start">Initialising…</span>
+    </div>
+  </div>
+
+  <pre><code>// Hot-reload pattern with FileSystemObserver
+const opfsRoot  = await navigator.storage.getDirectory();
+const fileHandle = await opfsRoot.getFileHandle('index.md', { create: true });
+
+const observer = new FileSystemObserver(async (records) => {
+  for (const record of records) {
+    if (record.type === 'modified') {
+      // File changed — re-read and re-render
+      const file = await fileHandle.getFile();
+      const text = await file.text();
+      renderMarkdown(text);
+      showReloadFlash();  // green flash like browser devtools reload
+    }
+  }
+});
+
+await observer.observe(fileHandle);
+
+// Editor save path
+async function saveFile() {
+  const writable = await fileHandle.createWritable();
+  await writable.write(editor.value);
+  await writable.close();
+  // Observer fires automatically with { type: 'modified' }
+}</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../fs-observer/">FileSystemObserver — basic demo</a></li>
+      <li><a href="../opfs-live-editor/">OPFS live editor</a></li>
+      <li><a href="../sync-conflict-detector/">Sync conflict detector</a></li>
+      <li><a href="../recursive-walker/">Recursive directory watcher</a></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5263869255892992" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/whatwg/fs/pull/165" target="_blank" rel="noopener">Spec</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+// Feature detection
+const supported = typeof FileSystemObserver !== 'undefined';
+const statusEl = document.getElementById('support-status');
+statusEl.textContent = supported
+  ? 'supported ✓ — FileSystemObserver active (Chrome 133+)'
+  : 'not supported — polling fallback active (checks for content changes every 500ms)';
+statusEl.style.color = supported ? 'var(--accent-emerald)' : 'var(--accent-rose)';
+
+const INITIAL_CONTENT = `# Hot Reload Demo
+
+## What is this?
+
+A **FileSystemObserver** watches \`index.md\` in the Origin Private File System.
+When you save, the observer fires and re-renders this preview.
+
+## How it works
+
+1. Edit the text on the left
+2. Press **Save** (or Ctrl+S)
+3. Watch the preview update with a green flash
+
+## Try it
+
+Change this text to see the live reload in action.
+`;
+
+// Log helpers
+const logEl = document.getElementById('change-log');
+let logLines = [];
+let hasLog = false;
+
+function log(type, msg) {
+  if (!hasLog) { logEl.innerHTML = ''; hasLog = true; }
+  const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+  logLines.push(`<span class="log-${type}">[${ts}] ${escHtml(msg)}</span>`);
+  if (logLines.length > 40) logLines.shift();
+  logEl.innerHTML = logLines.join('<br>');
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function clearLog() {
+  logLines = [];
+  hasLog = false;
+  logEl.innerHTML = '<span class="log-start">Log cleared.</span>';
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Minimal Markdown renderer
+function renderMarkdown(text) {
+  let html = escHtml(text)
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/`(.+?)`/g, '<code>$1</code>')
+    .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
+    .replace(/\n\n/g, '</p><p>')
+    .replace(/^(?!<[hlp])/gm, '');
+  document.getElementById('preview-rendered').innerHTML = '<p>' + html + '</p>';
+}
+
+let reloadCount = 0;
+
+function showReloadFlash() {
+  reloadCount++;
+  document.getElementById('reload-count').textContent = reloadCount;
+  document.getElementById('last-change').textContent =
+    new Date().toLocaleTimeString('en-US', { hour12: false });
+
+  const body = document.getElementById('preview-body');
+  body.classList.remove('reloading');
+  void body.offsetWidth; // force reflow
+  body.classList.add('reloading');
+  setTimeout(() => body.classList.remove('reloading'), 400);
+  document.getElementById('preview-label').textContent = '↻ reloaded';
+  setTimeout(() => {
+    document.getElementById('preview-label').textContent = 'live preview';
+  }, 1500);
+}
+
+// OPFS + FileSystemObserver setup
+let fileHandle = null;
+let observer   = null;
+let pollInterval = null;
+let lastContent = '';
+
+async function init() {
+  const editor = document.getElementById('editor');
+  editor.value = INITIAL_CONTENT;
+
+  document.getElementById('observer-status').textContent = 'initialising…';
+  document.getElementById('file-status').textContent = 'index.md';
+
+  try {
+    const opfsRoot = await navigator.storage.getDirectory();
+    fileHandle = await opfsRoot.getFileHandle('hot-reload-demo.md', { create: true });
+
+    // Write initial content
+    const writable = await fileHandle.createWritable();
+    await writable.write(INITIAL_CONTENT);
+    await writable.close();
+
+    lastContent = INITIAL_CONTENT;
+    renderMarkdown(INITIAL_CONTENT);
+
+    if (supported) {
+      // Native FileSystemObserver
+      observer = new FileSystemObserver(async (records) => {
+        for (const record of records) {
+          log('change', `FileSystemObserver: type=${record.type}, name=${record.changedHandle?.name || '?'}`);
+          if (record.type === 'modified' || record.type === 'appeared') {
+            const file = await fileHandle.getFile();
+            const text = await file.text();
+            renderMarkdown(text);
+            showReloadFlash();
+            log('reload', 'Preview reloaded from OPFS file');
+          }
+        }
+      });
+      await observer.observe(fileHandle);
+      document.getElementById('observer-status').textContent = 'watching ✓';
+      log('start', 'FileSystemObserver watching index.md in OPFS');
+    } else {
+      // Polling fallback
+      pollInterval = setInterval(async () => {
+        try {
+          const file = await fileHandle.getFile();
+          const text = await file.text();
+          if (text !== lastContent) {
+            lastContent = text;
+            renderMarkdown(text);
+            showReloadFlash();
+            log('reload', 'Preview reloaded (polled)');
+          }
+        } catch {}
+      }, 500);
+      document.getElementById('observer-status').textContent = 'polling (fallback)';
+      log('start', 'FileSystemObserver not supported — polling every 500ms');
+    }
+  } catch (err) {
+    document.getElementById('observer-status').textContent = 'error: ' + err.message;
+    log('start', 'Error: ' + err.message + ' — using in-memory fallback');
+    renderMarkdown(INITIAL_CONTENT);
+
+    // In-memory fallback: no real OPFS, just re-render on save
+    document.getElementById('observer-status').textContent = 'in-memory mode';
+  }
+}
+
+async function saveFile() {
+  const editor = document.getElementById('editor');
+  const text = editor.value;
+
+  try {
+    if (fileHandle) {
+      const writable = await fileHandle.createWritable();
+      await writable.write(text);
+      await writable.close();
+      lastContent = text;
+      log('change', `File saved (${text.length} bytes) — observer will fire`);
+    } else {
+      // In-memory fallback
+      renderMarkdown(text);
+      showReloadFlash();
+      log('reload', 'Rendered from memory (no OPFS)');
+    }
+  } catch (err) {
+    // Fallback: render directly
+    renderMarkdown(text);
+    showReloadFlash();
+    log('reload', 'OPFS write failed, rendered directly: ' + err.message);
+  }
+}
+
+// Ctrl+S shortcut
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    e.preventDefault();
+    saveFile();
+  }
+});
+
+init().catch(err => {
+  document.getElementById('observer-status').textContent = 'init failed';
+  log('start', 'Init error: ' + err.message);
+  renderMarkdown(INITIAL_CONTENT);
+});
+</script>
+</body>
+</html>
