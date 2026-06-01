@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Waterfall Debugger — Resource Timing: SW Router Timing Fields — Chrome 151</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .scenario-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 0.4rem; margin-bottom: 0.75rem; }
+    .scenario-btn { padding: 0.28rem 0.5rem; border: 1.5px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); font-family: var(--font-mono); font-size: 0.55rem; cursor: pointer; text-align: left; }
+    .scenario-btn.active { background: var(--text-black); color: var(--bg-ivory); }
+    .run-btn { padding: 0.32rem 0.8rem; border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); font-family: var(--font-mono); font-size: 0.62rem; cursor: pointer; }
+    .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .waterfall { margin-top: 0.75rem; }
+    .wf-head { display: grid; grid-template-columns: 2fr 1.2fr 1.2fr 1fr 3fr; gap: 0.4rem; padding: 0.25rem 0.5rem; background: var(--bg-stone); border: 1.5px solid var(--border-black); font-family: var(--font-mono); font-size: 0.52rem; font-weight: 700; color: var(--text-muted); margin-bottom: 2px; }
+    .wf-row { display: grid; grid-template-columns: 2fr 1.2fr 1.2fr 1fr 3fr; gap: 0.4rem; padding: 0.3rem 0.5rem; border: 1.5px solid var(--border-black); font-family: var(--font-mono); font-size: 0.57rem; margin-bottom: 2px; cursor: pointer; }
+    .wf-row:hover { background: var(--bg-stone); }
+    .wf-row.selected { background: var(--bg-stone); border-color: var(--accent-blue); }
+    .wf-bar { height: 10px; background: var(--text-black); display: inline-block; vertical-align: middle; min-width: 2px; }
+    .source-tag { font-family: var(--font-mono); font-size: 0.5rem; padding: 0.05rem 0.3rem; white-space: nowrap; }
+    .src-cache { background: var(--accent-emerald); color: #fff; }
+    .src-network { background: var(--accent-blue); color: #fff; }
+    .src-fetch { background: var(--accent-rose); color: #fff; }
+    .src-race { background: var(--accent-amber); color: #fff; }
+    .src-none { background: var(--bg-stone); color: var(--text-muted); }
+    .detail-panel { border: 2px solid var(--border-black); background: var(--bg-paper); padding: 0.5rem 0.65rem; margin-top: 0.5rem; font-family: var(--font-mono); font-size: 0.58rem; line-height: 1.7; color: var(--text-charcoal); white-space: pre-wrap; display: none; }
+    .decision-row { display: flex; align-items: center; gap: 0.4rem; margin: 0.4rem 0; font-family: var(--font-mono); font-size: 0.58rem; flex-wrap: wrap; }
+    .decision-arrow { color: var(--text-muted); }
+    .status-line { font-family: var(--font-mono); font-size: 0.57rem; color: var(--text-muted); margin-bottom: 0.5rem; min-height: 1.2rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields/">&larr; Resource Timing: SW Router Timing Fields</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v151 · Performance · Resource Timing</p>
+    <h1>Waterfall Debugger</h1>
+    <p class="lede">Simulates six routing scenarios — cold cache, warm cache, cache miss → network fallback, race (network wins), race (cache wins), and no SW — and annotates the browser's decision points using the values a real <code>PerformanceResourceTiming</code> entry would carry. Click any row to see the routing path explained.</p>
+  </header>
+
+  <div class="scenario-grid" id="scenario-grid"></div>
+  <button class="run-btn" id="run-btn" onclick="runScenario()">Simulate waterfall</button>
+  <div class="status-line" id="status-line"></div>
+
+  <div class="waterfall" id="waterfall" style="display:none">
+    <div class="wf-head">
+      <span>Resource</span>
+      <span>matchedSource</span>
+      <span>finalSource</span>
+      <span>Duration</span>
+      <span>Timeline</span>
+    </div>
+    <div id="wf-rows"></div>
+  </div>
+
+  <div class="detail-panel" id="detail-panel"></div>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Linlan</a></footer>
+</main>
+<script>
+(function () {
+  const SCENARIOS = [
+    {
+      id: 'cold',
+      name: 'Cold cache (first visit)',
+      resources: [
+        { name: 'app.js', matched: 'network', final: 'network', dur: 180, note: 'SW router rule: RouterSourceNetwork. No cache entry yet. Network serves the response.' },
+        { name: 'style.css', matched: 'network', final: 'network', dur: 120, note: 'RouterSourceNetwork. All resources fetch from network on first visit.' },
+        { name: 'hero.jpg', matched: 'network', final: 'network', dur: 340, note: 'Image also served from network — cache is empty.' },
+        { name: 'api/data', matched: 'fetch-event', final: 'fetch-event', dur: 95, note: 'Fetch handler intercepted this route (fetch-event). SW logic determines response.' },
+      ]
+    },
+    {
+      id: 'warm',
+      name: 'Warm cache (repeat visit)',
+      resources: [
+        { name: 'app.js', matched: 'cache', final: 'cache', dur: 5, note: 'SW router rule: RouterSourceCache. Cache hit — served from cache store immediately.' },
+        { name: 'style.css', matched: 'cache', final: 'cache', dur: 3, note: 'RouterSourceCache. Cache hit.' },
+        { name: 'hero.jpg', matched: 'cache', final: 'cache', dur: 4, note: 'Image served from cache — fast.' },
+        { name: 'api/data', matched: 'network', final: 'network', dur: 88, note: 'API route is always-network (no cache). Network serves fresh data.' },
+      ]
+    },
+    {
+      id: 'fallback',
+      name: 'Cache miss → network fallback',
+      resources: [
+        { name: 'app.js', matched: 'cache', final: 'cache', dur: 4, note: 'Cache hit — served from cache.' },
+        { name: 'v2/feature.js', matched: 'cache', final: 'network', dur: 210, note: 'DIVERGENCE: SW matched a RouterSourceCache rule, but the cache did not contain this versioned asset. Browser fell back to network. matched ≠ final — this is a cache miss event your RUM should alert on.' },
+        { name: 'style.css', matched: 'cache', final: 'cache', dur: 3, note: 'Cache hit — served from cache.' },
+        { name: 'hero.jpg', matched: 'cache', final: 'network', dur: 290, note: 'Another cache miss fallback — image was evicted or never cached.' },
+      ]
+    },
+    {
+      id: 'race-network-wins',
+      name: 'Race: network wins',
+      resources: [
+        { name: 'app.js', matched: 'race-network-and-fetch-handler', final: 'network', dur: 55, note: 'race-network-and-fetch-handler rule: both network and SW fetch handler started simultaneously. Network responded first (55ms). finalRouterSource = network.' },
+        { name: 'style.css', matched: 'race-network-and-fetch-handler', final: 'network', dur: 48, note: 'Network won the race again (fast CDN). Cache/handler result was discarded.' },
+        { name: 'hero.jpg', matched: 'race-network-and-fetch-handler', final: 'fetch-event', dur: 3, note: 'Fetch handler won the race — image was in-memory cache inside the SW. finalRouterSource = fetch-event.' },
+      ]
+    },
+    {
+      id: 'race-cache-wins',
+      name: 'Race: cache wins',
+      resources: [
+        { name: 'app.js', matched: 'race-network-and-fetch-handler', final: 'fetch-event', dur: 2, note: 'Fetch handler won every race — SW had all assets in-memory cache. Network requests were cancelled.' },
+        { name: 'style.css', matched: 'race-network-and-fetch-handler', final: 'fetch-event', dur: 1, note: 'Cache win — fetch handler responded in 1ms before network could respond.' },
+        { name: 'hero.jpg', matched: 'race-network-and-fetch-handler', final: 'fetch-event', dur: 2, note: 'Cache win.' },
+        { name: 'fonts.woff2', matched: 'race-network-and-fetch-handler', final: 'fetch-event', dur: 2, note: 'Cache win.' },
+      ]
+    },
+    {
+      id: 'no-sw',
+      name: 'No Service Worker active',
+      resources: [
+        { name: 'app.js', matched: '', final: '', dur: 165, note: 'No Service Worker registered or active. workerMatchedRouterSource and workerFinalRouterSource are both empty strings. Resources serve directly from network or HTTP cache.' },
+        { name: 'style.css', matched: '', final: '', dur: 110, note: 'Fields absent — no SW routing.' },
+        { name: 'hero.jpg', matched: '', final: '', dur: 298, note: 'Fields absent — no SW routing.' },
+      ]
+    },
+  ];
+
+  const SOURCE_CLASS = {
+    'cache': 'src-cache',
+    'network': 'src-network',
+    'fetch-event': 'src-fetch',
+    'race-network-and-fetch-handler': 'src-race',
+    '': 'src-none',
+  };
+
+  let activeScenario = SCENARIOS[0];
+
+  const grid = document.getElementById('scenario-grid');
+  SCENARIOS.forEach(s => {
+    const btn = document.createElement('button');
+    btn.className = 'scenario-btn' + (s.id === 'cold' ? ' active' : '');
+    btn.textContent = s.name;
+    btn.onclick = () => {
+      document.querySelectorAll('.scenario-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeScenario = s;
+    };
+    grid.appendChild(btn);
+  });
+
+  window.runScenario = function () {
+    const btn = document.getElementById('run-btn');
+    btn.disabled = true;
+    document.getElementById('status-line').textContent = 'Simulating ' + activeScenario.name + '…';
+    document.getElementById('detail-panel').style.display = 'none';
+
+    const waterfall = document.getElementById('waterfall');
+    const rowsEl = document.getElementById('wf-rows');
+    rowsEl.innerHTML = '';
+    waterfall.style.display = '';
+
+    const maxDur = Math.max(...activeScenario.resources.map(r => r.dur));
+
+    activeScenario.resources.forEach((res, i) => {
+      const row = document.createElement('div');
+      row.className = 'wf-row';
+      row.dataset.i = i;
+
+      const barWidth = Math.round((res.dur / maxDur) * 200);
+      const matchedTag = res.matched
+        ? `<span class="source-tag ${SOURCE_CLASS[res.matched] || 'src-none'}">${res.matched}</span>`
+        : `<span class="source-tag src-none">—</span>`;
+      const finalTag = res.final
+        ? `<span class="source-tag ${SOURCE_CLASS[res.final] || 'src-none'}">${res.final}</span>`
+        : `<span class="source-tag src-none">—</span>`;
+      const diverged = res.matched !== res.final;
+
+      row.innerHTML = `
+        <span style="word-break:break-all;${diverged ? 'color:var(--accent-rose);' : ''}">${res.name}${diverged ? ' ⚠' : ''}</span>
+        <span>${matchedTag}</span>
+        <span>${finalTag}</span>
+        <span>${res.dur}ms</span>
+        <span><span class="wf-bar" style="width:${barWidth}px;background:${res.matched === 'cache' ? 'var(--accent-emerald)' : res.matched === 'network' ? 'var(--accent-blue)' : res.matched.includes('race') ? 'var(--accent-amber)' : 'var(--text-muted)'}"></span></span>
+      `;
+
+      row.onclick = () => {
+        document.querySelectorAll('.wf-row').forEach(r => r.classList.remove('selected'));
+        row.classList.add('selected');
+        const detail = document.getElementById('detail-panel');
+        detail.style.display = '';
+
+        const divergedNote = diverged
+          ? '\n⚠ DIVERGENCE: matched ≠ final\n  matchedRouterSource: "' + res.matched + '" → primary source was unavailable\n  finalRouterSource: "' + res.final + '" → browser used this fallback\n  Action: alert your RUM when diverged = true'
+          : '';
+
+        detail.textContent =
+          'Resource: ' + res.name + '\n' +
+          'workerMatchedRouterSource: "' + res.matched + '"\n' +
+          'workerFinalRouterSource: "' + res.final + '"\n' +
+          'Duration: ' + res.dur + 'ms\n' +
+          divergedNote +
+          '\n\nBrowser decision:\n' + res.note;
+      };
+
+      rowsEl.appendChild(row);
+    });
+
+    document.getElementById('status-line').textContent = 'Scenario: ' + activeScenario.name + ' — click any row for routing decision details.';
+    btn.disabled = false;
+  };
+
+  // Auto-run first scenario
+  window.runScenario();
+})();
+</script>
+</body>
+</html>
