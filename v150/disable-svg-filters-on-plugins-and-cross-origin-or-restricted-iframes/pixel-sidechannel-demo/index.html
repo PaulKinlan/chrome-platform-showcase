@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pixel Sidechannel Demo — Disable SVG filters on cross-origin iframes — Chrome 150</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0;
+    }
+    .attack-flow {
+      display: flex; flex-direction: column; gap: 8px; margin: var(--space-3) 0;
+    }
+    .flow-step {
+      display: flex; align-items: flex-start; gap: 12px; padding: 10px 14px;
+      border-left: 3px solid var(--border-black); background: var(--bg-paper);
+      font-family: var(--font-mono); font-size: 0.75rem;
+    }
+    .flow-step.attacker { border-left-color: var(--accent-rose); background: #fff1f2; }
+    .flow-step.browser  { border-left-color: #7c3aed; background: #f5f3ff; }
+    .flow-step.blocked  { border-left-color: var(--accent-emerald); background: #f0fdf4; }
+    .step-actor { font-weight: bold; min-width: 70px; color: var(--text-charcoal); }
+    .step-text  { flex: 1; color: var(--text-black); line-height: 1.5; }
+
+    .two-col {
+      display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0;
+    }
+    @media (max-width: 680px) { .two-col { grid-template-columns: 1fr; } }
+
+    .demo-panel {
+      border: 2px solid var(--border-black); background: var(--bg-ivory);
+    }
+    .demo-head {
+      padding: 8px 12px; border-bottom: 2px solid var(--border-black);
+      font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.07em;
+    }
+    .demo-head.attack  { background: #fee2e2; color: #7f1d1d; border-color: #7f1d1d; }
+    .demo-head.blocked { background: #dcfce7; color: #14532d; border-color: #14532d; }
+    .demo-body { padding: var(--space-3); }
+
+    canvas { border: 2px solid var(--border-black); display: block; }
+
+    .filter-row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-2) 0; }
+    .filter-pill {
+      font-family: var(--font-mono); font-size: 0.72rem;
+      border: 2px solid var(--border-black); padding: 3px 9px; cursor: pointer;
+      background: var(--bg-stone); color: var(--text-charcoal);
+    }
+    .filter-pill:hover { background: var(--bg-ivory); }
+    .filter-pill.active { background: var(--text-black); color: var(--bg-ivory); }
+
+    .sampled-pixels {
+      font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-charcoal);
+      margin-top: var(--space-2); padding: var(--space-2); background: var(--bg-stone);
+      border: 1px solid var(--border-black); min-height: 40px;
+    }
+
+    .extraction-bar {
+      height: 20px; background: var(--bg-stone); border: 1px solid var(--border-black);
+      margin: 4px 0; overflow: hidden;
+    }
+    .extraction-fill {
+      height: 100%; background: var(--accent-rose); transition: width 0.3s;
+    }
+
+    pre.code-block {
+      background: #111; color: #e2e8f0; padding: var(--space-3);
+      font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.55;
+      overflow-x: auto; margin: var(--space-2) 0; border: 1px solid var(--border-black);
+    }
+    .btn {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      border: 2px solid var(--border-black); padding: 0.4rem 0.9rem;
+      cursor: pointer; background: var(--bg-ivory); color: var(--text-black);
+      box-shadow: 2px 2px 0 var(--border-black);
+    }
+    .btn:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--border-black); }
+    .btn-primary { background: var(--text-black); color: var(--bg-ivory); }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; }
+
+    code { font-family: var(--font-mono); font-size: 0.88em; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Disable SVG filters on cross-origin iframes</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo &middot; v150</p>
+    <h1>Pixel Sidechannel Demo</h1>
+    <p class="lede">SVG filters operate at the compositor level and can read pixel data from whatever they are applied to. On a cross-origin iframe, that means an attacker could extract colour information from inside a document they don't have JavaScript access to — a sidechannel leak. Chrome 150 blocks SVG filters at the cross-origin boundary. This demo shows the attack concept on same-origin content (where it works), and explains why it cannot reach cross-origin content.</p>
+  </header>
+
+  <div class="stage">
+    <p style="font-family:var(--font-mono);font-size:0.72rem;text-transform:uppercase;letter-spacing:0.07em;color:var(--text-muted);margin:0 0 var(--space-2)">How the pixel sidechannel attack works</p>
+    <div class="attack-flow">
+      <div class="flow-step attacker">
+        <span class="step-actor">Attacker</span>
+        <span class="step-text">Embed a target cross-origin iframe (e.g. bank login page). Apply an SVG filter with <code>feColorMatrix</code> or <code>feDisplacementMap</code> to the iframe's container element.</span>
+      </div>
+      <div class="flow-step attacker">
+        <span class="step-actor">Attacker</span>
+        <span class="step-text">The SVG filter applies a colour transformation that makes specific target pixels stand out — e.g. "if this pixel is red (a logged-in indicator), shift the entire image blue".</span>
+      </div>
+      <div class="flow-step browser">
+        <span class="step-actor">Browser</span>
+        <span class="step-text">[pre-150] The compositor processes the filter against the iframe's rendered pixels. The filtered output is visible on the page.</span>
+      </div>
+      <div class="flow-step attacker">
+        <span class="step-actor">Attacker</span>
+        <span class="step-text">JS reads the rendered output via <code>canvas.drawImage()</code> + <code>getImageData()</code>. Pixel colours in the canvas reveal information about the content inside the cross-origin frame.</span>
+      </div>
+      <div class="flow-step blocked">
+        <span class="step-actor">Chrome 150</span>
+        <span class="step-text">The compositor detects the SVG filter is applied across a cross-origin boundary. It strips the filter from the cross-origin iframe subtree. The attacker sees the unfiltered frame as-is — pixel data is not exposed.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <p style="font-family:var(--font-mono);font-size:0.72rem;text-transform:uppercase;letter-spacing:0.07em;color:var(--text-muted);margin:0 0 var(--space-2)">Live visual — filter applied to same-origin canvas (permitted)</p>
+    <div style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-charcoal);margin-bottom:var(--space-2)">Select a filter to see how it transforms the canvas pixel data. This simulates what an attacker does with same-origin content — the same technique is blocked on cross-origin content in Chrome 150.</div>
+
+    <div class="filter-row" id="filter-row">
+      <button class="filter-pill active" data-filter="none">none (no filter)</button>
+      <button class="filter-pill" data-filter="huerotate">hue-rotate 90°</button>
+      <button class="filter-pill" data-filter="invert">invert</button>
+      <button class="filter-pill" data-filter="colormatrix">feColorMatrix shift</button>
+      <button class="filter-pill" data-filter="displacement">feDisplacementMap</button>
+    </div>
+
+    <div class="two-col">
+      <div class="demo-panel">
+        <div class="demo-head">Original content (same-origin canvas)</div>
+        <div class="demo-body">
+          <canvas id="canvas-original" width="240" height="120"></canvas>
+          <div style="font-family:var(--font-mono);font-size:0.72rem;color:var(--text-muted);margin-top:6px">Simulated iframe content — secret text hidden in colour</div>
+        </div>
+      </div>
+
+      <div class="demo-panel">
+        <div class="demo-head attack">After SVG filter — pixel data leaked</div>
+        <div class="demo-body">
+          <canvas id="canvas-filtered" width="240" height="120"></canvas>
+          <div class="sampled-pixels" id="sampled">Click "Sample pixels" to read extracted data.</div>
+          <div class="controls" style="margin-top:var(--space-2)">
+            <button class="btn btn-primary" id="btn-sample">Sample pixels</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <p style="font-family:var(--font-mono);font-size:0.72rem;text-transform:uppercase;letter-spacing:0.07em;color:var(--text-muted);margin:0 0 var(--space-2)">Why cross-origin filtering was the real threat</p>
+    <div class="two-col">
+      <div>
+        <div style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-charcoal);margin-bottom:8px">Attack on a cross-origin iframe (pre-Chrome 150):</div>
+        <pre class="code-block">/* Attacker embeds a bank login page */
+&lt;div style="filter: url(#secret-extractor)"&gt;
+  &lt;iframe src="https://bank.example.com/login"&gt;
+  &lt;/iframe&gt;
+&lt;/div&gt;
+
+/* SVG filter: shift red pixels → bright yellow
+   so attacker can detect "user is logged in"
+   by observing the rendered output colour */
+&lt;filter id="secret-extractor"&gt;
+  &lt;feColorMatrix type="matrix"
+    values="1 0 0 0 0
+            1 1 0 0 0
+            0 0 0 0 0
+            0 0 0 1 0"/&gt;
+&lt;/filter&gt;
+
+/* Attacker reads result via canvas
+   → leaks pixel data from inside the iframe */</pre>
+      </div>
+      <div>
+        <div style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-charcoal);margin-bottom:8px">Chrome 150: filter stripped at cross-origin boundary:</div>
+        <pre class="code-block">/* Chrome 150 compositor:
+   Walks the paint effect tree.
+   Finds SVG filter applied to a subtree
+   containing a cross-origin iframe.
+   Result: filter is NOT applied to the iframe.
+   The iframe renders unfiltered.
+   Attacker cannot read cross-origin pixels. */
+
+/* Same-origin iframes: filter still applies.
+   Cross-origin iframes: filter is stripped.
+   CSS filters (blur, brightness, etc.):
+     still allowed — no pixel-read sidechannel.
+   SVG url() filters:
+     blocked at cross-origin boundary. */</pre>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../clickjacking-replay/">Clickjacking Replay</a> — feDisplacementMap attack in action</li>
+      <li><a href="../filter-comparison/">Filter Comparison</a> — same-origin vs cross-origin side by side</li>
+      <li><a href="../origin-trust-ladder/">Origin Trust Ladder</a> — all origin types and filter policies</li>
+      <li><a href="https://chromestatus.com/feature/5117170452398080" target="_blank" rel="noopener">ChromeStatus: Disable SVG filters on cross-origin iframes</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+
+  const canvasOrig = document.getElementById('canvas-original');
+  const canvasFilt = document.getElementById('canvas-filtered');
+  const ctxOrig    = canvasOrig.getContext('2d');
+  const ctxFilt    = canvasFilt.getContext('2d');
+
+  let currentFilter = 'none';
+
+  // Draw "secret" original content
+  function drawOriginal() {
+    const W = canvasOrig.width, H = canvasOrig.height;
+    ctxOrig.clearRect(0,0,W,H);
+    ctxOrig.fillStyle = '#f8f9fa';
+    ctxOrig.fillRect(0,0,W,H);
+    // "Secret" indicator: a red patch in the corner that encodes "LOGGED_IN"
+    ctxOrig.fillStyle = '#dc2626';
+    ctxOrig.fillRect(10, 10, 40, 20);
+    ctxOrig.fillStyle = '#1e40af';
+    ctxOrig.fillRect(10, 40, 100, 16);
+    ctxOrig.fillStyle = '#16a34a';
+    ctxOrig.fillRect(10, 65, 70, 16);
+    // Text (simulating content inside iframe)
+    ctxOrig.fillStyle = '#1f2937';
+    ctxOrig.font = '11px monospace';
+    ctxOrig.fillText('Balance: $4,521.00', 60, 23);
+    ctxOrig.fillStyle = '#fff';
+    ctxOrig.fillText('Username:', 14, 52);
+    ctxOrig.fillText('▣▣▣▣▣▣▣', 14, 77);
+    ctxOrig.fillStyle = '#9ca3af';
+    ctxOrig.font = '9px monospace';
+    ctxOrig.fillText('Simulated cross-origin content', 10, 105);
+  }
+
+  function applyFilter(filterKey) {
+    const imgData = ctxOrig.getImageData(0, 0, canvasOrig.width, canvasOrig.height);
+    const src = imgData.data;
+    const dst = ctxFilt.createImageData(canvasFilt.width, canvasFilt.height);
+    const d = dst.data;
+
+    for (let i = 0; i < src.length; i += 4) {
+      const r = src[i], g = src[i+1], b = src[i+2], a = src[i+3];
+      let nr, ng, nb;
+
+      if (filterKey === 'none') {
+        nr = r; ng = g; nb = b;
+      } else if (filterKey === 'huerotate') {
+        // Approximate hue rotate 90°
+        nr = 255 - g; ng = r; nb = b;
+        nr = Math.max(0, Math.min(255, nr));
+      } else if (filterKey === 'invert') {
+        nr = 255-r; ng = 255-g; nb = 255-b;
+      } else if (filterKey === 'colormatrix') {
+        // feColorMatrix: amplify red channel into green
+        // Attacker uses this to detect red (logged-in indicator)
+        nr = r;
+        ng = Math.min(255, g + r * 0.8);
+        nb = b;
+      } else if (filterKey === 'displacement') {
+        // Simulate displacement: shift rows by amount based on pixel brightness
+        // (actual feDisplacementMap uses a separate map texture)
+        const brightness = (r + g + b) / 3;
+        const shift = Math.floor((brightness / 255) * 10);
+        const srcIdx = Math.min(src.length - 4, i + shift * 4);
+        nr = src[srcIdx]; ng = src[srcIdx+1]; nb = src[srcIdx+2];
+      } else {
+        nr = r; ng = g; nb = b;
+      }
+
+      d[i] = nr; d[i+1] = ng; d[i+2] = nb; d[i+3] = a;
+    }
+
+    ctxFilt.putImageData(dst, 0, 0);
+  }
+
+  drawOriginal();
+  applyFilter('none');
+
+  document.getElementById('filter-row').addEventListener('click', e => {
+    const pill = e.target.closest('.filter-pill');
+    if (!pill) return;
+    document.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));
+    pill.classList.add('active');
+    currentFilter = pill.dataset.filter;
+    drawOriginal();
+    applyFilter(currentFilter);
+    document.getElementById('sampled').textContent = 'Filter changed. Click "Sample pixels" to read extracted data.';
+  });
+
+  document.getElementById('btn-sample').addEventListener('click', () => {
+    const imgData = ctxFilt.getImageData(0, 0, canvasFilt.width, canvasFilt.height);
+    const d = imgData.data;
+    // Sample the "indicator" region (top-left red patch after filter)
+    const sampleRegion = [];
+    for (let x = 10; x < 50; x += 5) {
+      for (let y = 10; y < 30; y += 5) {
+        const idx = (y * canvasFilt.width + x) * 4;
+        sampleRegion.push({ x, y, r: d[idx], g: d[idx+1], b: d[idx+2] });
+      }
+    }
+    const avgR = Math.round(sampleRegion.reduce((s,p) => s + p.r, 0) / sampleRegion.length);
+    const avgG = Math.round(sampleRegion.reduce((s,p) => s + p.g, 0) / sampleRegion.length);
+    const avgB = Math.round(sampleRegion.reduce((s,p) => s + p.b, 0) / sampleRegion.length);
+
+    const wasRed = avgR > 150 && avgG < 100; // original indicator was red
+    const loggedInSignal = currentFilter === 'colormatrix'
+      ? (avgG > 150 ? 'HIGH green — confirms red pixels in source → user logged in' : 'low green')
+      : currentFilter === 'invert'
+        ? (avgR < 100 ? 'LOW red after invert — confirms red in source' : 'no signal')
+        : 'N/A for this filter';
+
+    document.getElementById('sampled').textContent =
+      `Sampled indicator region (${sampleRegion.length} pixels):\n` +
+      `Avg RGB: (${avgR}, ${avgG}, ${avgB})\n` +
+      `Inference: ${loggedInSignal}\n` +
+      `\nOn a real cross-origin iframe in Chrome 150,\nthis sampling would return unfiltered pixel data\n— the filter is stripped before it reaches the iframe.`;
+  });
+
+})();
+</script>
+</body>
+</html>
