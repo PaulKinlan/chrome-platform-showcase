@@ -87,6 +87,13 @@ The self-critique and conformance workflow is manual/local-session work, not par
 routine. Read `.claude/auto-research.md` before running it; this section is the short operational
 version for other agents.
 
+Quick entry points:
+
+- Claude Code: use `/project:auto-research`, `/project:auto-research-critique`,
+  `/project:auto-research-conformance`, or `/project:auto-research-goals`.
+- Codex: use `$showcase-auto-research` in CLI/IDE, or choose `Showcase Auto Research` from the Codex
+  app skill/slash-command list. For long runs, set a `/goal` first and then invoke the skill.
+
 On-disk files:
 
 - `v<N>/<feature-slug>/<concept-slug>/_questions.json`: the usual per-concept critique.
