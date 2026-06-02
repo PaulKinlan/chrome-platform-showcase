@@ -196,6 +196,34 @@ function renderReferrerEcho(req: Request): Response {
   });
 }
 
+function renderDeviceMemoryClientHintRoute(req: Request, sub: string): Response | null {
+  if (sub !== "/update-device-memory-api-limits/compatibility-lab/client-hint-echo") {
+    return null;
+  }
+
+  const payload = {
+    endpoint: new URL(req.url).pathname,
+    optInResponseHeader: "Accept-CH: Sec-CH-Device-Memory",
+    expectedRequestHeader: "Sec-CH-Device-Memory",
+    received: {
+      secCHDeviceMemory: req.headers.get("sec-ch-device-memory"),
+      accept: req.headers.get("accept"),
+      userAgent: req.headers.get("user-agent"),
+    },
+    note: req.headers.get("sec-ch-device-memory")
+      ? "The browser sent the Device Memory client hint after this origin opted in."
+      : "No Device Memory client hint was received. That is the failure mode for unsupported browsers, first requests before opt-in, or clients that do not expose this Chromium-only hint.",
+  };
+
+  return jsonResponse(payload, {
+    headers: {
+      "accept-ch": "Sec-CH-Device-Memory",
+      "vary": "Sec-CH-Device-Memory",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 function jsonResponse(payload: unknown, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json; charset=utf-8");
@@ -5494,6 +5522,21 @@ Deno.serve({ port: PORT }, async (req) => {
       if (spcAuthResponse) return spcAuthResponse;
       const spcCheckoutResponse = await renderSpcCheckoutRoute(req, sub);
       if (spcCheckoutResponse) return spcCheckoutResponse;
+      const deviceMemoryHintResponse = renderDeviceMemoryClientHintRoute(req, sub);
+      if (deviceMemoryHintResponse) return deviceMemoryHintResponse;
+      if (
+        sub === "/update-device-memory-api-limits/compatibility-lab" ||
+        sub === "/update-device-memory-api-limits/compatibility-lab/" ||
+        sub === "/update-device-memory-api-limits/compatibility-lab/index.html"
+      ) {
+        const asset = await readReleaseAsset(release, sub);
+        if (asset) {
+          return withHeaders(asset, {
+            "accept-ch": "Sec-CH-Device-Memory",
+            "vary": "Sec-CH-Device-Memory",
+          });
+        }
+      }
       if (
         sub === "/js-profiling-in-dedicated-workers" ||
         sub.startsWith("/js-profiling-in-dedicated-workers/")
