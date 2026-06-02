@@ -95,6 +95,46 @@
       font-size: 0.875rem;
       color: var(--text-charcoal);
     }
+    .sim-panel {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .sim-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .sim-controls button {
+      font-family: monospace;
+      font-size: 0.74rem;
+      padding: 0.4rem 0.7rem;
+    }
+    .sim-log {
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: 0.75rem;
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: var(--text-charcoal);
+      min-height: 7rem;
+      line-height: 1.55;
+    }
+    .sim-log ol {
+      margin: 0;
+      padding-left: 1.2rem;
+    }
+    .sim-verdict {
+      margin-top: 0.75rem;
+      border-left: 3px solid var(--border-black);
+      padding: 0.5rem 0.75rem;
+      background: var(--bg-stone);
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: var(--text-charcoal);
+    }
     pre code { font-size: 0.8125rem; line-height: 1.6; }
   </style>
 </head>
@@ -114,6 +154,24 @@
   <div class="note">
     The fundamental improvement of <code>&lt;usermedia&gt;</code> is trust: the browser controls the permission prompt timing as part of an element activation it fully recognises, rather than relying on JavaScript to properly manage user gesture context.
   </div>
+
+  <section>
+    <h2>flow simulator</h2>
+    <div class="sim-panel">
+      <div class="sim-controls">
+        <button data-flow="direct">Immediate getUserMedia()</button>
+        <button data-flow="delayed">Delayed JS callback</button>
+        <button data-flow="native">Native &lt;usermedia&gt; stream</button>
+        <button data-flow="cancel">Native cancel/error</button>
+      </div>
+      <div class="sim-log" id="sim-log">
+        <ol id="sim-steps">
+          <li>Choose a flow to see who owns the prompt timing.</li>
+        </ol>
+      </div>
+      <div class="sim-verdict" id="sim-verdict">Native support probe has not run yet.</div>
+    </div>
+  </section>
 
   <section>
     <h2>flow comparison</h2>
@@ -151,7 +209,7 @@
         <ul class="flow-steps">
           <li class="flow-step">
             <span class="step-icon">1.</span>
-            <span class="step-text">Developer places <code>&lt;usermedia video audio&gt;</code> in HTML</span>
+            <span class="step-text">Developer places <code>&lt;usermedia&gt;</code> in HTML and configures it with <code>setConstraints()</code></span>
           </li>
           <li class="flow-step">
             <span class="step-icon">2.</span>
@@ -167,7 +225,7 @@
           </li>
           <li class="flow-step">
             <span class="step-icon">5.</span>
-            <span class="step-text"><code>activate</code> event fires with the stream; <code>error</code> fires if denied</span>
+            <span class="step-text"><code>stream</code> fires on success; <code>error</code> or <code>cancel</code> fires otherwise</span>
           </li>
         </ul>
         <div class="benefit-box">
@@ -199,14 +257,14 @@
           <td>Browser (always correct)</td>
         </tr>
         <tr>
-          <td>Works without JavaScript</td>
+          <td>Browser-owned prompt surface</td>
           <td class="no">No</td>
-          <td class="yes">Yes (HTML only)</td>
+          <td class="yes">Yes — native element owns activation UI</td>
         </tr>
         <tr>
           <td>Fine-grained constraints</td>
           <td class="yes">Yes — full MediaStreamConstraints</td>
-          <td class="partial">Basic (video/audio boolean attributes)</td>
+          <td class="yes">Yes — configured with <code>setConstraints()</code></td>
         </tr>
         <tr>
           <td>Browser support</td>
@@ -221,20 +279,26 @@
     <h2>progressive enhancement</h2>
     <pre><code>&lt;!-- Graceful degradation: usermedia for Chrome 150+,
      button+JS as fallback --&gt;
-&lt;usermedia id="um" video audio&gt;
+&lt;usermedia id="um"&gt;
   &lt;!-- Content shown in browsers without &lt;usermedia&gt; --&gt;
   &lt;button id="fallback-btn"&gt;Start camera&lt;/button&gt;
 &lt;/usermedia&gt;
 
 &lt;script&gt;
   const um = document.getElementById('um');
+  const constraints = { video: {}, audio: {} };
 
   // Check if &lt;usermedia&gt; is supported
-  const hasUsermedia = um.constructor !== HTMLUnknownElement;
+  const hasUsermedia =
+    typeof HTMLUserMediaElement !== 'undefined' &&
+    um instanceof HTMLUserMediaElement &&
+    typeof um.setConstraints === 'function';
 
   if (hasUsermedia) {
-    um.addEventListener('activate', e => startPreview(e.stream));
-    um.addEventListener('error', e => showError(e.error));
+    um.setConstraints(constraints);
+    um.addEventListener('stream', () => startPreview(um.stream));
+    um.addEventListener('error', () => showError(um.error));
+    um.addEventListener('cancel', () => showCancelled());
   } else {
     // Fallback: use getUserMedia directly
     document.getElementById('fallback-btn').addEventListener('click', async () => {
@@ -260,5 +324,69 @@
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script>
+  const flows = {
+    direct: {
+      verdict: 'The call happens inside the click handler, so the user gesture is clear, but the site still owns prompt timing and recovery UI.',
+      steps: [
+        'User clicks an app-defined button.',
+        'JavaScript immediately calls navigator.mediaDevices.getUserMedia().',
+        'Browser evaluates permission, secure context, and active document state.',
+        'The page receives a Promise result and must update every visible state itself.',
+      ],
+    },
+    delayed: {
+      verdict: 'The visible action and the prompt can drift apart. This is the trust gap the capability element is designed to reduce.',
+      steps: [
+        'User clicks something that appears unrelated to camera setup.',
+        'The app waits for a timer, callback, route change, or async dependency.',
+        'JavaScript later calls getUserMedia() from code the user cannot inspect.',
+        'The browser may reject, delay, or show a surprising prompt depending on gesture heuristics.',
+      ],
+    },
+    native: {
+      verdict: 'The browser-owned element is the activation target. The page observes stream/error/cancel events instead of deciding prompt timing.',
+      steps: [
+        'Developer renders <usermedia> with fallback content.',
+        'Before activation, the page calls setConstraints() with the desired media constraints.',
+        'User activates the browser-rendered element surface.',
+        'On success, the element exposes .stream and fires the stream event.',
+      ],
+    },
+    cancel: {
+      verdict: 'Cancellation and denial stay attached to the element, giving the page one place to show recovery instructions.',
+      steps: [
+        'User activates <usermedia> but dismisses or rejects the browser prompt.',
+        'For user cancellation, the element fires cancel.',
+        'For platform or security failure, the element sets .error and fires error.',
+        'Fallback content remains the progressive-enhancement path when the element is unsupported.',
+      ],
+    },
+  };
+
+  const probe = (() => {
+    const el = document.createElement('usermedia');
+    return typeof HTMLUserMediaElement !== 'undefined' &&
+      el instanceof HTMLUserMediaElement &&
+      typeof el.setConstraints === 'function';
+  })();
+  document.getElementById('sim-verdict').textContent = probe
+    ? 'Support probe: HTMLUserMediaElement is exposed in this browser.'
+    : 'Support probe: HTMLUserMediaElement is not exposed here; simulator shows expected Chrome 150 behavior and fallback flow.';
+
+  document.querySelectorAll('[data-flow]').forEach(button => {
+    button.addEventListener('click', () => {
+      const flow = flows[button.dataset.flow];
+      const steps = document.getElementById('sim-steps');
+      steps.textContent = '';
+      flow.steps.forEach(text => {
+        const item = document.createElement('li');
+        item.textContent = text;
+        steps.appendChild(item);
+      });
+      document.getElementById('sim-verdict').textContent = flow.verdict;
+    });
+  });
+</script>
 </body>
 </html>
