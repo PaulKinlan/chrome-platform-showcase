@@ -13,7 +13,7 @@
       margin: var(--space-4) 0;
       box-shadow: var(--thin-shadow);
     }
-    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--accent-amber); display: block; margin-bottom: 0.4rem; }
+    .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--text-black); display: block; margin-bottom: 0.4rem; }
     .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; }
     .screens { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4); margin: var(--space-4) 0; }
     .screen-card { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); box-shadow: var(--thin-shadow); }
@@ -21,9 +21,13 @@
     .screen-card dl { font-family: var(--font-mono); font-size: 0.78rem; margin: 0; }
     .screen-card dt { color: var(--text-muted); margin-top: var(--space-2); }
     .screen-card dd { color: var(--text-black); margin: 0; }
+    .screen-card .breakable { word-break: break-all; }
     .badge { display: inline-block; font-family: var(--font-mono); font-size: 0.7rem; padding: 0.1rem 0.4rem; border: 1px solid var(--border-black); }
     .badge-primary { background: var(--accent-blue); color: var(--bg-ivory); border-color: var(--accent-blue); }
+    .badge-secondary { background: var(--bg-stone); color: var(--text-black); }
+    .badge-unknown { background: var(--bg-paper); color: var(--text-muted); }
     .status { font-family: var(--font-mono); font-size: 0.82rem; padding: 0.5rem 0.8rem; border: 2px solid var(--border-black); background: var(--bg-stone); display: inline-block; margin: var(--space-3) 0; }
+    .status-note { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); margin-top: var(--space-2); }
   </style>
 </head>
 <body>
@@ -33,7 +37,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v131</p>
     <h1>One MediaStreamTrack per screen</h1>
-    <p class="lede">The real surprise of <code>getAllScreensMedia()</code> isn't that it captures everything — it's that the returned <code>MediaStream</code> exposes one <code>MediaStreamTrack</code> per display, each tagged with the screen's label and an <code>isPrimary</code> flag. This is what makes per-monitor routing possible in compliance recorders.</p>
+    <p class="lede">The real surprise of <code>getAllScreensMedia()</code> isn't that it captures everything — it's that the call returns one <code>MediaStream</code> per display, each containing the captured screen's video track. Primary-screen metadata comes from <code>track.screenDetailed().isPrimary</code> when that capture-track method is available, not from the generic track settings.</p>
   </header>
 
   <div class="warn-block">
@@ -53,13 +57,15 @@
 
   <section>
     <h2>the api in use</h2>
-<pre><code>const stream = await navigator.mediaDevices.getAllScreensMedia();
-for (const track of stream.getVideoTracks()) {
+<pre><code>const streams = await navigator.mediaDevices.getAllScreensMedia();
+for (const stream of streams) {
+  const [track] = stream.getVideoTracks();
   const s = track.getSettings();
   // s.displaySurface === "monitor"
   // track.label                e.g. "DELL P2419H"
   // s.deviceId                  stable per-display id
   // s.aspectRatio / width / height
+  // track.screenDetailed?.()?.isPrimary  // ScreenDetailed metadata
 }</code></pre>
   </section>
 
@@ -86,42 +92,104 @@ for (const track of stream.getVideoTracks()) {
   const screensEl = document.getElementById("screens");
   const runBtn = document.getElementById("run");
   const stopBtn = document.getElementById("stop");
-  let currentStream = null;
+  let currentStreams = [];
 
   const supported = typeof navigator.mediaDevices?.getAllScreensMedia === "function";
   statusEl.textContent = supported
     ? "supported: navigator.mediaDevices.getAllScreensMedia exists. Press probe."
     : "not supported: navigator.mediaDevices.getAllScreensMedia is missing in this browser.";
 
-  function renderTracks(tracks) {
+  function addField(list, label, value, className = "") {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value || "—";
+    if (className) dd.className = className;
+    list.append(dt, dd);
+  }
+
+  function screenDetailsFor(track) {
+    if (typeof track.screenDetailed !== "function") {
+      return { state: "unavailable", label: "screenDetailed() unavailable" };
+    }
+    try {
+      const detail = track.screenDetailed();
+      return {
+        state: "available",
+        isPrimary: detail.isPrimary === true,
+        label: detail.label || "(blank)",
+        left: detail.left,
+        top: detail.top,
+        width: detail.width,
+        height: detail.height,
+      };
+    } catch (e) {
+      return { state: "error", label: `${e.name || "Error"}: ${e.message || e}` };
+    }
+  }
+
+  function flattenStreams(streams) {
+    return streams.flatMap((stream, streamIndex) =>
+      stream.getVideoTracks().map((track, trackIndex) => ({
+        stream,
+        streamIndex,
+        track,
+        trackIndex,
+      }))
+    );
+  }
+
+  function renderTracks(rows) {
     screensEl.innerHTML = "";
-    tracks.forEach((track, i) => {
+    rows.forEach(({ track, streamIndex, trackIndex }, i) => {
       const s = track.getSettings();
+      const detail = screenDetailsFor(track);
       const card = document.createElement("div");
       card.className = "screen-card";
-      const primary = s.displaySurface === "monitor" && i === 0 ? '<span class="badge badge-primary">primary</span>' : "";
-      card.innerHTML = `
-        <h4>track ${i + 1} ${primary}</h4>
-        <dl>
-          <dt>label</dt><dd>${track.label || "(blank)"}</dd>
-          <dt>readyState</dt><dd>${track.readyState}</dd>
-          <dt>displaySurface</dt><dd>${s.displaySurface || "—"}</dd>
-          <dt>resolution</dt><dd>${s.width || "?"} &times; ${s.height || "?"}</dd>
-          <dt>aspectRatio</dt><dd>${s.aspectRatio || "—"}</dd>
-          <dt>deviceId</dt><dd style="word-break: break-all;">${s.deviceId || "—"}</dd>
-        </dl>`;
+      const title = document.createElement("h4");
+      title.textContent = `stream ${streamIndex + 1}, track ${trackIndex + 1}`;
+      const badge = document.createElement("span");
+      badge.className = detail.state === "available"
+        ? detail.isPrimary ? "badge badge-primary" : "badge badge-secondary"
+        : "badge badge-unknown";
+      badge.textContent = detail.state === "available"
+        ? detail.isPrimary ? "primary screen" : "secondary screen"
+        : "primary unknown";
+      title.append(" ", badge);
+
+      const dl = document.createElement("dl");
+      addField(dl, "track label", track.label || "(blank)");
+      addField(dl, "readyState", track.readyState);
+      addField(dl, "displaySurface", s.displaySurface || "—");
+      addField(dl, "resolution", `${s.width || "?"} × ${s.height || "?"}`);
+      addField(dl, "aspectRatio", String(s.aspectRatio || "—"));
+      addField(dl, "deviceId", s.deviceId || "—", "breakable");
+      addField(dl, "screenDetailed()", detail.label, "breakable");
+      if (detail.state === "available") {
+        addField(dl, "screen position", `${detail.left ?? "?"}, ${detail.top ?? "?"}`);
+        addField(dl, "screen size", `${detail.width ?? "?"} × ${detail.height ?? "?"}`);
+      }
+
+      card.append(title, dl);
       screensEl.appendChild(card);
     });
   }
 
+  function stopAllStreams() {
+    currentStreams.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
+    currentStreams = [];
+  }
+
   runBtn.addEventListener("click", async () => {
     if (!supported) return;
+    stopAllStreams();
+    stopBtn.disabled = true;
     statusEl.textContent = "requesting…";
     try {
-      currentStream = await navigator.mediaDevices.getAllScreensMedia();
-      const tracks = currentStream.getVideoTracks();
-      statusEl.textContent = `got ${tracks.length} track${tracks.length === 1 ? "" : "s"}`;
-      renderTracks(tracks);
+      currentStreams = await navigator.mediaDevices.getAllScreensMedia();
+      const rows = flattenStreams(currentStreams);
+      statusEl.textContent = `got ${currentStreams.length} stream${currentStreams.length === 1 ? "" : "s"} with ${rows.length} video track${rows.length === 1 ? "" : "s"}`;
+      renderTracks(rows);
       stopBtn.disabled = false;
     } catch (e) {
       statusEl.textContent = `rejected: ${e.name}: ${e.message}`;
@@ -129,9 +197,8 @@ for (const track of stream.getVideoTracks()) {
   });
 
   stopBtn.addEventListener("click", () => {
-    if (!currentStream) return;
-    currentStream.getTracks().forEach(t => t.stop());
-    currentStream = null;
+    if (!currentStreams.length) return;
+    stopAllStreams();
     screensEl.innerHTML = "";
     statusEl.textContent = "tracks stopped";
     stopBtn.disabled = true;
