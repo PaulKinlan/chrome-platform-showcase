@@ -26,11 +26,9 @@ export function cloneSelectedOptionIntoMirrors(select) {
   const option = select.selectedOptions[0];
   if (!option) return;
 
-  const sourceNodes = option.childNodes.length
-    ? [...option.childNodes]
-    : [
-      document.createTextNode(option.label || option.textContent || option.value),
-    ];
+  const sourceNodes = option.childNodes.length ? [...option.childNodes] : [
+    document.createTextNode(option.label || option.textContent || option.value),
+  ];
 
   select.querySelectorAll("selectedcontent").forEach((mirror) => {
     mirror.replaceChildren(...sourceNodes.map((node) => node.cloneNode(true)));
