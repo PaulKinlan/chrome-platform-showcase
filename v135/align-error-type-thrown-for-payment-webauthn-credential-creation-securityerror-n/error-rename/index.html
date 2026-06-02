@@ -58,7 +58,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v135</p>
     <h1>SecurityError → NotAllowedError</h1>
-    <p class="lede">Chrome 135 changes the error type thrown by <code>navigator.credentials.create({ publicKey, payment })</code> when called without a user gesture. Click the button to actually invoke the API and see what your browser throws.</p>
+    <p class="lede">Chrome 135 changes the error type thrown by payment WebAuthn credential creation in the activationless iframe envelope. The legacy payment path threw <code>SecurityError</code>; the aligned path throws <code>NotAllowedError</code>, matching WebAuthn's missing-activation failure.</p>
   </header>
 
   <div class="stage">
@@ -78,8 +78,8 @@
     </div>
 
     <div class="row">
-      <button id="probe">Probe error name (no gesture)</button>
-      <button id="probe-gesture">Probe with gesture (will prompt)</button>
+      <button id="probe">Queue delayed probe</button>
+      <button id="probe-gesture">Probe from this click</button>
     </div>
 
     <h3>actual result</h3>
@@ -106,11 +106,19 @@
   </section>
 
   <section>
+    <h2>migration impact</h2>
+    <p>Code that only handled <code>SecurityError</code> for payment credential creation can miss the Chrome 135+ activation failure. Keep <code>SecurityError</code> for true policy, origin, or RP ID failures, and route the missing-activation or user-denial path through <code>NotAllowedError</code>.</p>
+    <p>To inspect the success path, enable a WebAuthn virtual authenticator in DevTools and run the fresh-click probe. Without an authenticator, the page is expected to stay on the error path.</p>
+  </section>
+
+  <section>
     <h2>see also</h2>
     <ul>
       <li><a href="../">Payment WebAuthn error rename</a> — feature index</li>
+      <li><a href="../error-rename-iframe/">Cross-origin iframe envelope</a></li>
       <li><a href="https://chromestatus.com/feature/5160752715137024" target="_blank" rel="noopener">ChromeStatus entry</a></li>
       <li><a href="https://www.w3.org/TR/secure-payment-confirmation/" target="_blank" rel="noopener">Secure Payment Confirmation spec</a></li>
+      <li><a href="https://github.com/w3c/secure-payment-confirmation/pull/281" target="_blank" rel="noopener">SPC spec PR 281</a></li>
     </ul>
   </section>
 
@@ -125,10 +133,18 @@ const hasWA = !!navigator.credentials?.create;
 cap.textContent = hasWA ? "WebAuthn: yes" : "WebAuthn: no";
 cap.classList.add(hasWA ? "ok" : "bad");
 
-async function probe(_withGesture) {
+async function probe(withFreshGesture) {
   if (!hasWA) { out.textContent = "WebAuthn not available."; return; }
+  if (!withFreshGesture) {
+    out.textContent = "Waiting for transient user activation to expire before probing…";
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+  }
+  const activationBefore = navigator.userActivation?.isActive ?? null;
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), 1000);
   try {
     const cred = await navigator.credentials.create({
+      signal: controller.signal,
       publicKey: {
         rp: { name: "demo", id: location.hostname },
         user: { id: crypto.getRandomValues(new Uint8Array(16)), name: "u", displayName: "u" },
@@ -145,9 +161,12 @@ async function probe(_withGesture) {
     out.textContent =
       `e.name = "${e.name}"\n` +
       `e.message = ${e.message}\n\n` +
+      `userActivation.isActive before create() = ${activationBefore}\n\n` +
       (matched
         ? `matches Chrome 135+ behavior (NotAllowedError)`
         : `does NOT match Chrome 135+ behavior — your browser threw ${e.name}`);
+  } finally {
+    clearTimeout(abortTimer);
   }
 }
 
