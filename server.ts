@@ -4428,6 +4428,16 @@ function renderConformancePage(s: ConformanceSuite): string {
 
   async function runAssertion(kind, test, expect) {
     try {
+      function propertyDescriptor(target, property) {
+        let cur = Object(target);
+        while (cur) {
+          const descriptor = Object.getOwnPropertyDescriptor(cur, property);
+          if (descriptor) return descriptor;
+          cur = Object.getPrototypeOf(cur);
+        }
+        return undefined;
+      }
+
       if (kind === "css-supports") {
         // CSS.supports accepts either ("prop: value") or ("prop", "value");
         // we pass the raw declaration form.
@@ -4437,20 +4447,37 @@ function renderConformancePage(s: ConformanceSuite): string {
         // Walk a dotted path against the global.
         const parts = test.split(".");
         let cur = globalThis;
-        for (const p of parts) {
+        for (let i = 0; i < parts.length; i++) {
+          const p = parts[i];
           if (cur == null) return { ok: false, detail: "missing at " + p };
+          if (i === parts.length - 1) {
+            const ok = p in Object(cur);
+            return { ok, detail: ok ? "" : "undefined" };
+          }
           cur = cur[p];
         }
-        return { ok: cur !== undefined, detail: cur === undefined ? "undefined" : "" };
+        return { ok: false, detail: "empty path" };
       }
       if (kind === "typeof") {
         const parts = test.split(".");
         let cur = globalThis;
-        for (const p of parts) {
+        for (let i = 0; i < parts.length; i++) {
+          const p = parts[i];
           if (cur == null) return { ok: false, detail: "missing at " + p };
+          if (i === parts.length - 1) {
+            let actual;
+            try {
+              actual = typeof cur[p];
+            } catch (e) {
+              const descriptor = propertyDescriptor(cur, p);
+              if (!descriptor) throw e;
+              actual = "value" in descriptor ? typeof descriptor.value : "accessor";
+            }
+            return { ok: actual === expect, detail: "typeof = " + actual };
+          }
           cur = cur[p];
         }
-        return { ok: typeof cur === expect, detail: "typeof = " + typeof cur };
+        return { ok: false, detail: "empty path" };
       }
       if (kind === "script") {
         // eslint-disable-next-line no-new-func
@@ -4670,6 +4697,9 @@ function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
   const SUITES = ${JSON.stringify(all).replace(/</g, "\\u003c")};
   
   document.getElementById("ua").textContent = navigator.userAgent;
+  const chromeMajor = Number(
+    (navigator.userAgent.match(/(?:Chrome|HeadlessChrome)\\/(\\d+)/) || [])[1] || 0
+  );
   
   const rowsContainer = document.getElementById("rows");
   const progressContainer = document.getElementById("progress-container");
@@ -4680,6 +4710,15 @@ function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
   const filterVerdict = document.getElementById("filter-verdict");
   
   let results = []; // holds flat assertion results
+
+  function escapeHTML(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
   
   // Populate Table Rows Initially
   function populateTable() {
@@ -4695,11 +4734,14 @@ function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
         : "/" + suite.release + "/" + suite.featureSlug + "/conformance/";
       
       for (const assertion of suite.assertions) {
+        const specLink = assertion.specSection
+          ? \` <a class="spec-link" href="\${escapeHTML(assertion.specSection)}" target="_blank" rel="noopener">spec ↗</a>\`
+          : "";
         html.push(\`<tr data-index="\${index}" data-milestone="\${suite.release}" data-verdict="na">
-          <td><a href="\${suiteUrl}" target="_blank"><strong>\${suite.release}</strong> · \${suite.featureSlug}</a></td>
-          <td><code>\${assertion.id}</code></td>
-          <td>\${assertion.description}\${assertion.specSection ? \` <a class="spec-link" href="\${assertion.specSection}" target="_blank">spec ↗</a>\` : ''}</td>
-          <td><span class="kind">\${assertion.kind}</span></td>
+          <td><a href="\${escapeHTML(suiteUrl)}" target="_blank" rel="noopener"><strong>\${escapeHTML(suite.release)}</strong> · \${escapeHTML(suite.featureSlug)}</a></td>
+          <td><code>\${escapeHTML(assertion.id)}</code></td>
+          <td>\${escapeHTML(assertion.description)}\${specLink}</td>
+          <td><span class="kind">\${escapeHTML(assertion.kind)}</span></td>
           <td class="verdict-cell"><span class="verdict verdict-na" data-verdict-badge>pending</span></td>
           <td class="detail-cell" data-detail-cell>—</td>
         </tr>\`);
@@ -4727,26 +4769,53 @@ function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
   
   async function runAssertion(kind, test, expect) {
     try {
+      function propertyDescriptor(target, property) {
+        let cur = Object(target);
+        while (cur) {
+          const descriptor = Object.getOwnPropertyDescriptor(cur, property);
+          if (descriptor) return descriptor;
+          cur = Object.getPrototypeOf(cur);
+        }
+        return undefined;
+      }
+
       if (kind === "css-supports") {
         return { ok: !!CSS.supports(test), detail: "" };
       }
       if (kind === "exists") {
         const parts = test.split(".");
         let cur = globalThis;
-        for (const p of parts) {
+        for (let i = 0; i < parts.length; i++) {
+          const p = parts[i];
           if (cur == null) return { ok: false, detail: "missing at " + p };
+          if (i === parts.length - 1) {
+            const ok = p in Object(cur);
+            return { ok, detail: ok ? "" : "undefined" };
+          }
           cur = cur[p];
         }
-        return { ok: cur !== undefined, detail: cur === undefined ? "undefined" : "" };
+        return { ok: false, detail: "empty path" };
       }
       if (kind === "typeof") {
         const parts = test.split(".");
         let cur = globalThis;
-        for (const p of parts) {
+        for (let i = 0; i < parts.length; i++) {
+          const p = parts[i];
           if (cur == null) return { ok: false, detail: "missing at " + p };
+          if (i === parts.length - 1) {
+            let actual;
+            try {
+              actual = typeof cur[p];
+            } catch (e) {
+              const descriptor = propertyDescriptor(cur, p);
+              if (!descriptor) throw e;
+              actual = "value" in descriptor ? typeof descriptor.value : "accessor";
+            }
+            return { ok: actual === expect, detail: "typeof = " + actual };
+          }
           cur = cur[p];
         }
-        return { ok: typeof cur === expect, detail: "typeof = " + typeof cur };
+        return { ok: false, detail: "empty path" };
       }
       if (kind === "script") {
         const result = new Function("return (" + test + ")")();
@@ -4782,6 +4851,26 @@ function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
     for (let i = 0; i < total; i++) {
       const res = results[i];
       const row = rowsContainer.querySelector(\`tr[data-index="\${i}"]\`);
+      const releaseNumber = Number(String(res.release).replace(/^v/, ""));
+
+      if (chromeMajor && releaseNumber > chromeMajor) {
+        res.ok = null;
+        res.detail = \`future milestone for Chrome \${chromeMajor}\`;
+
+        const badge = row.querySelector("[data-verdict-badge]");
+        badge.className = "verdict verdict-na";
+        badge.textContent = "future";
+        row.dataset.verdict = "na";
+
+        const detailCell = row.querySelector("[data-detail-cell]");
+        detailCell.textContent = res.detail;
+
+        progressBar.style.width = ((i + 1) / total * 100) + "%";
+        if (i % 20 === 0) {
+          await new Promise(r => requestAnimationFrame(r));
+        }
+        continue;
+      }
       
       const { ok, detail } = await runAssertion(res.kind, res.test, res.expect);
       res.ok = ok;
