@@ -5513,6 +5513,21 @@ Deno.serve({ port: PORT }, async (req) => {
       const attributionTriggerResponse = await renderAttributionTriggerContextRoute(req, sub);
       if (attributionTriggerResponse) return attributionTriggerResponse;
     }
+    if (
+      release === "v133" &&
+      (
+        sub === "/atomics-pause/spsc-queue" ||
+        sub.startsWith("/atomics-pause/spsc-queue/")
+      )
+    ) {
+      const asset = await readReleaseAsset(release, sub);
+      if (asset) {
+        return withHeaders(asset, {
+          "cross-origin-opener-policy": "same-origin",
+          "cross-origin-embedder-policy": "require-corp",
+        });
+      }
+    }
     if (release === "v136") {
       const autoPasskeyResponse = await renderAutoPasskeyRoute(req, sub);
       if (autoPasskeyResponse) return autoPasskeyResponse;
