@@ -98,6 +98,25 @@
       color: var(--text-black);
     }
     .act-btn.secondary:hover { background: var(--text-black); color: var(--bg-ivory); }
+    .error-picker {
+      align-items: center;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-black);
+      display: inline-flex;
+      gap: 0.35rem;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      padding: 0.25rem 0.45rem;
+    }
+    .error-picker select {
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-black);
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      padding: 0.15rem 0.25rem;
+    }
 
     .event-log {
       background: var(--text-black);
@@ -131,6 +150,16 @@
     }
     .sb-label { color: var(--text-muted); display: block; }
     .sb-val { font-weight: 700; color: var(--text-black); display: block; margin-top: 0.1rem; }
+    .recovery-note {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      line-height: 1.5;
+      margin-top: 0.5rem;
+      padding: 0.45rem 0.6rem;
+    }
   </style>
 </head>
 <body>
@@ -201,10 +230,19 @@
 
   <div class="demo-panel">
     <div class="dp-head">Simulate the sequence</div>
-    <div class="dp-body">
+      <div class="dp-body">
       <div class="action-btns">
-        <button class="act-btn" onclick="runSequence('grant')">▶ Simulate grant</button>
-        <button class="act-btn" onclick="runSequence('deny')">▶ Simulate deny</button>
+        <button class="act-btn" onclick="runSequence('grant')">Simulate grant</button>
+        <label class="error-picker">Error
+          <select id="errorKind">
+            <option value="NotAllowedError">NotAllowedError</option>
+            <option value="NotFoundError">NotFoundError</option>
+            <option value="OverconstrainedError">OverconstrainedError</option>
+            <option value="SecurityError">SecurityError</option>
+          </select>
+        </label>
+        <button class="act-btn" onclick="runSequence('deny')">Simulate selected error</button>
+        <button class="act-btn secondary" onclick="runSequence('retry')">Simulate recovery click</button>
         <button class="act-btn secondary" onclick="resetSteps()">Reset</button>
       </div>
 
@@ -217,6 +255,7 @@
         <div class="state-box"><span class="sb-label">tracks</span><span class="sb-val" id="stTracks">—</span></div>
         <div class="state-box"><span class="sb-label">last event</span><span class="sb-val" id="stEvent">—</span></div>
       </div>
+      <div class="recovery-note" id="recoveryNote">Run an error path, then simulate the recovery click to see how a visible element can reopen browser-controlled capture UI.</div>
     </div>
   </div>
 
@@ -227,6 +266,7 @@
       <li><a href="../stream-controller/">Stream Controller</a> — mute/unmute live stream</li>
       <li><a href="../constraints-builder/">Constraints Builder</a> — configure constraints</li>
       <li><a href="../constraint-presets/">Constraint Presets</a> — preset configurations</li>
+      <li><a href="https://chromestatus.com/feature/4926233538330624" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -235,6 +275,13 @@
 <script>
 (function () {
   const stepIds = ['click', 'prompt', 'granted', 'error', 'stream', 'end'];
+  const errorDetails = {
+    NotAllowedError: 'User denied camera or microphone access; keep the element visible so they can try again.',
+    NotFoundError: 'No matching camera or microphone exists; offer device setup guidance before retrying.',
+    OverconstrainedError: 'Constraints could not be satisfied; relax exact values or advanced fallbacks.',
+    SecurityError: 'The document is not allowed to request capture; check policy, origin, and embedding context.',
+  };
+  let lastOutcome = null;
 
   const log = document.getElementById('eventLog');
   function logMsg(msg, cls) {
@@ -243,6 +290,25 @@
     d.textContent = new Date().toLocaleTimeString('en', { hour12: false }) + ' — ' + msg;
     log.appendChild(d);
     log.scrollTop = log.scrollHeight;
+  }
+
+  function selectedErrorName() {
+    return document.getElementById('errorKind').value;
+  }
+
+  function streamSummary() {
+    if (typeof MediaStream === 'undefined') {
+      return 'event.target.stream -> MediaStream { id: "simulated-stream", active: true, tracks: [video, audio] }';
+    }
+    const stream = new MediaStream();
+    return `event.target.stream -> ${stream.constructor.name} { id: "${stream.id}", active: ${stream.active}, tracks: ${stream.getTracks().length} }`;
+  }
+
+  function syncPayloads() {
+    const errorName = selectedErrorName();
+    document.getElementById('pay-error').textContent =
+      `event.error: DOMException { name: "${errorName}", message: "${errorDetails[errorName]}" }`;
+    document.getElementById('pay-granted').textContent = streamSummary();
   }
 
   function setDot(id, state) {
@@ -258,12 +324,17 @@
     document.getElementById('stStream').textContent = '—';
     document.getElementById('stTracks').textContent = '—';
     document.getElementById('stEvent').textContent  = '—';
+    document.getElementById('recoveryNote').textContent = 'Run an error path, then simulate the recovery click to see how a visible element can reopen browser-controlled capture UI.';
+    lastOutcome = null;
   };
 
   window.runSequence = function (outcome) {
     resetSteps();
     log.innerHTML = '';
-    const steps = outcome === 'grant'
+    const errorName = selectedErrorName();
+    const isRecovery = outcome === 'retry';
+    syncPayloads();
+    const steps = outcome === 'grant' || isRecovery
       ? ['click', 'prompt', 'granted', 'stream', 'end']
       : ['click', 'prompt', 'error'];
 
@@ -273,11 +344,11 @@
       setTimeout(() => {
         setDot(step, step === 'error' ? 'error' : 'fired');
         const messages = {
-          click:   ['click event fired on <usermedia>', 'ev-info'],
+          click:   [isRecovery ? 'second click fired on visible <usermedia> after a previous error' : 'click event fired on <usermedia>', 'ev-info'],
           prompt:  ['Browser permission dialog shown…', 'ev-state'],
-          granted: ['activate event fired — event.stream is a live MediaStream', 'ev-activate'],
-          error:   ['error event fired — event.error.name: "NotAllowedError"', 'ev-error'],
-          stream:  ['video.srcObject = event.stream assigned — live feed started', 'ev-activate'],
+          granted: ['activate event fired — ' + streamSummary(), 'ev-activate'],
+          error:   ['error event fired — event.error.name: "' + errorName + '"', 'ev-error'],
+          stream:  ['video.srcObject = event.target.stream assigned — live feed started', 'ev-activate'],
           end:     ['User stopped stream — track.ended events fired', 'ev-state'],
         };
         const [msg, cls] = messages[step] || ['—', 'ev-info'];
@@ -291,13 +362,21 @@
         if (step === 'error') {
           document.getElementById('stStream').textContent = 'none';
           document.getElementById('stTracks').textContent = '0';
+          document.getElementById('recoveryNote').textContent = errorName + ': ' + errorDetails[errorName] + ' Use "Simulate recovery click" to replay the visible-element retry path.';
         }
         if (step === 'end') {
           document.getElementById('stStream').textContent = 'ended';
+          document.getElementById('recoveryNote').textContent = isRecovery
+            ? 'Recovery complete: the second visible click reached the same granted stream path as a first-time activation.'
+            : 'Granted path complete: event.target.stream was handed to the page and tracks were later stopped.';
         }
+        lastOutcome = outcome;
       }, delay);
     });
   };
+
+  document.getElementById('errorKind').addEventListener('change', syncPayloads);
+  syncPayloads();
 })();
 </script>
 </body>

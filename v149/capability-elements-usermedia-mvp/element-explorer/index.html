@@ -65,6 +65,44 @@
     }
     .status-line.ok { color: var(--accent-emerald); }
     .status-line.err { color: var(--accent-rose); }
+    .edge-tools {
+      border-top: 1px solid var(--bg-stone);
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+      padding-top: var(--space-3);
+    }
+    .edge-btn,
+    .toggle-chip {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-black);
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      padding: var(--space-1) var(--space-2);
+    }
+    .edge-btn:hover {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+    }
+    .toggle-chip {
+      align-items: center;
+      display: inline-flex;
+      gap: var(--space-1);
+    }
+    .toggle-chip input { accent-color: var(--text-black); }
+    .security-status {
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      line-height: 1.45;
+      padding: var(--space-2);
+    }
+    .security-status.ok { color: var(--accent-emerald); }
+    .security-status.err { color: var(--accent-rose); }
 
     /* usermedia element styling */
     usermedia {
@@ -205,6 +243,13 @@
         <div id="um-fallback" style="display:none;font-family:var(--font-mono);font-size:0.72rem;color:var(--accent-rose);padding:var(--space-2);border:2px solid var(--accent-rose);">
           &lt;usermedia&gt; is not supported in this browser. Try Chrome 149+.
         </div>
+        <div class="edge-tools">
+          <button class="edge-btn" id="simulate-denied" type="button">Simulate denied error</button>
+          <button class="edge-btn" id="simulate-recovery" type="button">Simulate recovery click</button>
+          <label class="toggle-chip"><input type="checkbox" id="hide-usermedia"> hide element</label>
+        </div>
+        <div class="security-status" id="um-edge-status">Denied and recovery branches are ready to simulate.</div>
+        <div class="status-line" id="enabled-status">userchangedenabled: waiting for native toggle or simulation.</div>
       </div>
     </div>
   </div>
@@ -289,14 +334,37 @@ um.<span class="fn">addEventListener</span>(<span class="str">"userchangedenable
     const supported = typeof HTMLUserMediaElement !== 'undefined';
     const dot = document.getElementById('detect-dot');
     const val = document.getElementById('detect-val');
+    const um = document.getElementById('um-element');
+    const edgeStatus = document.getElementById('um-edge-status');
+    const enabledStatus = document.getElementById('enabled-status');
+    const hideToggle = document.getElementById('hide-usermedia');
+    let simulatedUmError = null;
+    let deniedOnce = false;
     dot.className = 'detect-dot ' + (supported ? 'yes' : 'no');
     val.className = 'detect-val ' + (supported ? 'yes' : 'no');
     val.textContent = supported ? 'supported' : 'not supported';
 
     if (!supported) {
       document.getElementById('um-fallback').style.display = 'block';
-      const um = document.getElementById('um-element');
       if (um) um.style.display = 'none';
+    }
+
+    function setEdgeStatus(message, state) {
+      edgeStatus.textContent = message;
+      edgeStatus.className = 'security-status' + (state ? ' ' + state : '');
+    }
+
+    function syncUserMediaVisibility() {
+      if (!um) return;
+      const hidden = hideToggle.checked || !supported;
+      um.style.display = hidden ? 'none' : '';
+      if (hideToggle.checked) {
+        setEdgeStatus('Element is display:none. A trusted activation must be ignored because the capability control is not visible to the user.', 'err');
+      } else if (!supported) {
+        setEdgeStatus('Native element is unavailable in this browser, but the simulated denied/recovery events still show the branch behavior.', '');
+      } else {
+        setEdgeStatus('Element is visible and eligible for a browser-controlled recovery click.', 'ok');
+      }
     }
 
     // JS panel
@@ -320,7 +388,6 @@ um.<span class="fn">addEventListener</span>(<span class="str">"userchangedenable
 
     // usermedia panel
     function umStreamReady() {
-      const um = document.getElementById('um-element');
       const status = document.getElementById('um-status');
       const video = document.getElementById('um-video');
       if (um.error) {
@@ -332,14 +399,43 @@ um.<span class="fn">addEventListener</span>(<span class="str">"userchangedenable
       video.style.display = 'block';
       status.className = 'status-line ok';
       status.textContent = 'streamready event fired. Stream tracks: ' + um.stream.getTracks().length;
+      simulatedUmError = null;
+      deniedOnce = false;
+      setEdgeStatus('Recovery complete: streamready replaced the previous denied state.', 'ok');
     }
 
     function umError() {
-      const um = document.getElementById('um-element');
       const status = document.getElementById('um-status');
+      const error = simulatedUmError || um.error;
       status.className = 'status-line err';
-      status.textContent = 'Error: ' + (um.error ? um.error.name : 'unknown');
+      status.textContent = 'Error: ' + (error ? error.name : 'unknown');
+      deniedOnce = true;
+      setEdgeStatus('Denied branch fired. The element remains in-place so a later visible click can reopen the browser-controlled recovery UI.', 'err');
     }
+
+    document.getElementById('simulate-denied').addEventListener('click', () => {
+      simulatedUmError = { name: 'NotAllowedError', message: 'Simulated user denial' };
+      um.dispatchEvent(new Event('error'));
+    });
+
+    document.getElementById('simulate-recovery').addEventListener('click', () => {
+      if (hideToggle.checked) {
+        setEdgeStatus('Recovery click rejected: the element is hidden, so the browser must not honor the activation.', 'err');
+        return;
+      }
+      simulatedUmError = null;
+      um.dispatchEvent(new Event('click'));
+      setEdgeStatus(deniedOnce
+        ? 'Second click after denial: the visible element can present trusted recovery UI again.'
+        : 'First simulated click: the visible element is eligible to open the browser capture UI.', 'ok');
+    });
+
+    hideToggle.addEventListener('change', syncUserMediaVisibility);
+    um.addEventListener('userchangedenabled', () => {
+      enabledStatus.textContent = 'userchangedenabled fired. element.enabled = ' + String(um.enabled);
+      enabledStatus.className = 'status-line ok';
+    });
+    syncUserMediaVisibility();
   </script>
 </main>
 </body>

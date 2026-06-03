@@ -104,6 +104,39 @@
       color: var(--text-charcoal);
       margin: 0.5rem 0;
       line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .diff-panel {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      margin: 0.5rem 0;
+      overflow: hidden;
+      font-family: var(--font-mono);
+      font-size: 0.63rem;
+    }
+    .diff-head {
+      background: var(--bg-stone);
+      border-bottom: 2px solid var(--border-black);
+      color: var(--text-black);
+      font-weight: 700;
+      padding: 0.35rem 0.55rem;
+    }
+    .diff-row {
+      display: grid;
+      grid-template-columns: 1.5fr 1fr 1fr;
+      border-bottom: 1px solid var(--border-black);
+    }
+    .diff-row:last-child { border-bottom: none; }
+    .diff-cell {
+      border-right: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+      padding: 0.28rem 0.45rem;
+    }
+    .diff-cell:last-child { border-right: none; }
+    .diff-row.changed .diff-cell {
+      background: var(--bg-stone);
+      color: var(--accent-rose);
+      font-weight: 700;
     }
   </style>
 </head>
@@ -141,6 +174,10 @@
       <span class="preset-name">Low latency</span>
       <span class="preset-desc">Minimal processing, 30 fps cap</span>
     </button>
+    <button class="preset-btn" id="btn-cinema8k" onclick="selectPreset('cinema8k', this)">
+      <span class="preset-name">8K cinema</span>
+      <span class="preset-desc">Exact 8K + 120 fps, expects rejection</span>
+    </button>
   </div>
 
   <div class="output-area">
@@ -175,6 +212,19 @@
   <button onclick="applyPreset()" style="padding:0.35rem 0.85rem;border:2px solid var(--border-black);background:var(--text-black);color:var(--bg-ivory);font-family:var(--font-mono);font-size:0.72rem;cursor:pointer;margin-top:0.4rem;">Apply &amp; probe</button>
 
   <div class="live-result" id="liveResult">Press "Apply &amp; probe" to request the stream and see negotiated track settings.</div>
+  <div class="diff-panel" id="diffPanel">
+    <div class="diff-head">Requested vs. negotiated settings</div>
+    <div class="diff-row">
+      <div class="diff-cell">Constraint</div>
+      <div class="diff-cell">Requested</div>
+      <div class="diff-cell">Negotiated</div>
+    </div>
+    <div class="diff-row">
+      <div class="diff-cell">—</div>
+      <div class="diff-cell">Select a preset</div>
+      <div class="diff-cell">Apply &amp; probe</div>
+    </div>
+  </div>
 
   <section>
     <h2>see also</h2>
@@ -182,6 +232,7 @@
       <li><a href="../constraints-builder/">Constraints Builder</a> — build constraints from scratch</li>
       <li><a href="../stream-controller/">Stream Controller</a> — live stream with mute/unmute</li>
       <li><a href="../event-sequence/">Event Sequence</a> — lifecycle event walkthrough</li>
+      <li><a href="https://chromestatus.com/feature/4926233538330624" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -246,6 +297,15 @@
         ['audio.noiseSuppression', 'false', 'Off — processing adds latency'],
       ],
     },
+    cinema8k: {
+      constraints: { video: { width: { exact: 7680 }, height: { exact: 4320 }, frameRate: { exact: 120 } }, audio: false },
+      rows: [
+        ['video.width.exact', '7680', '8K capture width — expected to overconstrain ordinary cameras'],
+        ['video.height.exact', '4320', '8K capture height'],
+        ['video.frameRate.exact', '120', 'High frame rate makes rejection deterministic on common hardware'],
+        ['audio', 'false', 'No microphone needed for the failure probe'],
+      ],
+    },
   };
 
   let current = 'videocall';
@@ -270,6 +330,79 @@
     container.innerHTML = rows.map(([key, val, why]) =>
       `<div class="ct-row"><div class="ct-cell">${key}</div><div class="ct-cell val-set">${val}</div><div class="ct-cell">${why}</div></div>`
     ).join('');
+  }
+
+  function flattenConstraints(value, prefix, rows) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      rows.push([prefix, value]);
+      return;
+    }
+    Object.entries(value).forEach(([key, child]) => {
+      flattenConstraints(child, prefix ? prefix + '.' + key : key, rows);
+    });
+  }
+
+  function settingKeyFromPath(path) {
+    const parts = path.split('.');
+    const last = parts[parts.length - 1];
+    if (['min', 'max', 'ideal', 'exact'].includes(last)) return parts[parts.length - 2];
+    return parts[parts.length - 1];
+  }
+
+  function valueChanged(path, requested, negotiated) {
+    if (negotiated === 'n/a') return true;
+    const parts = path.split('.');
+    const qualifier = parts[parts.length - 1];
+    if (qualifier === 'min') return Number(negotiated) < Number(requested);
+    if (qualifier === 'max') return Number(negotiated) > Number(requested);
+    return String(negotiated) !== String(requested);
+  }
+
+  function renderDiff(constraints, stream) {
+    const diff = document.getElementById('diffPanel');
+    const flat = [];
+    flattenConstraints(constraints, '', flat);
+    const tracks = stream ? stream.getTracks() : [];
+    const settingsByKind = Object.fromEntries(tracks.map((track) => [track.kind, track.getSettings()]));
+    diff.innerHTML = '<div class="diff-head">Requested vs. negotiated settings</div>';
+    const header = document.createElement('div');
+    header.className = 'diff-row';
+    ['Constraint', 'Requested', 'Negotiated'].forEach((label) => {
+      const cell = document.createElement('div');
+      cell.className = 'diff-cell';
+      cell.textContent = label;
+      header.appendChild(cell);
+    });
+    diff.appendChild(header);
+
+    flat.forEach(([path, requested]) => {
+      const kind = path.split('.')[0];
+      const settings = settingsByKind[kind];
+      const negotiated = settings ? settings[settingKeyFromPath(path)] ?? 'n/a' : 'n/a';
+      const row = document.createElement('div');
+      row.className = 'diff-row' + (valueChanged(path, requested, negotiated) ? ' changed' : '');
+      [path, String(requested), String(negotiated)].forEach((text) => {
+        const cell = document.createElement('div');
+        cell.className = 'diff-cell';
+        cell.textContent = text;
+        row.appendChild(cell);
+      });
+      diff.appendChild(row);
+    });
+  }
+
+  function renderExpectedFailure(error) {
+    const diff = document.getElementById('diffPanel');
+    diff.innerHTML = '<div class="diff-head">Requested vs. negotiated settings</div>';
+    const row = document.createElement('div');
+    row.className = 'diff-row changed';
+    ['request rejected', presets[current].rows.map(([key]) => key).join(', '), error.name].forEach((text) => {
+      const cell = document.createElement('div');
+      cell.className = 'diff-cell';
+      cell.textContent = text;
+      row.appendChild(cell);
+    });
+    diff.appendChild(row);
   }
 
   window.selectPreset = function (id, btn) {
@@ -298,10 +431,12 @@
       const stream = await navigator.mediaDevices.getUserMedia(c);
       const tracks = stream.getTracks();
       const settings = tracks.map(t => `${t.kind}: ${JSON.stringify(t.getSettings())}`).join('\n');
-      res.textContent = `✓ Stream granted — ${tracks.length} track(s)\n\n${settings}`;
+      res.textContent = `Stream granted — ${tracks.length} track(s)\n\n${settings}`;
+      renderDiff(c, stream);
       setTimeout(() => { tracks.forEach(t => t.stop()); }, 5000);
     } catch (err) {
-      res.textContent = `✗ ${err.name}: ${err.message}`;
+      res.textContent = `${err.name}: ${err.message}`;
+      renderExpectedFailure(err);
     }
   };
 
