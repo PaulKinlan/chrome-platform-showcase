@@ -28,6 +28,49 @@
     .status-ok { color: var(--accent-emerald); }
     .status-fail { color: var(--accent-rose); }
     .status-na { color: var(--text-muted); }
+    .transport-lab {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: var(--space-4);
+      margin: var(--space-3) 0;
+    }
+    .transport-form {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto auto;
+      gap: var(--space-3);
+      align-items: end;
+    }
+    @media (max-width: 640px) { .transport-form { grid-template-columns: 1fr; } }
+    .transport-form label {
+      display: grid;
+      gap: 0.35rem;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+    }
+    .transport-form input {
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      font: inherit;
+      padding: 0.45rem 0.55rem;
+    }
+    .transport-form button.secondary {
+      background: var(--bg-stone);
+      color: var(--text-black);
+    }
+    .transport-output {
+      min-height: 6rem;
+      margin-top: var(--space-3);
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      line-height: 1.65;
+      padding: var(--space-3);
+      white-space: pre-wrap;
+    }
   </style>
 </head>
 <body>
@@ -65,6 +108,21 @@
         </div>
         <span class="result-tag tag-pass">✓ Protected</span>
       </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>target tester</h2>
+    <div class="transport-lab">
+      <div class="transport-form">
+        <label>
+          WebTransport URL
+          <input id="wtUrl" value="https://localhost:4433/session">
+        </label>
+        <button id="btnClassifyWt" type="button">Classify</button>
+        <button id="btnTryWt" type="button" class="secondary">Try WebTransport</button>
+      </div>
+      <div class="transport-output" id="wtOutput">Classify a WebTransport target or try a short WebTransport.ready probe.</div>
     </div>
   </section>
 
@@ -120,6 +178,75 @@ Access-Control-Allow-Private-Network: true   ← mandatory
     row.innerHTML = `<span>${label}</span><span class="${ok ? 'status-ok' : 'status-fail'}">${ok ? '✓ yes' : '✗ no'}</span>`;
     container.appendChild(row);
   });
+
+  const wtUrl = document.getElementById('wtUrl');
+  const wtOutput = document.getElementById('wtOutput');
+
+  function tierFor(hostname) {
+    const host = hostname.toLowerCase();
+    if (host === 'localhost' || host === '::1' || /^127\./.test(host)) return 'loopback';
+    if (/^10\./.test(host) || /^192\.168\./.test(host)) return 'private';
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return 'private';
+    if (host.endsWith('.local') || host.endsWith('.lan')) return 'private';
+    return 'public';
+  }
+
+  function classifyWtTarget(prefix) {
+    const lines = [];
+    if (prefix) lines.push(prefix, '');
+    lines.push('WebTransport API: ' + (typeof WebTransport === 'function' ? 'available' : 'not available'));
+    lines.push('Page origin:      ' + location.origin);
+
+    let url;
+    try {
+      url = new URL(wtUrl.value);
+    } catch (err) {
+      lines.push('Target error:     ' + err.message);
+      wtOutput.textContent = lines.join('\n');
+      return null;
+    }
+
+    const tier = tierFor(url.hostname);
+    const publicSource = !/^localhost$|^127\.|^::1$|^10\.|^192\.168\.|^172\.(1[6-9]|2\d|3[01])\./.test(location.hostname);
+    lines.push('Target URL:       ' + url.href);
+    lines.push('Target tier:      ' + tier);
+    lines.push('Secure scheme:    ' + (url.protocol === 'https:' ? 'yes' : 'no - WebTransport requires https://'));
+    lines.push('Chrome 147:       ' + (publicSource && tier !== 'public' ? 'server opt-in required before session is accepted' : 'no cross-tier LNA block from this context'));
+    if (publicSource && tier !== 'public') {
+      lines.push('');
+      lines.push('Required server signal:');
+      lines.push('  Access-Control-Allow-Private-Network: true');
+      lines.push('  plus the normal WebTransport HTTP/3 handshake requirements.');
+    }
+    wtOutput.textContent = lines.join('\n');
+    return url;
+  }
+
+  document.getElementById('btnClassifyWt').addEventListener('click', () => classifyWtTarget());
+  document.getElementById('btnTryWt').addEventListener('click', async () => {
+    const url = classifyWtTarget('Starting WebTransport.ready probe...');
+    if (!url || typeof WebTransport !== 'function') return;
+    if (url.protocol !== 'https:') {
+      wtOutput.textContent += '\nprobe skipped: WebTransport only accepts https:// URLs.';
+      return;
+    }
+    let transport;
+    try {
+      transport = new WebTransport(url.href);
+      wtOutput.textContent += '\nconstructor returned. Waiting up to 3 seconds for ready/rejected.';
+      await Promise.race([
+        transport.ready,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('probe timeout')), 3000)),
+      ]);
+      wtOutput.textContent += '\nready resolved: session established. Closing probe.';
+      transport.close();
+    } catch (err) {
+      wtOutput.textContent += '\nready rejected: ' + err.name + ': ' + err.message;
+      if (transport) transport.close();
+    }
+  });
+
+  classifyWtTarget();
 </script>
 </body>
 </html>

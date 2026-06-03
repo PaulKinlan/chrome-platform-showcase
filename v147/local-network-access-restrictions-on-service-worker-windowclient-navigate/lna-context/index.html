@@ -39,6 +39,44 @@
       font-size: 0.875rem;
       color: var(--text-charcoal);
     }
+    .classifier {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .classifier-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+    .classifier-grid label {
+      display: grid;
+      gap: 0.3rem;
+      font-family: monospace;
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+    }
+    .classifier-grid input,
+    .classifier-grid select {
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      font: inherit;
+      padding: 0.45rem 0.55rem;
+    }
+    .classifier-output {
+      min-height: 6rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+      font-family: monospace;
+      font-size: 0.74rem;
+      line-height: 1.65;
+      padding: 0.75rem;
+      white-space: pre-wrap;
+    }
     pre code { font-size: 0.8125rem; line-height: 1.6; }
   </style>
 </head>
@@ -58,6 +96,37 @@
   <div class="note">
     Local Network Access (LNA) is Chrome's implementation of the Private Network Access specification. It prevents public websites from making unsolicited requests to private IP addresses and localhost. The protection has been rolled out API by API across Chrome versions.
   </div>
+
+  <section>
+    <h2>API boundary classifier</h2>
+    <p>Pick an API and target URL to see whether Chrome 147 allows it, requires an LNA opt-in, or blocks it with no server opt-in path.</p>
+    <div class="classifier">
+      <div class="classifier-grid">
+        <label>
+          Source tier
+          <select id="sourceTier">
+            <option value="public">public</option>
+            <option value="private">private</option>
+            <option value="loopback">loopback</option>
+          </select>
+        </label>
+        <label>
+          API
+          <select id="apiKind">
+            <option value="fetch">fetch()</option>
+            <option value="websocket">WebSocket</option>
+            <option value="webtransport">WebTransport</option>
+            <option value="navigate">WindowClient.navigate()</option>
+          </select>
+        </label>
+        <label>
+          Target URL
+          <input id="targetUrl" value="http://192.168.1.1/admin">
+        </label>
+      </div>
+      <div class="classifier-output" id="classifierOutput"></div>
+    </div>
+  </section>
 
   <section>
     <h2>LNA coverage by Chrome version</h2>
@@ -149,5 +218,78 @@ Access-Control-Allow-Private-Network: true
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script>
+(() => {
+  const sourceTier = document.getElementById('sourceTier');
+  const apiKind = document.getElementById('apiKind');
+  const targetUrl = document.getElementById('targetUrl');
+  const output = document.getElementById('classifierOutput');
+  const rank = { public: 0, private: 1, loopback: 2 };
+
+  function tierFor(raw) {
+    try {
+      const { hostname } = new URL(raw, location.href);
+      const host = hostname.toLowerCase();
+      if (host === 'localhost' || host === '::1' || /^127\./.test(host)) return { ok: true, tier: 'loopback', host };
+      if (/^10\./.test(host) || /^192\.168\./.test(host)) return { ok: true, tier: 'private', host };
+      if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return { ok: true, tier: 'private', host };
+      if (/^169\.254\./.test(host) || host.endsWith('.local') || host.endsWith('.lan')) return { ok: true, tier: 'private', host };
+      return { ok: true, tier: 'public', host };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  function render() {
+    const source = sourceTier.value;
+    const api = apiKind.value;
+    const target = tierFor(targetUrl.value);
+    const lines = [
+      'Feature detection:',
+      '  fetch(): ' + (typeof fetch === 'function' ? 'available' : 'missing'),
+      '  WebSocket: ' + (typeof WebSocket === 'function' ? 'available' : 'missing'),
+      '  WebTransport: ' + (typeof WebTransport === 'function' ? 'available' : 'missing'),
+      '  Service Worker: ' + ('serviceWorker' in navigator ? 'available' : 'missing'),
+      '',
+      'Source tier: ' + source,
+    ];
+
+    if (!target.ok) {
+      lines.push('Target error: ' + target.error);
+      output.textContent = lines.join('\n');
+      return;
+    }
+
+    const crossesPrivateBoundary = rank[source] < rank[target.tier];
+    lines.push('Target host: ' + target.host);
+    lines.push('Target tier: ' + target.tier);
+    lines.push('API: ' + api);
+    lines.push('');
+
+    if (!crossesPrivateBoundary) {
+      lines.push('Chrome 147 result: allowed by LNA tier rules.');
+      lines.push('Normal CORS, TLS, same-origin, and API-specific checks still apply.');
+    } else if (api === 'navigate') {
+      lines.push('Chrome 147 result: blocked.');
+      lines.push('WindowClient.navigate() has no Access-Control-Allow-Private-Network opt-in path.');
+      lines.push('Replacement: postMessage the URL to the controlled page and let the page choose the navigation.');
+    } else {
+      lines.push('Chrome 147 result: LNA opt-in required before the request/session proceeds.');
+      lines.push('Required response: Access-Control-Allow-Private-Network: true');
+      if (api === 'fetch') lines.push('Mechanism: CORS OPTIONS preflight.');
+      if (api === 'websocket') lines.push('Mechanism: WebSocket preflight before Upgrade.');
+      if (api === 'webtransport') lines.push('Mechanism: WebTransport server opt-in during connection setup.');
+    }
+
+    output.textContent = lines.join('\n');
+  }
+
+  [sourceTier, apiKind, targetUrl].forEach((el) => {
+    el.addEventListener('input', render);
+    el.addEventListener('change', render);
+  });
+  render();
+})();
+</script>
 </body>
 </html>

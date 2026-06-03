@@ -55,6 +55,54 @@
       font-size: 0.875rem;
       color: var(--text-charcoal);
     }
+    .probe-panel {
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .probe-form {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+    .probe-form label {
+      display: grid;
+      gap: 0.3rem;
+      font-family: monospace;
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+    }
+    .probe-form input,
+    .probe-form select {
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      font: inherit;
+      padding: 0.45rem 0.55rem;
+    }
+    .probe-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.75rem;
+    }
+    .probe-actions .secondary {
+      background: var(--bg-stone);
+      color: var(--text-black);
+    }
+    .probe-output {
+      min-height: 6rem;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+      font-family: monospace;
+      font-size: 0.74rem;
+      line-height: 1.65;
+      padding: 0.75rem;
+      white-space: pre-wrap;
+    }
     pre code { font-size: 0.8125rem; line-height: 1.6; }
   </style>
 </head>
@@ -74,6 +122,32 @@
   <div class="note">
     Chrome 147 adds LNA checks to WebSocket connections. The preflight is an HTTP GET request (before the WebSocket upgrade) with <code>Access-Control-Request-Private-Network: true</code>. The local server must respond with <code>Access-Control-Allow-Private-Network: true</code>.
   </div>
+
+  <section>
+    <h2>try a WebSocket target</h2>
+    <p>Classify a target URL and optionally invoke the WebSocket constructor to see the browser's readyState/error path from this page.</p>
+    <div class="probe-panel">
+      <div class="probe-form">
+        <label>
+          Source context
+          <select id="sourceContext">
+            <option value="public">Public page</option>
+            <option value="private">Private network page</option>
+            <option value="loopback">Loopback page</option>
+          </select>
+        </label>
+        <label>
+          WebSocket target
+          <input id="wsTarget" value="ws://localhost:9/lna-probe">
+        </label>
+      </div>
+      <div class="probe-actions">
+        <button id="btnClassifyWs" type="button">Classify target</button>
+        <button id="btnOpenWs" type="button" class="secondary">Open WebSocket probe</button>
+      </div>
+      <div class="probe-output" id="wsProbeOutput">Choose a target, then classify or open a short WebSocket probe.</div>
+    </div>
+  </section>
 
   <section>
     <h2>blocked vs allowed</h2>
@@ -179,5 +253,113 @@ server.listen(8080);</code></pre>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script>
+(() => {
+  const sourceSelect = document.getElementById('sourceContext');
+  const targetInput = document.getElementById('wsTarget');
+  const output = document.getElementById('wsProbeOutput');
+  let activeSocket = null;
+  let activeTimer = null;
+
+  const rank = { public: 0, private: 1, loopback: 2 };
+
+  function classifyHost(hostname) {
+    const host = hostname.toLowerCase();
+    if (host === 'localhost' || host === '::1' || /^127\./.test(host)) return 'loopback';
+    if (/^10\./.test(host) || /^192\.168\./.test(host)) return 'private';
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return 'private';
+    if (host.endsWith('.local') || host.endsWith('.lan') || host.endsWith('.internal')) return 'private';
+    return 'public';
+  }
+
+  function readTarget() {
+    try {
+      const url = new URL(targetInput.value);
+      if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+        return { ok: false, error: 'Use a ws:// or wss:// URL.' };
+      }
+      return { ok: true, url, tier: classifyHost(url.hostname) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  function decisionFor(source, tier) {
+    if (rank[source] < rank[tier]) {
+      return 'PNA preflight required before the WebSocket upgrade.';
+    }
+    return 'Allowed by network tier; normal WebSocket checks still apply.';
+  }
+
+  function renderClassification(prefix) {
+    const target = readTarget();
+    const lines = [];
+    if (prefix) lines.push(prefix, '');
+    lines.push('WebSocket API: ' + (typeof WebSocket === 'function' ? 'available' : 'not available'));
+    lines.push('Page origin:   ' + location.origin);
+    lines.push('Model source:  ' + sourceSelect.value);
+
+    if (!target.ok) {
+      lines.push('Target error:  ' + target.error);
+      output.textContent = lines.join('\n');
+      return null;
+    }
+
+    lines.push('Target URL:    ' + target.url.href);
+    lines.push('Target tier:   ' + target.tier);
+    lines.push('Chrome 147:    ' + decisionFor(sourceSelect.value, target.tier));
+    if (rank[sourceSelect.value] < rank[target.tier]) {
+      lines.push('');
+      lines.push('Required response before upgrade:');
+      lines.push('  Access-Control-Allow-Origin: ' + location.origin);
+      lines.push('  Access-Control-Allow-Private-Network: true');
+    }
+    output.textContent = lines.join('\n');
+    return target;
+  }
+
+  document.getElementById('btnClassifyWs').addEventListener('click', () => {
+    renderClassification();
+  });
+
+  document.getElementById('btnOpenWs').addEventListener('click', () => {
+    const target = renderClassification('Opening WebSocket probe...');
+    if (!target || typeof WebSocket !== 'function') return;
+
+    if (activeSocket) activeSocket.close();
+    if (activeTimer) clearTimeout(activeTimer);
+
+    try {
+      const socket = new WebSocket(target.url.href);
+      activeSocket = socket;
+      const lines = output.textContent.split('\n');
+      lines.push('');
+      lines.push('new WebSocket() returned. readyState=' + socket.readyState + ' (CONNECTING)');
+      output.textContent = lines.join('\n');
+
+      socket.addEventListener('open', () => {
+        output.textContent += '\nopen event: connection established; closing probe.';
+        socket.close(1000, 'probe complete');
+      });
+      socket.addEventListener('error', () => {
+        output.textContent += '\nerror event: browser reported a network, TLS, mixed-content, or LNA failure.';
+      });
+      socket.addEventListener('close', (event) => {
+        output.textContent += '\nclose event: code=' + event.code + ' readyState=' + socket.readyState + '.';
+      });
+      activeTimer = setTimeout(() => {
+        if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
+          output.textContent += '\ntimeout: closing the probe after 3 seconds.';
+          socket.close(1000, 'probe timeout');
+        }
+      }, 3000);
+    } catch (err) {
+      output.textContent += '\nconstructor threw: ' + err.name + ': ' + err.message;
+    }
+  });
+
+  renderClassification();
+})();
+</script>
 </body>
 </html>
