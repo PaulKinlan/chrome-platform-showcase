@@ -224,6 +224,80 @@ function renderDeviceMemoryClientHintRoute(req: Request, sub: string): Response 
   });
 }
 
+const UA_CH_MIGRATION_ECHO_ROUTE =
+  "/reduced-user-agent-strings-by-default/ua-ch-migration/client-hints-echo";
+
+const UA_CH_LOW_ENTROPY_HEADERS = [
+  "Sec-CH-UA",
+  "Sec-CH-UA-Mobile",
+  "Sec-CH-UA-Platform",
+];
+
+const UA_CH_HIGH_ENTROPY_HEADERS = [
+  "Sec-CH-UA-Platform-Version",
+  "Sec-CH-UA-Full-Version-List",
+  "Sec-CH-UA-Arch",
+  "Sec-CH-UA-Bitness",
+  "Sec-CH-UA-Model",
+  "Sec-CH-UA-WoW64",
+];
+
+function renderUaChMigrationEchoRoute(req: Request, sub: string): Response | null {
+  if (sub !== UA_CH_MIGRATION_ECHO_ROUTE) return null;
+
+  const url = new URL(req.url);
+  const requestedHighEntropyHints = url.searchParams.getAll("hint").flatMap((value) =>
+    value.split(",").map((hint) => hint.trim()).filter((hint) =>
+      UA_CH_HIGH_ENTROPY_HEADERS.includes(hint)
+    )
+  );
+  const suppressHighEntropyOptIn = url.searchParams.get("hints") === "none";
+  const optInHints = suppressHighEntropyOptIn
+    ? []
+    : requestedHighEntropyHints.length
+    ? [...new Set(requestedHighEntropyHints)]
+    : ["Sec-CH-UA-Platform-Version", "Sec-CH-UA-Full-Version-List"];
+  const varyHeaders = [
+    "User-Agent",
+    ...UA_CH_LOW_ENTROPY_HEADERS,
+    ...optInHints,
+  ];
+  const responseHeaders: Record<string, string> = {
+    "vary": [...new Set(varyHeaders)].join(", "),
+    "cache-control": "no-store",
+  };
+  if (optInHints.length) responseHeaders["accept-ch"] = optInHints.join(", ");
+  const observedHeaderNames = [
+    "User-Agent",
+    ...UA_CH_LOW_ENTROPY_HEADERS,
+    ...UA_CH_HIGH_ENTROPY_HEADERS,
+  ];
+  const requestHeaders = Object.fromEntries(
+    observedHeaderNames.map((name) => [name, req.headers.get(name)]),
+  );
+  const missingOptedInHints = optInHints.filter((name) => !req.headers.has(name));
+
+  return jsonResponse({
+    endpoint: url.pathname,
+    status: 200,
+    method: req.method,
+    receivedAt: new Date().toISOString(),
+    requestHeaders,
+    responseHeaders: {
+      "accept-ch": responseHeaders["accept-ch"] ?? "<omitted>",
+      "vary": responseHeaders["vary"],
+      "cache-control": responseHeaders["cache-control"],
+    },
+    optInHints,
+    missingOptedInHints,
+    note: optInHints.length === 0
+      ? "This response deliberately omits Accept-CH because the selected migration path does not need high-entropy UA-CH headers."
+      : missingOptedInHints.length
+      ? "High-entropy UA-CH headers were not present on this request. That is expected on first requests, unsupported browsers, or clients that decline these hints."
+      : "The browser sent every high-entropy UA-CH header this route opted in to receive.",
+  }, { headers: responseHeaders });
+}
+
 function jsonResponse(payload: unknown, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json; charset=utf-8");
@@ -5785,6 +5859,10 @@ Deno.serve({ port: PORT }, async (req) => {
       if (release === "v135") {
         const fetchLaterResponse = await renderFetchLaterRoute(req, sub);
         if (fetchLaterResponse) return fetchLaterResponse;
+      }
+      if (release === "v145") {
+        const uaChMigrationResponse = renderUaChMigrationEchoRoute(req, sub);
+        if (uaChMigrationResponse) return uaChMigrationResponse;
       }
       if (release === "v135" || release === "v145") {
         const spcBbkResponse = await renderSpcBbkRoute(req, release, sub);
