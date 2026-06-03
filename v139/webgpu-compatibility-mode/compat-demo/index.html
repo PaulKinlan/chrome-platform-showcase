@@ -28,6 +28,32 @@
     .adapter-value.err { color: var(--accent-rose); }
 
     .action-row { margin-bottom: 1.5rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      font-family: monospace;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+    .field select {
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      padding: 0.45rem 0.6rem;
+      font-family: monospace;
+      font-size: 0.82rem;
+    }
+    .decision-card {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+      font-family: monospace;
+      font-size: 0.84rem;
+    }
+    .decision-card strong { color: var(--text-black); }
 
     .note {
       background: var(--bg-stone);
@@ -76,7 +102,25 @@
     </div>
 
     <div class="action-row">
-      <button id="btn-check">Request adapters</button>
+      <label class="field" for="request-level">
+        adapter request
+        <select id="request-level">
+          <option value="compatibility">compatibility first</option>
+          <option value="core">core default</option>
+          <option value="both">compare both</option>
+        </select>
+      </label>
+      <label class="field" for="device-policy">
+        device policy
+        <select id="device-policy">
+          <option value="portable">portable subset</option>
+          <option value="lift-core">enable core-features when available</option>
+        </select>
+      </label>
+      <button id="btn-check">Request adapters &amp; devices</button>
+    </div>
+    <div class="decision-card" id="decision">
+      <strong>runtime decision:</strong> no adapter request yet.
     </div>
   </section>
 
@@ -89,20 +133,18 @@ async function compareAdapters() {
     return;
   }
 
-  // Core mode (default)
-  const coreAdapter = await navigator.gpu.requestAdapter();
-  if (coreAdapter) {
-    const info = await coreAdapter.requestAdapterInfo();
-    console.log('Core:', coreAdapter.featureLevel, info.vendor);
-  }
+    // Core mode (default)
+    const coreAdapter = await navigator.gpu.requestAdapter();
+    if (coreAdapter) {
+    console.log('Core:', coreAdapter.featureLevel, coreAdapter.info?.vendor);
+    }
 
-  // Compatibility mode (Chrome 146+)
+  // Compatibility mode
   const compatAdapter = await navigator.gpu.requestAdapter({
     featureLevel: 'compatibility',
   });
   if (compatAdapter) {
-    const info = await compatAdapter.requestAdapterInfo();
-    console.log('Compat:', compatAdapter.featureLevel, info.vendor);
+    console.log('Compat:', compatAdapter.featureLevel, compatAdapter.info?.vendor);
   }
 }</code></pre>
   </section>
@@ -127,42 +169,61 @@ async function compareAdapters() {
   }
 
   document.getElementById('btn-check').addEventListener('click', async () => {
+    const requestLevel = document.getElementById('request-level').value;
+    const devicePolicy = document.getElementById('device-policy').value;
+    const decision = document.getElementById('decision');
     if (!navigator.gpu) {
       set('core-status', 'WebGPU not supported', 'err');
       set('compat-status', 'WebGPU not supported', 'err');
+      decision.innerHTML = '<strong>runtime decision:</strong> use a non-WebGPU renderer.';
       return;
     }
 
-    // Core mode
-    try {
-      const adapter = await navigator.gpu.requestAdapter();
+    async function inspect(level) {
+      const adapterOptions = level === 'compatibility' ? { featureLevel: 'compatibility' } : {};
+      const adapter = await navigator.gpu.requestAdapter(adapterOptions);
       if (adapter) {
-        const info = await adapter.requestAdapterInfo();
-        set('core-status', 'Adapter found', 'core');
-        set('core-level', adapter.featureLevel || 'core', '');
-        set('core-vendor', info.vendor || 'unknown', '');
-        set('core-backend', info.description || 'unknown', '');
-      } else {
-        set('core-status', 'No adapter', 'err');
+        const wantsCore = devicePolicy === 'lift-core' && adapter.features.has('core-features-and-limits');
+        const device = await adapter.requestDevice({
+          requiredFeatures: wantsCore ? ['core-features-and-limits'] : [],
+        });
+        return { adapter, device, info: adapter.info || {}, wantsCore };
       }
-    } catch (e) {
-      set('core-status', 'Error: ' + e.message, 'err');
+      return null;
     }
 
-    // Compatibility mode
-    try {
-      const adapter = await navigator.gpu.requestAdapter({ featureLevel: 'compatibility' });
-      if (adapter) {
-        const info = await adapter.requestAdapterInfo();
-        set('compat-status', 'Adapter found', 'compat');
-        set('compat-level', adapter.featureLevel || 'compatibility', '');
-        set('compat-vendor', info.vendor || 'unknown', '');
-        set('compat-backend', info.description || 'unknown', '');
-      } else {
-        set('compat-status', 'No adapter', 'err');
+    function fill(prefix, result, okClass) {
+      if (!result) {
+        set(prefix + '-status', 'No adapter', 'err');
+        set(prefix + '-level', '—', '');
+        set(prefix + '-vendor', '—', '');
+        set(prefix + '-backend', '—', '');
+        return;
       }
+      set(prefix + '-status', 'Device ready', okClass);
+      set(prefix + '-level', result.adapter.featureLevel || (result.device.features.has('core-features-and-limits') ? 'core' : 'compatibility'), '');
+      set(prefix + '-vendor', result.info.vendor || 'unknown', '');
+      set(prefix + '-backend', result.info.architecture || result.info.description || 'unknown', '');
+    }
+
+    try {
+      const core = requestLevel === 'compatibility' ? null : await inspect('core');
+      const compat = requestLevel === 'core' ? null : await inspect('compatibility');
+      fill('core', core, 'core');
+      fill('compat', compat, 'compat');
+
+      const active = compat || core;
+      if (!active) {
+        decision.innerHTML = '<strong>runtime decision:</strong> neither requested adapter level returned a device.';
+        return;
+      }
+      const hasCore = active.device.features.has('core-features-and-limits');
+      decision.innerHTML =
+        '<strong>runtime decision:</strong> ' +
+        (hasCore ? 'core limits are enabled; advanced WebGPU paths can run.' : 'compatibility subset selected; avoid core-only limits and features.') +
+        ' Device policy: ' + devicePolicy + '.';
     } catch (e) {
-      set('compat-status', 'Error: ' + e.message, 'err');
+      decision.innerHTML = '<strong>runtime decision:</strong> request failed: ' + e.message;
     }
   });
 </script>

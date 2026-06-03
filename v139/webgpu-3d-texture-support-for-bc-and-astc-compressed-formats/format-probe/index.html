@@ -6,8 +6,11 @@
   <title>3D Compressed Format Probe — WebGPU BC/ASTC sliced-3d — Chrome 139</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; align-items: end; }
     .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; }
+    .field { display: flex; flex-direction: column; gap: var(--space-1); font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+    .field select, .field input { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: 0.45rem 0.6rem; font-family: var(--font-mono); font-size: 0.82rem; }
+    .field input { accent-color: var(--text-black); width: 9rem; }
     .status { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); margin: var(--space-3) 0; }
     .status.ok { color: var(--accent-emerald); }
     .status.warn { color: var(--accent-amber); }
@@ -18,6 +21,12 @@
     .matrix th { font-size: 0.78rem; text-transform: uppercase; color: var(--text-muted); }
     .yes { color: var(--accent-emerald); font-weight: 600; }
     .no { color: var(--text-muted); }
+    .plan { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.84rem; color: var(--text-charcoal); }
+    .plan strong { color: var(--text-black); }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); margin: var(--space-4) 0; }
+    .stat { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3); }
+    .stat-label { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; }
+    .stat-value { font-family: var(--font-display); font-size: 1.4rem; color: var(--text-black); }
   </style>
 </head>
 <body>
@@ -32,9 +41,34 @@
 
   <div class="controls">
     <button class="ctl-btn" id="probe">Probe GPU adapter</button>
+    <label class="field" for="format">
+      texture format
+      <select id="format">
+        <option value="rgba8unorm">rgba8unorm fallback</option>
+        <option value="bc1-rgba-unorm">bc1-rgba-unorm 3D</option>
+        <option value="bc7-rgba-unorm">bc7-rgba-unorm 3D</option>
+        <option value="astc-4x4-unorm">astc-4x4-unorm 3D</option>
+        <option value="astc-8x8-unorm">astc-8x8-unorm 3D</option>
+      </select>
+    </label>
+    <label class="field" for="edge">
+      width/height
+      <input id="edge" type="range" min="64" max="512" step="64" value="256">
+    </label>
+    <label class="field" for="depth">
+      depth
+      <input id="depth" type="range" min="8" max="128" step="8" value="32">
+    </label>
+    <button class="ctl-btn" id="test-texture">Request device &amp; create texture</button>
   </div>
 
   <div class="status" id="status">Click "Probe" to query.</div>
+  <div class="plan" id="plan"><strong>texture plan:</strong> choose a format to see required WebGPU features.</div>
+  <div class="stats">
+    <div class="stat"><div class="stat-label">volume size</div><div class="stat-value" id="stat-size">—</div></div>
+    <div class="stat"><div class="stat-label">memory</div><div class="stat-value" id="stat-memory">—</div></div>
+    <div class="stat"><div class="stat-label">vs RGBA8</div><div class="stat-value" id="stat-ratio">—</div></div>
+  </div>
 
   <div class="matrix">
     <table>
@@ -71,8 +105,44 @@ const device = await adapter.requestDevice({
     { label: 'BC (DXT/BCn)',  twod: 'texture-compression-bc',   threed: 'texture-compression-bc-sliced-3d' },
     { label: 'ASTC',          twod: 'texture-compression-astc', threed: 'texture-compression-astc-sliced-3d' },
   ];
+  const formatInfo = {
+    'rgba8unorm': { bpp: 32, features: [], label: 'uncompressed fallback' },
+    'bc1-rgba-unorm': { bpp: 4, features: ['texture-compression-bc', 'texture-compression-bc-sliced-3d'], label: 'BC 3D sliced texture' },
+    'bc7-rgba-unorm': { bpp: 8, features: ['texture-compression-bc', 'texture-compression-bc-sliced-3d'], label: 'BC 3D sliced texture' },
+    'astc-4x4-unorm': { bpp: 8, features: ['texture-compression-astc', 'texture-compression-astc-sliced-3d'], label: 'ASTC 3D sliced texture' },
+    'astc-8x8-unorm': { bpp: 2, features: ['texture-compression-astc', 'texture-compression-astc-sliced-3d'], label: 'ASTC 3D sliced texture' },
+  };
   const status = document.getElementById('status');
   const body = document.getElementById('matrix-body');
+  let adapterFeatures = null;
+
+  function fmtBytes(n) {
+    if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
+  }
+
+  function selectedPlan() {
+    const format = document.getElementById('format').value;
+    const edge = Number(document.getElementById('edge').value);
+    const depth = Number(document.getElementById('depth').value);
+    const info = formatInfo[format];
+    const bytes = Math.ceil(edge * edge * depth * info.bpp / 8);
+    return { format, edge, depth, info, bytes };
+  }
+
+  function renderPlan() {
+    const { format, edge, depth, info, bytes } = selectedPlan();
+    const baseline = edge * edge * depth * 4;
+    const missing = info.features.filter(f => !adapterFeatures?.has(f));
+    document.getElementById('stat-size').textContent = edge + '×' + edge + '×' + depth;
+    document.getElementById('stat-memory').textContent = fmtBytes(bytes);
+    document.getElementById('stat-ratio').textContent = info.bpp === 32 ? '1.0×' : (baseline / bytes).toFixed(1) + '× smaller';
+    document.getElementById('plan').innerHTML =
+      '<strong>texture plan:</strong> ' + format + ' uses ' + info.label + '. Required features: ' +
+      (info.features.join(', ') || 'none') + '. ' +
+      (adapterFeatures ? (missing.length ? 'Missing on this adapter: ' + missing.join(', ') + '.' : 'This adapter advertises every required feature.') : 'Run the probe to check this adapter.');
+  }
 
   function render(features) {
     body.innerHTML = '';
@@ -101,14 +171,59 @@ const device = await adapter.requestDevice({
       }
       status.textContent = 'adapter: ' + adapter.features.size + ' features advertised.';
       status.className = 'status ok';
+      adapterFeatures = adapter.features;
       render(adapter.features);
+      renderPlan();
     } catch (e) {
       status.textContent = e.message;
       status.className = 'status err';
     }
   });
 
+  document.getElementById('test-texture').addEventListener('click', async () => {
+    const { format, edge, depth, info } = selectedPlan();
+    if (!navigator.gpu) {
+      status.textContent = 'navigator.gpu missing; cannot create a WebGPU texture.';
+      status.className = 'status err';
+      return;
+    }
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) {
+        status.textContent = 'requestAdapter() returned null; no texture created.';
+        status.className = 'status warn';
+        return;
+      }
+      const missing = info.features.filter(f => !adapter.features.has(f));
+      adapterFeatures = adapter.features;
+      render(adapter.features);
+      if (missing.length) {
+        status.textContent = 'Selected format is not supported for 3D textures on this adapter: ' + missing.join(', ') + '.';
+        status.className = 'status warn';
+        renderPlan();
+        return;
+      }
+      const device = await adapter.requestDevice({ requiredFeatures: info.features });
+      const texture = device.createTexture({
+        size: { width: edge, height: edge, depthOrArrayLayers: depth },
+        dimension: '3d',
+        format,
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      texture.destroy();
+      device.destroy?.();
+      status.textContent = 'Created and destroyed a ' + format + ' 3D texture descriptor successfully.';
+      status.className = 'status ok';
+      renderPlan();
+    } catch (e) {
+      status.textContent = 'Texture test failed: ' + e.message;
+      status.className = 'status err';
+    }
+  });
+
   render(null);
+  ['format', 'edge', 'depth'].forEach(id => document.getElementById(id).addEventListener('input', renderPlan));
+  renderPlan();
 </script>
 </body>
 </html>

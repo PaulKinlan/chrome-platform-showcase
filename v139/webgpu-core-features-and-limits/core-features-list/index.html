@@ -6,7 +6,11 @@
   <title>WebGPU Core Features List — Chrome 139</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; }
+    .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; align-items: end; }
+    .control-field { display: flex; flex-direction: column; gap: var(--space-1); font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+    .control-field select { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: 0.45rem 0.6rem; font-family: var(--font-mono); font-size: 0.82rem; }
+    .toggle { display: flex; gap: var(--space-2); align-items: center; font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); padding: 0.45rem 0; }
+    .toggle input { accent-color: var(--text-black); }
     .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); box-shadow: var(--flat-shadow); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; }
     .status { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); margin: var(--space-3) 0; }
     .status.ok { color: var(--accent-emerald); }
@@ -21,6 +25,8 @@
     .row .v { color: var(--text-charcoal); }
     .row.has { color: var(--accent-emerald); }
     .row.no { color: var(--text-muted); }
+    .device-panel { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.84rem; color: var(--text-charcoal); }
+    .device-panel strong { color: var(--text-black); }
   </style>
 </head>
 <body>
@@ -34,10 +40,24 @@
   </header>
 
   <div class="controls">
-    <button class="ctl-btn" id="probe">Query my GPU adapter</button>
+    <label class="control-field" for="adapter-mode">
+      adapter request
+      <select id="adapter-mode">
+        <option value="core">core default</option>
+        <option value="compatibility">compatibility hint</option>
+      </select>
+    </label>
+    <label class="toggle" for="request-core">
+      <input type="checkbox" id="request-core" checked>
+      request <code>core-features-and-limits</code> when advertised
+    </label>
+    <button class="ctl-btn" id="probe">Query adapter &amp; device</button>
   </div>
 
   <div class="status" id="status">Click "Query" to inspect your adapter.</div>
+  <div class="device-panel" id="device-summary">
+    <strong>device path:</strong> no request made yet.
+  </div>
 
   <div class="grid">
     <div class="panel">
@@ -70,7 +90,7 @@ for (const k in adapter.limits) console.log(k, adapter.limits[k]);</code></pre>
 </main>
 
 <script>
-  const coreFeatures = [
+  const featureChecks = [
     'core-features-and-limits',
     'depth-clip-control',
     'depth32float-stencil8',
@@ -99,13 +119,14 @@ for (const k in adapter.limits) console.log(k, adapter.limits[k]);</code></pre>
   const featPanel = document.getElementById('core-features');
   const limPanel = document.getElementById('core-limits');
 
-  function renderBaseline(adapterFeatures, adapterLimits) {
+  function renderBaseline(adapterFeatures, adapterLimits, deviceFeatures) {
     featPanel.innerHTML = '';
-    coreFeatures.forEach(f => {
+    featureChecks.forEach(f => {
       const has = adapterFeatures && adapterFeatures.has(f);
+      const enabled = deviceFeatures && deviceFeatures.has(f);
       const row = document.createElement('div');
       row.className = 'row ' + (has ? 'has' : 'no');
-      row.innerHTML = '<span>' + f + '</span><span class="v">' + (has ? 'available' : '—') + '</span>';
+      row.innerHTML = '<span>' + f + '</span><span class="v">' + (enabled ? 'enabled on device' : (has ? 'adapter advertises' : '—')) + '</span>';
       featPanel.appendChild(row);
     });
     limPanel.innerHTML = '';
@@ -119,30 +140,46 @@ for (const k in adapter.limits) console.log(k, adapter.limits[k]);</code></pre>
   }
 
   document.getElementById('probe').addEventListener('click', async () => {
+    const mode = document.getElementById('adapter-mode').value;
+    const shouldRequestCore = document.getElementById('request-core').checked;
+    const deviceSummary = document.getElementById('device-summary');
     if (!navigator.gpu) {
       status.textContent = 'navigator.gpu is undefined — WebGPU not available in this browser.';
       status.className = 'status err';
-      renderBaseline(null, null);
+      deviceSummary.innerHTML = '<strong>device path:</strong> WebGPU unavailable; fallback renderer should run.';
+      renderBaseline(null, null, null);
       return;
     }
     try {
-      const adapter = await navigator.gpu.requestAdapter();
+      const adapterOptions = mode === 'compatibility' ? { featureLevel: 'compatibility' } : {};
+      const adapter = await navigator.gpu.requestAdapter(adapterOptions);
       if (!adapter) {
         status.textContent = 'requestAdapter() resolved null. No suitable GPU.';
         status.className = 'status warn';
-        renderBaseline(null, null);
+        deviceSummary.innerHTML = '<strong>device path:</strong> no adapter, so no device request was attempted.';
+        renderBaseline(null, null, null);
         return;
       }
-      status.textContent = 'adapter acquired. ' + adapter.features.size + ' features, isFallbackAdapter=' + adapter.isFallbackAdapter;
+      const requiredFeatures = shouldRequestCore && adapter.features.has('core-features-and-limits')
+        ? ['core-features-and-limits']
+        : [];
+      const device = await adapter.requestDevice({ requiredFeatures });
+      const isCoreDevice = device.features.has('core-features-and-limits');
+      status.textContent = 'adapter acquired with ' + adapter.features.size + ' features; requested mode=' + mode + '.';
       status.className = 'status ok';
-      renderBaseline(adapter.features, adapter.limits);
+      deviceSummary.innerHTML =
+        '<strong>device path:</strong> ' +
+        (isCoreDevice ? 'core device, compatibility restrictions lifted.' : 'compatibility-level device, stay within the restricted subset.') +
+        ' Required features: ' + (requiredFeatures.join(', ') || 'none') + '.';
+      renderBaseline(adapter.features, adapter.limits, device.features);
     } catch (e) {
       status.textContent = 'probe failed: ' + e.message;
       status.className = 'status err';
+      deviceSummary.innerHTML = '<strong>device path:</strong> request failed before a usable device was returned.';
     }
   });
 
-  renderBaseline(null, null);
+  renderBaseline(null, null, null);
 </script>
 </body>
 </html>
