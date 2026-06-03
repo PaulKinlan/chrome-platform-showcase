@@ -38,6 +38,17 @@
       margin-top: var(--space-3);
     }
     @media (max-width: 600px) { .out-grid { grid-template-columns: 1fr; } }
+    .preset-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-3);
+      margin-bottom: var(--space-4);
+    }
+    .preset-row button.active {
+      background: var(--accent-blue);
+      color: var(--bg-ivory);
+      border-color: var(--accent-blue);
+    }
     .out-panel {
       background: var(--bg-stone);
       border: 1px solid var(--border-black);
@@ -91,6 +102,23 @@
       color: var(--text-muted);
       margin-top: var(--space-2);
     }
+    .diagnostic {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      margin-top: var(--space-2);
+      padding: 0.35rem 0.5rem;
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-charcoal);
+    }
+    .diagnostic.warn {
+      background: color-mix(in srgb, var(--accent-rose) 14%, var(--bg-paper));
+      color: var(--text-black);
+    }
+    .diagnostic.ok {
+      background: color-mix(in srgb, var(--accent-emerald) 16%, var(--bg-paper));
+      color: var(--text-black);
+    }
     .probe {
       font-family: var(--font-mono);
       font-size: 0.85rem;
@@ -110,12 +138,16 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v136</p>
     <h1>Multi-term Highlighter</h1>
-    <p class="lede">The headline use case from the TC39 proposal: take a list of arbitrary user terms, escape each one, glue them into a single <code>(a|b|c)</code> alternation and highlight every match. With <code>RegExp.escape</code>, dangerous strings like <code>C++</code>, <code>$100</code>, or <code>(parens)</code> just work.</p>
+    <p class="lede">The headline use case from the TC39 proposal: take arbitrary user terms, escape each one, glue them into a single <code>(a|b|c)</code> alternation and highlight every match. With <code>RegExp.escape</code>, strings like <code>C++</code>, <code>.NET</code>, or <code>a.b</code> match literally instead of crashing or silently overmatching.</p>
   </header>
 
   <div id="probe" class="probe">Probing <code>RegExp.escape</code> support&hellip;</div>
 
   <div class="stage">
+    <div class="preset-row" aria-label="failure mode presets">
+      <button type="button" data-preset="syntax" class="active">Loud syntax error</button>
+      <button type="button" data-preset="silent">Silent false positives</button>
+    </div>
     <div class="field">
       <label for="terms">search terms (comma-separated)</label>
       <input id="terms" type="text" value="C++, $100, (parens), .NET, a.b">
@@ -132,6 +164,7 @@
         <div id="naive-err" style="display:none" class="err"></div>
         <div class="render" id="naive-render"></div>
         <div class="count" id="naive-count">&mdash;</div>
+        <div class="diagnostic" id="naive-diagnostic">&mdash;</div>
       </div>
       <div class="out-panel safe">
         <h4>safe: <code>terms.map(RegExp.escape).join("|")</code></h4>
@@ -139,6 +172,7 @@
         <div id="safe-err" style="display:none" class="err"></div>
         <div class="render" id="safe-render"></div>
         <div class="count" id="safe-count">&mdash;</div>
+        <div class="diagnostic" id="safe-diagnostic">&mdash;</div>
       </div>
     </div>
   </div>
@@ -164,7 +198,7 @@ document.body.innerHTML = document.body.innerHTML.replace(
 
   <section>
     <h2>why this angle</h2>
-    <p>The single-input demo answers "does it escape?" — useful but minimal. The proposal's motivating example is exactly this: building one regex from <em>many</em> untrusted strings (autocomplete terms, tag filters, search-box history) and putting them through <code>join("|")</code>. That join is where the naive path quietly explodes: a stray <code>(</code> from one term turns the entire alternation into a syntax error, killing the feature for every other term too. The two panels above show that failure mode side by side.</p>
+    <p>The single-input demo answers "does it escape?" — useful but minimal. The proposal's motivating example is exactly this: building one regex from <em>many</em> untrusted strings (autocomplete terms, tag filters, search-box history) and putting them through <code>join("|")</code>. That join has two traps: a stray <code>(</code> or <code>+</code> can turn the whole alternation into a syntax error, while a valid pattern such as <code>.NET|a.b</code> quietly treats dots as "any character" and highlights the wrong text. The two presets above show both failure modes.</p>
   </section>
 
   <section>
@@ -195,6 +229,16 @@ document.body.innerHTML = document.body.innerHTML.replace(
     return s.replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&").replace(/^[0-9]/, m => "\\x3" + m);
   }
   const escapeFn = supported ? RegExp.escape : escapeFallback;
+  const presets = {
+    syntax: {
+      terms: "C++, $100, (parens), .NET, a.b",
+      text: "The conference covered C++, .NET, and a few less common topics. One vendor was selling a $100 license for some (parens) parser. Confusing names like aXb and a.b were treated differently."
+    },
+    silent: {
+      terms: ".NET, a.b",
+      text: "Literal .NET and a.b should highlight. The near misses aNET, bNET, aXb, and a-b should stay plain text."
+    }
+  };
 
   function escapeHTML(s) {
     return s.replace(/[&<>"']/g, c => ({
@@ -216,6 +260,24 @@ document.body.innerHTML = document.body.innerHTML.replace(
     out += escapeHTML(text.slice(i));
     return out;
   }
+  function collectMatches(text, regex) {
+    const matches = [];
+    regex.lastIndex = 0;
+    let m;
+    while ((m = regex.exec(text)) !== null) {
+      matches.push(m[0]);
+      if (m[0].length === 0) regex.lastIndex++;
+    }
+    return matches;
+  }
+  function falsePositiveSummary(matches, terms) {
+    const literals = new Set(terms.map(t => t.toLocaleLowerCase()));
+    const falsePositives = matches.filter(m => !literals.has(m.toLocaleLowerCase()));
+    return {
+      count: falsePositives.length,
+      examples: [...new Set(falsePositives)].slice(0, 4)
+    };
+  }
 
   function update() {
     const terms = document.getElementById("terms").value.split(",").map(t => t.trim()).filter(Boolean);
@@ -226,18 +288,25 @@ document.body.innerHTML = document.body.innerHTML.replace(
     const naiveErr = document.getElementById("naive-err");
     const naiveRender = document.getElementById("naive-render");
     const naiveCount = document.getElementById("naive-count");
+    const naiveDiagnostic = document.getElementById("naive-diagnostic");
     try {
       const re = new RegExp(naivePat, "gi");
       naiveErr.style.display = "none";
       naiveRender.innerHTML = highlight(text, re);
-      let c = 0; re.lastIndex = 0; let m;
-      while ((m = re.exec(text)) !== null) { c++; if (m[0].length === 0) re.lastIndex++; }
-      naiveCount.textContent = c + " match" + (c === 1 ? "" : "es") + " — but many are wrong (metacharacters interpreted as regex syntax).";
+      const matches = collectMatches(text, re);
+      const falsePositives = falsePositiveSummary(matches, terms);
+      naiveCount.textContent = matches.length + " match" + (matches.length === 1 ? "" : "es") + " — regex syntax is active.";
+      naiveDiagnostic.className = "diagnostic " + (falsePositives.count ? "warn" : "ok");
+      naiveDiagnostic.textContent = falsePositives.count
+        ? falsePositives.count + " false positive" + (falsePositives.count === 1 ? "" : "s") + ": " + falsePositives.examples.join(", ")
+        : "0 false positives detected for this sample.";
     } catch (e) {
       naiveErr.style.display = "block";
       naiveErr.textContent = "SyntaxError: " + e.message;
       naiveRender.innerHTML = escapeHTML(text);
       naiveCount.textContent = "regex did not even parse — zero terms get highlighted.";
+      naiveDiagnostic.className = "diagnostic warn";
+      naiveDiagnostic.textContent = "The whole alternation failed before it could match any valid term.";
     }
 
     const safePat = terms.map(escapeFn).join("|");
@@ -245,21 +314,37 @@ document.body.innerHTML = document.body.innerHTML.replace(
     const safeErr = document.getElementById("safe-err");
     const safeRender = document.getElementById("safe-render");
     const safeCount = document.getElementById("safe-count");
+    const safeDiagnostic = document.getElementById("safe-diagnostic");
     try {
       const re = new RegExp(safePat, "gi");
       safeErr.style.display = "none";
       safeRender.innerHTML = highlight(text, re);
-      let c = 0; re.lastIndex = 0; let m;
-      while ((m = re.exec(text)) !== null) { c++; if (m[0].length === 0) re.lastIndex++; }
-      safeCount.textContent = c + " match" + (c === 1 ? "" : "es") + " — each term matched literally.";
+      const matches = collectMatches(text, re);
+      const falsePositives = falsePositiveSummary(matches, terms);
+      safeCount.textContent = matches.length + " match" + (matches.length === 1 ? "" : "es") + " — each term matched literally.";
+      safeDiagnostic.className = "diagnostic " + (falsePositives.count ? "warn" : "ok");
+      safeDiagnostic.textContent = falsePositives.count
+        ? falsePositives.count + " unexpected literal mismatch" + (falsePositives.count === 1 ? "" : "es") + ": " + falsePositives.examples.join(", ")
+        : "0 false positives: every highlight equals one of the user terms.";
     } catch (e) {
       safeErr.style.display = "block";
       safeErr.textContent = "(should not happen) " + e.message;
       safeRender.innerHTML = escapeHTML(text);
       safeCount.textContent = "";
+      safeDiagnostic.className = "diagnostic warn";
+      safeDiagnostic.textContent = "Escaped pattern failed unexpectedly.";
     }
   }
 
+  document.querySelectorAll("[data-preset]").forEach(button => {
+    button.addEventListener("click", () => {
+      const preset = presets[button.dataset.preset];
+      document.getElementById("terms").value = preset.terms;
+      document.getElementById("text").value = preset.text;
+      document.querySelectorAll("[data-preset]").forEach(b => b.classList.toggle("active", b === button));
+      update();
+    });
+  });
   document.getElementById("terms").addEventListener("input", update);
   document.getElementById("text").addEventListener("input", update);
   update();
