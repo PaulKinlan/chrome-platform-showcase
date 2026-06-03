@@ -33,6 +33,12 @@ Rules that must never be broken. Each has bitten the project before:
    expose the real header/network behavior, or if a real feature-detection probe can show the
    outcome. A fallback may explain unsupported/flag-required state, but it must be labelled as a
    fallback and must not report "success" as if the platform feature ran.
+5. **Browser verification must be DevTools-backed**: Before pushing a demo, use
+   `chrome-devtools-mcp` to open the local route in Chrome or Chrome Canary, click/type/drag every
+   visible control, verify the DOM/live readout changes, and inspect console/network failures. Do
+   not substitute Playwright, the in-app browser, screenshots from another tool, or generic browser
+   automation. If `chrome-devtools-mcp` is unavailable, stop and report that the feature is blocked
+   on browser verification rather than claiming it was tested.
 
 Every time you decide to write a folder, the path MUST be `v<N>/<slug(listing_name)>` where N is the
 milestone whose listing returned the feature.
@@ -209,6 +215,19 @@ a `<pre><code>` snippet under it, and a 'see also' section. Real working code. N
 Behind-a-flag features get a `.note` block at the top.
 
 ## Step 8: Commit per feature, push, move on
+
+Before committing, start the local server and verify each new concept with `chrome-devtools-mcp`:
+
+- Open every concept route in Chrome or Chrome Canary.
+- Exercise every button, input, slider, tab, toggle, and "try it" action.
+- Confirm each interaction changes the expected DOM, live readout, network result, permission state,
+  or fallback banner.
+- Inspect console and network logs; fix unhandled errors, failed same-origin demo routes, blank
+  states, and stale readouts.
+- For unsupported, origin-trial, flag-gated, OS-specific, or device-specific features, verify the
+  fallback clearly states the missing capability and never reports fake success.
+
+Do not push a feature without this verification evidence.
 
 ```bash
 git add v<N>/<feature-slug>/

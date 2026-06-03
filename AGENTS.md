@@ -39,8 +39,9 @@ HTML or CSS unless the task specifically requires it.
 
 - `/auto-research` (or "run showcase"): Starts the complete, autonomous auto-research workflow
   end-to-end. The agent will automatically run critiques, generate missing conformance suites, spin
-  up browser automation on `http://localhost:3000/conformance/run-all`, collect all failures, repair
-  the relevant demos/concepts in-place, and push clean, working commits for all features.
+  up a `chrome-devtools-mcp` browser session on `http://localhost:3000/conformance/run-all`, collect
+  all failures, repair the relevant demos/concepts in-place, and push clean, working commits for all
+  features.
 
 For a quick server smoke test after `deno task start`:
 
@@ -67,6 +68,11 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
 - Concept pages must be genuinely interactive. Do not ship static code cards. Use real controls,
   live output, feature detection, graceful fallback, and server routes where HTTP/header behavior is
   the feature.
+- Browser verification for demos, bug fixes, critique, and conformance must use
+  `chrome-devtools-mcp` only. Do not substitute Playwright, the in-app browser, screenshots from a
+  non-DevTools tool, or generic browser automation. Chrome Canary is acceptable when the target
+  milestone needs it. If `chrome-devtools-mcp` is unavailable, report the blocker and do not claim a
+  browser-tested result.
 - Build every distinct use case identified for an API. Two or three concepts is a floor, not a cap.
 - Automated routine-style work should normally stay inside `v<N>/`. Top-level files are only edited
   for explicit maintenance tasks, route support, shared fixes, or user-directed changes.
@@ -117,14 +123,22 @@ Site routes discover these files automatically:
 
 For a critique pass, walk concept pages under the target milestone, skip any concept that already
 has a sibling `_questions.json`. Start the local server (`deno task start`) and test the actual
-changes/interactivity in the browser (using a browser subagent or devtools). Verify that the page is
-robust and check its `/conformance/` page. If the browser being used is older than the target
-milestone `v<N>` (e.g. testing `v150` Canary on an older Chrome version), do not fail the page or
-the run solely because the API is unsupported. Instead, verify that capability detection works and
-the page degrades gracefully with a clean fallback warning/banner rather than completely failing,
-rendering a blank screen, or throwing uncaught console crashes. Score the six rubric fields in
-`lib/critique.ts` honestly. The most important output is `openQuestions`, with `severity` and
-`suggestedSlug` when a new concept page should be built.
+changes/interactivity with `chrome-devtools-mcp`: navigate to the page, click or type through every
+visible control, verify the live DOM/readout changes, inspect console and network failures, and
+check the page's `/conformance/` route. Record this evidence in the critique rationale or summary.
+If the browser being used is older than the target milestone `v<N>` (e.g. testing `v150` Canary on
+an older Chrome version), do not fail the page or the run solely because the API is unsupported.
+Instead, verify that capability detection works and the page degrades gracefully with a clean
+fallback warning/banner rather than completely failing, rendering a blank screen, or throwing
+uncaught console crashes. Score the six rubric fields in `lib/critique.ts` honestly. The most
+important output is `openQuestions`, with `severity` and `suggestedSlug` when a new concept page
+should be built.
+
+For a user-reported URL bug, reproduce the reported behavior with `chrome-devtools-mcp` before
+editing, fix the page, then re-test the exact controls that failed plus adjacent controls on the
+same concept. Update or regenerate the touched `_questions.json` and the relevant `conformance.json`
+so they describe the repaired behavior. In the handoff, list the browser/channel, URL, controls
+exercised, console/network status, Deno checks, and JSON files refreshed.
 
 For a conformance pass, skip features that already have `conformance.json`. Write 3-10 assertions
 covering distinct spec contracts. Use only real `css-supports`, `exists`, `typeof`, `script`, or
@@ -159,6 +173,8 @@ Before handing off meaningful changes:
 - Run the narrowest relevant checks, preferably `deno fmt --check`, `deno check server.ts`, and
   `deno task audit` or `deno task check` when generated demos changed.
 - Start the server and smoke test key routes when routing, rendering, or shared styles changed.
+- Use `chrome-devtools-mcp` for browser verification, including the exact user-reported click path
+  for bug fixes. Do not use another browser automation tool as a substitute.
 - If escaping, route rendering, or `/features` changed, inspect quoted text in attributes and verify
   no injected markup escapes the expected tree.
 - If `public/styles.css` changed, check a mobile-width page and at least one existing demo for

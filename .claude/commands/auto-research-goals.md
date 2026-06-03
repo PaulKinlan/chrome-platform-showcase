@@ -27,11 +27,17 @@ Goal-setting loop:
 4. If it has no `suggestedSlug`, improve the existing concept page in place.
 5. Follow `.claude/routine-prompt.md`: interactive only, CSS variables, WCAG AA, chromestatus link,
    and every distinct use case covered.
-6. Delete or regenerate the touched page's `_questions.json`, then re-run critique for that touched
+6. Use `chrome-devtools-mcp` only to reproduce the old issue, exercise every changed control, verify
+   console/network state, and check the relevant `/conformance/` route. Use Chrome Canary when
+   useful. If the MCP is unavailable, mark browser verification blocked and do not substitute
+   another browser tool.
+7. Delete or regenerate the touched page's `_questions.json`, then re-run critique for that touched
    page or milestone so the score reflects the fix.
-7. Run relevant checks: at minimum `deno fmt --check`, `deno check server.ts`, and a local smoke
+8. Update or regenerate the relevant `conformance.json` whenever the browser contract, route,
+   fallback behavior, or API probe changed.
+9. Run relevant checks: at minimum `deno fmt --check`, `deno check server.ts`, and a local smoke
    test when routes or shared rendering changed.
-8. Commit and push the fix and updated critique separately when practical.
+10. Commit and push the fix and updated critique separately when practical.
 
 Do not start a broad rewrite. Ship one coherent answer to the critique, then report the fixed
-question, touched files, checks, commit, and URL to inspect.
+question, touched files, checks, exact DevTools MCP evidence, commit, and URL to inspect.

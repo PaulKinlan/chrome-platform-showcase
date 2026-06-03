@@ -22,10 +22,16 @@ For each milestone:
 2. Skip any page that already has a sibling `_questions.json`.
 3. Read the concept page, the feature `index.html`, the ChromeStatus detail, and the linked spec
    where available.
-4. Score the six-field rubric in `lib/critique.ts` honestly.
-5. Write `v<N>/<feature>/<concept>/_questions.json` using
+4. Start the local server and use `chrome-devtools-mcp` only for browser work. Navigate to the
+   concept, exercise every visible control, verify DOM/live readout changes, inspect console and
+   network failures, and open the relevant `/conformance/` route. Use Chrome Canary when useful for
+   future milestones. If `chrome-devtools-mcp` is unavailable, mark the browser pass blocked and do
+   not substitute another browser tool.
+5. Score the six-field rubric in `lib/critique.ts` honestly, including concrete browser evidence in
+   the rationale or summary.
+6. Write `v<N>/<feature>/<concept>/_questions.json` using
    `v149/css-gap-decorations/rule-builder/_questions.json` as the exact shape.
-6. Commit and push each generated `_questions.json` on its own:
+7. Commit and push each generated `_questions.json` on its own:
    `git add <file> && git commit -m "critique: v<N>/<feature>/<concept>" && git push`.
 
 Use subagents if available, one per milestone, with at most four running at once. If a push races,

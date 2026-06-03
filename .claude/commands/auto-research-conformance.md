@@ -26,7 +26,11 @@ For each milestone:
    `typeof`, `script`, or `throws` checks; do not invent API names.
 5. Write `v<N>/<feature>/conformance.json` using `v149/css-gap-decorations/conformance.json` as the
    exact shape.
-6. Commit and push each generated `conformance.json` on its own:
+6. Start the local server and use `chrome-devtools-mcp` only to open the feature's `/conformance/`
+   route and confirm the assertions execute in-browser. Use Chrome Canary when useful for future
+   milestones. If `chrome-devtools-mcp` is unavailable, mark the browser verification blocked and do
+   not substitute another browser tool.
+7. Commit and push each generated `conformance.json` on its own:
    `git add <file> && git commit -m "conformance: v<N>/<feature>" && git push`.
 
 Use subagents if available, one per milestone, with at most four running at once. If a push races,

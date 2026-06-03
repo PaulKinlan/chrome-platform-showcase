@@ -31,13 +31,19 @@ Operational rules:
 1. Start with `git pull --rebase` and confirm the worktree state.
 2. Use subagents if available, one per milestone, with at most four running at once. If subagents
    are unavailable, process the batch serially.
-3. Critique pass: skip concepts that already have sibling `_questions.json`; write files matching
+3. Browser work must use `chrome-devtools-mcp` only. If it is unavailable in this session or a
+   subagent, mark that browser pass blocked; do not substitute Playwright, the in-app browser, or
+   generic browser automation.
+4. Critique pass: skip concepts that already have sibling `_questions.json`; use
+   `chrome-devtools-mcp` to click/type/drag every visible control, inspect console/network state,
+   check the relevant `/conformance/` route, and write files matching
    `v149/css-gap-decorations/rule-builder/_questions.json`.
-4. Conformance pass: skip features that already have `conformance.json`; write files matching
-   `v149/css-gap-decorations/conformance.json`.
-5. Commit and push each generated JSON file on its own. Stage only that file; never use `git add -A`
+5. Conformance pass: skip features that already have `conformance.json`; write files matching
+   `v149/css-gap-decorations/conformance.json`, then open the suite's `/conformance/` route with
+   `chrome-devtools-mcp` to verify the assertions execute.
+6. Commit and push each generated JSON file on its own. Stage only that file; never use `git add -A`
    inside the fan-out.
-6. After the batch, run `deno fmt`, `deno check server.ts`, and commit/push only relevant formatting
+7. After the batch, run `deno fmt`, `deno check server.ts`, and commit/push only relevant formatting
    changes.
-7. Report commits, pushed refs, routes to inspect (`/critiques`, `/conformance`), and any blocked
-   milestones.
+8. Report commits, pushed refs, routes to inspect (`/critiques`, `/conformance`), exact browser
+   verification evidence, and any blocked milestones.

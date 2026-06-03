@@ -18,6 +18,26 @@ missing, and turns those gaps into the next batch of work. Three moving parts:
 All three are **file-on-disk, no database**. Everything is browsable on the live site and
 recoverable by re-reading the files.
 
+## 0. Browser testing contract
+
+All browser work in this workflow must use `chrome-devtools-mcp` only. Do not substitute Playwright,
+the Codex in-app browser, static screenshots, or generic browser automation. Chrome Canary is
+acceptable and preferred when the target milestone likely needs a newer implementation. If
+`chrome-devtools-mcp` is unavailable, stop the browser portion, write down that blocker, and do not
+claim the page was browser-tested.
+
+For every concept critique or user-reported fix, the reviewer must capture concrete evidence:
+
+- browser/channel and URL tested;
+- every visible control clicked, typed into, dragged, or toggled;
+- observed DOM/readout/state changes for each interaction;
+- console errors and failed network requests;
+- unsupported/flag-gated fallback behavior, separated from actual runtime failures;
+- the relevant `/conformance/` route result.
+
+A page load without exercising the controls is not a critique. A passing conformance rollup without
+testing the changed concept UI is not enough evidence for a bug fix.
+
 ---
 
 ## 1. Data models & file locations
@@ -105,8 +125,10 @@ not one big "does it exist" check.
 ## 5. Re-running the passes (the orchestration)
 
 This is a fan-out: one subagent per milestone, each looping over that milestone's concept pages.
-Launch them with the `Agent` tool, `run_in_background: true`. Coverage as of 2026-06-01 is in the
-"current state" section below — target the gaps, don't redo what exists.
+Launch them with the `Agent` tool, `run_in_background: true`. Each subagent must use
+`chrome-devtools-mcp` for browser work; if the MCP is not exposed to that subagent, that milestone's
+browser pass is blocked rather than downgraded to a different browser tool. Coverage as of
+2026-06-01 is in the "current state" section below — target the gaps, don't redo what exists.
 
 ### Per-subagent prompt skeleton (critique pass)
 
@@ -115,18 +137,20 @@ Launch them with the `Agent` tool, `run_in_background: true`. Coverage as of 202
 > any page that already has a sibling `_questions.json`** — idempotent resume. For each remaining
 > page: read its HTML, read the feature index, fetch `chromestatus.com/api/v0/features/<id>` (strip
 > the `)]}'` prefix) and the spec if linked. Start the local server (`deno task start`) in the
-> background, then use browser automation or a browser subagent to navigate to the concept page and
-> test its actual interactivity/changes in the browser. Verify that there are no unhandled console
-> errors or broken layouts. **Browser version exception**: Milestone `v<N>` might represent a future
-> release (e.g., `v150` Canary) that is newer than the browser environment you are running. If the
-> API is missing or fails feature-detection because the browser is too old, **do not fail the page
-> or the run**. Instead, verify that the page has capability detection and displays a clean,
-> friendly fallback warning or a behind-a-flag note rather than completely crashing, throwing
-> unhandled exceptions, or rendering a broken blank screen. Do not score the page as `fail` on the
-> rubric solely due to lack of browser support, as long as this fallback behavior is correctly
-> implemented. Score the six-criterion rubric in `lib/critique.ts` honestly — partial/fail are
-> useful, don't inflate. Write the `CritiqueReport` JSON to
-> `v<N>/<feature>/<concept>/_questions.json`. Use the exact shape of
+> background, then use `chrome-devtools-mcp` to navigate to the concept page and test its actual
+> interactivity/changes in Chrome or Chrome Canary. Click/type/drag every visible control, verify
+> the live DOM/readout changes after each interaction, inspect console and network logs, and open
+> the feature or concept `/conformance/` route. Record the tested URL, browser/channel, exercised
+> controls, console/network result, and conformance route in the critique summary or rationale.
+> **Browser version exception**: Milestone `v<N>` might represent a future release (e.g., `v150`
+> Canary) that is newer than the browser environment you are running. If the API is missing or fails
+> feature-detection because the browser is too old, **do not fail the page or the run**. Instead,
+> verify that the page has capability detection and displays a clean, friendly fallback warning or a
+> behind-a-flag note rather than completely crashing, throwing unhandled exceptions, or rendering a
+> broken blank screen. Do not score the page as `fail` on the rubric solely due to lack of browser
+> support, as long as this fallback behavior is correctly implemented. Score the six-criterion
+> rubric in `lib/critique.ts` honestly — partial/fail are useful, don't inflate. Write the
+> `CritiqueReport` JSON to `v<N>/<feature>/<concept>/_questions.json`. Use the exact shape of
 > `v149/css-gap-decorations/rule-builder/_questions.json`. Commit and push **each file on its own**
 > with a single bash call:
 > `git add <file> && git commit -m "critique: v<N>/<feature>/<concept>" && git push` (see the race
@@ -138,7 +162,10 @@ Launch them with the `Agent` tool, `run_in_background: true`. Coverage as of 202
 > spec, derive 3–10 assertions covering the distinct contracts (use the kinds in
 > `lib/conformance.ts`), and write `v<N>/<feature>/conformance.json` matching
 > `v149/css-gap-decorations/conformance.json`. Real `css-supports` declarations and real global
-> paths only — never invent an API name. Commit+push each file with one bash call.
+> paths only — never invent an API name. Before committing, run the feature's `/conformance/` route
+> with `chrome-devtools-mcp` and verify that the assertions execute in the browser, even if future
+> or flag-gated assertions fail with a clean unsupported state. Commit+push each file with one bash
+> call.
 
 ### Race note (this WILL bite you)
 
@@ -171,6 +198,10 @@ The point of the critiques is to **drive the next build pass**. To turn open que
    the missing spec capability, fix the blurb).
 4. After answering, **delete or regenerate** that page's `_questions.json` and re-run the critique
    so the score reflects the fix. The loop is: build → critique → answer questions → re-critique.
+5. Re-run or update the relevant feature/concept `conformance.json` whenever the fix changes the
+   browser contract, fallback behavior, routes, or visible API probes.
+6. Use `chrome-devtools-mcp` to reproduce the old issue and verify the repaired page before closing
+   the question. Record the exact controls and observations in the new critique summary.
 
 This is the "research sets its own goals" half of the Karpathy idea: the corpus tells you where it's
 weakest (worst-scored pages float to the top of `/critiques`) and hands you a concrete to-do list.

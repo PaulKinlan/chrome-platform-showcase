@@ -47,13 +47,16 @@ stash-race mitigation, the fmt gotcha, and current coverage per milestone — li
 
 For a critique pass, walk concept pages under the target milestone, skipping those with an existing
 `_questions.json`. Start the local server (`deno task start`) and test the actual changes and
-interactivity directly in the browser.
+interactivity directly with `chrome-devtools-mcp`. The test must exercise real controls, live
+readouts, console state, network state, and the relevant `/conformance/` route. Chrome Canary is
+acceptable for future milestones; if `chrome-devtools-mcp` is unavailable, stop and report that the
+page was not browser-verified instead of substituting another browser tool.
 
 Alternatively, **automate the entire workflow autonomously** by typing `/auto-research` in the chat.
-This will pull code, boot the local server, run all conformance tests in a background browser on
-`http://localhost:3000/conformance/run-all`, collect all failures, automatically repair the code
-files in-place, and push clean, working commits for all features. You can also inspect the current
-quality snapshot via `deno task auto-research`.
+This will pull code, boot the local server, run all conformance tests through a
+`chrome-devtools-mcp` browser session on `http://localhost:3000/conformance/run-all`, collect all
+failures, automatically repair the code files in-place, and push clean, working commits for all
+features. You can also inspect the current quality snapshot via `deno task auto-research`.
 
 ## The routine
 
@@ -167,6 +170,23 @@ history: 2026-05-30, mass backfill of v130-v144 shipped static cards in the name
 flagged it as a serious regression because the site is live and depth matters more than coverage.
 Don't repeat.
 
+### 7b. Browser verification means DevTools MCP, not generic automation
+
+When building or fixing a demo, "tested in the browser" means tested through `chrome-devtools-mcp`.
+Do not substitute Playwright, the Codex in-app browser, static screenshots, or generic browser
+automation. Use Chrome Canary when a target milestone needs a newer implementation. If the MCP is
+not available in the current environment, say so plainly and do not claim browser verification.
+
+For every user-reported URL bug:
+
+1. Reproduce the reported failure with `chrome-devtools-mcp` before editing.
+2. Click/type through the exact failing controls and the adjacent controls that could regress.
+3. Watch for unhandled console errors, failed requests, blank states, and stale live readouts.
+4. After the fix, update or regenerate the touched `_questions.json` and relevant `conformance.json`
+   so the quality and conformance files match the repaired behavior.
+5. In the handoff, report the browser/channel, URL, controls exercised, expected vs observed
+   behavior, console/network result, screenshots or DOM observations, and Deno checks.
+
 **Also non-negotiable: build EVERY distinct use case the API has. No ceiling.** 2-3 concepts is the
 floor, not the cap. If the spec / planning discussion identifies five distinct use cases, build five
 concept folders. The goal of this project (Paul, 2026-05-30): "be comprehensive and inspire
@@ -194,6 +214,16 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/
 curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/features
 curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
 ```
+
+For demo changes and bug fixes, also verify with `chrome-devtools-mcp`:
+
+- Open the exact route, using Chrome Canary when the target milestone requires it.
+- Exercise every visible button, input, slider, tab, toggle, and "try it" action on the changed
+  concept.
+- Confirm the DOM/live output changed as intended, not just that the page loaded.
+- Inspect console and network logs and record any unsupported API fallback separately from real
+  runtime errors.
+- Open the relevant `/conformance/` route and confirm the assertions reflect the repaired contract.
 
 If you changed escapeHTML or anything that builds HTML attributes:
 
