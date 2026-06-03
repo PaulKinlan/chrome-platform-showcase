@@ -25,6 +25,45 @@
     .panel.event { border-left: 6px solid var(--accent-blue); }
     .panel .count { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
     .status { background: var(--bg-stone); border: 1px dashed var(--border-black); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.85rem; margin: var(--space-3) 0; }
+    .sim-controls {
+      display: flex;
+      gap: var(--space-2);
+      align-items: center;
+      flex-wrap: wrap;
+      margin: var(--space-4) 0;
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-3);
+    }
+    .sim-label {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-muted);
+      margin-right: var(--space-2);
+    }
+    .sim-btn {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: 0.35rem 0.7rem;
+      font-family: var(--font-sans);
+      cursor: pointer;
+    }
+    .sim-btn:hover { background: var(--bg-paper); color: var(--text-black); transform: translate(-2px,-2px); box-shadow: var(--flat-shadow-hover); }
+    .sim-btn.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    .metric-row {
+      display: grid;
+      gap: 0.25rem;
+      margin-top: var(--space-2);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-charcoal);
+    }
+    .metric-row strong { color: var(--text-black); }
   </style>
 </head>
 <body>
@@ -34,10 +73,19 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v149</p>
     <h1>Latency Comparator</h1>
-    <p class="lede">Plug in a controller and press buttons. Each panel shows the average interval between detected input changes — polled vs event-driven. Lower interval = more granular input.</p>
+    <p class="lede">Plug in a controller and press buttons, or run the keyboard-free simulator. Each panel shows the interval between detected input changes — polled vs event-driven. Lower interval = more granular input.</p>
   </header>
 
   <div class="status" id="status">no controller detected — connect a gamepad and press any button</div>
+  <div class="status" id="flag-note">Checking rawgamepadinputchange support…</div>
+
+  <div class="sim-controls" aria-label="Synthetic input controls">
+    <span class="sim-label">simulate inputs</span>
+    <button class="sim-btn" data-sim-hz="60">60Hz</button>
+    <button class="sim-btn" data-sim-hz="120">120Hz</button>
+    <button class="sim-btn" data-sim-hz="240">240Hz</button>
+    <button class="sim-btn secondary" id="btn-stop-sim">Stop</button>
+  </div>
 
   <div class="panels">
     <div class="panel poll">
@@ -46,6 +94,9 @@
       <div class="big" id="poll-ms">—</div>
       <span class="unit">ms between detected changes</span>
       <span class="count" id="poll-count">0 changes seen</span>
+      <div class="metric-row">
+        <span>max interval: <strong id="poll-max">—</strong> ms</span>
+      </div>
     </div>
     <div class="panel event">
       <h3>method</h3>
@@ -53,6 +104,10 @@
       <div class="big" id="evt-ms">—</div>
       <span class="unit">ms between events</span>
       <span class="count" id="evt-count">0 events seen</span>
+      <div class="metric-row">
+        <span>max interval: <strong id="evt-max">—</strong> ms</span>
+        <span>events missed by polling: <strong id="subframe-count">0</strong></span>
+      </div>
     </div>
   </div>
 
@@ -69,7 +124,10 @@ requestAnimationFrame(tick);
 // Event-driven path (new in v149 OT)
 addEventListener("rawgamepadinputchange", (e) =&gt; {
   console.log(e.gamepad.index, e.buttons, e.axes);
-});</code></pre>
+});
+
+// Simulation path for hardware-free testing:
+// emit 240Hz synthetic transitions; rAF polling can only see one per frame.</code></pre>
   </section>
 
   <section>
@@ -92,6 +150,15 @@ let pollCount = 0;
 let lastEvt = null;
 let evtIntervals = [];
 let evtCount = 0;
+let maxPoll = null;
+let maxEvt = null;
+let syntheticSeq = 0;
+let lastSimPollSeq = 0;
+let simTimer = null;
+let eventsThisFrame = 0;
+let subFrameMisses = 0;
+let frameSeenEvents = 0;
+const supportsRawGamepad = "onrawgamepadinputchange" in window || "rawgamepadinputchange" in window;
 
 function avg(arr) {
   if (!arr.length) return null;
@@ -99,6 +166,49 @@ function avg(arr) {
 }
 
 function fmtMs(v) { return v == null ? "—" : v.toFixed(1); }
+function fmtMetric(v) { return v == null ? "—" : v.toFixed(1); }
+
+function rememberInterval(bucket, dt) {
+  bucket.push(dt);
+  if (bucket.length > 60) bucket.shift();
+}
+
+function resetMetrics() {
+  lastPoll = null;
+  pollIntervals = [];
+  pollCount = 0;
+  lastEvt = null;
+  evtIntervals = [];
+  evtCount = 0;
+  maxPoll = null;
+  maxEvt = null;
+  syntheticSeq = 0;
+  lastSimPollSeq = 0;
+  eventsThisFrame = 0;
+  subFrameMisses = 0;
+  frameSeenEvents = 0;
+}
+
+function recordPollChange(t) {
+  if (lastPoll != null) {
+    const dt = t - lastPoll;
+    rememberInterval(pollIntervals, dt);
+    maxPoll = maxPoll == null ? dt : Math.max(maxPoll, dt);
+  }
+  lastPoll = t;
+  pollCount++;
+}
+
+function recordEventChange(t) {
+  if (lastEvt != null) {
+    const dt = t - lastEvt;
+    rememberInterval(evtIntervals, dt);
+    maxEvt = maxEvt == null ? dt : Math.max(maxEvt, dt);
+  }
+  lastEvt = t;
+  evtCount++;
+  eventsThisFrame++;
+}
 
 addEventListener("gamepadconnected", (e) => {
   connected = true;
@@ -112,21 +222,27 @@ addEventListener("gamepaddisconnected", () => {
 // Polling path
 let lastPollSnap = null;
 function poll(t) {
-  const pad = navigator.getGamepads?.()[0];
-  if (pad) {
-    const snap = JSON.stringify({
-      b: pad.buttons.map(b => b.value),
-      a: pad.axes.map(a => Math.round(a * 1000) / 1000),
-    });
-    if (snap !== lastPollSnap) {
-      lastPollSnap = snap;
-      if (lastPoll != null) {
-        const dt = t - lastPoll;
-        pollIntervals.push(dt);
-        if (pollIntervals.length > 60) pollIntervals.shift();
+  if (simTimer) {
+    if (syntheticSeq !== lastSimPollSeq) {
+      lastSimPollSeq = syntheticSeq;
+      recordPollChange(t);
+    }
+    if (eventsThisFrame > 0) {
+      subFrameMisses += Math.max(0, eventsThisFrame - 1);
+      frameSeenEvents = Math.max(frameSeenEvents, eventsThisFrame);
+      eventsThisFrame = 0;
+    }
+  } else {
+    const pad = navigator.getGamepads?.()[0];
+    if (pad) {
+      const snap = JSON.stringify({
+        b: pad.buttons.map(b => b.value),
+        a: pad.axes.map(a => Math.round(a * 1000) / 1000),
+      });
+      if (snap !== lastPollSnap) {
+        lastPollSnap = snap;
+        recordPollChange(t);
       }
-      lastPoll = t;
-      pollCount++;
     }
   }
   requestAnimationFrame(poll);
@@ -134,29 +250,53 @@ function poll(t) {
 requestAnimationFrame(poll);
 
 // Event-driven path
-if ("onrawgamepadinputchange" in window) {
+if (supportsRawGamepad) {
   addEventListener("rawgamepadinputchange", () => {
-    const t = performance.now();
-    if (lastEvt != null) {
-      const dt = t - lastEvt;
-      evtIntervals.push(dt);
-      if (evtIntervals.length > 60) evtIntervals.shift();
-    }
-    lastEvt = t;
-    evtCount++;
+    recordEventChange(performance.now());
   });
 } else {
   document.getElementById("evt-ms").textContent = "n/a";
-  document.querySelector(".panel.event .unit").textContent = "rawgamepadinputchange not available — enable the OT";
+  document.querySelector(".panel.event .unit").textContent = "rawgamepadinputchange not available — simulator still shows the event path";
 }
+
+document.getElementById("flag-note").textContent = supportsRawGamepad
+  ? "rawgamepadinputchange detected. Real controller events can be measured when Chrome 149 origin trial / flag support is enabled."
+  : "rawgamepadinputchange is not exposed in this browser. In Chrome 149, enable the origin trial or related gamepad event-driven input flag for real hardware events; use the simulator below without hardware.";
+
+function stopSimulation() {
+  if (simTimer) clearInterval(simTimer);
+  simTimer = null;
+  status.textContent = connected
+    ? "controller connected — simulation stopped"
+    : "no controller detected — simulation stopped";
+}
+
+function startSimulation(hz) {
+  stopSimulation();
+  resetMetrics();
+  const interval = 1000 / hz;
+  status.textContent = `simulating ${hz}Hz input transitions — polling is still capped by requestAnimationFrame`;
+  simTimer = setInterval(() => {
+    syntheticSeq++;
+    recordEventChange(performance.now());
+  }, interval);
+}
+
+document.querySelectorAll("[data-sim-hz]").forEach(button => {
+  button.addEventListener("click", () => startSimulation(Number(button.dataset.simHz)));
+});
+document.getElementById("btn-stop-sim").addEventListener("click", stopSimulation);
 
 setInterval(() => {
   document.getElementById("poll-ms").textContent = fmtMs(avg(pollIntervals));
   document.getElementById("poll-count").textContent = `${pollCount} changes seen`;
-  if ("onrawgamepadinputchange" in window) {
+  document.getElementById("poll-max").textContent = fmtMetric(maxPoll);
+  if (supportsRawGamepad || simTimer) {
     document.getElementById("evt-ms").textContent = fmtMs(avg(evtIntervals));
     document.getElementById("evt-count").textContent = `${evtCount} events seen`;
   }
+  document.getElementById("evt-max").textContent = fmtMetric(maxEvt);
+  document.getElementById("subframe-count").textContent = `${subFrameMisses} (${frameSeenEvents} max/frame)`;
 }, 250);
 </script>
 </body>
