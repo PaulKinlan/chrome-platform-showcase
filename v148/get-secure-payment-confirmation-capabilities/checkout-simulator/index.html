@@ -204,6 +204,84 @@
       line-height: 1.5;
     }
 
+    .probe-panel {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      box-shadow: var(--thin-shadow);
+      margin: 0.75rem 0;
+      padding: 0.65rem;
+    }
+    .probe-head {
+      align-items: center;
+      display: flex;
+      gap: 0.5rem;
+      justify-content: space-between;
+      margin-bottom: 0.5rem;
+    }
+    .probe-head h2 {
+      border: 0;
+      font-size: 0.86rem;
+      margin: 0;
+      padding: 0;
+    }
+    .probe-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+    .probe-btn {
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      font-weight: 700;
+      padding: 0.3rem 0.55rem;
+    }
+    .probe-btn.secondary {
+      background: var(--bg-stone);
+      color: var(--text-black);
+    }
+    .probe-btn:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+    .probe-grid {
+      display: grid;
+      gap: 0.35rem;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: 0.5rem;
+    }
+    @media (max-width: 620px) { .probe-grid { grid-template-columns: 1fr; } }
+    .probe-card {
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      line-height: 1.5;
+      padding: 0.45rem;
+    }
+    .probe-card strong {
+      color: var(--text-black);
+      display: block;
+      margin-bottom: 0.15rem;
+    }
+    .probe-output {
+      background: var(--text-black);
+      border: 2px solid var(--border-black);
+      color: var(--bg-stone);
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      line-height: 1.55;
+      margin-top: 0.5rem;
+      min-height: 4.5rem;
+      overflow-x: auto;
+      padding: 0.5rem;
+      white-space: pre-wrap;
+    }
+
     .code-block {
       background: var(--text-black);
       color: var(--bg-stone);
@@ -229,6 +307,27 @@
     <h1>Checkout Simulator</h1>
     <p class="lede">A multi-step checkout that calls <code>PaymentRequest.getSecurePaymentConfirmationCapabilities()</code> (Chrome 148) before rendering the payment step. Based on the capability result, it shows biometric SPC, standard card, or a graceful "not available" fallback. Pick a device scenario to see each code path.</p>
   </header>
+
+  <section class="probe-panel" aria-labelledby="probe-title">
+    <div class="probe-head">
+      <h2 id="probe-title">real browser capability probe</h2>
+      <div class="probe-actions">
+        <button class="probe-btn" type="button" id="runProbeBtn">Run PaymentRequest probe</button>
+        <button class="probe-btn secondary" type="button" id="applyProbeBtn" disabled>Apply probe to simulator</button>
+      </div>
+    </div>
+    <div class="probe-grid">
+      <div class="probe-card">
+        <strong>Spec method</strong>
+        Calls <code>PaymentRequest.getSecurePaymentConfirmationCapabilities()</code> when this browser exposes it.
+      </div>
+      <div class="probe-card">
+        <strong>Graceful fallback</strong>
+        If the API is missing or throws, the simulator keeps showing the standard card path and records the reason.
+      </div>
+    </div>
+    <div class="probe-output" id="probeOutput">Probe has not run yet.</div>
+  </section>
 
   <div class="stage">
     <div class="stage-head">Simulated checkout flow</div>
@@ -326,6 +425,8 @@
       <li><a href="../spc-overview/">SPC Overview</a> — how SPC works</li>
       <li><a href="../payment-flow-gate/">Payment Flow Gate</a> — 4-step gate pattern</li>
       <li><a href="../payment-method-checker/">Payment Method Checker</a> — all payment methods</li>
+      <li><a href="https://chromestatus.com/feature/4727235745546240" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://w3c.github.io/secure-payment-confirmation/#sctn-secure-payment-confirmation-capabilities" target="_blank" rel="noopener">Secure Payment Confirmation capabilities spec</a></li>
     </ul>
   </section>
 
@@ -336,12 +437,120 @@
   let currentStep = 0;
   let selectedPayMethod = 'spc';
   let capResult = null;
+  let lastProbe = null;
 
   const SCENARIOS = {
     spc:      { api: true, spcSupported: true,  auth: 'platform',       method: 'SPC biometric' },
     noauth:   { api: true, spcSupported: false,  auth: null,             method: 'Standard card' },
     notavail: { api: false, spcSupported: false, auth: null,             method: 'Standard card' },
   };
+
+  function normalizeCapabilityResult(methodName, raw) {
+    const result = {
+      methodName,
+      api: true,
+      spcSupported: false,
+      auth: null,
+      raw,
+    };
+
+    if (typeof raw === 'string') {
+      result.spcSupported = raw === 'available';
+      return result;
+    }
+
+    if (raw && typeof raw === 'object') {
+      result.spcSupported = Boolean(
+        raw.spcSupported ?? raw.available ?? raw.canMakePayment ?? raw.supported
+      );
+      result.auth = raw.authenticatorAttachment ||
+        raw.authenticatorAttachmentAvailability ||
+        raw.preferredAuthenticatorAttachment ||
+        null;
+    }
+    return result;
+  }
+
+  async function runRealProbe() {
+    const output = document.getElementById('probeOutput');
+    const apply = document.getElementById('applyProbeBtn');
+    const lines = [];
+    const PaymentRequestCtor = window.PaymentRequest;
+    apply.disabled = true;
+    output.textContent = 'Running browser capability probe...';
+
+    lines.push(`PaymentRequest: ${typeof PaymentRequestCtor}`);
+    if (typeof PaymentRequestCtor !== 'function') {
+      lastProbe = {
+        api: false,
+        spcSupported: false,
+        auth: null,
+        methodName: 'none',
+        raw: 'PaymentRequest unavailable',
+      };
+      lines.push('SPC capability API: unavailable because PaymentRequest is missing.');
+      output.textContent = lines.join('\n');
+      apply.disabled = false;
+      return;
+    }
+
+    const candidates = [
+      'getSecurePaymentConfirmationCapabilities',
+      'securePaymentConfirmationAvailability',
+    ];
+
+    for (const methodName of candidates) {
+      const method = PaymentRequestCtor[methodName];
+      lines.push(`${methodName}: ${typeof method}`);
+      if (typeof method !== 'function') continue;
+
+      try {
+        const raw = await method.call(PaymentRequestCtor);
+        lastProbe = normalizeCapabilityResult(methodName, raw);
+        lines.push(`called: ${methodName}()`);
+        lines.push(`raw: ${JSON.stringify(raw, null, 2)}`);
+        lines.push(`normalized: spcSupported=${lastProbe.spcSupported}, authenticator=${lastProbe.auth || 'unknown'}`);
+        output.textContent = lines.join('\n');
+        apply.disabled = false;
+        return;
+      } catch (error) {
+        lastProbe = {
+          api: true,
+          spcSupported: false,
+          auth: null,
+          methodName,
+          raw: null,
+          error: error && error.message ? error.message : String(error),
+        };
+        lines.push(`error calling ${methodName}(): ${lastProbe.error}`);
+        output.textContent = lines.join('\n');
+        apply.disabled = false;
+        return;
+      }
+    }
+
+    lastProbe = {
+      api: false,
+      spcSupported: false,
+      auth: null,
+      methodName: 'none',
+      raw: 'No SPC capability method exposed on PaymentRequest',
+    };
+    lines.push('SPC capability method: not exposed. Simulator can still show the fallback path.');
+    output.textContent = lines.join('\n');
+    apply.disabled = false;
+  }
+
+  function applyProbeToSimulator() {
+    if (!lastProbe) return;
+    const select = document.getElementById('simSelect');
+    select.value = !lastProbe.api ? 'notavail' : lastProbe.spcSupported ? 'spc' : 'noauth';
+    resetCheckout();
+    const reason = lastProbe.error
+      ? ` Probe error was: ${lastProbe.error}`
+      : ` Probe method: ${lastProbe.methodName}.`;
+    document.getElementById('insightBox').textContent += ' Applied real browser probe to this scenario.' + reason;
+  }
 
   function goStep(n) {
     for (let i = 0; i < 4; i++) {
@@ -459,6 +668,22 @@
     };
     document.getElementById('insightBox').textContent = `Step ${currentStep+1}/4. Scenario: ${scenario}. ${msgs[scenario]}`;
   }
+
+  document.getElementById('runProbeBtn').addEventListener('click', () => {
+    runRealProbe().catch(error => {
+      lastProbe = {
+        api: false,
+        spcSupported: false,
+        auth: null,
+        methodName: 'probe-error',
+        raw: null,
+        error: error && error.message ? error.message : String(error),
+      };
+      document.getElementById('probeOutput').textContent = 'Probe failed gracefully: ' + lastProbe.error;
+      document.getElementById('applyProbeBtn').disabled = false;
+    });
+  });
+  document.getElementById('applyProbeBtn').addEventListener('click', applyProbeToSimulator);
 
   updateInsight();
 })();
