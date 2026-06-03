@@ -59,7 +59,7 @@
     <p class="lede">TC39 changed all the locale info accessors from <strong>getters</strong> (<code>locale.calendars</code>) to <strong>methods</strong> (<code>locale.getCalendars()</code>). Old code keeps reading the property — which Chrome 143 still serves with a deprecation warning, but will eventually remove. This page is a one-shot codemod: paste any source file, get a patched version, see every hit.</p>
   </header>
 
-  <p>The rewrite is a regex: 8 known property names → method calls. Run it across your repo and you're done.</p>
+  <p>The rewrite tokenizes the source, masks strings and comments, records variables initialized from <code>new Intl.Locale(...)</code>, then rewrites only those typed receivers. Untyped lookalikes are reported but left alone.</p>
 
   <div class="controls">
     <button id="load-sample">load sample</button>
@@ -80,7 +80,7 @@
 
   <div class="findings" id="findings">Paste source and hit rewrite.</div>
 
-  <h3>The 8 affected accessors</h3>
+  <h3>The 7 Chrome-deprecated accessors</h3>
   <ul>
     <li><code>.calendars</code> → <code>.getCalendars()</code></li>
     <li><code>.collations</code> → <code>.getCollations()</code></li>
@@ -89,15 +89,15 @@
     <li><code>.textInfo</code> → <code>.getTextInfo()</code></li>
     <li><code>.timeZones</code> → <code>.getTimeZones()</code></li>
     <li><code>.weekInfo</code> → <code>.getWeekInfo()</code></li>
-    <li><code>.timeFormats</code> → <code>.getTimeFormats()</code> (Firefox-style — Chrome dropped this one)</li>
   </ul>
 
   <h3>What this checks for</h3>
   <ol class="how">
-    <li>Finds bareword references to each property name (<code>locale.calendars</code>, <code>l.calendars</code>, etc.).</li>
-    <li>Rewrites only when the LHS pattern looks like an <code>Intl.Locale</code> instance — not arbitrary property names.</li>
+    <li>Masks string literals and comments so text examples do not produce edits.</li>
+    <li>Finds variables initialized from <code>new Intl.Locale(...)</code> and simple aliases of those variables.</li>
+    <li>Rewrites only member expressions on those receivers — not arbitrary property names.</li>
     <li>Counts each replacement and shows which line they happened on.</li>
-    <li>Skips the change inside string literals.</li>
+    <li>Lists skipped lookalikes such as <code>obj.calendars</code> so you can review them manually.</li>
   </ol>
 
   <pre><code>// before
@@ -158,7 +158,6 @@ const note = "the user's calendars are: ...";  // string literal — skip
     "textInfo",
     "timeZones",
     "weekInfo",
-    "timeFormats",
   ];
 
   const src = document.getElementById("src");
@@ -172,43 +171,141 @@ const note = "the user's calendars are: ...";  // string literal — skip
     findings.textContent = "Sample loaded. Hit rewrite.";
   });
 
-  document.getElementById("run").addEventListener("click", () => {
-    const text = src.value;
-    const lines = text.split("\n");
-    const hits = [];
-    const out = lines.map((line, i) => {
-      // Strip string literals approximately
-      let masked = line.replace(/"([^"\\]|\\.)*"/g, (m) => " ".repeat(m.length))
-        .replace(/'([^'\\]|\\.)*'/g, (m) => " ".repeat(m.length))
-        .replace(/`([^`\\]|\\.)*`/g, (m) => " ".repeat(m.length));
-      let newLine = line;
-      for (const p of props) {
-        // match .prop not followed by ( and not followed by another identifier char
-        const re = new RegExp("(\\bnew Intl\\.Locale\\b[\\s\\S]*?|\\bnew Intl\\.Locale\\b|locale|l|loc|userLocale)\\.(" + p + ")\\b(?!\\s*\\()", "g");
-        // Simpler: any identifier followed by .<prop>
-        const simpler = new RegExp("(\\.)(" + p + ")\\b(?!\\s*\\()", "g");
-        let mIdx = 0;
-        masked.replace(simpler, (m, dot, name, offset) => {
-          hits.push({ line: i + 1, name, offset });
-          mIdx++;
-          return m;
-        });
-        newLine = newLine.replace(simpler, (m, dot, name) => {
-          return dot + "get" + name.charAt(0).toUpperCase() + name.slice(1) + "()";
-        });
+  function escapeHTML(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "\"": "&quot;",
+      "'": "&#39;",
+    }[char]));
+  }
+
+  function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function maskNonCode(text) {
+    const out = [...text];
+    let quote = "";
+    for (let i = 0; i < out.length; i++) {
+      const char = out[i];
+      const next = out[i + 1];
+      if (quote) {
+        if (char !== "\n") out[i] = " ";
+        if (char === "\\") {
+          if (out[i + 1] && out[i + 1] !== "\n") out[i + 1] = " ";
+          i++;
+        } else if (char === quote) {
+          quote = "";
+        }
+        continue;
       }
-      return newLine;
+      if (char === "\"" || char === "'" || char === "`") {
+        quote = char;
+        out[i] = " ";
+      } else if (char === "/" && next === "/") {
+        out[i] = " ";
+        out[i + 1] = " ";
+        i += 2;
+        while (i < out.length && out[i] !== "\n") {
+          out[i] = " ";
+          i++;
+        }
+      } else if (char === "/" && next === "*") {
+        out[i] = " ";
+        out[i + 1] = " ";
+        i += 2;
+        while (i < out.length) {
+          if (out[i] === "*" && out[i + 1] === "/") {
+            out[i] = " ";
+            out[i + 1] = " ";
+            i++;
+            break;
+          }
+          if (out[i] !== "\n") out[i] = " ";
+          i++;
+        }
+      }
+    }
+    return out.join("");
+  }
+
+  function collectLocaleBindings(masked) {
+    const bindings = new Set();
+    const id = "[A-Za-z_$][\\w$]*";
+    const newLocale = new RegExp("\\b(?:const|let|var)\\s+(" + id + ")\\s*=\\s*new\\s+Intl\\.Locale\\s*\\(", "g");
+    for (const match of masked.matchAll(newLocale)) bindings.add(match[1]);
+
+    let changed = true;
+    while (changed) {
+      const before = bindings.size;
+      const names = [...bindings].map(escapeRegExp).join("|");
+      if (names) {
+        const alias = new RegExp("\\b(?:const|let|var)\\s+(" + id + ")\\s*=\\s*(?:" + names + ")\\b", "g");
+        for (const match of masked.matchAll(alias)) bindings.add(match[1]);
+      }
+      changed = bindings.size !== before;
+    }
+    return bindings;
+  }
+
+  function lineNumberAt(text, offset) {
+    return text.slice(0, offset).split("\n").length;
+  }
+
+  function rewriteTypedLocaleGetters(text) {
+    const masked = maskNonCode(text);
+    const bindings = collectLocaleBindings(masked);
+    const propPattern = props.map(escapeRegExp).join("|");
+    const member = new RegExp("\\b([A-Za-z_$][\\w$]*)\\.(" + propPattern + ")\\b(?!\\s*\\()", "g");
+    const replacements = [];
+    const hits = [];
+    const skipped = [];
+
+    for (const match of masked.matchAll(member)) {
+      const receiver = match[1];
+      const name = match[2];
+      const propStart = match.index + receiver.length + 1;
+      const method = "get" + name.charAt(0).toUpperCase() + name.slice(1) + "()";
+      if (bindings.has(receiver)) {
+        replacements.push({ start: propStart, end: propStart + name.length, value: method });
+        hits.push({ line: lineNumberAt(text, match.index), receiver, name });
+      } else {
+        skipped.push({ line: lineNumberAt(text, match.index), receiver, name });
+      }
+    }
+
+    let output = text;
+    replacements.sort((a, b) => b.start - a.start).forEach((replacement) => {
+      output = output.slice(0, replacement.start) + replacement.value + output.slice(replacement.end);
     });
-    dst.value = out.join("\n");
+    return { output, hits, skipped, bindings };
+  }
+
+  document.getElementById("run").addEventListener("click", () => {
+    const { output, hits, skipped, bindings } = rewriteTypedLocaleGetters(src.value);
+    dst.value = output;
 
     if (hits.length === 0) {
       findings.className = "findings ok";
-      findings.textContent = "No legacy getters detected. You're clean.";
+      findings.textContent = skipped.length === 0
+        ? "No legacy getters detected. You're clean."
+        : "No typed Intl.Locale getter was rewritten. " + skipped.length + " untyped lookalike(s) were left unchanged.";
     } else {
       findings.className = "findings dirty";
-      findings.innerHTML = "<strong>" + hits.length + " replacement(s) made:</strong><ul>" +
-        hits.map((h) => "<li>line " + h.line + ": <code>." + h.name + "</code> → <code>.get" +
-          h.name.charAt(0).toUpperCase() + h.name.slice(1) + "()</code></li>").join("") + "</ul>";
+      findings.innerHTML =
+        "<strong>" + hits.length + " typed replacement(s) made for " + bindings.size +
+        " Intl.Locale binding(s):</strong><ul>" +
+        hits.map((h) => "<li>line " + h.line + ": <code>" + escapeHTML(h.receiver) + "." +
+          escapeHTML(h.name) + "</code> → <code>" + escapeHTML(h.receiver) + ".get" +
+          escapeHTML(h.name.charAt(0).toUpperCase() + h.name.slice(1)) + "()</code></li>").join("") +
+        "</ul>" +
+        (skipped.length
+          ? "<strong>Skipped untyped lookalikes:</strong><ul>" +
+            skipped.map((h) => "<li>line " + h.line + ": <code>" + escapeHTML(h.receiver) + "." +
+              escapeHTML(h.name) + "</code></li>").join("") + "</ul>"
+          : "");
     }
   });
 
