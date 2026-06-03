@@ -92,6 +92,18 @@
       font-size: 0.85rem;
     }
     .warn-block strong { color: var(--accent-rose); display: block; margin-bottom: 0.3rem; }
+    .ot-banner {
+      border: 2px solid var(--accent-amber);
+      background: var(--bg-stone);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+      font-size: 0.92rem;
+    }
+    .ot-banner strong {
+      display: block;
+      font-family: var(--font-mono);
+      margin-bottom: 0.35rem;
+    }
     .probe {
       font-family: var(--font-mono);
       font-size: 0.85rem;
@@ -102,6 +114,7 @@
     }
     .probe.yes { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
     .probe.no { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .probe code { background: var(--bg-paper); color: var(--text-black); }
     .log {
       background: var(--bg-stone);
       border: 1px solid var(--border-black);
@@ -125,6 +138,11 @@
     <p class="lede">The video-conferencing pattern that motivated the spec: a live "preview tile" of the captured tab where the user can wheel/scroll inside the tile and have those wheel deltas forwarded to the captured surface &mdash; without having to leave the call to do it.</p>
   </header>
 
+  <div class="ot-banner" role="note">
+    <strong>Origin trial / flag</strong>
+    Captured Surface Control shipped in Chrome 136 as an origin-trial and flag-gated API. To actually run the forwarding path, enable <code>chrome://flags/#captured-surface-control</code> or join the origin trial. The capability probe and wheel log below still show the graceful fallback when the API is unavailable.
+  </div>
+
   <div id="probe" class="probe">Probing&hellip;</div>
 
   <div class="warn-block">
@@ -142,8 +160,10 @@
       Tile is idle &mdash; press "Start capture" then wheel here.
     </div>
 
+    <div class="reading"><span class="k">capture state</span><span class="v" id="r-state">idle</span></div>
+    <div class="reading"><span class="k">forwardWheel binding</span><span class="v" id="r-bind">not bound</span></div>
     <div class="reading"><span class="k">last wheel deltaY</span><span class="v" id="r-dy">&mdash;</span></div>
-    <div class="reading"><span class="k">forwarded as deltaY</span><span class="v" id="r-fdy">&mdash;</span></div>
+    <div class="reading"><span class="k">forwarding path</span><span class="v" id="r-fdy">&mdash;</span></div>
     <div class="reading"><span class="k">cumulative px sent</span><span class="v" id="r-sum">0</span></div>
 
     <h3>action log</h3>
@@ -157,19 +177,18 @@ const ctrl = new CaptureController();
 const stream = await navigator.mediaDevices.getDisplayMedia({ controller: ctrl });
 tile.querySelector(&quot;video&quot;).srcObject = stream;
 
-tile.addEventListener(&quot;wheel&quot;, async (e) =&gt; {
+// Current CSC binds a trusted wheel source element once.
+await ctrl.forwardWheel(tile);
+
+tile.addEventListener(&quot;wheel&quot;, (e) =&gt; {
   e.preventDefault(); // don't scroll the tile itself
-  try {
-    await ctrl.forwardWheel({ deltaX: e.deltaX, deltaY: e.deltaY });
-  } catch (err) {
-    // Permission denied or surface unsupported.
-  }
+  renderWheelTelemetry(e.deltaX, e.deltaY);
 }, { passive: false });</code></pre>
   </section>
 
   <section>
     <h2>why this angle</h2>
-    <p>The sibling concept exposes the API surface &mdash; "press the up/down buttons, they call <code>forwardWheel</code>." Real VC products don't ship those buttons; users scroll the preview tile with their real trackpad or mouse wheel. The DOM event &rarr; CSC translation is what the spec was designed for, and is what makes the difference between "demo" and "shippable feature." This page wires the actual wheel handler.</p>
+    <p>The sibling concept exposes the API surface &mdash; "press the up/down buttons, they call <code>forwardWheel</code>." Real VC products don't ship those buttons; users scroll the preview tile with their real trackpad or mouse wheel. The trusted wheel source &rarr; CSC binding is what the spec was designed for, and is what makes the difference between "demo" and "shippable feature." This page binds the actual preview tile and logs the live wheel stream.</p>
   </section>
 
   <section>
@@ -187,13 +206,24 @@ tile.addEventListener(&quot;wheel&quot;, async (e) =&gt; {
 
 <script>
   const probe = document.getElementById("probe");
-  const supported = typeof CaptureController !== "undefined" && "forwardWheel" in CaptureController.prototype;
-  if (supported) {
+  const startButton = document.getElementById("start");
+  const stopButton = document.getElementById("stop");
+  const hasGetDisplayMedia = !!navigator.mediaDevices?.getDisplayMedia;
+  const hasCaptureController = typeof CaptureController === "function";
+  const hasForwardWheel = hasCaptureController && typeof CaptureController.prototype.forwardWheel === "function";
+  if (hasForwardWheel) {
     probe.classList.add("yes");
     probe.innerHTML = "<code>CaptureController.prototype.forwardWheel</code> &mdash; <strong>supported</strong>";
+  } else if (hasCaptureController) {
+    probe.classList.add("no");
+    probe.innerHTML = "<code>CaptureController</code> exists, but <code>forwardWheel</code> is missing. Enable the flag or origin trial to run the passthrough path.";
   } else {
     probe.classList.add("no");
-    probe.innerHTML = "<code>CaptureController.forwardWheel</code> not available here. Wheel events will be logged but not forwarded.";
+    probe.innerHTML = "<code>CaptureController.prototype.forwardWheel</code> not available here. Wheel events can be logged from a preview, but not forwarded.";
+  }
+  if (!hasGetDisplayMedia) {
+    startButton.disabled = true;
+    probe.innerHTML = "<code>navigator.mediaDevices.getDisplayMedia</code> is not available in this browser.";
   }
 
   const log = document.getElementById("log");
@@ -206,48 +236,111 @@ tile.addEventListener(&quot;wheel&quot;, async (e) =&gt; {
 
   let stream = null;
   let controller = null;
+  let wheelBindingReady = false;
   let sum = 0;
 
   const tile = document.getElementById("tile");
+  function setReading(id, value) {
+    document.getElementById(id).textContent = value;
+  }
 
-  document.getElementById("start").addEventListener("click", async () => {
+  function resetTile() {
+    tile.classList.add("idle");
+    tile.textContent = 'Tile is idle - press "Start capture" then wheel here.';
+  }
+
+  function endCapture(message, stopTracks = false) {
+    const activeStream = stream;
+    stream = null;
+    controller = null;
+    wheelBindingReady = false;
+    if (stopTracks && activeStream) {
+      activeStream.getTracks().forEach((track) => {
+        if (track.readyState !== "ended") track.stop();
+      });
+    }
+    resetTile();
+    startButton.disabled = !hasGetDisplayMedia;
+    stopButton.disabled = true;
+    setReading("r-state", "idle");
+    setReading("r-bind", hasForwardWheel ? "not bound" : "unavailable");
+    setReading("r-fdy", "-");
+    ln(message);
+  }
+
+  startButton.addEventListener("click", async () => {
+    if (!hasGetDisplayMedia) {
+      ln("getDisplayMedia unavailable: cannot start preview capture");
+      return;
+    }
     try {
-      controller = new CaptureController();
-      stream = await navigator.mediaDevices.getDisplayMedia({ controller, video: true, audio: false });
+      controller = hasCaptureController ? new CaptureController() : null;
+      const options = { video: true, audio: false };
+      if (controller) options.controller = controller;
+      stream = await navigator.mediaDevices.getDisplayMedia(options);
+      const [track] = stream.getVideoTracks();
+      if (track) {
+        track.addEventListener("ended", () => {
+          if (stream) endCapture("source ended from the browser sharing UI");
+        }, { once: true });
+      }
       tile.classList.remove("idle");
       tile.innerHTML = "<video autoplay muted playsinline></video><div class='hud'><span id='hud-state'>capturing — wheel here</span><span id='hud-cum'>0 px sent</span></div>";
       tile.querySelector("video").srcObject = stream;
-      document.getElementById("stop").disabled = false;
+      startButton.disabled = true;
+      stopButton.disabled = false;
       sum = 0;
+      wheelBindingReady = false;
+      setReading("r-state", track ? `capturing (${track.readyState})` : "capturing");
+      setReading("r-bind", "checking permission");
+      setReading("r-dy", "-");
+      setReading("r-fdy", "-");
+      setReading("r-sum", "0");
       ln("capture started");
+      if (!controller || !hasForwardWheel) {
+        setReading("r-bind", "unavailable - logging only");
+        ln("forwardWheel unavailable: preview wheel events will be logged only");
+        return;
+      }
+      try {
+        await controller.forwardWheel(tile);
+        wheelBindingReady = true;
+        setReading("r-bind", "bound to preview tile");
+        ln("forwardWheel(tile) bound: trusted wheel events can pass through");
+      } catch (err) {
+        setReading("r-bind", "rejected: " + err.message);
+        ln("forwardWheel(tile) rejected: " + err.message);
+      }
     } catch (e) {
       ln("getDisplayMedia rejected: " + e.message);
+      stream = null;
+      controller = null;
+      wheelBindingReady = false;
+      startButton.disabled = !hasGetDisplayMedia;
+      stopButton.disabled = true;
+      setReading("r-state", "idle");
+      setReading("r-bind", hasForwardWheel ? "not bound" : "unavailable");
     }
   });
 
-  document.getElementById("stop").addEventListener("click", () => {
-    if (stream) stream.getTracks().forEach(t => t.stop());
-    stream = null;
-    controller = null;
-    tile.classList.add("idle");
-    tile.innerHTML = "Tile is idle &mdash; press \"Start capture\" then wheel here.";
-    document.getElementById("stop").disabled = true;
-    ln("capture stopped");
-  });
+  stopButton.addEventListener("click", () => endCapture("capture stopped", true));
 
-  tile.addEventListener("wheel", async (e) => {
-    if (!stream || !controller) return;
+  tile.addEventListener("wheel", (e) => {
+    if (!stream) return;
     e.preventDefault();
-    document.getElementById("r-dy").textContent = `dx=${e.deltaX.toFixed(0)}  dy=${e.deltaY.toFixed(0)}`;
-    try {
-      await controller.forwardWheel({ x: 0, y: 0, wheelDeltaX: e.deltaX, wheelDeltaY: e.deltaY });
+    const dx = e.deltaX.toFixed(0);
+    const dy = e.deltaY.toFixed(0);
+    setReading("r-dy", `dx=${dx}  dy=${dy}`);
+    if (wheelBindingReady) {
       sum += Math.abs(e.deltaY);
-      document.getElementById("r-fdy").textContent = `dx=${e.deltaX.toFixed(0)}  dy=${e.deltaY.toFixed(0)}`;
-      document.getElementById("r-sum").textContent = sum.toFixed(0);
+      setReading("r-fdy", `bound event dx=${dx}  dy=${dy}`);
+      setReading("r-sum", sum.toFixed(0));
       const hud = document.getElementById("hud-cum");
       if (hud) hud.textContent = sum.toFixed(0) + " px sent";
-    } catch (err) {
-      ln("forwardWheel rejected: " + err.message);
+      ln(`trusted wheel event forwarded by binding: dx=${dx} dy=${dy}`);
+    } else {
+      setReading("r-fdy", "not forwarded - binding unavailable");
+      ln(`wheel observed but not forwarded: dx=${dx} dy=${dy}`);
     }
   }, { passive: false });
 </script>
