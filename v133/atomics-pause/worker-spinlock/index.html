@@ -5,17 +5,197 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Worker spinlock — Atomics.pause — Chrome 133</title>
   <link rel="stylesheet" href="/public/styles.css">
+  <link rel="icon" href="data:,">
   <style>
-    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-5); margin: var(--space-4) 0; }
-    .row { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-3); align-items: center; }
-    .row label { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); }
-    .gauges { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin-top: var(--space-3); }
-    .gauge { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-4); text-align: center; }
-    .gauge .lbl { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
-    .gauge .val { font-family: var(--font-display); font-size: 1.6rem; font-variant-numeric: tabular-nums; margin-top: var(--space-1); color: var(--text-black); }
-    .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.76rem; color: var(--text-charcoal); max-height: 200px; overflow-y: auto; margin-top: var(--space-3); }
-    .log p { margin: 0.1rem 0; }
-    .warn-block { border: 2px solid var(--accent-rose); background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-4) 0; }
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      margin: var(--space-4) 0;
+      padding: var(--space-5);
+    }
+
+    .status-grid,
+    .result-grid {
+      display: grid;
+      gap: var(--space-3);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin: var(--space-4) 0;
+    }
+
+    @media (max-width: 720px) {
+      .status-grid,
+      .result-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .status-card,
+    .result-card {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      border-left: 6px solid var(--accent-amber);
+      padding: var(--space-3);
+    }
+
+    .status-card.ok,
+    .result-card.ok {
+      border-left-color: var(--accent-emerald);
+    }
+
+    .status-card.fail,
+    .result-card.fail {
+      border-left-color: var(--accent-rose);
+    }
+
+    .status-card h3,
+    .result-card h3 {
+      font-size: 0.9rem;
+      margin: 0 0 var(--space-1);
+    }
+
+    .status-card p {
+      color: var(--text-charcoal);
+      font-size: 0.82rem;
+      margin: 0;
+    }
+
+    .controls {
+      align-items: end;
+      display: grid;
+      gap: var(--space-3);
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-bottom: var(--space-4);
+    }
+
+    @media (max-width: 760px) {
+      .controls {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .field {
+      display: grid;
+      gap: var(--space-1);
+    }
+
+    .field label {
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .field input {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      color: var(--text-black);
+      font-family: var(--font-mono);
+      font-size: 0.86rem;
+      min-height: 38px;
+      padding: 0.35rem 0.45rem;
+      width: 100%;
+    }
+
+    .run-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+    }
+
+    .run-row button {
+      border: 2px solid var(--border-black);
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      font-weight: 700;
+      min-height: 40px;
+      padding: 0.45rem 0.8rem;
+    }
+
+    .run-row .primary {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+    }
+
+    .run-row .secondary {
+      background: var(--bg-stone);
+      color: var(--text-black);
+    }
+
+    .run-row button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    .result-card b {
+      color: var(--text-black);
+      display: block;
+      font-family: var(--font-display);
+      font-size: 1.75rem;
+      font-variant-numeric: tabular-nums;
+      margin: var(--space-1) 0 var(--space-2);
+    }
+
+    .metric-row {
+      border-top: 1px solid var(--border-black);
+      display: flex;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      gap: var(--space-2);
+      justify-content: space-between;
+      padding: 0.3rem 0;
+    }
+
+    .metric-row span:first-child {
+      color: var(--text-muted);
+    }
+
+    .metric-row span:last-child {
+      color: var(--text-black);
+      text-align: right;
+      word-break: break-word;
+    }
+
+    .comparison {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      margin-top: var(--space-3);
+      padding: var(--space-3);
+    }
+
+    .log {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      line-height: 1.5;
+      margin-top: var(--space-3);
+      max-height: 220px;
+      overflow: auto;
+      padding: var(--space-3);
+    }
+
+    .log p {
+      margin: 0.1rem 0;
+      word-break: break-word;
+    }
+
+    .warn-block {
+      background: var(--bg-stone);
+      border: 2px solid var(--accent-rose);
+      color: var(--text-black);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      margin: var(--space-4) 0;
+      padding: var(--space-3);
+    }
   </style>
 </head>
 <body>
@@ -24,46 +204,89 @@
 
   <header class="lede-block">
     <p class="eyebrow">demo · v133</p>
-    <h1>Real spinlock in a Worker</h1>
-    <p class="lede">The TC39 proposal motivates <code>Atomics.pause()</code> with one scenario: a thread spin-waiting on a flag in <code>SharedArrayBuffer</code>. This page runs that exact pattern in a Worker, with and without the pause hint.</p>
+    <h1>Real spinlock in two Workers</h1>
+    <p class="lede">The TC39 proposal motivates <code>Atomics.pause()</code> with a thread spin-waiting on shared memory. This page runs the real shape: one producer Worker flips a <code>SharedArrayBuffer</code> flag on a timer while one consumer Worker spins on that flag, once tightly and once with <code>Atomics.pause()</code>.</p>
   </header>
 
-  <div id="iso-warn" class="warn-block" hidden>
-    SharedArrayBuffer requires cross-origin isolation (COOP+COEP headers). This page won't be isolated on the showcase domain, so the worker will fall back to a non-shared run. The numbers will still print &mdash; just from a single-thread fake.
+  <div class="status-grid" aria-live="polite">
+    <article class="status-card" id="isoStatus">
+      <h3>Shared memory isolation</h3>
+      <p id="isoText">checking</p>
+    </article>
+    <article class="status-card" id="pauseStatus">
+      <h3>Atomics.pause in worker</h3>
+      <p id="pauseText">checking</p>
+    </article>
+  </div>
+
+  <div id="fallbackWarn" class="warn-block" hidden>
+    SharedArrayBuffer is unavailable here, so this page cannot run the real producer/consumer spinlock. The controls stay visible, but the run button is disabled rather than pretending to measure a single-thread loop.
   </div>
 
   <div class="stage">
-    <div class="row">
-      <label>handoffs <input id="n" type="number" value="100000" min="1000" max="1000000" step="1000" style="width:7rem;border:2px solid var(--border-black);padding:0.3rem;font-family:var(--font-mono);background:var(--bg-paper);color:var(--text-black)"></label>
-      <button id="run">run producer/consumer</button>
+    <div class="controls">
+      <div class="field">
+        <label for="handoffs">handoffs</label>
+        <input id="handoffs" type="number" value="120" min="20" max="500" step="10">
+      </div>
+      <div class="field">
+        <label for="delay">producer timer delay (ms)</label>
+        <input id="delay" type="number" value="1" min="0" max="10" step="1">
+      </div>
+      <div class="field">
+        <label for="timeout">safety timeout (ms)</label>
+        <input id="timeout" type="number" value="5000" min="1000" max="20000" step="500">
+      </div>
     </div>
 
-    <div class="gauges">
-      <div class="gauge"><div class="lbl">plain spin (ms)</div><div class="val" id="plain">—</div></div>
-      <div class="gauge"><div class="lbl">Atomics.pause() (ms)</div><div class="val" id="pause">—</div></div>
+    <div class="run-row">
+      <button class="primary" id="run" type="button">Run producer/consumer benchmark</button>
+      <button class="secondary" id="clear" type="button">Clear log</button>
     </div>
 
+    <div class="result-grid">
+      <article class="result-card" id="plainCard">
+        <h3>plain tight spin</h3>
+        <b id="plainMs">&mdash;</b>
+        <div class="metric-row"><span>empty flag probes</span><span id="plainSpins">&mdash;</span></div>
+        <div class="metric-row"><span>validated handoffs</span><span id="plainHandoffs">&mdash;</span></div>
+        <div class="metric-row"><span>checksum</span><span id="plainChecksum">&mdash;</span></div>
+      </article>
+      <article class="result-card" id="pauseCard">
+        <h3>spin with Atomics.pause()</h3>
+        <b id="pauseMs">&mdash;</b>
+        <div class="metric-row"><span>empty flag probes</span><span id="pauseSpins">&mdash;</span></div>
+        <div class="metric-row"><span>validated handoffs</span><span id="pauseHandoffs">&mdash;</span></div>
+        <div class="metric-row"><span>checksum</span><span id="pauseChecksum">&mdash;</span></div>
+      </article>
+    </div>
+
+    <div class="comparison" id="comparison">Run the benchmark to compare wall time and how many times the consumer observed an empty flag.</div>
     <div class="log" id="log"></div>
   </div>
 
   <section>
     <h2>the pattern</h2>
-    <p>Producer thread writes a value, then flips a shared flag. Consumer thread spin-waits on the flag, reads the value, flips it back. <code>Atomics.pause()</code> goes inside the spin &mdash; on x86 it issues the <code>PAUSE</code> instruction, which lowers core power use, reduces memory-ordering pipeline flushes when the flag flips, and on hyperthreaded cores yields execution resources to the sibling thread. Functionally a no-op, but the CPU schedules differently around it.</p>
-<pre><code>// Inside the worker (consumer)
-function waitFor(flag, want) {
-  while (Atomics.load(flag, 0) !== want) {
-    Atomics.pause();   // hint: I'm spinning, back off
-  }
-}</code></pre>
+    <p>The producer waits for the shared flag to return to <code>0</code>, waits on its own timer, writes the next value, then stores <code>1</code>. The consumer runs on a separate Worker and spins until it sees <code>1</code>. The only difference between the two measured runs is whether the consumer calls <code>Atomics.pause()</code> while the flag is still empty.</p>
+<pre><code>// Consumer Worker
+while (Atomics.load(cells, FLAG) !== READY) {
+  emptyChecks++;
+  if (usePause) Atomics.pause(1 + (emptyChecks &amp; 31));
+}
+const value = Atomics.load(cells, VALUE);
+Atomics.store(cells, FLAG, EMPTY);
+Atomics.notify(cells, FLAG, 1);</code></pre>
+    <p>The proposal says the method is a spin-wait hint with no observable behavior other than timing, so this demo reports both elapsed time and the count of empty probes to make the wait visible.</p>
   </section>
 
   <section>
     <h2>see also</h2>
     <ul>
       <li><a href="../atomics-pause/">Atomics.pause &mdash; per-call timing demo</a></li>
+      <li><a href="../spsc-queue/">SPSC queue throughput</a></li>
       <li><a href="../">Feature index</a></li>
       <li><a href="https://chromestatus.com/feature/5106098833719296" target="_blank" rel="noopener">ChromeStatus entry</a></li>
-      <li><a href="https://tc39.es/proposal-atomics-microwait/" target="_blank" rel="noopener">TC39 proposal &mdash; motivating example</a></li>
+      <li><a href="https://tc39.es/proposal-atomics-microwait/" target="_blank" rel="noopener">TC39 proposal &mdash; Atomics.pause</a></li>
     </ul>
   </section>
 
@@ -71,85 +294,273 @@ function waitFor(flag, want) {
 </main>
 
 <script>
-const isolated = self.crossOriginIsolated === true;
-if (!isolated) document.getElementById("iso-warn").hidden = false;
+const FLAG = 0;
+const VALUE = 1;
+const EMPTY = 0;
+const READY = 1;
 
+const hasShared = typeof SharedArrayBuffer === "function" && self.crossOriginIsolated === true;
+const isoStatus = document.getElementById("isoStatus");
+const pauseStatus = document.getElementById("pauseStatus");
+const isoText = document.getElementById("isoText");
+const pauseText = document.getElementById("pauseText");
+const fallbackWarn = document.getElementById("fallbackWarn");
+const runButton = document.getElementById("run");
 const logEl = document.getElementById("log");
+
 function log(msg) {
   const p = document.createElement("p");
   p.textContent = new Date().toISOString().slice(11, 23) + "  " + msg;
   logEl.prepend(p);
-  while (logEl.children.length > 18) logEl.lastChild.remove();
+  while (logEl.children.length > 24) logEl.lastChild.remove();
 }
 
-const workerSrc = `
-self.onmessage = (e) => {
-  const { n, isolated } = e.data;
-  let plainMs, pauseMs;
+function setStatus(card, ok, textEl, text) {
+  card.classList.toggle("ok", ok);
+  card.classList.toggle("fail", !ok);
+  textEl.textContent = text;
+}
 
-  if (isolated && typeof SharedArrayBuffer !== "undefined") {
-    const sab = new SharedArrayBuffer(8);
-    const flag = new Int32Array(sab);
-    // Self handoff: ping-pong with itself by toggling
-    function runPlain() {
-      const t0 = performance.now();
-      let acc = 0;
-      for (let i = 0; i < n; i++) {
-        while (Atomics.load(flag, 0) !== 0) { /* spin */ }
-        Atomics.store(flag, 0, 1);
-        Atomics.store(flag, 0, 0);
-        acc++;
-      }
-      return performance.now() - t0;
+function clampNumber(id, min, max) {
+  const input = document.getElementById(id);
+  const value = Number(input.value);
+  const clamped = Math.max(min, Math.min(max, Number.isFinite(value) ? value : min));
+  input.value = String(clamped);
+  return clamped;
+}
+
+const workerSource = `
+const FLAG = 0;
+const VALUE = 1;
+const EMPTY = 0;
+const READY = 1;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runProducer(data) {
+  const cells = new Int32Array(data.sab);
+  const count = data.count;
+  const delay = data.delay;
+  for (let i = 1; i <= count; i++) {
+    while (Atomics.load(cells, FLAG) !== EMPTY) {
+      Atomics.wait(cells, FLAG, READY, 20);
     }
-    function runPause() {
-      const t0 = performance.now();
-      let acc = 0;
-      for (let i = 0; i < n; i++) {
-        while (Atomics.load(flag, 0) !== 0) { Atomics.pause(); }
-        Atomics.store(flag, 0, 1);
-        Atomics.store(flag, 0, 0);
-        acc++;
-      }
-      return performance.now() - t0;
+    if (delay > 0) await sleep(delay);
+    Atomics.store(cells, VALUE, i);
+    Atomics.store(cells, FLAG, READY);
+    Atomics.notify(cells, FLAG, 1);
+  }
+  self.postMessage({ role: "producer", produced: count });
+}
+
+function runConsumer(data) {
+  const cells = new Int32Array(data.sab);
+  const count = data.count;
+  const usePause = data.usePause === true;
+  const hasPause = typeof Atomics !== "undefined" && typeof Atomics.pause === "function";
+  let emptyChecks = 0;
+  let checksum = 0;
+  const t0 = performance.now();
+  for (let i = 1; i <= count; i++) {
+    while (Atomics.load(cells, FLAG) !== READY) {
+      emptyChecks++;
+      if (usePause && hasPause) Atomics.pause(1 + (emptyChecks & 31));
     }
-    plainMs = runPlain();
-    pauseMs = runPause();
-  } else {
-    // Fallback: just time the pause overhead in a tight loop
-    const t0 = performance.now();
-    let a = 0;
-    for (let i = 0; i < n; i++) a = (a + i) | 0;
-    plainMs = performance.now() - t0;
-    if (typeof Atomics.pause === "function") {
-      const t1 = performance.now();
-      let b = 0;
-      for (let i = 0; i < n; i++) { b = (b + i) | 0; Atomics.pause(); }
-      pauseMs = performance.now() - t1;
-    } else {
-      pauseMs = -1;
+    checksum += Atomics.load(cells, VALUE);
+    Atomics.store(cells, FLAG, EMPTY);
+    Atomics.notify(cells, FLAG, 1);
+  }
+  const ms = performance.now() - t0;
+  self.postMessage({ role: "consumer", ms, emptyChecks, checksum, consumed: count, hasPause });
+}
+
+self.onmessage = (event) => {
+  const data = event.data;
+  if (data.role === "probe") {
+    self.postMessage({
+      role: "probe",
+      hasPause: typeof Atomics !== "undefined" && typeof Atomics.pause === "function"
+    });
+  } else if (data.role === "producer") {
+    runProducer(data).catch((error) => {
+      self.postMessage({ role: "error", message: error.message || String(error) });
+    });
+  } else if (data.role === "consumer") {
+    try {
+      runConsumer(data);
+    } catch (error) {
+      self.postMessage({ role: "error", message: error.message || String(error) });
     }
   }
-  self.postMessage({ plainMs, pauseMs });
 };
 `;
 
-const blob = new Blob([workerSrc], { type: "application/javascript" });
-const url = URL.createObjectURL(blob);
-const worker = new Worker(url);
+const workerUrl = URL.createObjectURL(new Blob([workerSource], { type: "application/javascript" }));
 
-worker.onmessage = (e) => {
-  const { plainMs, pauseMs } = e.data;
-  document.getElementById("plain").textContent = plainMs.toFixed(2);
-  document.getElementById("pause").textContent = pauseMs < 0 ? "n/a" : pauseMs.toFixed(2);
-  log(`plain ${plainMs.toFixed(2)}ms / pause ${pauseMs.toFixed(2)}ms`);
-};
+function createWorker() {
+  return new Worker(workerUrl);
+}
 
-document.getElementById("run").addEventListener("click", () => {
-  const n = Math.max(1000, Math.min(1000000, +document.getElementById("n").value | 0));
-  log(`starting ${n.toLocaleString()} handoffs (isolated=${isolated})`);
-  worker.postMessage({ n, isolated });
+function expectedChecksum(count) {
+  return count * (count + 1) / 2;
+}
+
+function runExperiment(usePause, count, delay, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const sab = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2);
+    const cells = new Int32Array(sab);
+    Atomics.store(cells, FLAG, EMPTY);
+    Atomics.store(cells, VALUE, 0);
+
+    const producer = createWorker();
+    const consumer = createWorker();
+    let producerDone = null;
+    let consumerDone = null;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      producer.terminate();
+      consumer.terminate();
+    };
+
+    const finishIfReady = () => {
+      if (!producerDone || !consumerDone) return;
+      cleanup();
+      resolve({
+        mode: usePause ? "pause" : "plain",
+        produced: producerDone.produced,
+        consumed: consumerDone.consumed,
+        ms: consumerDone.ms,
+        emptyChecks: consumerDone.emptyChecks,
+        checksum: consumerDone.checksum,
+        hasPause: consumerDone.hasPause,
+        valid: consumerDone.checksum === expectedChecksum(count),
+      });
+    };
+
+    const onMessage = (event) => {
+      const data = event.data;
+      if (data.role === "producer") producerDone = data;
+      else if (data.role === "consumer") consumerDone = data;
+      else if (data.role === "error") {
+        cleanup();
+        reject(new Error(data.message));
+        return;
+      }
+      finishIfReady();
+    };
+
+    const onError = (error) => {
+      cleanup();
+      reject(error instanceof Error ? error : new Error(String(error.message || error)));
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("worker spinlock timed out"));
+    }, timeoutMs);
+
+    producer.onmessage = onMessage;
+    consumer.onmessage = onMessage;
+    producer.onerror = onError;
+    consumer.onerror = onError;
+
+    consumer.postMessage({ role: "consumer", sab, count, usePause });
+    producer.postMessage({ role: "producer", sab, count, delay });
+  });
+}
+
+function formatNumber(value) {
+  return Number(value).toLocaleString();
+}
+
+function renderResult(prefix, result) {
+  const card = document.getElementById(prefix + "Card");
+  card.classList.toggle("ok", result.valid);
+  card.classList.toggle("fail", !result.valid);
+  document.getElementById(prefix + "Ms").textContent = result.ms.toFixed(2) + " ms";
+  document.getElementById(prefix + "Spins").textContent = formatNumber(result.emptyChecks);
+  document.getElementById(prefix + "Handoffs").textContent =
+    formatNumber(result.consumed) + " / " + formatNumber(result.produced);
+  document.getElementById(prefix + "Checksum").textContent =
+    formatNumber(result.checksum) + (result.valid ? " ok" : " mismatch");
+}
+
+function renderComparison(plain, pause) {
+  const delta = plain.emptyChecks - pause.emptyChecks;
+  const ratio = plain.emptyChecks > 0
+    ? (pause.emptyChecks / plain.emptyChecks * 100).toFixed(1)
+    : "0.0";
+  document.getElementById("comparison").textContent =
+    "The paused consumer made " + formatNumber(pause.emptyChecks) +
+    " empty-flag probes vs " + formatNumber(plain.emptyChecks) +
+    " for the tight spin (" + ratio + "% of the plain run, delta " +
+    formatNumber(delta) + "). Both runs validated the same producer values.";
+}
+
+async function probeWorkerPause() {
+  if (!hasShared) {
+    setStatus(isoStatus, false, isoText, "crossOriginIsolated is false; SharedArrayBuffer is unavailable.");
+    setStatus(pauseStatus, false, pauseText, "Worker probe skipped because shared memory is disabled.");
+    fallbackWarn.hidden = false;
+    runButton.disabled = true;
+    log("ready: SharedArrayBuffer unavailable; real spinlock disabled");
+    return;
+  }
+
+  setStatus(isoStatus, true, isoText, "crossOriginIsolated is true; SharedArrayBuffer and real workers are enabled.");
+  fallbackWarn.hidden = true;
+  runButton.disabled = false;
+
+  const probe = createWorker();
+  probe.onmessage = (event) => {
+    const hasPause = event.data.hasPause === true;
+    setStatus(
+      pauseStatus,
+      hasPause,
+      pauseText,
+      hasPause
+        ? "Atomics.pause is callable inside Worker scope."
+        : "Atomics.pause is missing inside Worker scope; paused run cannot call the hint.",
+    );
+    probe.terminate();
+  };
+  probe.postMessage({ role: "probe" });
+  log("ready: two-worker SharedArrayBuffer spinlock benchmark");
+}
+
+document.getElementById("run").addEventListener("click", async () => {
+  if (!hasShared) return;
+  const count = clampNumber("handoffs", 20, 500);
+  const delay = clampNumber("delay", 0, 10);
+  const timeout = clampNumber("timeout", 1000, 20000);
+  runButton.disabled = true;
+  document.getElementById("comparison").textContent = "Running plain spin, then paused spin...";
+  log("starting " + count + " handoffs with producer timer delay " + delay + "ms");
+  try {
+    const plain = await runExperiment(false, count, delay, timeout);
+    renderResult("plain", plain);
+    log("plain run: " + plain.ms.toFixed(2) + "ms, " + formatNumber(plain.emptyChecks) + " empty probes");
+
+    const pause = await runExperiment(true, count, delay, timeout);
+    renderResult("pause", pause);
+    log("pause run: " + pause.ms.toFixed(2) + "ms, " + formatNumber(pause.emptyChecks) + " empty probes");
+    renderComparison(plain, pause);
+  } catch (error) {
+    document.getElementById("comparison").textContent = "Run failed: " + (error.message || String(error));
+    log("error: " + (error.message || String(error)));
+  } finally {
+    runButton.disabled = false;
+  }
 });
+
+document.getElementById("clear").addEventListener("click", () => {
+  logEl.textContent = "";
+});
+
+probeWorkerPause();
 </script>
 </body>
 </html>

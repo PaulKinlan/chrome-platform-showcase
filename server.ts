@@ -5634,7 +5634,9 @@ Deno.serve({ port: PORT }, async (req) => {
       release === "v133" &&
       (
         sub === "/atomics-pause/spsc-queue" ||
-        sub.startsWith("/atomics-pause/spsc-queue/")
+        sub.startsWith("/atomics-pause/spsc-queue/") ||
+        sub === "/atomics-pause/worker-spinlock" ||
+        sub.startsWith("/atomics-pause/worker-spinlock/")
       )
     ) {
       const asset = await readReleaseAsset(release, sub);
