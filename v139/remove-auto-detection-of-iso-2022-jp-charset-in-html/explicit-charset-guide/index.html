@@ -14,12 +14,18 @@
     select { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: 0.3rem; font-family: var(--font-mono); font-size: 0.85rem; width: 100%; }
     .row { display: flex; gap: var(--space-2); margin: var(--space-2) 0; }
     .out { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; min-height: 100px; white-space: pre-wrap; line-height: 1.6; }
+    .out h4 { margin: 0 0 var(--space-2); font-family: var(--font-sans); font-size: 0.96rem; }
+    .out p { margin: 0 0 var(--space-2); }
     .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; box-shadow: var(--flat-shadow); margin-top: var(--space-2); }
     pre.snippet { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; overflow-x: auto; }
     .pill { display: inline-block; padding: 0.1rem 0.5rem; font-size: 0.72rem; border: 1px solid var(--border-black); font-family: var(--font-mono); }
-    .pill.ok { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
-    .pill.warn { background: var(--accent-amber); color: var(--bg-ivory); border-color: var(--accent-amber); }
+    .pill.ok { background: var(--accent-emerald); color: var(--text-black); border-color: var(--accent-emerald); }
+    .pill.warn { background: var(--accent-amber); color: var(--text-black); border-color: var(--accent-amber); }
     .pill.bad { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    .decision { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-3); margin-top: var(--space-4); }
+    .decision p { margin: 0 0 var(--space-2); }
+    .decision p:last-child { margin-bottom: 0; }
+    .field-label { display: block; margin-top: var(--space-3); margin-bottom: var(--space-1); font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
   </style>
 </head>
 <body>
@@ -29,7 +35,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v139</p>
     <h1>Explicit Charset Guide</h1>
-    <p class="lede">Paste ISO-2022-JP encoded bytes; pick how you'd serve them. The decoder result and the security implication flip in real time. The lesson: declare your charset and you have nothing to lose.</p>
+    <p class="lede">Paste an ISO-2022-JP byte-shaped sample; pick how the HTML response is served. The parser decision, fallback path, and security implication flip in real time. The lesson: declare the actual charset explicitly and keep headers and markup aligned.</p>
   </header>
 
   <div class="lab">
@@ -39,6 +45,16 @@
       <textarea id="bytes">&lt;p&gt;こんにちは、世界&lt;/p&gt;</textarea>
       <button class="ctl-btn" id="enc">Encode sample as ISO-2022-JP</button>
 
+      <label class="field-label" for="source">where the charset is declared</label>
+      <select id="source">
+        <option value="header">HTTP Content-Type header</option>
+        <option value="meta">HTML meta charset</option>
+        <option value="both-match">header and meta agree</option>
+        <option value="conflict">header utf-8, meta iso-2022-jp conflict</option>
+        <option value="non-html">non-HTML MIME type</option>
+      </select>
+
+      <label class="field-label" for="declared">declared charset</label>
       <div class="row">
         <select id="declared">
           <option value="none">no charset declared</option>
@@ -47,6 +63,8 @@
           <option value="iso-8859-1">declared: iso-8859-1 (wrong)</option>
         </select>
       </div>
+
+      <div class="decision" id="decision"></div>
     </div>
 
     <div class="pane">
@@ -74,7 +92,7 @@ res.setHeader('Content-Type', 'text/html; charset=iso-2022-jp');</pre>
       <li><a href="/v139/remove-auto-detection-of-iso-2022-jp-charset-in-html/encoding-detection/">Encoding Detection</a></li>
       <li><a href="/v139/remove-auto-detection-of-iso-2022-jp-charset-in-html/xss-sidechannel/">XSS Sidechannel</a></li>
       <li><a href="https://html.spec.whatwg.org/multipage/parsing.html#determining-the-character-encoding" target="_blank" rel="noopener">HTML — Determining the character encoding</a></li>
-      <li><a href="https://chromestatus.com/feature/5141009480286208" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://chromestatus.com/feature/6576566521561088" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -82,33 +100,123 @@ res.setHeader('Content-Type', 'text/html; charset=iso-2022-jp');</pre>
 </main>
 
 <script>
-(() =&gt; {
+(() => {
+  const states = {
+    none: {
+      label: 'No charset declaration',
+      chrome138: 'May auto-detect ISO-2022-JP from escape bytes and reinterpret the HTML stream.',
+      chrome139: 'Does not auto-detect ISO-2022-JP. The document follows the normal no-declaration fallback path instead.',
+      risk: 'Fix required: undeclared HTML is the risky branch this removal closes.'
+    },
+    'utf-8': {
+      label: 'Declared UTF-8',
+      chrome138: 'Uses the explicit UTF-8 declaration; old sniffing should not override a valid higher-priority declaration.',
+      chrome139: 'Uses the explicit UTF-8 declaration. If the bytes are really ISO-2022-JP, the page renders mojibake until the bytes or declaration are corrected.',
+      risk: 'Safe parser path, but only if your bytes are actually UTF-8.'
+    },
+    'iso-2022-jp': {
+      label: 'Declared ISO-2022-JP',
+      chrome138: 'Uses the explicit ISO-2022-JP declaration.',
+      chrome139: 'Still uses the explicit ISO-2022-JP declaration. Chrome removed automatic detection, not explicit encoding labels.',
+      risk: 'Works, but migrating old pages to UTF-8 removes the special encoding dependency.'
+    },
+    'iso-8859-1': {
+      label: 'Declared wrong charset',
+      chrome138: 'May appear to work only if legacy sniffing rescues the page, which is inconsistent and security-sensitive.',
+      chrome139: 'Trusts the declaration path and no longer rescues ISO-2022-JP bytes with automatic detection.',
+      risk: 'Fix required: declared charset and actual bytes disagree.'
+    }
+  };
+
+  function addLine(container, text) {
+    const p = document.createElement('p');
+    p.textContent = text;
+    container.appendChild(p);
+  }
+
+  function addPill(container, text, tone) {
+    const pill = document.createElement('span');
+    pill.className = `pill ${tone}`;
+    pill.textContent = text;
+    container.appendChild(pill);
+  }
+
+  function renderBox(target, title, tone, lines) {
+    target.textContent = '';
+    addPill(target, title, tone);
+    for (const line of lines) addLine(target, line);
+  }
+
+  function escapeBytesForDisplay(value) {
+    return value
+      .replace(/\x1b/g, '\\x1B')
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n');
+  }
+
   function render() {
+    const source = document.getElementById('source').value;
     const declared = document.getElementById('declared').value;
     const bytes = document.getElementById('bytes').value;
 
     const out138 = document.getElementById('out138');
     const out139 = document.getElementById('out139');
+    const decision = document.getElementById('decision');
+    const displayBytes = escapeBytesForDisplay(bytes);
 
-    if (declared === 'iso-2022-jp') {
-      out138.innerHTML = `&lt;span class="pill ok"&gt;✓ decoded as ISO-2022-JP&lt;/span&gt;\n${escape(bytes)}`;
-      out139.innerHTML = `&lt;span class="pill ok"&gt;✓ decoded as ISO-2022-JP (explicit)&lt;/span&gt;\n${escape(bytes)}`;
-    } else if (declared === 'utf-8') {
-      // mismatch — characters may garble
-      out138.innerHTML = `&lt;span class="pill warn"&gt;⚠ Chrome 138 may still auto-detect ISO-2022-JP and silently override the declared utf-8&lt;/span&gt;\n${escape(bytes)}`;
-      out139.innerHTML = `&lt;span class="pill ok"&gt;✓ trusts the declared utf-8&lt;/span&gt;\n(garbled if the bytes were ISO-2022-JP — declare correctly)`;
-    } else if (declared === 'none') {
-      out138.innerHTML = `&lt;span class="pill bad"&gt;auto-detected ISO-2022-JP — XSS sidechannel risk&lt;/span&gt;\n${escape(bytes)}`;
-      out139.innerHTML = `&lt;span class="pill ok"&gt;falls back to windows-1252 (no auto-detect)&lt;/span&gt;\nMojibake but no encoding-confusion XSS vector.`;
+    let effectiveDeclared = declared;
+    let sourceNote = 'The selected charset is supplied by the response header.';
+    if (source === 'meta') {
+      sourceNote = 'The selected charset is supplied by the first in-document meta charset declaration.';
+    } else if (source === 'both-match') {
+      sourceNote = 'The HTTP header and meta charset agree, so the parser has a stable explicit declaration.';
+    } else if (source === 'conflict') {
+      effectiveDeclared = 'utf-8';
+      sourceNote = 'Conflict branch: the HTTP header says UTF-8 and wins over the later ISO-2022-JP meta declaration.';
+    } else if (source === 'non-html') {
+      sourceNote = 'Boundary branch: non-HTML resources are not the HTML parser auto-detection case.';
+    }
+
+    const effectiveState = states[effectiveDeclared];
+    const tone139 = effectiveDeclared === 'none' || effectiveDeclared === 'iso-8859-1' ? 'warn' : 'ok';
+    const tone138 = effectiveDeclared === 'none' ? 'bad' : effectiveDeclared === 'iso-8859-1' ? 'warn' : 'ok';
+
+    renderBox(out138, `Chrome 138: ${effectiveState.label}`, tone138, [
+      effectiveState.chrome138,
+      `Sample bytes: ${displayBytes}`
+    ]);
+
+    if (source === 'non-html') {
+      renderBox(out139, 'Chrome 139+: non-HTML boundary', 'warn', [
+        'The removal targets HTML charset auto-detection. Fix the MIME type first, then provide an explicit charset when text decoding matters.',
+        `This document reports document.characterSet as ${document.characterSet || 'unknown'}.`
+      ]);
     } else {
-      out138.innerHTML = `&lt;span class="pill warn"&gt;wrong charset declared — auto-detection may rescue but inconsistently&lt;/span&gt;`;
-      out139.innerHTML = `&lt;span class="pill ok"&gt;follows the declaration verbatim&lt;/span&gt;`;
+      renderBox(out139, `Chrome 139+: ${effectiveState.label}`, tone139, [
+        effectiveState.chrome139,
+        effectiveState.risk
+      ]);
+    }
+
+    decision.textContent = '';
+    addLine(decision, sourceNote);
+    addLine(decision, `Current page characterSet: ${document.characterSet || 'unknown'}.`);
+    addLine(decision, `TextDecoder('iso-2022-jp') availability: ${decoderStatus()}.`);
+  }
+
+  function decoderStatus() {
+    try {
+      const decoder = new TextDecoder('iso-2022-jp');
+      return `accepted as ${decoder.encoding}`;
+    } catch {
+      return 'not available in this browser';
     }
   }
-  function escape(s) { return s.replace(/&/g, '&amp;').replace(/&lt;/g, '&lt;'); }
+
+  document.getElementById('source').addEventListener('change', render);
   document.getElementById('declared').addEventListener('change', render);
   document.getElementById('bytes').addEventListener('input', render);
-  document.getElementById('enc').addEventListener('click', () =&gt; {
+  document.getElementById('enc').addEventListener('click', () => {
     // Provide a canonical ISO-2022-JP escape-sequence example as readable text.
     document.getElementById('bytes').value = '\x1b$B$3$s$K$A$O!\"$;3&\x1b(B';
     render();
