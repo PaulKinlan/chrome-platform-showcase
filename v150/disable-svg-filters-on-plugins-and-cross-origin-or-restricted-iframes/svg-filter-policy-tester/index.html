@@ -76,16 +76,13 @@
       margin-bottom: 0.6rem;
     }
 
-    /* Simulated iframe rendering area */
+    /* Real iframe rendering area */
     .sim-area {
       position: relative;
       width: 100%;
-      height: 52px;
+      height: 96px;
       background: var(--bg-stone);
       border: 1px dashed var(--border-black);
-      display: flex;
-      align-items: center;
-      justify-content: center;
       margin-bottom: 0.6rem;
       overflow: hidden;
     }
@@ -113,6 +110,13 @@
     .filter-host {
       position: absolute;
       inset: 0;
+    }
+
+    .real-frame {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: var(--bg-paper);
     }
 
     .config-footer {
@@ -428,10 +432,10 @@
 
   if (chromeVer) {
     noteEl.innerHTML = chromeVer >= 150
-      ? '<strong>Chrome ' + chromeVer + '</strong> — SVG filters on cross-origin and restricted iframes are blocked. CSS shorthand filters still apply. Results below show expected Chrome 150 behaviour.'
-      : '<strong>Chrome ' + chromeVer + '</strong> — Pre-Chrome 150: SVG filters may reach cross-origin frames. The "blocked" results below show what Chrome 150+ enforces.';
+      ? '<strong>Chrome ' + chromeVer + '</strong> — real same-origin, opaque-origin, and sandboxed iframes are mounted below. SVG filters are requested on each wrapper; Chrome strips them at restricted frame boundaries.'
+      : '<strong>Chrome ' + chromeVer + '</strong> — this browser may predate the Chrome 150 restriction. The frames below are real, so compare the native rendering against the policy labels.';
   } else {
-    noteEl.textContent = 'Non-Chrome browser — SVG filter policy results are simulated based on the Chrome 150 spec. Actual behaviour may differ.';
+    noteEl.textContent = 'Non-Chrome browser — real iframes are mounted below, but the policy labels describe Chrome 150 behavior. Native rendering may differ.';
   }
 
   // --- Config definitions ---
@@ -441,6 +445,7 @@
       name: 'Same-origin',
       attrs: '<iframe src="/same-origin-page">',
       desc: 'An iframe pointing to a page on the same origin as this page.',
+      frameKind: 'srcdoc',
       svgAllowed: true,
       rule: 'Same origin: no restriction. SVG filters can sample pixels from same-origin content because the embedding page has full read access anyway.',
       workaround: null
@@ -449,7 +454,8 @@
       id: 'cross-origin-cors',
       name: 'Cross-origin + CORS',
       attrs: '<iframe src="https://other.example"\n  crossorigin="anonymous">',
-      desc: 'Cross-origin iframe with CORS headers. CORS grants JS fetch access but does not extend to SVG filter pixel reads.',
+      desc: 'Cross-origin iframe with CORS headers. This local demo uses an opaque data: frame to exercise the same restricted rendering boundary.',
+      frameKind: 'data',
       svgAllowed: false,
       rule: 'Cross-origin boundary. CORS does not grant pixel-level access. Chrome 150 blocks SVG filters at origin boundary.',
       workaround: 'Use CSS shorthand filters (blur, grayscale, brightness) — they still apply across origin boundaries.'
@@ -458,7 +464,8 @@
       id: 'cross-origin-no-cors',
       name: 'Cross-origin, no CORS',
       attrs: '<iframe src="https://other.example">',
-      desc: 'Plain cross-origin iframe with no CORS. The most common embedding pattern.',
+      desc: 'Plain cross-origin iframe with no CORS. This local demo uses an opaque data: frame so the browser paints a real restricted iframe.',
+      frameKind: 'data',
       svgAllowed: false,
       rule: 'Cross-origin boundary with no CORS. SVG filter would allow pixel extraction across an origin boundary the embedding page cannot read — blocked.',
       workaround: 'Use CSS shorthand filters or proxy the content through your own server.'
@@ -468,6 +475,8 @@
       name: 'Sandboxed (same-origin src)',
       attrs: '<iframe src="/same-origin-page"\n  sandbox>',
       desc: 'Same-origin content placed inside a sandboxed iframe. The sandbox attribute creates a restricted browsing context.',
+      frameKind: 'srcdoc',
+      sandbox: '',
       svgAllowed: false,
       rule: 'sandbox attribute creates a restricted browsing context regardless of origin. Chrome 150 treats sandboxed frames as potentially untrusted content — SVG filters blocked.',
       workaround: 'Remove the sandbox attribute if SVG filters are needed and the content is trusted same-origin content.'
@@ -477,6 +486,8 @@
       name: 'Cross-origin sandboxed',
       attrs: '<iframe src="https://other.example"\n  sandbox>',
       desc: 'Cross-origin content in a sandboxed iframe. Both the origin boundary and the sandbox restriction apply.',
+      frameKind: 'data',
+      sandbox: '',
       svgAllowed: false,
       rule: 'Double restriction: cross-origin boundary + sandbox attribute. SVG filters blocked by both rules independently.',
       workaround: 'Use CSS shorthand filters for visual effects. SVG filters cannot be applied regardless of sandbox configuration.'
@@ -486,6 +497,8 @@
       name: 'Sandboxed + allow-same-origin',
       attrs: '<iframe src="/same-origin-page"\n  sandbox="allow-same-origin">',
       desc: 'Sandboxed iframe with allow-same-origin. Restores same-origin context but does not lift the Chrome 150 SVG filter restriction.',
+      frameKind: 'srcdoc',
+      sandbox: 'allow-same-origin',
       svgAllowed: false,
       rule: 'allow-same-origin restores origin context but the Chrome 150 policy blocks SVG filters on all sandboxed frames regardless of allow-same-origin.',
       workaround: 'If you need SVG filters on same-origin content, remove the sandbox attribute entirely. allow-same-origin alone is not sufficient.'
@@ -515,10 +528,6 @@
         '<div class="sim-area" id="sim-' + config.id + '">' +
           '<div class="filter-host" id="host-' + config.id + '">' +
           '</div>' +
-          '<div class="sim-content">' +
-            escHtml(config.id === 'same-origin' ? 'same-origin content' : 'embedded content') +
-            '<br><small style="font-size:0.6rem;opacity:0.8;">' + escHtml(config.name) + '</small>' +
-          '</div>' +
         '</div>' +
         '<div class="policy-note ' + (config.svgAllowed ? 'allowed' : 'blocked') + '" id="policy-' + config.id + '">' +
           escHtml(config.rule) +
@@ -531,6 +540,7 @@
       '</div>';
 
     grid.appendChild(card);
+    mountFrame(config);
   });
 
   function escHtml(str) {
@@ -540,6 +550,25 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
+  }
+
+  function frameDocument(config) {
+    return `<!doctype html><html><body style="margin:0;background:Canvas;color:CanvasText;font:13px ui-monospace,monospace;display:grid;place-items:center;height:100vh;"><div style="border:2px solid CanvasText;background:color-mix(in srgb, Canvas 75%, Highlight);padding:8px 10px;text-align:center;"><strong>${escHtml(config.name)}</strong><br><span>real iframe content</span></div></body></html>`;
+  }
+
+  function mountFrame(config) {
+    const host = document.getElementById('host-' + config.id);
+    const frame = document.createElement('iframe');
+    frame.className = 'real-frame';
+    frame.title = config.name + ' live iframe';
+    if ('sandbox' in config) frame.setAttribute('sandbox', config.sandbox);
+    const markup = frameDocument(config);
+    if (config.frameKind === 'data') {
+      frame.src = 'data:text/html;charset=utf-8,' + encodeURIComponent(markup);
+    } else {
+      frame.srcdoc = markup;
+    }
+    host.appendChild(frame);
   }
 
   // Build a lookup map for quick access
@@ -573,9 +602,7 @@
     }
 
     if (type === 'css') {
-      // CSS filters always apply — simulate with actual CSS
       host.style.filter = 'hue-rotate(180deg) saturate(2)';
-      host.style.background = 'var(--bg-stone)';
       badge.textContent = 'CSS filter: applied';
       badge.className = 'badge badge-allowed';
       policyEl.textContent = 'CSS shorthand filters (hue-rotate, saturate, blur, etc.) are not blocked by Chrome 150. They cannot extract pixel data. Result: filter applies regardless of iframe origin or sandbox attribute.';
@@ -584,25 +611,19 @@
     }
 
     if (type === 'svg') {
+      host.style.filter = 'url(#color-tint)';
       if (config.svgAllowed) {
-        // Same-origin: actually apply the SVG filter
-        host.style.filter = 'url(#color-tint)';
-        host.style.background = 'var(--bg-stone)';
-        badge.textContent = 'SVG filter: applied';
+        badge.textContent = 'SVG filter: requested';
         badge.className = 'badge badge-allowed';
-        policyEl.textContent = 'Same-origin: SVG filter applied. The feColorMatrix tints the content. No security boundary crossed.';
+        policyEl.textContent = 'Same-origin: SVG filter requested on a real iframe wrapper. No security boundary is crossed, so Chrome can apply the feColorMatrix effect.';
         policyEl.className = 'policy-note allowed';
       } else {
-        // Cross-origin / sandboxed: show blocked state
-        host.style.filter = 'none';
-        host.style.background = 'transparent';
-        badge.textContent = 'SVG filter: BLOCKED';
+        badge.textContent = 'SVG policy: restricted';
         badge.className = 'badge badge-blocked';
 
-        // Show what workaround is available
         const workaroundText = config.workaround
-          ? 'Blocked by Chrome 150 policy. Workaround: ' + config.workaround
-          : 'Blocked by Chrome 150 policy. ' + config.rule;
+          ? 'SVG filter requested on the real iframe wrapper. Chrome 150 should strip the effect at this restricted frame boundary. Workaround: ' + config.workaround
+          : 'SVG filter requested on the real iframe wrapper. Chrome 150 should strip the effect at this restricted frame boundary. ' + config.rule;
         policyEl.textContent = workaroundText;
         policyEl.className = 'policy-note blocked';
       }
