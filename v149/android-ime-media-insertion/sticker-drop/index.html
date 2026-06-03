@@ -35,6 +35,39 @@
       font-style: italic;
       pointer-events: none;
     }
+    .sim-toolbar {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-3);
+      margin: var(--space-4) 0;
+      display: flex;
+      gap: var(--space-2);
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .sim-toolbar-label {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-muted);
+      margin-right: var(--space-2);
+    }
+    .sim-btn {
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      padding: 0.35rem 0.65rem;
+      cursor: pointer;
+      box-shadow: 2px 2px 0 var(--border-black);
+    }
+    .sim-btn:hover {
+      transform: translate(-1px, -1px);
+      box-shadow: 3px 3px 0 var(--border-black);
+    }
     .log {
       background: var(--bg-paper);
       border: 2px solid var(--border-black);
@@ -58,8 +91,15 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v149</p>
     <h1>Sticker Drop</h1>
-    <p class="lede">Use a GIF-capable Android keyboard and tap a sticker — it lands inline in the editor. On desktop, drag-and-drop a PNG/GIF from your filesystem to see the same code path handle it.</p>
+    <p class="lede">Use a GIF-capable Android keyboard and tap a sticker — it lands inline in the editor. On desktop, use the simulation buttons or drag-and-drop a PNG/GIF from your filesystem to see the same code path handle it.</p>
   </header>
+
+  <div class="sim-toolbar" aria-label="Simulate Android IME media insertion">
+    <span class="sim-toolbar-label">Simulate IME insert</span>
+    <button class="sim-btn" data-sim-mime="image/gif" data-sim-label="GIF">Insert GIF</button>
+    <button class="sim-btn" data-sim-mime="image/png" data-sim-label="PNG">Insert PNG</button>
+    <button class="sim-btn" data-sim-mime="image/webp" data-sim-label="WebP">Insert WebP</button>
+  </div>
 
   <div class="composer">
     <div class="editor" id="editor" contenteditable="true" autocorrect="off">
@@ -72,6 +112,21 @@
   <section>
     <h2>the wiring</h2>
 <pre><code>const editor = document.getElementById("editor");
+const objectURLs = new WeakMap();
+
+function rememberObjectURL(el, url) {
+  objectURLs.set(el, url);
+}
+
+new MutationObserver(records =&gt; {
+  for (const record of records) {
+    for (const node of record.removedNodes) {
+      const url = objectURLs.get(node);
+      if (url) URL.revokeObjectURL(url);
+    }
+  }
+}).observe(editor, { childList: true, subtree: true });
+
 editor.addEventListener("beforeinput", (e) =&gt; {
   if (e.inputType === "insertFromPaste" || e.inputType === "insertFromDrop") {
     const items = e.dataTransfer?.items ?? [];
@@ -80,6 +135,7 @@ editor.addEventListener("beforeinput", (e) =&gt; {
         const file = item.getAsFile();
         const img = document.createElement("img");
         img.src = URL.createObjectURL(file);
+        rememberObjectURL(img, img.src);
         editor.appendChild(img);
         e.preventDefault();
       }
@@ -103,6 +159,7 @@ editor.addEventListener("beforeinput", (e) =&gt; {
 const editor = document.getElementById("editor");
 const log = document.getElementById("log");
 let cleared = false;
+const objectURLs = new WeakMap();
 
 function logLine(text, cls = "") {
   const div = document.createElement("div");
@@ -111,6 +168,27 @@ function logLine(text, cls = "") {
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
 }
+
+function rememberObjectURL(el, url) {
+  objectURLs.set(el, url);
+}
+
+function revokeObjectURLFor(node) {
+  if (node.nodeType !== Node.ELEMENT_NODE) return;
+  const url = objectURLs.get(node);
+  if (url) {
+    URL.revokeObjectURL(url);
+    objectURLs.delete(node);
+    logLine(`  revoked object URL for removed ${node.tagName.toLowerCase()}`, "evt");
+  }
+  node.querySelectorAll?.("img,video").forEach(child => revokeObjectURLFor(child));
+}
+
+new MutationObserver(records => {
+  for (const record of records) {
+    for (const node of record.removedNodes) revokeObjectURLFor(node);
+  }
+}).observe(editor, { childList: true, subtree: true });
 
 function clearPlaceholder() {
   if (!cleared) {
@@ -122,7 +200,7 @@ function clearPlaceholder() {
 function handleData(dt, label) {
   if (!dt) { logLine(`${label}: no dataTransfer`); return; }
   for (const item of dt.items || []) {
-    logLine(`  item kind=${item.kind} type=${item.type}`, "evt");
+    logLine(`${label}: item kind=${item.kind} type=${item.type || "(empty)"}`, "evt");
     if (item.kind === "file" && (item.type.startsWith("image/") || item.type.startsWith("video/"))) {
       const file = item.getAsFile();
       if (!file) continue;
@@ -131,8 +209,11 @@ function handleData(dt, label) {
       const el = item.type.startsWith("video/")
         ? Object.assign(document.createElement("video"), { src: url, controls: true, autoplay: true, loop: true, muted: true })
         : Object.assign(document.createElement("img"), { src: url });
+      rememberObjectURL(el, url);
       editor.appendChild(el);
       logLine(`  inserted ${item.type} (${(file.size / 1024).toFixed(0)} KB)`, "media");
+    } else {
+      logLine(`  rejected non-media item type=${item.type || "(empty)"} kind=${item.kind}`, "evt");
     }
   }
 }
@@ -140,21 +221,104 @@ function handleData(dt, label) {
 editor.addEventListener("beforeinput", (e) => {
   logLine(`beforeinput · inputType=${e.inputType}`, "evt");
   if (e.dataTransfer) {
-    handleData(e.dataTransfer, e.inputType);
+    handleData(e.dataTransfer, `beforeinput/${e.inputType}`);
     e.preventDefault();
   }
 });
 editor.addEventListener("paste", (e) => {
   logLine(`paste`, "evt");
-  handleData(e.clipboardData, "paste");
+  handleData(e.clipboardData, "paste/clipboardData");
 });
 editor.addEventListener("drop", (e) => {
   e.preventDefault();
   logLine(`drop`, "evt");
-  handleData(e.dataTransfer, "drop");
+  handleData(e.dataTransfer, "drop/dataTransfer");
 });
 editor.addEventListener("dragover", (e) => e.preventDefault());
 editor.addEventListener("focus", () => logLine("editor focused"));
+
+function makeFallbackGIF() {
+  const bytes = Uint8Array.from([
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00,
+    0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xff, 0xff, 0xff, 0x21, 0xf9, 0x04, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44,
+    0x01, 0x00, 0x3b,
+  ]);
+  return new File([bytes], "simulated-ime-sticker.gif", { type: "image/gif" });
+}
+
+function makeCanvasFile(mimeType, label) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 140;
+  canvas.height = 96;
+  const ctx = canvas.getContext("2d");
+  const styles = getComputedStyle(document.documentElement);
+  ctx.fillStyle = styles.getPropertyValue("--bg-stone").trim();
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = styles.getPropertyValue("--border-black").trim();
+  ctx.lineWidth = 4;
+  ctx.strokeRect(8, 8, canvas.width - 16, canvas.height - 16);
+  ctx.fillStyle = styles.getPropertyValue("--accent-blue").trim();
+  ctx.fillRect(18, 24, canvas.width - 36, 28);
+  ctx.fillStyle = styles.getPropertyValue("--text-black").trim();
+  ctx.font = "bold 18px monospace";
+  ctx.fillText(label, 24, 70);
+  return new Promise(resolve => {
+    canvas.toBlob(blob => {
+      resolve(new File([blob], `simulated-ime-${label.toLowerCase()}.${mimeType.split("/")[1]}`, { type: mimeType }));
+    }, mimeType);
+  });
+}
+
+async function makeSimulatedFile(mimeType, label) {
+  if (mimeType === "image/gif") return makeFallbackGIF();
+  return await makeCanvasFile(mimeType, label);
+}
+
+function makeDataTransfer(file) {
+  try {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    return dt;
+  } catch (_) {
+    return {
+      files: [file],
+      items: [{
+        kind: "file",
+        type: file.type,
+        getAsFile: () => file,
+      }],
+    };
+  }
+}
+
+async function simulateIMEInsert(mimeType, label) {
+  const file = await makeSimulatedFile(mimeType, label);
+  const dt = makeDataTransfer(file);
+  const event = new InputEvent("beforeinput", {
+    bubbles: true,
+    cancelable: true,
+    inputType: "insertFromPaste",
+    dataTransfer: dt,
+  });
+  if (!event.dataTransfer) {
+    Object.defineProperty(event, "dataTransfer", { value: dt });
+  }
+  logLine(`simulate IME commitContent · ${mimeType}`, "evt");
+  const handled = editor.dispatchEvent(event);
+  if (handled) {
+    handleData(dt, "beforeinput/simulated fallback");
+  }
+}
+
+document.querySelectorAll("[data-sim-mime]").forEach(button => {
+  button.addEventListener("click", () => {
+    simulateIMEInsert(button.dataset.simMime, button.dataset.simLabel);
+  });
+});
+
 logLine("ready");
 </script>
 </body>
