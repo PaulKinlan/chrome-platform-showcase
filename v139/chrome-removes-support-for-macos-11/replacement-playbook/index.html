@@ -72,6 +72,14 @@
           <option value="js">Client-side JS (navigator.userAgentData)</option>
         </select>
       </div>
+      <div class="row"><label for="os-state">visitor state</label>
+        <select id="os-state">
+          <option value="macos11-existing">macOS 11 with existing Chrome</option>
+          <option value="macos11-new">macOS 11 attempting new install</option>
+          <option value="supported">macOS 12 or later</option>
+          <option value="unknown">Unknown / hints unavailable</option>
+        </select>
+      </div>
       <div class="row"><label for="placement">banner placement</label>
         <select id="placement">
           <option value="top">Top sticky bar</option>
@@ -124,15 +132,18 @@
 </main>
 
 <script>
-(() =&gt; {
+(() => {
   const out = document.getElementById('playbook');
   const copyOut = document.getElementById('copy-snippet');
   const detectOut = document.getElementById('detect-snippet');
-  const fields = ['audience','impact','milestone','banner-start','detect','placement','cadence','tone'].map(id =&gt; document.getElementById(id));
-  fields.forEach(f =&gt; f.addEventListener('input', render));
+  const fields = ['audience', 'impact', 'milestone', 'banner-start', 'detect', 'os-state', 'placement', 'cadence', 'tone'].map((id) => document.getElementById(id));
+  fields.forEach((f) => {
+    f.addEventListener('input', render);
+    f.addEventListener('change', render);
+  });
 
   function get() {
-    return Object.fromEntries(fields.map(f =&gt; [f.id, f.value]));
+    return Object.fromEntries(fields.map((f) => [f.id, f.value]));
   }
 
   function tonePrefix(t) {
@@ -141,32 +152,79 @@
     return 'Compatibility notice.';
   }
 
+  function safeDate(value) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : 'not scheduled';
+  }
+
   function render() {
     const v = get();
-    const banner = v.tone === 'urgent' ? 'modal' : v.placement;
-    const removeBy = ({'139':'2026-07-01','142':'2026-10-01','145':'2027-01-01'})[v.milestone];
+    const liveFrom = safeDate(v['banner-start']);
+    const removeBy = ({
+      '139': 'after Chrome 139 rollout completes',
+      '142': 'after three monthly reminders or when unsupported sessions fall below 0.1%',
+      '145': 'after six monthly reminders or when support traffic is gone',
+    })[v.milestone];
+    const osState = ({
+      'macos11-existing': {
+        pill: 'danger',
+        label: 'macOS 11 existing Chrome',
+        status: 'Chrome continues to launch, but Chrome 138 is the final update stream for this OS.',
+        guidance: 'Keep the warning visible, link to a macOS upgrade path, and avoid promising future Chrome security fixes.',
+        snippet: 'existing Chrome on macOS 11: warn and route to OS upgrade instructions',
+      },
+      'macos11-new': {
+        pill: 'danger',
+        label: 'macOS 11 new install',
+        status: 'Chrome 139+ requires macOS 12+ for new installations.',
+        guidance: 'Do not show a generic download button. Send users to supported-OS requirements or an alternate browser path.',
+        snippet: 'new Chrome install on macOS 11: block installer path and explain macOS 12+ requirement',
+      },
+      supported: {
+        pill: 'ok',
+        label: 'macOS 12+ supported',
+        status: 'No end-of-support warning is needed for this visitor.',
+        guidance: 'Suppress the banner and clear any stale eol_macos11_seen audience membership.',
+        snippet: 'macOS 12 or later: suppress end-of-support notice',
+      },
+      unknown: {
+        pill: 'warn',
+        label: 'unknown platform',
+        status: 'The OS version could not be detected confidently.',
+        guidance: 'Use neutral copy, never block the session, and offer a manual “About This Mac” check.',
+        snippet: 'unknown platform: show neutral help only after user opens compatibility details',
+      },
+    })[v['os-state']];
+    const suppressNotice = v['os-state'] === 'supported';
+    const neutralOnly = v['os-state'] === 'unknown';
+    const banner = suppressNotice ? 'suppressed' : neutralOnly ? 'account' : v.tone === 'urgent' ? 'modal' : v.placement;
 
     const sections = [];
 
-    sections.push(`&lt;span class="pill ${v.impact === 'high' ? 'danger' : v.impact === 'medium' ? 'warn' : 'ok'}"&gt;${v.impact} impact&lt;/span&gt;` +
-      `&lt;span class="pill"&gt;Chrome ${v.milestone} cutover&lt;/span&gt;` +
-      `&lt;span class="pill"&gt;${v.audience}&lt;/span&gt;`);
+    sections.push(`<span class="pill ${v.impact === 'high' ? 'danger' : v.impact === 'medium' ? 'warn' : 'ok'}">${v.impact} impact</span>` +
+      `<span class="pill ${osState.pill}">${osState.label}</span>` +
+      `<span class="pill">Chrome ${v.milestone} plan</span>` +
+      `<span class="pill">${v.audience}</span>`);
 
-    sections.push(`&lt;h4&gt;1. Detect&lt;/h4&gt;&lt;ul&gt;
-      &lt;li&gt;Method: &lt;strong&gt;${({
-        'ua-ch':'<code>Sec-CH-UA-Platform-Version</code> header on every request (request via <code>Accept-CH</code>)',
-        'ua-string':'Parse <code>User-Agent</code> for <code>Mac OS X 11_*</code>',
-        'js':'Read <code>navigator.userAgentData.getHighEntropyValues([\'platformVersion\'])</code> on first paint',
-      })[v.detect]}&lt;/strong&gt;&lt;/li&gt;
-      &lt;li&gt;Latency: ${v.detect === 'ua-ch' ? 'second request' : 'first request'}&lt;/li&gt;
-      &lt;li&gt;Privacy: ${v.detect === 'ua-string' ? 'lossy (UA is being frozen)' : 'standards-track, persistent'}&lt;/li&gt;
-    &lt;/ul&gt;`);
+    sections.push(`<h4>1. Detect</h4><ul>
+      <li>Method: <strong>${({
+        'ua-ch': '<code>Sec-CH-UA-Platform-Version</code> header on every request (request via <code>Accept-CH</code>)',
+        'ua-string': 'Parse <code>User-Agent</code> for <code>Mac OS X 11_*</code>',
+        js: 'Read <code>navigator.userAgentData.getHighEntropyValues([\'platformVersion\'])</code> on first paint',
+      })[v.detect]}</strong></li>
+      <li>Latency: ${v.detect === 'ua-ch' ? 'second request' : 'first request'}</li>
+      <li>Privacy: ${v.detect === 'ua-string' ? 'lossy (UA is being frozen)' : 'standards-track, persistent'}</li>
+    </ul>`);
 
-    sections.push(`&lt;h4&gt;2. Communicate&lt;/h4&gt;&lt;ul&gt;
-      &lt;li&gt;Placement: &lt;strong&gt;${({top:'top sticky bar',modal:'first-visit modal',account:'account / settings page'})[banner]}&lt;/strong&gt;${v.tone === 'urgent' &amp;&amp; v.placement !== 'modal' ? ' &lt;em&gt;(escalated to modal due to urgent tone)&lt;/em&gt;' : ''}&lt;/li&gt;
-      &lt;li&gt;Cadence: ${({once:'once per session',daily:'daily',every:'every page view'})[v.cadence]}&lt;/li&gt;
-      &lt;li&gt;Live from: ${v['banner-start']} → remove by: &lt;strong&gt;${removeBy}&lt;/strong&gt;&lt;/li&gt;
-    &lt;/ul&gt;`);
+    sections.push(`<h4>2. Classify the visitor</h4><ul>
+      <li>Status: <strong>${osState.status}</strong></li>
+      <li>Edge-case guidance: ${osState.guidance}</li>
+    </ul>`);
+
+    sections.push(`<h4>3. Communicate</h4><ul>
+      <li>Placement: <strong>${({ top: 'top sticky bar', modal: 'first-visit modal', account: 'account / settings page', suppressed: 'no banner' })[banner]}</strong>${v.tone === 'urgent' && v.placement !== 'modal' && !suppressNotice && !neutralOnly ? ' <em>(escalated to modal due to urgent tone)</em>' : ''}</li>
+      <li>Cadence: ${({ once: 'once per session', daily: 'daily', every: 'every page view' })[v.cadence]}</li>
+      <li>Live from: ${liveFrom} → remove: <strong>${removeBy}</strong></li>
+    </ul>`);
 
     const audienceBlock = {
       consumer: 'Avoid the words &ldquo;deprecated&rdquo; and &ldquo;EOL&rdquo;. Link to a one-page upgrade guide with screenshots.',
@@ -174,24 +232,39 @@
       enterprise: 'Surface an MDM-deployable JSON payload at <code>/.well-known/chrome-eol-notice.json</code> so IT can centrally suppress the banner once devices are migrated.',
     }[v.audience];
 
-    sections.push(`&lt;h4&gt;3. Audience-specific&lt;/h4&gt;&lt;ul&gt;&lt;li&gt;${audienceBlock}&lt;/li&gt;${v.impact === 'high' ? '&lt;li&gt;Add an offline-capable fallback build link (Electron / native wrapper pinned to your last good Chromium-on-Big-Sur).&lt;/li&gt;' : ''}&lt;/ul&gt;`);
+    sections.push(`<h4>4. Audience-specific</h4><ul><li>${audienceBlock}</li>${v.impact === 'high' ? '<li>Add an offline-capable fallback build link (Electron / native wrapper pinned to your last good Chromium-on-Big-Sur).</li>' : ''}</ul>`);
 
-    sections.push(`&lt;h4&gt;4. Measure&lt;/h4&gt;&lt;ul&gt;
-      &lt;li&gt;Emit a custom RUM event &lt;code&gt;eol_macos11_seen&lt;/code&gt; with the platformVersion tag.&lt;/li&gt;
-      &lt;li&gt;Stop showing the banner when the rolling 7-day count drops below 0.1% of unique sessions.&lt;/li&gt;
-    &lt;/ul&gt;`);
+    sections.push(`<h4>5. Measure</h4><ul>
+      <li>Emit a custom RUM event <code>eol_macos11_seen</code> with the platformVersion tag.</li>
+      <li>Record the branch: <code>${osState.snippet}</code>.</li>
+      <li>Stop showing the banner when the rolling 7-day count drops below 0.1% of unique sessions.</li>
+    </ul>`);
 
     out.innerHTML = sections.join('');
 
     // Copy snippet
     const prefix = tonePrefix(v.tone);
-    const copy =
-`${prefix} Chrome ${v.milestone} is the last version that will receive security updates on macOS 11
-(Big Sur). Your browser keeps working, but stops getting fixes after ${removeBy}.
+    let copy = '';
+    if (suppressNotice) {
+      copy =
+`Compatibility check. This device appears to be running macOS 12 or later.
 
-What to do: update to macOS 12 or later, or switch to a different browser. ${v.audience === 'enterprise' ? 'Your IT admin can roll this out via MDM — see your help desk.' : 'It takes about 30 minutes — back up first.'}
+No end-of-support warning is needed for this visitor. Keep the normal Chrome download and support paths visible, and clear any stale macOS 11 warning audience membership.`;
+    } else if (neutralOnly) {
+      copy =
+`Compatibility check. We could not detect this device's macOS version confidently.
+
+Do not block this session. Offer a short help link that shows users how to check Apple menu → About This Mac, then only show the macOS 11 warning after a confirmed match.`;
+    } else {
+      copy =
+`${prefix} Chrome 138 is the last version that receives security updates on macOS 11
+(Big Sur). Chrome 139 and newer require macOS 12 or later for new installs.
+
+What this page detected: ${osState.status}
+What to do: update to macOS 12 or later, or switch to a different browser. ${v.audience === 'enterprise' ? 'Your IT admin can roll this out via MDM — see your help desk.' : 'Back up first, then use Software Update.'}
 
 ${v.impact === 'high' ? `If you can't upgrade right now, a long-term support build is at https://example.com/lts-mac.` : ''}`.trim();
+    }
 
     copyOut.textContent = copy;
 
@@ -199,14 +272,15 @@ ${v.impact === 'high' ? `If you can't upgrade right now, a long-term support bui
     if (v.detect === 'ua-ch') {
       detectOut.textContent =
 `// Express middleware — request the hint, then read it on the next hop.
-app.use((req, res, next) =&gt; {
+app.use((req, res, next) => {
   res.setHeader('Accept-CH', 'Sec-CH-UA-Platform-Version');
   res.setHeader('Critical-CH', 'Sec-CH-UA-Platform-Version');
   res.setHeader('Vary', 'Sec-CH-UA-Platform-Version');
   const version = req.get('sec-ch-ua-platform-version') ?? '';
   // "11.7.10" → major 11
   const major = parseInt(version.replace(/^"|"$/g, ''), 10);
-  req.macOS11 = req.get('sec-ch-ua-platform') === '"macOS"' &amp;&amp; major === 11;
+  req.macOS11 = req.get('sec-ch-ua-platform') === '"macOS"' && major === 11;
+  req.eolBranch = req.macOS11 ? '${v['os-state'] === 'macos11-new' ? 'new-install-blocked' : 'existing-install-warning'}' : 'supported-or-unknown';
   next();
 });`;
     } else if (v.detect === 'ua-string') {
@@ -219,9 +293,9 @@ function isMacOS11(ua) {
     } else {
       detectOut.textContent =
 `// Client-side, lazy. Fine for soft banners — but blocks the first paint of the banner.
-navigator.userAgentData?.getHighEntropyValues(['platformVersion']).then(v =&gt; {
+navigator.userAgentData?.getHighEntropyValues(['platformVersion']).then((v) => {
   const major = parseInt(v.platformVersion, 10);
-  if (v.platform === 'macOS' &amp;&amp; major === 11) {
+  if (v.platform === 'macOS' && major === 11) {
     document.body.classList.add('eol-macos-11');
   }
 });`;
