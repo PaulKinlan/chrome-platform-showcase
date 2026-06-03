@@ -20,12 +20,41 @@
       user-select: none;
     }
     fancy-submit:hover { transform: translate(-2px,-2px); box-shadow: var(--flat-shadow-hover); }
+    fancy-submit:focus, fancy-submit:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 3px; }
+    fancy-submit:disabled, fancy-submit[disabled] {
+      background: var(--text-muted);
+      color: var(--bg-ivory);
+      cursor: not-allowed;
+      opacity: 0.75;
+      transform: none;
+      box-shadow: none;
+    }
     form {
       background: var(--bg-paper);
       border: 2px solid var(--border-black);
       box-shadow: var(--thin-shadow);
       padding: var(--space-4);
       max-width: 480px;
+    }
+    .form-actions, .control-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-3);
+      align-items: center;
+      margin-top: var(--space-3);
+    }
+    .form-actions button, .control-strip button {
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      box-shadow: var(--thin-shadow);
+      padding: 0.55rem 0.9rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+    }
+    .control-strip button[aria-pressed="true"] {
+      background: var(--accent-rose);
+      color: var(--bg-ivory);
     }
     form .row { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: var(--space-3); }
     form label { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
@@ -36,6 +65,16 @@
       background: var(--bg-paper);
       color: var(--text-black);
     }
+    .state {
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      padding: var(--space-2) var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      margin-top: var(--space-3);
+    }
+    pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
     .log {
       background: var(--bg-paper);
       border: 2px solid var(--border-black);
@@ -60,7 +99,7 @@
     <p class="lede">A <code>&lt;fancy-submit&gt;</code> element with its own rendering — but submits the surrounding form like a native button when activated, thanks to <code>HTMLSubmitButtonBehavior</code>.</p>
   </header>
 
-  <form id="form" novalidate>
+  <form id="form">
     <div class="row">
       <label for="name">name</label>
       <input id="name" name="name" required>
@@ -69,7 +108,16 @@
       <label for="msg">message</label>
       <input id="msg" name="msg" minlength="3" required>
     </div>
-    <fancy-submit tabindex="0">Send it</fancy-submit>
+    <div class="form-actions">
+      <fancy-submit id="fancy" tabindex="0">Send it</fancy-submit>
+      <button type="submit" id="nativeSubmit">Native submit</button>
+    </div>
+    <div class="control-strip">
+      <button type="button" id="tryEmpty">Try empty submit</button>
+      <button type="button" id="toggleDisabled" aria-pressed="false">Disable fancy submit</button>
+      <button type="button" id="fillValid">Fill valid sample</button>
+    </div>
+    <p class="state" id="state">Form validity pending…</p>
   </form>
 
   <div class="log" id="log"></div>
@@ -77,11 +125,17 @@
   <section>
     <h2>the element</h2>
 <pre><code>class FancySubmit extends HTMLElement {
+  static formAssociated = true;
+
   constructor() {
     super();
-    this.internals_ = this.attachInternals({
-      behaviors: [HTMLSubmitButtonBehavior],
-    });
+    this.internals_ = this.attachInternals({ behaviors: [new HTMLSubmitButtonBehavior()] });
+  }
+
+  set disabled(value) {
+    this.toggleAttribute("disabled", Boolean(value));
+    this.setAttribute("aria-disabled", String(Boolean(value)));
+    this.tabIndex = value ? -1 : 0;
   }
 }
 customElements.define("fancy-submit", FancySubmit);</code></pre>
@@ -109,35 +163,115 @@ function logLine(s) {
 }
 
 class FancySubmit extends HTMLElement {
+  static formAssociated = true;
+
   constructor() {
     super();
+    this.behaviorActive = false;
     try {
-      this.internals_ = this.attachInternals({ behaviors: [self.HTMLSubmitButtonBehavior] });
+      const submitBehavior = new self.HTMLSubmitButtonBehavior();
+      this.internals_ = this.attachInternals({ behaviors: [submitBehavior] });
+      this.behaviorActive = true;
       logLine("registered HTMLSubmitButtonBehavior");
     } catch (e) {
-      // Fallback: walk up and requestSubmit().
-      this.addEventListener("click", (ev) => {
-        const f = this.closest("form");
-        if (f) f.requestSubmit();
-      });
-      this.addEventListener("keydown", (ev) => {
-        if (ev.key === "Enter" || ev.key === " ") {
-          ev.preventDefault();
-          const f = this.closest("form");
-          if (f) f.requestSubmit();
-        }
-      });
       logLine("HTMLSubmitButtonBehavior not available — falling back to requestSubmit()");
+    }
+    this.addEventListener("click", (ev) => this.activate(ev, "click"));
+    this.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        if (this.behaviorActive) {
+          if (this.disabled) {
+            ev.preventDefault();
+            logLine(`blocked ${ev.key}: fancy-submit is disabled`);
+          }
+          return;
+        }
+        ev.preventDefault();
+        this.activate(ev, ev.key === "Enter" ? "Enter" : "Space");
+      }
+    });
+  }
+
+  get disabled() {
+    return this.hasAttribute("disabled");
+  }
+
+  set disabled(value) {
+    this.toggleAttribute("disabled", Boolean(value));
+    this.setAttribute("aria-disabled", String(Boolean(value)));
+    this.tabIndex = value ? -1 : 0;
+  }
+
+  activate(ev, via) {
+    if (this.disabled) {
+      ev.preventDefault();
+      logLine(`blocked ${via}: fancy-submit is disabled`);
+      return;
+    }
+    if (!this.behaviorActive) {
+      const f = this.closest("form");
+      if (f) {
+        logLine(`fallback ${via}: calling form.requestSubmit()`);
+        f.requestSubmit();
+      }
+    } else if (via === "click") {
+      logLine("platform behavior handles click activation");
     }
   }
 }
 customElements.define("fancy-submit", FancySubmit);
 
-document.getElementById("form").addEventListener("submit", (e) => {
+const form = document.getElementById("form");
+const fancy = document.getElementById("fancy");
+const nameInput = document.getElementById("name");
+const msgInput = document.getElementById("msg");
+const state = document.getElementById("state");
+const toggleDisabled = document.getElementById("toggleDisabled");
+
+function updateState() {
+  const valid = [nameInput, msgInput].every((control) => control.validity.valid);
+  state.textContent = `${valid ? "valid" : "invalid"} form · fancy-submit ${fancy.disabled ? "disabled" : "enabled"}`;
+}
+
+form.addEventListener("submit", (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
-  logLine(`submitted: ${JSON.stringify(Object.fromEntries(fd))}`);
+  const submitter = e.submitter?.id || e.submitter?.tagName?.toLowerCase() || "custom/fallback";
+  logLine(`submitted by ${submitter}: ${JSON.stringify(Object.fromEntries(fd))}`);
+  updateState();
 });
+
+form.addEventListener("invalid", (e) => {
+  logLine(`validation blocked submit: ${e.target.name} is invalid`);
+  updateState();
+}, true);
+
+form.addEventListener("input", updateState);
+
+document.getElementById("tryEmpty").addEventListener("click", () => {
+  nameInput.value = "";
+  msgInput.value = "";
+  updateState();
+  logLine("trying empty form through fancy-submit");
+  fancy.click();
+});
+
+document.getElementById("fillValid").addEventListener("click", () => {
+  nameInput.value = "Ada";
+  msgInput.value = "Ship it";
+  updateState();
+  logLine("filled a valid sample");
+});
+
+toggleDisabled.addEventListener("click", () => {
+  fancy.disabled = !fancy.disabled;
+  toggleDisabled.textContent = fancy.disabled ? "Enable fancy submit" : "Disable fancy submit";
+  toggleDisabled.setAttribute("aria-pressed", String(fancy.disabled));
+  logLine(`fancy-submit ${fancy.disabled ? "disabled" : "enabled"}`);
+  updateState();
+});
+
+updateState();
 </script>
 </body>
 </html>
