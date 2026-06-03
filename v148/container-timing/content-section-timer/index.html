@@ -112,10 +112,46 @@
     .timing-bar-fill.fastest { background: var(--accent-emerald); }
     .timing-bar-fill.slowest { background: var(--accent-rose); }
 
+    .observer-status {
+      padding: 0.6rem 0.8rem;
+      border-bottom: 1.5px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--text-charcoal);
+      background: var(--bg-ivory);
+      line-height: 1.45;
+    }
+
+    .control-stack {
+      padding: 0.75rem 1rem;
+      border-top: 1.5px solid var(--border-black);
+      display: grid;
+      gap: 0.55rem;
+    }
+
+    .control-stack label {
+      display: grid;
+      gap: 0.2rem;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 700;
+    }
+
+    .control-stack input[type="checkbox"] { accent-color: var(--accent-blue); }
+
+    .control-stack select {
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      padding: 0.35rem 0.45rem;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+    }
+
     .reload-btn {
       display: block;
-      width: calc(100% - 2rem);
-      margin: 0.75rem 1rem;
+      width: 100%;
+      margin: 0;
       padding: 0.45rem;
       background: var(--text-black);
       color: var(--bg-ivory);
@@ -197,7 +233,7 @@
       </div>
       <div id="entry-article" class="timing-entry">
         <div class="timing-entry-id">article</div>
-        <div class="timing-entry-time pending" id="time-article">waiting��</div>
+        <div class="timing-entry-time pending" id="time-article">waiting…</div>
         <div class="timing-bar-mini"><div class="timing-bar-fill" id="bar-article"></div></div>
       </div>
       <div id="entry-sidebar" class="timing-entry">
@@ -205,7 +241,21 @@
         <div class="timing-entry-time pending" id="time-sidebar">waiting…</div>
         <div class="timing-bar-mini"><div class="timing-bar-fill" id="bar-sidebar"></div></div>
       </div>
-      <button class="reload-btn" id="reload-btn">Replay simulation</button>
+      <div class="observer-status" id="observer-status">Checking PerformanceObserver support…</div>
+      <div class="control-stack">
+        <label>
+          Paint scenario
+          <select id="scenario-select">
+            <option value="normal">Normal article load</option>
+            <option value="slow-hero">Slow hero image</option>
+            <option value="delayed-sidebar">Delayed sidebar widget</option>
+          </select>
+        </label>
+        <label>
+          <span><input type="checkbox" id="ignore-sidebar"> mark sidebar with <code>containertiming-ignore</code></span>
+        </label>
+        <button class="reload-btn" id="reload-btn">Observe containers</button>
+      </div>
     </div>
   </div>
 
@@ -218,29 +268,29 @@ const observer = new PerformanceObserver(list => {
   for (const entry of list.getEntries()) {
     console.log(
       entry.identifier,   // "hero", "article", "sidebar"
-      entry.renderTime,   // ms since navigation start
+      entry.renderTime,   // latest paint timestamp
+      entry.firstRenderTime,
       entry.size          // { width, height } of container
     );
   }
 });
 
-observer.observe({ type: 'container-timing', buffered: true });</code></pre>
+observer.observe({ type: 'container', buffered: true });</code></pre>
 
   <section>
-    <h2>see also</h2>
+    <h2>references</h2>
     <ul>
       <li><a href="/v148/container-timing/timing-dashboard/">Timing Dashboard</a> — multi-element live dashboard</li>
       <li><a href="/v148/container-timing/">Back to feature index</a></li>
-          <li><a href="https://chromestatus.com/feature/5110962817073152" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://chromestatus.com/feature/5110962817073152" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://wicg.github.io/container-timing/" target="_blank" rel="noopener">Container Timing API draft</a></li>
     </ul>
   </section>
 
   <script>
-    const navStart = performance.timeOrigin;
-
-    function setTime(id, ms, barId, pct, which) {
+    function setTime(id, ms, barId, pct, which, source) {
       const el = document.getElementById('time-' + id);
-      el.textContent = ms.toFixed(1) + ' ms';
+      el.textContent = ms.toFixed(1) + ' ms' + (source ? ' · ' + source : '');
       el.className = 'timing-entry-time';
       const bar = document.getElementById('bar-' + barId);
       bar.style.width = pct + '%';
@@ -248,8 +298,11 @@ observer.observe({ type: 'container-timing', buffered: true });</code></pre>
       if (which === 'slowest') bar.classList.add('slowest');
     }
 
-    function runSimulation() {
-      // Reset
+    function setStatus(text) {
+      document.getElementById('observer-status').textContent = text;
+    }
+
+    function resetRows() {
       ['hero', 'article', 'sidebar'].forEach(id => {
         document.getElementById('time-' + id).textContent = 'waiting…';
         document.getElementById('time-' + id).className = 'timing-entry-time pending';
@@ -257,61 +310,84 @@ observer.observe({ type: 'container-timing', buffered: true });</code></pre>
         bar.style.width = '0%';
         bar.className = 'timing-bar-fill';
       });
+    }
 
-      // Simulate render times (base + jitter)
+    function runSimulation(reason) {
+      resetRows();
+      const scenario = document.getElementById('scenario-select').value;
+      const ignoreSidebar = document.getElementById('ignore-sidebar').checked;
+      const sidebar = document.querySelector('[containertiming="sidebar"]');
+      sidebar.toggleAttribute('containertiming-ignore', ignoreSidebar);
+      setStatus(reason || 'Using simulated PerformanceContainerTiming entries so the scenario can be replayed.');
+
       const jitter = () => Math.random() * 15;
-      const times = {
-        hero:    120 + jitter(),
-        article: 95  + jitter(),
-        sidebar: 75  + jitter(),
+      const baseTimes = {
+        normal: { hero: 120, article: 95, sidebar: 75 },
+        'slow-hero': { hero: 190, article: 92, sidebar: 78 },
+        'delayed-sidebar': { hero: 112, article: 96, sidebar: 175 },
       };
+      const times = Object.fromEntries(
+        Object.entries(baseTimes[scenario]).map(([id, ms]) => [id, ms + jitter()]),
+      );
+      if (ignoreSidebar) times.sidebar = 0;
       const max = Math.max(...Object.values(times));
 
-      const sorted = Object.entries(times).sort((a, b) => a[1] - b[1]);
+      const sorted = Object.entries(times).filter(([, ms]) => ms > 0).sort((a, b) => a[1] - b[1]);
       const fastest = sorted[0][0];
       const slowest = sorted[sorted.length - 1][0];
 
       Object.entries(times).forEach(([id, ms]) => {
+        if (ms === 0) {
+          document.getElementById('time-' + id).textContent = 'ignored subtree';
+          return;
+        }
         setTimeout(() => {
           const pct = (ms / max) * 100;
           const which = id === fastest ? 'fastest' : id === slowest ? 'slowest' : '';
-          setTime(id, ms, id, pct, which);
+          setTime(id, ms, id, pct, which, 'simulated');
         }, ms);
       });
     }
 
     // Try real Container Timing API first
+    let nativeObserver;
     if ('PerformanceObserver' in window) {
       try {
         const supportedTypes = PerformanceObserver.supportedEntryTypes || [];
-        if (supportedTypes.includes('container-timing')) {
-          const obs = new PerformanceObserver(list => {
-            const max = Math.max(...list.getEntries().map(e => e.renderTime));
+        if (supportedTypes.includes('container')) {
+          setStatus('Native support detected: observing PerformanceObserver entries with type "container".');
+          nativeObserver = new PerformanceObserver(list => {
+            const max = Math.max(...list.getEntries().map(e => e.renderTime || e.startTime || 1));
             list.getEntries().forEach(entry => {
-              const pct = (entry.renderTime / max) * 100;
-              setTime(entry.identifier, entry.renderTime, entry.identifier, pct, '');
+              const ms = entry.renderTime || entry.startTime;
+              const pct = (ms / max) * 100;
+              setTime(entry.identifier, ms, entry.identifier, pct, '', 'native');
             });
           });
-          obs.observe({ type: 'container-timing', buffered: true });
+          nativeObserver.observe({ type: 'container', buffered: true });
         } else {
-          // Fallback to simulation after DOM settles
-          setTimeout(runSimulation, 150);
+          setTimeout(() => runSimulation('Unsupported-browser path: PerformanceObserver exists, but supportedEntryTypes does not include "container".'), 150);
         }
       } catch (e) {
-        setTimeout(runSimulation, 150);
+        setTimeout(() => runSimulation('Container observer setup threw, so the page is showing the fallback path: ' + e.message), 150);
       }
     } else {
-      setTimeout(runSimulation, 150);
+      setTimeout(() => runSimulation('Unsupported-browser path: PerformanceObserver is not available.'), 150);
     }
 
     // Make hero image "load" after a delay to simulate async content
     setTimeout(() => {
       document.getElementById('hero-img').textContent = '[ hero image painted ]';
       document.getElementById('hero-img').style.background =
-        'linear-gradient(135deg, var(--bg-stone) 0%, #e8f4fd 100%)';
+        'linear-gradient(135deg, var(--bg-stone) 0%, color-mix(in srgb, var(--accent-blue) 12%, var(--bg-paper)) 100%)';
     }, 130);
 
-    document.getElementById('reload-btn').addEventListener('click', runSimulation);
+    document.getElementById('reload-btn').addEventListener('click', () => {
+      if (nativeObserver) {
+        setStatus('Native observer is active. This replay also uses the simulation model because real container entries are tied to future paints.');
+      }
+      runSimulation();
+    });
   </script>
 </main>
 </body>
