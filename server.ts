@@ -231,6 +231,99 @@ function jsonResponse(payload: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(payload, null, 2), { ...init, headers });
 }
 
+const CDT_MEASURE_ROUTE =
+  "/compression-dictionary-transport-with-shared-brotli-and-shared-zstandard/cdt-shared/measure";
+const CDT_MAX_MEASURE_BYTES = 64 * 1024;
+
+async function sha256Base64(bytes: Uint8Array): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", toArrayBuffer(bytes)));
+  let binary = "";
+  for (const byte of digest) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+async function renderCompressionDictionaryMeasureRoute(
+  req: Request,
+  sub: string,
+): Promise<Response | null> {
+  if (sub !== CDT_MEASURE_ROUTE) return null;
+
+  if (req.method !== "POST") {
+    return jsonResponse({ error: "POST dictionary and response text to measure compression." }, {
+      status: 405,
+    });
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = await req.json() as Record<string, unknown>;
+  } catch {
+    return jsonResponse({ error: "Expected a JSON request body." }, { status: 400 });
+  }
+
+  const dictionary = typeof body.dictionary === "string" ? body.dictionary : "";
+  const response = typeof body.response === "string" ? body.response : "";
+  const encoder = new TextEncoder();
+  const dictionaryBytes = encoder.encode(dictionary);
+  const responseBytes = encoder.encode(response);
+  if (dictionaryBytes.byteLength + responseBytes.byteLength > CDT_MAX_MEASURE_BYTES) {
+    return jsonResponse({
+      error: "Keep the dictionary and response under 64 KiB for this live demo.",
+    }, { status: 413 });
+  }
+
+  const actualHash = await sha256Base64(dictionaryBytes);
+  const advertisedHash = typeof body.availableDictionary === "string"
+    ? body.availableDictionary
+    : actualHash;
+  const dictionaryMatches = advertisedHash === actualHash;
+
+  try {
+    const { brotliCompressSync, constants, gzipSync } = await import("node:zlib");
+    const { deflateRaw } = await import("npm:pako@2.1.0");
+    const brotliOptions = {
+      params: {
+        [constants.BROTLI_PARAM_MODE]: constants.BROTLI_MODE_TEXT,
+        [constants.BROTLI_PARAM_QUALITY]: 6,
+      },
+    };
+    const rawBytes = responseBytes.byteLength;
+    const gzipBytes = gzipSync(responseBytes).byteLength;
+    const brotliBytes = brotliCompressSync(responseBytes, brotliOptions).byteLength;
+    const deflateBytes = deflateRaw(responseBytes).byteLength;
+    const dictionaryDeflateBytes = deflateRaw(responseBytes, {
+      dictionary: dictionaryBytes,
+    }).byteLength;
+    const dcbHeaderBytes = 36;
+    const dictionaryFramedBytes = dictionaryDeflateBytes + dcbHeaderBytes;
+    const selectedEncoding = dictionaryMatches ? "dcb" : "br";
+    const selectedBytes = dictionaryMatches ? dictionaryFramedBytes : brotliBytes;
+
+    return jsonResponse({
+      rawBytes,
+      gzipBytes,
+      brotliBytes,
+      deflateBytes,
+      dictionaryDeflateBytes,
+      dcbHeaderBytes,
+      dictionaryFramedBytes,
+      selectedEncoding,
+      selectedBytes,
+      dictionaryMatches,
+      actualHash,
+      advertisedHash,
+      dictionaryId: "cart-v42",
+      note: dictionaryMatches
+        ? "The server accepted the advertised dictionary hash. The dcb byte count uses RFC 9842's 36-byte dcb header plus a real zlib dictionary-compressed payload as a local stand-in for Shared Brotli."
+        : "The advertised hash did not match the dictionary bytes, so the server ignored dcb/dcz and fell back to regular Brotli.",
+    });
+  } catch (err) {
+    return jsonResponse({ error: `Compression route failed: ${(err as Error).message}` }, {
+      status: 500,
+    });
+  }
+}
+
 function withHeaders(response: Response, extraHeaders: Record<string, string>): Response {
   const headers = new Headers(response.headers);
   for (const [name, value] of Object.entries(extraHeaders)) headers.set(name, value);
@@ -5619,6 +5712,11 @@ Deno.serve({ port: PORT }, async (req) => {
       if (evpResponse) return evpResponse;
     }
     if (release === "v130") {
+      const compressionDictionaryMeasureResponse = await renderCompressionDictionaryMeasureRoute(
+        req,
+        sub,
+      );
+      if (compressionDictionaryMeasureResponse) return compressionDictionaryMeasureResponse;
       const webAuthnSignalResponse = await renderWebAuthnSignalRoute(req, sub);
       if (webAuthnSignalResponse) return webAuthnSignalResponse;
       const storageAccessHeadersResponse = renderStorageAccessHeadersRoute(req, sub);

@@ -55,6 +55,27 @@
       font-variant-numeric: tabular-nums;
     }
     .metric .unit { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+    .notice, .status {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      padding: var(--space-3);
+      margin: var(--space-4) 0;
+      font-size: 0.95rem;
+    }
+    .notice strong, .status strong { color: var(--text-black); }
+    .status.good { border-color: var(--accent-emerald); }
+    .status.bad { border-color: var(--accent-rose); }
+    .scenario {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      margin-top: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-charcoal);
+    }
+    pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
     .headers {
       background: var(--bg-stone);
       border: 1px solid var(--border-black);
@@ -75,23 +96,70 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v130</p>
     <h1>Shared CDT simulator</h1>
-    <p class="lede">Edit a dictionary (the previous version) and the new resource. The simulator computes a simple LCP-style diff to estimate how many bytes shared-brotli/zstd would save versus a regular gzip, and shows the request/response headers Chrome would emit.</p>
+    <p class="lede">Edit a dictionary (the previous version) and the new resource. The page posts both to a local server route, measures real regular Brotli bytes plus a real dictionary-compressed payload, then shows the request/response headers Chrome and a server would negotiate for <code>dcb</code>/<code>dcz</code>.</p>
   </header>
+
+  <div class="notice">
+    <strong>Measured, with one honest caveat:</strong> the baseline Brotli and dictionary-compressed payload are produced by the server. Native JavaScript does not expose a Shared Brotli or Zstandard dictionary encoder, so the dcb result uses RFC 9842's 36-byte dcb header plus a real zlib dictionary-compressed payload as the local stand-in.
+  </div>
 
   <section class="panel">
     <p class="col-label">Dictionary (previous response, served once and cached)</p>
-    <textarea id="dict">function greet(name) {
-  console.log("hello " + name);
+    <textarea id="dict">const CART_VERSION = "1.8.2";
+const currency = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
+
+export function lineTotal(item) {
+  return item.price * item.quantity;
 }
-greet("world");</textarea>
+
+export function formatLine(item) {
+  return item.quantity + " x " + item.name + " - " + currency.format(lineTotal(item));
+}
+
+export function renderCart(items) {
+  return items.map(formatLine).join("\n");
+}
+
+export function shippingBand(total) {
+  if (total > 75) return "free";
+  if (total > 35) return "reduced";
+  return "standard";
+}
+</textarea>
 
     <p class="col-label" style="margin-top: var(--space-4);">New response (this fetch)</p>
-    <textarea id="resp">function greet(name) {
-  console.log("hello " + name);
+    <textarea id="resp">const CART_VERSION = "1.8.3";
+const currency = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
+
+export function lineTotal(item) {
+  return item.price * item.quantity;
 }
-greet("Chrome 130");
-greet("Paul");</textarea>
+
+export function formatLine(item) {
+  return item.quantity + " x " + item.name + " - " + currency.format(lineTotal(item));
+}
+
+export function renderCart(items) {
+  return items.map(formatLine).join("\n");
+}
+
+export function shippingBand(total) {
+  if (total > 75) return "free";
+  if (total > 35) return "priority";
+  return "standard";
+}
+
+export function loyaltyMessage(points) {
+  return points > 1000 ? "gold reward unlocked" : "earn more points";
+}
+</textarea>
+    <label class="scenario">
+      <input type="checkbox" id="badHash">
+      Send a mismatched Available-Dictionary hash and force the Brotli fallback
+    </label>
   </section>
+
+  <div class="status" id="status"><strong>Waiting for measurement...</strong></div>
 
   <section class="metrics">
     <div class="metric">
@@ -100,14 +168,14 @@ greet("Paul");</textarea>
       <div class="unit">bytes</div>
     </div>
     <div class="metric">
-      <h4>gzip estimate</h4>
+      <h4>regular Brotli</h4>
       <div class="val" id="gz">0</div>
       <div class="unit">bytes</div>
     </div>
     <div class="metric">
-      <h4>shared-brotli (dcb)</h4>
+      <h4 id="selectedLabel">dictionary result</h4>
       <div class="val" id="dcb">0</div>
-      <div class="unit">bytes (saving <span id="savings">0</span>%)</div>
+      <div class="unit" id="selectedUnit">bytes (saving <span id="savings">0</span>% vs Brotli)</div>
     </div>
   </section>
 
@@ -124,12 +192,12 @@ greet("Paul");</textarea>
 Use-As-Dictionary: match="/app.*.js", id="v42"
 
 # 2. On the next fetch, Chrome sends:
-Sec-Available-Dictionary: &lt;sha-256 of dictionary&gt;
-Accept-Encoding: dcb, dcz, br, gzip
+Available-Dictionary: :&lt;sha-256 of dictionary&gt;:
+Accept-Encoding: gzip, deflate, br, zstd, dcb, dcz
 
 # 3. Server responds with the diff:
 Content-Encoding: dcb
-Vary: Accept-Encoding, Available-Dictionary</code></pre>
+Vary: accept-encoding, available-dictionary</code></pre>
   </section>
 
   <section>
@@ -146,93 +214,117 @@ Vary: Accept-Encoding, Available-Dictionary</code></pre>
 <script>
   const dict = document.getElementById("dict");
   const resp = document.getElementById("resp");
+  const badHash = document.getElementById("badHash");
   const raw = document.getElementById("raw");
   const gz = document.getElementById("gz");
   const dcb = document.getElementById("dcb");
-  const savings = document.getElementById("savings");
+  const selectedLabel = document.getElementById("selectedLabel");
+  const selectedUnit = document.getElementById("selectedUnit");
+  const status = document.getElementById("status");
   const req = document.getElementById("req");
   const res = document.getElementById("res");
+  let run = 0;
 
-  // Rough "longest common substring matching" estimate of how many bytes
-  // would survive the dictionary diff. We slide windows of the response
-  // through the dictionary and count matching runs >= 4 bytes.
-  function diffSize(d, r) {
-    if (!r.length) return 0;
-    let bytes = 0;
-    let i = 0;
-    while (i < r.length) {
-      let bestLen = 0;
-      for (let j = 0; j <= d.length - 4; j++) {
-        let k = 0;
-        while (k < d.length - j && i + k < r.length && d[j + k] === r[i + k]) k++;
-        if (k > bestLen) bestLen = k;
-      }
-      if (bestLen >= 4) {
-        bytes += 3; // back-ref: 3 bytes overhead for a (offset,length) pair
-        i += bestLen;
-      } else {
-        bytes += 1;
-        i += 1;
-      }
-    }
-    return bytes;
+  function toBase64(bytes) {
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
   }
 
-  // very rough gzip estimate using self-LZ77 (same algorithm but dictionary = empty)
-  function selfDiff(r) {
-    if (!r.length) return 0;
-    let bytes = 0;
-    let i = 0;
-    while (i < r.length) {
-      let bestLen = 0;
-      for (let j = 0; j <= i - 4; j++) {
-        let k = 0;
-        while (k < i - j && i + k < r.length && r[j + k] === r[i + k]) k++;
-        if (k > bestLen) bestLen = k;
-      }
-      if (bestLen >= 4) {
-        bytes += 3;
-        i += bestLen;
-      } else {
-        bytes += 1;
-        i += 1;
-      }
-    }
-    return bytes;
-  }
-
-  async function sha256Hex(s) {
+  async function sha256Base64(s) {
     const buf = new TextEncoder().encode(s);
     const hash = await crypto.subtle.digest("SHA-256", buf);
-    return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+    return toBase64(new Uint8Array(hash));
+  }
+
+  function corruptHash(hash) {
+    if (!hash) return "invalid";
+    return (hash[0] === "A" ? "B" : "A") + hash.slice(1);
+  }
+
+  function setStatus(ok, message) {
+    status.className = `status ${ok ? "good" : "bad"}`;
+    status.innerHTML = `<strong>${ok ? "Dictionary accepted." : "Dictionary rejected."}</strong> ${message}`;
   }
 
   async function render() {
+    const id = ++run;
     const d = dict.value;
     const r = resp.value;
-    const rawBytes = new TextEncoder().encode(r).length;
-    const gzBytes = selfDiff(r);
-    const dcbBytes = diffSize(d, r);
-    const pct = rawBytes === 0 ? 0 : Math.round((1 - dcbBytes / Math.max(gzBytes, 1)) * 100);
-    raw.textContent = rawBytes;
-    gz.textContent = gzBytes;
-    dcb.textContent = dcbBytes;
-    savings.textContent = Math.max(0, pct);
+    const hash = await sha256Base64(d);
+    const advertisedHash = badHash.checked ? corruptHash(hash) : hash;
 
-    const hash = await sha256Hex(d);
     req.textContent =
       "GET /app.v43.js HTTP/1.1\n" +
-      "Accept-Encoding: dcb, dcz, br, gzip\n" +
-      `Sec-Available-Dictionary: :${hash}=:`;
-    res.textContent =
-      "HTTP/1.1 200 OK\n" +
-      "Content-Encoding: dcb\n" +
-      "Vary: Accept-Encoding, Available-Dictionary\n" +
-      `Content-Length: ${dcbBytes}`;
+      "Accept-Encoding: gzip, deflate, br, zstd, dcb, dcz\n" +
+      `Available-Dictionary: :${advertisedHash}:\n` +
+      'Dictionary-ID: "cart-v42"';
+
+    try {
+      const measure = await fetch("./measure", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          dictionary: d,
+          response: r,
+          availableDictionary: advertisedHash
+        })
+      });
+      const data = await measure.json();
+      if (id !== run) return;
+      if (!measure.ok) throw new Error(data.error || `HTTP ${measure.status}`);
+
+      raw.textContent = data.rawBytes;
+      gz.textContent = data.brotliBytes;
+      dcb.textContent = data.selectedBytes;
+      const pct = data.brotliBytes === 0
+        ? 0
+        : Math.round((1 - data.selectedBytes / data.brotliBytes) * 100);
+      selectedLabel.textContent = data.dictionaryMatches ? "dcb proof" : "fallback br";
+      selectedUnit.textContent = data.dictionaryMatches
+        ? `bytes (saving ${Math.max(0, pct)}% vs Brotli)`
+        : "bytes (no dictionary savings)";
+
+      if (data.dictionaryMatches) {
+        setStatus(
+          true,
+          `The route matched the SHA-256 dictionary hash and selected dcb. ${data.dcbHeaderBytes} bytes are the RFC dcb header; ${data.dictionaryDeflateBytes} bytes are the measured dictionary-compressed payload stand-in.`
+        );
+        res.textContent =
+          "HTTP/1.1 200 OK\n" +
+          "Content-Encoding: dcb\n" +
+          "Vary: accept-encoding, available-dictionary\n" +
+          `Dictionary-ID: "${data.dictionaryId}"\n` +
+          `Content-Length: ${data.dictionaryFramedBytes}\n\n` +
+          `Showcase measurement: ${data.dcbHeaderBytes} byte dcb header + ${data.dictionaryDeflateBytes} byte real dictionary payload`;
+      } else {
+        setStatus(
+          false,
+          "The advertised hash does not match the cached dictionary, so the server ignores dcb/dcz and sends regular Brotli."
+        );
+        res.textContent =
+          "HTTP/1.1 200 OK\n" +
+          "Content-Encoding: br\n" +
+          "Vary: accept-encoding, available-dictionary\n" +
+          `Content-Length: ${data.brotliBytes}\n\n` +
+          "Showcase measurement: dictionary hash mismatch -> normal Brotli fallback";
+      }
+    } catch (e) {
+      if (id !== run) return;
+      raw.textContent = "0";
+      gz.textContent = "0";
+      dcb.textContent = "0";
+      selectedLabel.textContent = "route error";
+      selectedUnit.textContent = "bytes";
+      status.className = "status bad";
+      status.textContent = `Compression measurement failed: ${e.message}`;
+      res.textContent = "HTTP/1.1 500 Internal Server Error";
+    }
   }
 
   dict.addEventListener("input", render);
   resp.addEventListener("input", render);
+  badHash.addEventListener("change", render);
   render();
 </script>
 </body>
