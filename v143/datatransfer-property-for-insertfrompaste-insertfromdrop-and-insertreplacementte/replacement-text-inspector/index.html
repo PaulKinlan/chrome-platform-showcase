@@ -105,13 +105,13 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v143</p>
     <h1>Replacement text inspector</h1>
-    <p class="lede">The third <code>inputType</code> that grows a <code>dataTransfer</code> is <code>insertReplacementText</code> — fired when the OS accepts a spell-check or autocorrect suggestion. Type in the editor with deliberate misspellings, accept the suggestion, and watch the inspector show the strike-through diff and the carried-over original phrase.</p>
+    <p class="lede">The third <code>inputType</code> that Chrome 143 exposes on <code>input.dataTransfer</code> is <code>insertReplacementText</code> — fired when the OS accepts a spell-check or autocorrect suggestion. Type in the editor with deliberate misspellings, accept the suggestion, and watch the inspector compare the older <code>beforeinput</code> payload with the final <code>input</code> payload.</p>
   </header>
 
-  <p>Try typing <strong>teh</strong> and accepting Chrome's autocorrect. Or right-click a wavy red underline and pick a suggestion. The inspector receives the <code>beforeinput</code>, parses the diff via the new <code>dataTransfer</code>, and renders both versions inline as a track-changes view.</p>
+  <p>Try typing <strong>teh</strong> and accepting Chrome's autocorrect. Or right-click a wavy red underline and pick a suggestion. With track changes off, the native edit lands and the <code>input</code> log shows whether v143 supplied the replacement payload. Turn track changes on to intercept the same replacement in <code>beforeinput</code>.</p>
 
   <div class="controls">
-    <button id="toggle-track" class="toggle on">track changes: ON</button>
+    <button id="toggle-track" class="toggle">track changes: off</button>
     <button id="restore">restore sample text</button>
     <button id="clear-log">clear log</button>
   </div>
@@ -138,18 +138,21 @@
 
   <h3>What's happening</h3>
   <ol class="how">
-    <li>The editor listens for <code>beforeinput</code> with <code>inputType === "insertReplacementText"</code>.</li>
-    <li>The new <code>event.dataTransfer</code> carries the suggested string in <code>text/plain</code>. The browser also exposes the <em>old</em> text via <code>event.getTargetRanges()[0]</code>.</li>
-    <li>Comparing the two gives a precise replacement diff — what the OS wants to write, what it's replacing, and where.</li>
-    <li>Without this property, replacement detection required diffing the contenteditable's <code>textContent</code> after every event — fragile and lossy with IMEs.</li>
-    <li>With <em>track changes</em> on, the editor cancels the default and inserts both versions wrapped in marks so the user can accept or reject.</li>
+    <li>The editor listens for both <code>beforeinput</code> and <code>input</code> with <code>inputType === "insertReplacementText"</code>.</li>
+    <li><code>beforeinput</code> records the suggested string and target range that older Chrome builds already exposed.</li>
+    <li>Chrome 143 adds the matching <code>input.dataTransfer</code> payload after the native edit lands, so the log can prove the replacement text survived to the committed event.</li>
+    <li>Without this input-side payload, replacement detection required diffing the contenteditable's <code>textContent</code> after every event — fragile and lossy with IMEs.</li>
+    <li>With <em>track changes</em> on, the editor cancels the default in <code>beforeinput</code> and inserts both versions wrapped in marks so the user can accept or reject.</li>
   </ol>
 
   <pre><code>editor.addEventListener("beforeinput", (e) =&gt; {
   if (e.inputType !== "insertReplacementText") return;
+  rememberOldRange(e.getTargetRanges()[0]);
+});
+
+editor.addEventListener("input", (e) =&gt; {
+  if (e.inputType !== "insertReplacementText") return;
   const newText = e.dataTransfer?.getData("text/plain");
-  const range   = e.getTargetRanges()[0];
-  const oldText = range.toString?.() ?? "";
   showDiff(oldText, newText);
 });</code></pre>
 
@@ -174,7 +177,18 @@
   const evtBox = document.getElementById("evt");
   const diffBox = document.getElementById("diff");
   const trackBtn = document.getElementById("toggle-track");
-  let track = true;
+  let track = false;
+  let lastReplacement = null;
+
+  function escapeHTML(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "\"": "&quot;",
+      "'": "&#39;",
+    })[char]);
+  }
 
   function row(kind, msg) {
     const r = document.createElement("div");
@@ -187,8 +201,8 @@
 
   function setDiff(oldT, newT) {
     diffBox.innerHTML =
-      '<div>—</div><div class="sub">' + (oldT || "(nothing)") + "</div>" +
-      '<div>+</div><div class="add">' + (newT || "(nothing)") + "</div>";
+      '<div>—</div><div class="sub">' + escapeHTML(oldT || "(nothing)") + "</div>" +
+      '<div>+</div><div class="add">' + escapeHTML(newT || "(nothing)") + "</div>";
   }
 
   editor.addEventListener("beforeinput", (e) => {
@@ -207,9 +221,11 @@
     else if (range && range.startContainer) {
       try { oldText = range.startContainer.textContent.slice(range.startOffset, range.endOffset); } catch (_) {}
     }
+    lastReplacement = { oldText, newText };
     evtBox.innerHTML =
+      "event: <b>beforeinput</b><br>" +
       "inputType: <b>insertReplacementText</b><br>" +
-      "dataTransfer text: <b>" + (newText || "") + "</b>";
+      "dataTransfer text: <b>" + escapeHTML(newText || "") + "</b>";
     setDiff(oldText, newText);
 
     if (track) {
@@ -218,13 +234,35 @@
       r.deleteContents();
       const wrap = document.createElement("span");
       wrap.setAttribute("data-track", "");
-      wrap.innerHTML =
-        '<span class="rejected" data-track>' + (oldText || "") + "</span>" +
-        '<span class="accepted" data-track>' + newText + "</span>";
+      const rejected = document.createElement("span");
+      rejected.className = "rejected";
+      rejected.setAttribute("data-track", "");
+      rejected.textContent = oldText || "";
+      const accepted = document.createElement("span");
+      accepted.className = "accepted";
+      accepted.setAttribute("data-track", "");
+      accepted.textContent = newText || "";
+      wrap.append(rejected, accepted);
       r.insertNode(wrap);
-      row("rep", "replaced — kept both sides for review");
+      row("rep", "beforeinput.insertReplacementText — intercepted; kept both sides for review");
     } else {
-      row("rep", "replaced — '" + oldText + "' → '" + newText + "'");
+      row("rep", "beforeinput.insertReplacementText — payload observed; waiting for input event");
+    }
+  });
+
+  editor.addEventListener("input", (e) => {
+    if (e.inputType !== "insertReplacementText") return;
+    const dt = e.dataTransfer;
+    const newText = dt?.getData("text/plain") || dt?.getData("text/html") || e.data || lastReplacement?.newText || "";
+    evtBox.innerHTML =
+      "event: <b>input</b><br>" +
+      "inputType: <b>insertReplacementText</b><br>" +
+      "dataTransfer text: <b>" + escapeHTML(newText || "") + "</b>";
+    setDiff(lastReplacement?.oldText || "", newText);
+    if (dt) {
+      row("rep", "input.insertReplacementText — dataTransfer carried text/plain: " + escapeHTML(newText || "(empty)"));
+    } else {
+      row("cancel", "input.insertReplacementText — dataTransfer null (pre-v143 path)");
     }
   });
 

@@ -94,10 +94,10 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v143</p>
     <h1>Drop attributor</h1>
-    <p class="lede">Drag a research snippet from the palette into the editor. The <code>beforeinput</code> event fires with <code>inputType === "insertFromDrop"</code> and the new <code>dataTransfer</code> property — exposing the cited source URL. The editor reads the citation, cancels the default insert, and renders a properly attributed block quote.</p>
+    <p class="lede">Drag a research snippet from the palette into the editor. <code>beforeinput</code> records the incoming payload for contrast, then the v143 <code>input.dataTransfer</code> read exposes the cited source URL and lets the editor convert the inserted text into a properly attributed block quote.</p>
   </header>
 
-  <p>This is what citation-aware editors (Notion, Obsidian, Coda) need but had to hack with <code>dragend</code> guesswork before: the drop type is on the input event, in spec, with the same shape as a paste.</p>
+  <p>This is what citation-aware editors (Notion, Obsidian, Coda) need but had to hack with <code>drop</code> / <code>dragend</code> guesswork before: the final <code>input</code> event now carries the same transfer data as the interceptable <code>beforeinput</code> event.</p>
 
   <h3>Palette — drag any chip into the editor</h3>
   <div class="palette" id="palette">
@@ -129,7 +129,7 @@
   </div>
 
   <div class="stage">
-    <div class="editor" id="editor" contenteditable="true" spellcheck="false"><p>Drop any quote chip here. Watch <code>beforeinput.dataTransfer</code> carry the citation through.</p></div>
+    <div class="editor" id="editor" contenteditable="true" spellcheck="false"><p>Drop any quote chip here. Watch <code>input.dataTransfer</code> carry the citation through.</p></div>
   </div>
 
   <h3>InputEvent log</h3>
@@ -138,19 +138,20 @@
   <h3>What you're seeing</h3>
   <ol class="how">
     <li>Each chip is a <code>draggable</code> element. Its <code>dragstart</code> sets the <code>text/plain</code> and a custom <code>application/x-attribution</code> MIME with the cite.</li>
-    <li>On drop, the editor's <code>beforeinput</code> fires with <code>inputType === "insertFromDrop"</code>.</li>
-    <li>Before this feature shipped, the dataTransfer was <em>not</em> available on <code>beforeinput</code> — only on the separate <code>drop</code> event. Now, the editor reads <code>event.dataTransfer.getData("application/x-attribution")</code> right from the input event, cancels the default insert, and inserts a proper <code>&lt;blockquote&gt;</code> with cite.</li>
-    <li>If <code>event.dataTransfer</code> is null, the demo falls back to a plain insertion and logs a "miss".</li>
+    <li>On drop, the editor's <code>beforeinput</code> fires with <code>inputType === "insertFromDrop"</code> and logs the transfer types that were visible before the edit landed.</li>
+    <li>Chrome 143 adds the important second half: the resulting <code>input</code> event now exposes <code>event.dataTransfer.getData("application/x-attribution")</code>.</li>
+    <li>When the <code>input</code>-side custom MIME is present, the demo replaces the inserted plain text with a proper <code>&lt;blockquote&gt;</code> and cite. If it is null, the plain insertion remains and the log marks the pre-v143 path.</li>
   </ol>
 
   <pre><code>editor.addEventListener("beforeinput", (e) =&gt; {
   if (e.inputType !== "insertFromDrop") return;
-  const dt = e.dataTransfer;
-  if (!dt) return;                              // feature not on this browser
-  const text = dt.getData("text/plain");
-  const cite = dt.getData("application/x-attribution");
-  e.preventDefault();
-  insertAttributedQuote(text, cite);
+  logBeforeInput(e.dataTransfer); // beforeinput had this first
+});
+
+editor.addEventListener("input", (e) =&gt; {
+  if (e.inputType !== "insertFromDrop") return;
+  const cite = e.dataTransfer?.getData("application/x-attribution");
+  if (cite) replaceDroppedTextWithQuote(e.dataTransfer.getData("text/plain"), cite);
 });</code></pre>
 
   <section>
@@ -170,6 +171,17 @@
 <script>
   const editor = document.getElementById("editor");
   const log = document.getElementById("log");
+  let pendingDrop = null;
+
+  function escapeHTML(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "\"": "&quot;",
+      "'": "&#39;",
+    })[char]);
+  }
 
   function row(kind, msg) {
     const r = document.createElement("div");
@@ -178,6 +190,40 @@
     r.innerHTML = '<span class="ts">' + ts + "</span>" + msg;
     log.prepend(r);
     while (log.children.length > 40) log.lastChild.remove();
+  }
+
+  function quoteNode(text, cite) {
+    const block = document.createElement("blockquote");
+    block.className = "quote";
+    block.appendChild(document.createTextNode(text || "(empty drop)"));
+    const citeEl = document.createElement("span");
+    citeEl.className = "cite";
+    citeEl.textContent = "— " + cite;
+    block.appendChild(citeEl);
+    return block;
+  }
+
+  function replaceInsertedText(text, replacement) {
+    if (!text) {
+      editor.appendChild(replacement);
+      return false;
+    }
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+    let last = null;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const index = node.nodeValue.lastIndexOf(text);
+      if (index !== -1) last = { node, index };
+    }
+    if (!last) {
+      editor.appendChild(replacement);
+      return false;
+    }
+    const range = document.createRange();
+    range.setStart(last.node, last.index);
+    range.setEnd(last.node, last.index + text.length);
+    range.deleteContents();
+    range.insertNode(replacement);
+    return true;
   }
 
   document.querySelectorAll(".chip").forEach((chip) => {
@@ -197,22 +243,31 @@
     if (e.inputType !== "insertFromDrop") return;
     const dt = e.dataTransfer;
     if (!dt) {
-      row("miss", "insertFromDrop fired — but dataTransfer was null (browser lacks the property)");
+      pendingDrop = null;
+      row("miss", "beforeinput.insertFromDrop → dataTransfer was null");
       return;
     }
     const text = dt.getData("text/plain");
     const cite = dt.getData("application/x-attribution");
-    if (!cite) {
-      row("miss", "no x-attribution MIME — fell through to default insert");
+    pendingDrop = { text, cite };
+    row(cite ? "drop" : "miss", "beforeinput.dataTransfer → application/x-attribution: " + escapeHTML(cite || "null"));
+  });
+
+  editor.addEventListener("input", (e) => {
+    if (e.inputType !== "insertFromDrop") return;
+    const dt = e.dataTransfer;
+    if (!dt) {
+      row("miss", "input.dataTransfer → null; custom MIME cannot be verified on this browser");
       return;
     }
-    e.preventDefault();
-    const escapedText = text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-    const escapedCite = cite.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-    const html = '<blockquote class="quote">' + escapedText +
-      '<span class="cite">— ' + escapedCite + "</span></blockquote>";
-    document.execCommand("insertHTML", false, html);
-    row("drop", "insertFromDrop → attributed quote inserted (cite: " + cite + ")");
+    const text = dt.getData("text/plain") || pendingDrop?.text || "";
+    const cite = dt.getData("application/x-attribution");
+    if (!cite) {
+      row("miss", "input.dataTransfer populated, but application/x-attribution was not present");
+      return;
+    }
+    const replaced = replaceInsertedText(text, quoteNode(text, cite));
+    row("drop", "input.dataTransfer → application/x-attribution: " + escapeHTML(cite) + (replaced ? "; attributed quote inserted" : "; attributed quote appended"));
   });
 
   document.getElementById("clear").addEventListener("click", () => {
