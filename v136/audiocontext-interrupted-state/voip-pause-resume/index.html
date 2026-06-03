@@ -42,6 +42,35 @@
       gap: 0.5rem;
       flex-wrap: wrap;
     }
+    .audio-readout {
+      display: grid;
+      grid-template-columns: minmax(9rem, 1fr) minmax(8rem, 14rem) auto;
+      gap: 0.5rem;
+      align-items: center;
+      margin-top: 0.45rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-charcoal);
+    }
+    .meter {
+      height: 0.7rem;
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      overflow: hidden;
+    }
+    .meter span {
+      display: block;
+      width: 100%;
+      height: 100%;
+      transform: scaleX(0.04);
+      transform-origin: left center;
+      background: var(--accent-emerald);
+      transition: transform 120ms linear;
+    }
+    .meter.muted span { background: var(--accent-rose); }
+    .source-label {
+      overflow-wrap: anywhere;
+    }
     .badge {
       display: inline-block;
       padding: 0.15rem 0.4rem;
@@ -89,6 +118,10 @@
       font-family: var(--font-mono);
       font-size: 0.8rem;
       cursor: pointer;
+    }
+    .overlay button:disabled {
+      opacity: 0.65;
+      cursor: wait;
     }
 
     .controls { display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-4) 0; }
@@ -158,6 +191,12 @@
     }
     .probe.yes { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
     .probe.no { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+
+    @media (max-width: 720px) {
+      .audio-readout {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
 <body>
@@ -167,7 +206,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v136</p>
     <h1>VoIP-style pause &amp; resume</h1>
-    <p class="lede">A mock music player wired to the new <code>interrupted</code> state. Simulate an inbound VoIP call &mdash; the player auto-pauses, shows a "paused by system" overlay, and re-enters <code>running</code> once the system releases the audio focus. Compare the <em>silent failure</em> we used to ship: <code>suspended</code> showing without context.</p>
+    <p class="lede">A live Web Audio tone wired to the new <code>interrupted</code> state. Simulate an inbound VoIP call &mdash; the tone pauses, shows a "paused by system" overlay, and re-enters <code>running</code> only after the system releases audio focus. Compare the <em>silent failure</em> we used to ship: <code>suspended</code> showing without context.</p>
   </header>
 
   <div id="probe" class="probe">Probing&hellip;</div>
@@ -179,11 +218,16 @@
         <div class="title">Steady Pulse</div>
         <div class="artist">Standard Tone Co.</div>
         <div class="state-row">state: <span id="state-badge" class="badge">no context</span></div>
+        <div class="audio-readout">
+          <span id="source-label" class="source-label">source: no oscillator</span>
+          <span id="meter" class="meter muted" aria-label="audio output meter"><span id="meter-fill"></span></span>
+          <span id="audio-label">silent</span>
+        </div>
       </div>
       <div class="overlay" id="overlay">
-        <span class="label">paused by system</span>
+        <span class="label" id="overlay-label">paused by system</span>
         <div class="msg" id="overlay-msg">Audio focus released to another app.</div>
-        <button id="manual-resume">Tap to resume</button>
+        <button id="manual-resume" disabled>Waiting for focus</button>
       </div>
     </div>
 
@@ -216,16 +260,26 @@
   </section>
 
   <section>
+    <h2>what the simulator stands in for</h2>
+    <table class="cmp">
+      <thead>
+        <tr><th>button</th><th>real source</th><th>expected app response</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Simulate VoIP call</td><td>another app requests exclusive output hardware</td><td>show system-paused UX, keep audio silent, resume after focus returns</td></tr>
+        <tr><td>Simulate page-hide</td><td>same page intentionally calls <code>suspend()</code></td><td>show ordinary paused UX and wait for an explicit resume tap</td></tr>
+        <tr><td>Auto-resume off</td><td>app policy says focus return is not enough</td><td>keep the tone silent and make the manual-resume affordance active</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
     <h2>the code</h2>
 <pre><code>const ac = new AudioContext();
 
 ac.addEventListener(&quot;statechange&quot;, () =&gt; {
   if (ac.state === &quot;interrupted&quot;) {
     showSystemPausedOverlay();
-    if (autoResume.checked) {
-      // resume() is queued; the UA will honour it once focus returns.
-      ac.resume().catch(() =&gt; { /* still interrupted, will fire again */ });
-    }
   } else if (ac.state === &quot;running&quot;) {
     hideOverlay();
   } else if (ac.state === &quot;suspended&quot;) {
@@ -255,7 +309,8 @@ ac.addEventListener(&quot;statechange&quot;, () =&gt; {
 
 <script>
   const probe = document.getElementById("probe");
-  if (typeof AudioContext !== "undefined") {
+  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  if (AudioContextCtor) {
     probe.classList.add("yes");
     probe.innerHTML = "<code>AudioContext</code> available &mdash; press Play, then simulate an interruption.";
   } else {
@@ -265,13 +320,19 @@ ac.addEventListener(&quot;statechange&quot;, () =&gt; {
 
   const stateBadge = document.getElementById("state-badge");
   const overlay = document.getElementById("overlay");
+  const overlayLabel = document.getElementById("overlay-label");
   const overlayMsg = document.getElementById("overlay-msg");
+  const manualResumeBtn = document.getElementById("manual-resume");
   const autoResume = document.getElementById("auto-resume");
   const log = document.getElementById("log");
   const stopBtn = document.getElementById("stop");
   const playBtn = document.getElementById("play");
   const simIntBtn = document.getElementById("sim-interrupt");
   const simSuspBtn = document.getElementById("sim-suspend");
+  const sourceLabel = document.getElementById("source-label");
+  const meter = document.getElementById("meter");
+  const meterFill = document.getElementById("meter-fill");
+  const audioLabel = document.getElementById("audio-label");
 
   function ln(msg, cls) {
     const p = document.createElement("p");
@@ -284,79 +345,158 @@ ac.addEventListener(&quot;statechange&quot;, () =&gt; {
     stateBadge.textContent = state;
     stateBadge.className = "badge " + state;
   }
+  function showOverlay(label, message, canResume) {
+    overlayLabel.textContent = label;
+    overlayMsg.textContent = message;
+    manualResumeBtn.disabled = !canResume;
+    manualResumeBtn.textContent = canResume ? "Tap to resume" : "Waiting for focus";
+    overlay.classList.add("show");
+  }
+  function hideOverlay() {
+    overlay.classList.remove("show");
+    manualResumeBtn.disabled = true;
+    manualResumeBtn.textContent = "Waiting for focus";
+  }
 
   let ac = null, osc = null, gain = null;
   let simInterrupted = false;
+  let focusReleaseTimer = null;
+  let meterFrame = null;
+
+  function updateAudioReadout() {
+    const audible = Boolean(ac && ac.state === "running" && !simInterrupted);
+    sourceLabel.textContent = ac ? "source: OscillatorNode 196 Hz sine" : "source: no oscillator";
+    audioLabel.textContent = audible ? "audible" : "silent";
+    meter.classList.toggle("muted", !audible);
+    const level = audible ? 0.52 + Math.sin(Date.now() / 140) * 0.28 : 0.04;
+    meterFill.style.transform = `scaleX(${level.toFixed(2)})`;
+  }
+
+  function startMeter() {
+    if (meterFrame) return;
+    const tick = () => {
+      updateAudioReadout();
+      meterFrame = ac ? requestAnimationFrame(tick) : null;
+    };
+    tick();
+  }
+
+  function stopMeter() {
+    if (meterFrame) cancelAnimationFrame(meterFrame);
+    meterFrame = null;
+    updateAudioReadout();
+  }
+
+  async function resumeContext(logLine) {
+    if (!ac) return;
+    if (simInterrupted) {
+      ln("resume requested, but the simulated OS focus hold is still active", "system");
+      return;
+    }
+    try {
+      if (ac.state !== "running") await ac.resume();
+      hideOverlay();
+      setBadge(ac.state);
+      updateAudioReadout();
+      ln(logLine, "resume");
+    } catch (err) {
+      ln(`resume() failed: ${err.name || err.message}`, "system");
+    }
+  }
 
   function buildGraph() {
-    ac = new AudioContext();
+    ac = new AudioContextCtor();
     osc = ac.createOscillator();
     gain = ac.createGain();
+    osc.type = "sine";
     osc.frequency.value = 196; // G3, calmer than 220
     gain.gain.value = 0.04;
     osc.connect(gain).connect(ac.destination);
     ac.addEventListener("statechange", () => {
-      // Treat simulated interruption as if it were real
+      // JS cannot force a real `interrupted` state, so the simulator paints
+      // the OS-held period while the real context is suspended and silent.
       const effective = simInterrupted ? "interrupted" : ac.state;
       setBadge(effective);
       ln(`statechange -> ${ac.state}` + (simInterrupted ? " (sim-overlay: interrupted)" : ""));
       if (effective === "interrupted") {
-        overlayMsg.textContent = "Audio focus released to another app (simulated VoIP).";
-        overlay.classList.add("show");
+        showOverlay("paused by system", "Audio focus is held by another app (simulated VoIP).", false);
         if (autoResume.checked) {
-          ln("auto-resume strategy: ac.resume() queued", "system");
-          ac.resume().catch(() => ln("resume() rejected; UA still has interruption hold", "system"));
+          ln("auto-resume strategy armed until focus returns", "system");
         }
       } else if (effective === "suspended") {
-        overlayMsg.textContent = "Paused by user (or page-hidden).";
-        overlay.classList.add("show");
+        showOverlay("paused by page", "Paused by user or same-page policy. Resume is available now.", true);
       } else if (effective === "running") {
-        overlay.classList.remove("show");
+        hideOverlay();
       }
+      updateAudioReadout();
     });
     setBadge(ac.state);
+    updateAudioReadout();
+    startMeter();
   }
 
   playBtn.addEventListener("click", async () => {
-    if (!ac) { buildGraph(); osc.start(); }
-    if (ac.state !== "running") await ac.resume();
+    if (!AudioContextCtor) return;
+    if (!ac) {
+      buildGraph();
+      osc.start();
+    }
+    await resumeContext("user pressed play -> live oscillator running");
     stopBtn.disabled = false;
     simIntBtn.disabled = false;
     simSuspBtn.disabled = false;
-    ln("user pressed play", "resume");
   });
 
-  stopBtn.disabled && (stopBtn.onclick = null);
   stopBtn.addEventListener("click", async () => {
     if (!ac) return;
+    if (focusReleaseTimer) {
+      clearTimeout(focusReleaseTimer);
+      focusReleaseTimer = null;
+    }
     await ac.close();
     ln("user pressed stop -> close()");
-    ac = null; osc = null;
+    ac = null; osc = null; gain = null;
+    simInterrupted = false;
+    stopBtn.disabled = true;
     simIntBtn.disabled = true;
     simSuspBtn.disabled = true;
-    overlay.classList.remove("show");
+    hideOverlay();
     setBadge("no context");
+    stopMeter();
   });
 
   simIntBtn.addEventListener("click", async () => {
     if (!ac) return;
+    if (focusReleaseTimer) clearTimeout(focusReleaseTimer);
     ln("simulated incoming VoIP call -- OS would set state='interrupted'", "interrupt");
     simInterrupted = true;
-    await ac.suspend(); // we cannot really fire 'interrupted' from JS, but suspend triggers a statechange we can paint as interrupted
+    simIntBtn.disabled = true;
+    simSuspBtn.disabled = true;
+    showOverlay("paused by system", "Audio focus is held by another app (simulated VoIP).", false);
     setBadge("interrupted");
-    overlayMsg.textContent = "Audio focus released to another app (simulated VoIP).";
-    overlay.classList.add("show");
+    updateAudioReadout();
+    await ac.suspend();
     if (autoResume.checked) {
-      ln("auto-resume strategy: ac.resume() queued for when focus returns", "system");
+      ln("auto-resume strategy armed for focus return", "system");
+    } else {
+      ln("auto-resume off: focus return will require a tap", "system");
     }
-    setTimeout(async () => {
+    focusReleaseTimer = setTimeout(async () => {
+      focusReleaseTimer = null;
+      if (!ac) return;
       ln("system released audio focus", "system");
       simInterrupted = false;
       if (autoResume.checked && ac) {
-        await ac.resume();
-        ln("resumed automatically", "resume");
+        await resumeContext("resumed automatically after focus returned");
       } else {
+        setBadge(ac.state);
+        showOverlay("focus returned", "System focus is back. Auto-resume is off, so the tone stays paused.", true);
+        updateAudioReadout();
         ln("waiting for user tap", "system");
+      }
+      if (ac) {
+        simIntBtn.disabled = false;
+        simSuspBtn.disabled = false;
       }
     }, 2400);
   });
@@ -364,14 +504,11 @@ ac.addEventListener(&quot;statechange&quot;, () =&gt; {
   simSuspBtn.addEventListener("click", async () => {
     if (!ac) return;
     ln("simulated page-hide -> ac.suspend() (user-driven)", "system");
+    simInterrupted = false;
     await ac.suspend();
   });
 
-  document.getElementById("manual-resume").addEventListener("click", async () => {
-    if (!ac) return;
-    await ac.resume();
-    ln("user tapped resume", "resume");
-  });
+  manualResumeBtn.addEventListener("click", () => resumeContext("user tapped resume"));
 </script>
 </body>
 </html>
