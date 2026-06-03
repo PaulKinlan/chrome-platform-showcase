@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lookback window — Interest groups in Shared Storage Worklet — Chrome 134 — chrome platform showcase</title>
+  <title>Reach measurement update window - Interest groups in Shared Storage Worklet - Chrome 134</title>
   <link rel="stylesheet" href="/public/styles.css">
+  <link rel="icon" href="data:,">
   <style>
     .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
     .probe { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
@@ -14,6 +15,8 @@
     .controls { display: flex; gap: var(--space-3); margin: var(--space-3) 0; flex-wrap: wrap; align-items: baseline; }
     .field { display: flex; flex-direction: column; gap: 0.3rem; font-family: var(--font-mono); font-size: 0.85rem; }
     input[type="range"] { width: 240px; accent-color: var(--text-black); }
+    .select-input { border: 2px solid var(--border-black); padding: 0.3rem; font-family: var(--font-mono); background: var(--bg-ivory); color: var(--text-black); }
+    .table-wrap { overflow-x: auto; max-width: 100%; }
     table.ig { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
     table.ig th, table.ig td { border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); text-align: left; }
     table.ig th { background: var(--bg-stone); }
@@ -22,6 +25,7 @@
     .pill { font-family: var(--font-mono); font-size: 0.72rem; padding: 0.1rem 0.45rem; background: var(--text-black); color: var(--bg-ivory); }
     .pill.out { background: var(--bg-stone); color: var(--text-muted); border: 1px solid var(--border-black); }
     .summary { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.92rem; margin: var(--space-4) 0; }
+    .summary.none { border-color: var(--accent-rose); }
   </style>
 </head>
 <body>
@@ -30,26 +34,26 @@
 
   <header class="lede-block">
     <p class="eyebrow">demo · v134</p>
-    <h1>Reach measurement with a lookback window</h1>
-    <p class="lede">The driving use case for adding <code>interestGroups()</code> to Shared Storage worklets was <em>reach measurement</em>: how many users in audience X have been served by ad campaign Y in the last N days. The <code>lookbackWindow</code> property on each IG is what makes that possible without dragging along arbitrary user history. Move the slider to see how the worklet would filter the audience before sending a single aggregate to the reporting endpoint.</p>
+    <h1>Reach measurement with update-age metadata</h1>
+    <p class="lede">The driving use case for adding <code>interestGroups()</code> to Shared Storage worklets was reach measurement: how many users in audience X have been served by ad campaign Y in a recent window. Chrome exposes that timing through <code>StorageInterestGroup</code> metadata such as <code>timeSinceLastUpdateMs</code>, <code>timeSinceGroupJoinedMs</code>, and <code>lifetimeRemainingMs</code>. Move the slider to see how a worklet filters by update age before sending a single aggregate to the reporting endpoint.</p>
   </header>
 
-  <div class="probe" id="probe">probing sharedStorage worklet…</div>
+  <div class="probe" id="probe">probing sharedStorage worklet...</div>
 
   <div class="warn-block">This API is only exposed inside a <code>SharedStorageWorkletGlobalScope</code> in a fenced frame or window context with the <code>shared-storage</code> permission policy. The demo simulates the worklet locally so you can interact with the algorithm; the production code listing below is what runs inside Chrome 134+.</div>
 
   <h2>Simulated worklet input</h2>
   <div class="stage">
-    <p class="note">Each row is an interest group as Chrome would deliver it to the worklet, with the new <code>lookbackWindow</code> metadata field (milliseconds since the last user-visible join/refresh).</p>
+    <p class="note">Each row is an interest group as Chrome would deliver it to the worklet, with timing fields in milliseconds. The table displays days to keep the filter understandable.</p>
     <div class="controls">
       <div class="field">
-        <label for="window">lookbackWindow filter</label>
-        <input type="range" id="window" min="1" max="90" value="30">
+        <label for="window">timeSinceLastUpdateMs filter</label>
+        <input type="range" id="window" min="0" max="90" value="30">
         <span id="win-val">30 days</span>
       </div>
       <div class="field">
         <label for="campaign">campaign tag</label>
-        <select id="campaign" style="border: 2px solid var(--border-black); padding: 0.3rem; font-family: var(--font-mono);">
+        <select id="campaign" class="select-input">
           <option value="">(all)</option>
           <option value="shoes-spring">shoes-spring</option>
           <option value="travel-easter">travel-easter</option>
@@ -57,23 +61,28 @@
         </select>
       </div>
     </div>
-    <table class="ig" id="ig-table">
-      <thead><tr><th>name</th><th>owner</th><th>lookbackWindow</th><th>tags</th><th>in window?</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <div class="table-wrap">
+      <table class="ig" id="ig-table">
+        <thead>
+          <tr><th>name</th><th>owner</th><th>timeSinceLastUpdateMs</th><th>timeSinceGroupJoinedMs</th><th>tags</th><th>in window?</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
     <div class="summary" id="summary"></div>
   </div>
 
   <h2>The worklet code</h2>
-  <pre><code>// reach-worklet.js — runs inside Shared Storage worklet
+  <pre><code>// reach-worklet.js - runs inside Shared Storage worklet
 class Reach {
-  async run({ campaign, maxAgeMs }) {
+  async run({ campaign, maxUpdateAgeMs }) {
     const igs = await interestGroups();
     const reached = igs.filter((g) =&gt;
-      g.lookbackWindow &lt; maxAgeMs &amp;&amp;
+      g.timeSinceLastUpdateMs &lt;= maxUpdateAgeMs &amp;&amp;
       (!campaign || g.userBiddingSignals?.tags?.includes(campaign))
     );
     if (reached.length) {
+      // Private Aggregation contribution budgets still apply.
       privateAggregation.contributeToHistogram({
         bucket: BigInt(campaignBucket(campaign)),
         value: 1n,
@@ -88,7 +97,8 @@ register('reach', Reach);</code></pre>
     <ul>
       <li><a href="../">Interest groups in Shared Storage Worklet</a> — feature index</li>
       <li><a href="../ig-shared-storage/">IG read baseline</a> — sibling concept</li>
-      <li><a href="https://github.com/WICG/turtledove/blob/main/PA_reach.md" target="_blank" rel="noopener">Protected Audience — reach measurement explainer</a></li>
+      <li><a href="../reach-before-vs-after/">Reach before vs after v134</a></li>
+      <li><a href="https://wicg.github.io/turtledove/#get-storage-interest-groups-for-owner" target="_blank" rel="noopener">Protected Audience StorageInterestGroup spec</a></li>
       <li><a href="https://chromestatus.com/feature/5074536530444288" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
@@ -97,49 +107,78 @@ register('reach', Reach);</code></pre>
 </main>
 
 <script>
-  const probe = document.getElementById('probe');
-  const supported = 'sharedStorage' in window && typeof window.sharedStorage?.worklet?.addModule === 'function';
-  probe.innerHTML = supported
-    ? '<span class="ok">window.sharedStorage exposed</span> — the worklet API surface is present in this engine; interestGroups() requires the worklet context and is simulated here'
-    : '<span class="bad">sharedStorage worklet missing</span> — the production code path won\'t run here; the simulation below uses the same algorithm';
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const probe = document.getElementById("probe");
+  const supported = "sharedStorage" in window && typeof window.sharedStorage?.worklet?.addModule === "function";
+  probe.textContent = supported
+    ? "window.sharedStorage exposed - the worklet API surface is present; interestGroups() requires the worklet context and is simulated here"
+    : "sharedStorage worklet missing - the production code path will not run here; the simulation below uses the same algorithm";
+  probe.classList.add(supported ? "ok" : "bad");
 
   const FAKE = [
-    { name: 'shoe-shoppers', owner: 'https://shoes.example', lookbackDays: 4,  tags: ['shoes-spring'] },
-    { name: 'cart-abandoners', owner: 'https://shoes.example', lookbackDays: 18, tags: ['shoes-spring','retargeting'] },
-    { name: 'travel-browsers', owner: 'https://flights.example', lookbackDays: 50, tags: ['travel-easter'] },
-    { name: 'travel-booked', owner: 'https://flights.example', lookbackDays: 9, tags: ['travel-easter','converted'] },
-    { name: 'laptop-research', owner: 'https://gadgets.example', lookbackDays: 70, tags: ['laptops-back2school'] },
-    { name: 'broad-tech', owner: 'https://gadgets.example', lookbackDays: 25, tags: ['laptops-back2school','travel-easter'] },
-    { name: 'reactivation', owner: 'https://news.example', lookbackDays: 85, tags: [] },
+    { name: "just-joined", owner: "https://shoes.example", timeSinceLastUpdateMs: 0, timeSinceGroupJoinedMs: 0, lifetimeRemainingMs: 30 * DAY_MS, tags: ["shoes-spring"] },
+    { name: "shoe-shoppers", owner: "https://shoes.example", timeSinceLastUpdateMs: 4 * DAY_MS, timeSinceGroupJoinedMs: 12 * DAY_MS, lifetimeRemainingMs: 18 * DAY_MS, tags: ["shoes-spring"] },
+    { name: "cart-abandoners", owner: "https://shoes.example", timeSinceLastUpdateMs: 18 * DAY_MS, timeSinceGroupJoinedMs: 24 * DAY_MS, lifetimeRemainingMs: 6 * DAY_MS, tags: ["shoes-spring", "retargeting"] },
+    { name: "travel-browsers", owner: "https://flights.example", timeSinceLastUpdateMs: 50 * DAY_MS, timeSinceGroupJoinedMs: 70 * DAY_MS, lifetimeRemainingMs: 20 * DAY_MS, tags: ["travel-easter"] },
+    { name: "travel-booked", owner: "https://flights.example", timeSinceLastUpdateMs: 9 * DAY_MS, timeSinceGroupJoinedMs: 14 * DAY_MS, lifetimeRemainingMs: 16 * DAY_MS, tags: ["travel-easter", "converted"] },
+    { name: "laptop-research", owner: "https://gadgets.example", timeSinceLastUpdateMs: 70 * DAY_MS, timeSinceGroupJoinedMs: 80 * DAY_MS, lifetimeRemainingMs: 10 * DAY_MS, tags: ["laptops-back2school"] },
+    { name: "broad-tech", owner: "https://gadgets.example", timeSinceLastUpdateMs: 25 * DAY_MS, timeSinceGroupJoinedMs: 40 * DAY_MS, lifetimeRemainingMs: 22 * DAY_MS, tags: ["laptops-back2school", "travel-easter"] },
+    { name: "reactivation", owner: "https://news.example", timeSinceLastUpdateMs: 85 * DAY_MS, timeSinceGroupJoinedMs: 110 * DAY_MS, lifetimeRemainingMs: 2 * DAY_MS, tags: [] },
   ];
 
-  const winInput = document.getElementById('window');
-  const winVal = document.getElementById('win-val');
-  const campaign = document.getElementById('campaign');
-  const tbody = document.querySelector('#ig-table tbody');
-  const summary = document.getElementById('summary');
+  const winInput = document.getElementById("window");
+  const winVal = document.getElementById("win-val");
+  const campaign = document.getElementById("campaign");
+  const tbody = document.querySelector("#ig-table tbody");
+  const summary = document.getElementById("summary");
+
+  function days(ms) {
+    return Math.round(ms / DAY_MS);
+  }
+
+  function cell(text) {
+    const td = document.createElement("td");
+    td.textContent = text;
+    return td;
+  }
 
   function render() {
-    const days = +winInput.value;
-    winVal.textContent = `${days} days  (${days * 24 * 3600 * 1000} ms)`;
+    const maxDays = Number(winInput.value);
+    const maxAgeMs = maxDays * DAY_MS;
+    winVal.textContent = `${maxDays} days (${maxAgeMs} ms)`;
     const cmp = campaign.value;
-    tbody.innerHTML = '';
+    tbody.textContent = "";
     let inCount = 0;
     FAKE.forEach((g) => {
-      const inWindow = g.lookbackDays < days;
+      const inWindow = g.timeSinceLastUpdateMs <= maxAgeMs;
       const tagOk = !cmp || g.tags.includes(cmp);
       const counts = inWindow && tagOk;
       if (counts) inCount++;
-      const tr = document.createElement('tr');
-      tr.className = counts ? 'in-window' : 'out-window';
-      tr.innerHTML = `<td>${g.name}</td><td>${g.owner}</td><td>${g.lookbackDays}d</td><td>${g.tags.join(', ') || '—'}</td><td><span class="pill ${counts ? '' : 'out'}">${counts ? 'counted' : 'skipped'}</span></td>`;
+      const tr = document.createElement("tr");
+      tr.className = counts ? "in-window" : "out-window";
+      tr.append(
+        cell(g.name),
+        cell(g.owner),
+        cell(`${days(g.timeSinceLastUpdateMs)}d`),
+        cell(`${days(g.timeSinceGroupJoinedMs)}d`),
+        cell(g.tags.join(", ") || "-"),
+      );
+      const state = document.createElement("td");
+      const pill = document.createElement("span");
+      pill.className = "pill" + (counts ? "" : " out");
+      pill.textContent = counts ? "counted" : "skipped";
+      state.appendChild(pill);
+      tr.appendChild(state);
       tbody.appendChild(tr);
     });
-    summary.textContent = `Worklet would contribute ${inCount > 0 ? '1' : '0'} to the aggregate histogram bucket for "${cmp || '(all)'}", because ${inCount}/${FAKE.length} interest groups match the lookback + campaign filter.`;
+    summary.classList.toggle("none", inCount === 0);
+    summary.textContent = inCount > 0
+      ? `Worklet would contribute 1 to the aggregate histogram bucket for "${cmp || "(all)"}", because ${inCount}/${FAKE.length} interest groups match the update-age + campaign filter.`
+      : `No aggregate emitted for "${cmp || "(all)"}": zero interest groups match the update-age + campaign filter.`;
   }
 
-  winInput.addEventListener('input', render);
-  campaign.addEventListener('change', render);
+  winInput.addEventListener("input", render);
+  campaign.addEventListener("change", render);
   render();
 </script>
 </body>
