@@ -38,6 +38,17 @@
       padding: 0.5rem 0.65rem;
       border-top: 1px solid var(--border-black);
     }
+    .filter-row {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.45rem 0.65rem;
+      border-top: 1px solid var(--border-black);
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      color: var(--text-charcoal);
+    }
+    .filter-row input { accent-color: var(--text-black); }
     .ins-btn {
       padding: 0.3rem 0.55rem;
       border: 2px solid var(--border-black);
@@ -118,6 +129,7 @@
       color: var(--text-charcoal);
     }
     .gi-meta .mime { color: var(--text-muted); }
+    .gi-meta .duplicate { color: var(--accent-rose); }
 
     .event-log {
       background: var(--text-black);
@@ -133,6 +145,7 @@
     }
     .log-ok   { color: color-mix(in srgb, var(--accent-emerald) 42%, var(--bg-paper)); }
     .log-info { color: color-mix(in srgb, var(--accent-blue) 58%, var(--text-black)); }
+    .log-no   { color: color-mix(in srgb, var(--accent-rose) 70%, var(--bg-paper)); }
   </style>
 </head>
 <body>
@@ -152,6 +165,12 @@
       <button class="ins-btn" onclick="simulateInsert('png', 'image/png')">Sim: PNG</button>
       <button class="ins-btn" onclick="simulateInsert('webp', 'image/webp')">Sim: WebP</button>
       <button class="ins-btn" onclick="simulateInsert('jpeg', 'image/jpeg')">Sim: JPEG</button>
+      <button class="ins-btn" onclick="simulatePack()">Sim: sticker pack</button>
+      <button class="ins-btn" onclick="simulateRejected()">Sim: SVG reject</button>
+    </div>
+    <div class="filter-row">
+      <input type="checkbox" id="strictGate" checked>
+      <label for="strictGate">Strict gallery gate: accept only GIF, PNG, WebP, and JPEG; reject SVG and other image types.</label>
     </div>
     <div class="ins-note">Simulate buttons create a synthetic beforeinput event carrying a fake DataTransfer, identical to what an Android IME produces.</div>
   </div>
@@ -177,6 +196,7 @@
       <li><a href="../sticker-drop/">Sticker Drop</a> — simple inline media rendering</li>
       <li><a href="../comment-composer/">Comment Composer</a> — chip-based attachment pattern</li>
       <li><a href="../mime-type-filter/">MIME Type Filter</a> — accept/reject by type before inserting</li>
+      <li><a href="https://chromestatus.com/feature/5484282563919872" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -185,12 +205,18 @@
 <script>
 (function () {
   let galleryItems = [];
+  const seenKeys = new Set();
+  const rootStyles = getComputedStyle(document.documentElement);
+  function cssVar(name) {
+    return rootStyles.getPropertyValue(name).trim();
+  }
   const colors = {
-    gif:  ['#4ade80', '#22c55e', '#16a34a'],
-    png:  ['#60a5fa', '#3b82f6', '#2563eb'],
-    webp: ['#f472b6', '#ec4899', '#db2777'],
-    jpeg: ['#fb923c', '#f97316', '#ea580c'],
+    gif: [cssVar('--accent-emerald'), cssVar('--bg-paper'), cssVar('--text-black')],
+    png: [cssVar('--accent-blue'), cssVar('--bg-paper'), cssVar('--text-black')],
+    webp: [cssVar('--accent-rose'), cssVar('--bg-paper'), cssVar('--text-black')],
+    jpeg: [cssVar('--text-charcoal'), cssVar('--bg-paper'), cssVar('--text-black')],
   };
+  const commonTypes = new Set(['image/gif', 'image/png', 'image/webp', 'image/jpeg']);
 
   const log = document.getElementById('eventLog');
   function logMsg(msg, cls) {
@@ -201,12 +227,44 @@
     log.scrollTop = log.scrollHeight;
   }
 
-  function addToGallery(type, label) {
+  function getFallbackText(dt) {
+    try {
+      return dt.getData('text/plain') || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function fileFromItem(item) {
+    if (item.kind !== 'file') return null;
+    return item.getAsFile();
+  }
+
+  function filesFromTransfer(dt) {
+    const itemFiles = Array.from(dt.items ?? []).map(fileFromItem).filter(Boolean);
+    return itemFiles.length ? itemFiles : Array.from(dt.files ?? []);
+  }
+
+  function acceptance(file) {
+    const type = file.type || '';
+    if (!type.startsWith('image/')) return { ok: false, reason: 'not image/*' };
+    if (document.getElementById('strictGate').checked && !commonTypes.has(type)) {
+      return { ok: false, reason: 'outside strict image allow-list' };
+    }
+    return { ok: true };
+  }
+
+  function addToGallery(file, fallbackText) {
+    const type = file.type || '(empty type)';
+    const label = type.includes('/') ? type.split('/')[1] : 'unknown';
     const grid = document.getElementById('galleryGrid');
     const empty = document.getElementById('galleryEmpty');
     if (empty) empty.remove();
 
-    galleryItems.push({ type, label });
+    const key = `${file.name}:${file.size}:${type}`;
+    const duplicate = seenKeys.has(key);
+    seenKeys.add(key);
+    galleryItems.push({ type, label, duplicate });
     document.getElementById('galleryCount').textContent = galleryItems.length;
 
     const item = document.createElement('div');
@@ -216,7 +274,7 @@
     canvas.width = 120;
     canvas.height = 80;
     const ctx = canvas.getContext('2d');
-    const pal = colors[label] || ['#9ca3af', '#6b7280', '#4b5563'];
+    const pal = colors[label] || [cssVar('--bg-stone'), cssVar('--text-muted'), cssVar('--text-black')];
 
     // Draw a simple colored placeholder
     const grad = ctx.createLinearGradient(0, 0, 120, 80);
@@ -224,7 +282,7 @@
     grad.addColorStop(1, pal[2]);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, 120, 80);
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillStyle = cssVar('--bg-ivory');
     ctx.font = 'bold 13px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -232,11 +290,39 @@
 
     const meta = document.createElement('div');
     meta.className = 'gi-meta';
-    meta.innerHTML = `<span class="mime">${type}</span>`;
+    const mime = document.createElement('span');
+    mime.className = 'mime';
+    mime.textContent = type;
+    meta.append(mime);
+    if (fallbackText) {
+      meta.append(document.createElement('br'), document.createTextNode(fallbackText));
+    }
+    if (duplicate) {
+      const marker = document.createElement('span');
+      marker.className = 'duplicate';
+      marker.textContent = 'duplicate';
+      meta.append(document.createElement('br'), marker);
+    }
 
     item.appendChild(canvas);
     item.appendChild(meta);
     grid.appendChild(item);
+    logMsg(`${duplicate ? 'Duplicate flagged' : 'Lifted to gallery'}: ${type}`, duplicate ? 'log-no' : 'log-ok');
+  }
+
+  function handleFiles(files, source, fallbackText) {
+    if (!files.length) {
+      logMsg(`${source}: no file items in dataTransfer`, 'log-no');
+      return;
+    }
+    files.forEach(file => {
+      const result = acceptance(file);
+      if (!result.ok) {
+        logMsg(`Rejected ${file.type || '(empty type)'} from ${source}: ${result.reason}`, 'log-no');
+        return;
+      }
+      addToGallery(file, fallbackText);
+    });
   }
 
   // Real IME insertion via beforeinput
@@ -244,43 +330,64 @@
   editor.addEventListener('beforeinput', (e) => {
     if (e.inputType !== 'insertFromPaste' && e.inputType !== 'insertContent') return;
     const dt = e.dataTransfer;
-    if (!dt || !dt.files.length) return;
+    if (!dt) return;
+    const files = filesFromTransfer(dt);
+    if (!files.length) return;
     e.preventDefault();
-    const file = dt.files[0];
-    logMsg(`beforeinput: inputType=${e.inputType}, MIME=${file.type}, size=${file.size}B`, 'log-info');
-    const label = file.type.split('/')[1] || 'unknown';
-    addToGallery(file.type, label);
-    logMsg(`✓ Lifted to gallery: ${file.type}`, 'log-ok');
+    const itemTypes = Array.from(dt.items ?? []).map(item => item.type || item.kind).join(', ');
+    logMsg(`beforeinput: inputType=${e.inputType}, items=${files.length}, types=${itemTypes || files.map(f => f.type).join(', ')}`, 'log-info');
+    handleFiles(files, 'beforeinput', getFallbackText(dt));
   });
 
-  window.simulateInsert = function (label, mimeType) {
-    logMsg(`Simulating IME insertion: ${mimeType}`, 'log-info');
-
-    // Create a fake DataTransfer with a Blob file
+  function makeFile(label, mimeType, name) {
     const fakeBytes = new Uint8Array(64);
     crypto.getRandomValues(fakeBytes);
     const blob = new Blob([fakeBytes], { type: mimeType });
-    const file = new File([blob], `media.${label}`, { type: mimeType });
+    return new File([blob], name || `media.${label}`, { type: mimeType });
+  }
 
+  function dispatchIme(files, fallbackText) {
     try {
       const dt = new DataTransfer();
-      dt.items.add(file);
+      files.forEach(file => dt.items.add(file));
+      if (fallbackText) dt.setData('text/plain', fallbackText);
       const event = new InputEvent('beforeinput', {
         bubbles: true,
         cancelable: true,
         inputType: 'insertFromPaste',
         dataTransfer: dt,
       });
+      if (!event.dataTransfer) {
+        Object.defineProperty(event, 'dataTransfer', { value: dt });
+      }
       editor.dispatchEvent(event);
     } catch (_) {
-      // DataTransfer constructor not available in this context — handle directly
-      addToGallery(mimeType, label);
-      logMsg(`✓ Simulated (direct) — ${mimeType}`, 'log-ok');
+      handleFiles(files, 'simulated fallback', fallbackText || '');
     }
+  }
+
+  window.simulateInsert = function (label, mimeType) {
+    logMsg(`Simulating IME insertion: ${mimeType}`, 'log-info');
+    dispatchIme([makeFile(label, mimeType)], `${label.toUpperCase()} sticker fallback`);
+  };
+
+  window.simulatePack = function () {
+    logMsg('Simulating IME sticker pack: GIF, PNG, WebP in one DataTransfer', 'log-info');
+    dispatchIme([
+      makeFile('gif', 'image/gif', 'pack-one.gif'),
+      makeFile('png', 'image/png', 'pack-two.png'),
+      makeFile('webp', 'image/webp', 'pack-three.webp'),
+    ], 'Sticker pack text fallback');
+  };
+
+  window.simulateRejected = function () {
+    logMsg('Simulating SVG sticker against strict gallery gate', 'log-info');
+    dispatchIme([makeFile('svg', 'image/svg+xml', 'keyboard-sticker.svg')], 'SVG fallback text');
   };
 
   window.clearGallery = function () {
     galleryItems = [];
+    seenKeys.clear();
     document.getElementById('galleryCount').textContent = '0';
     const grid = document.getElementById('galleryGrid');
     grid.innerHTML = '<div class="gallery-empty" id="galleryEmpty">No media inserted yet.</div>';
