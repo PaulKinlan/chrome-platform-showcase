@@ -14,9 +14,10 @@
     .matrix { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.78rem; margin-top: var(--space-3); }
     .matrix th, .matrix td { border: 1px solid var(--border-black); padding: 0.4rem; text-align: left; }
     .matrix th { background: var(--bg-stone); }
-    .matrix td.yes { background: var(--accent-emerald); color: var(--accent-emerald); font-weight: 600; }
+    .matrix td.yes { background: var(--accent-emerald); color: var(--text-black); font-weight: 600; }
     .matrix td.no { background: var(--bg-stone); color: var(--text-muted); }
-    .matrix td.was-no { background: var(--accent-rose); color: var(--accent-rose); font-weight: 600; }
+    .matrix td.was-no { background: var(--accent-rose); color: var(--bg-ivory); font-weight: 600; }
+    .note { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-3); margin-top: var(--space-4); font-size: 0.94rem; }
     .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; box-shadow: var(--flat-shadow); }
     pre.snippet { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; overflow-x: auto; }
   </style>
@@ -28,7 +29,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v139</p>
     <h1>+json MIME Explorer</h1>
-    <p class="lede">Pick a MIME from the catalogue (or type a custom one) and see how Chrome 138 vs 139 classify it across each surface that asks &ldquo;is this JSON?&rdquo; — module loading, fetch() body, Resource Timing classification, structured-cloning, and content-sniffing.</p>
+    <p class="lede">Pick a MIME from the catalogue (or type a custom one) and see how Chrome 138 vs 139 classify it against the WHATWG JSON MIME type rule. The explorer strips parameters, lowercases the essence, handles malformed input, and shows where <code>+json</code> suffixes now become JSON.</p>
   </header>
 
   <div class="lab">
@@ -43,7 +44,13 @@
           <option value="application/manifest+json">application/manifest+json</option>
           <option value="application/health+json">application/health+json</option>
           <option value="application/problem+json">application/problem+json</option>
+          <option value="Application/Problem+JSON; charset=utf-8">Application/Problem+JSON; charset=utf-8</option>
+          <option value="application/activity+json">application/activity+json</option>
+          <option value="application/x.custom+json">application/x.custom+json</option>
+          <option value="application/json-seq">application/json-seq</option>
+          <option value="application/json; charset=utf-8">application/json; charset=utf-8</option>
           <option value="text/plain">text/plain</option>
+          <option value="not a mime">not a mime</option>
           <option value="custom">custom…</option>
         </select>
       </div>
@@ -53,9 +60,10 @@
       <button class="ctl-btn" id="probe">Classify</button>
 
       <table class="matrix" id="m">
-        <thead><tr><th>surface</th><th>Chrome 138</th><th>Chrome 139</th></tr></thead>
+        <thead><tr><th>check</th><th>Chrome 138</th><th>Chrome 139</th></tr></thead>
         <tbody></tbody>
       </table>
+      <p class="note">Highlighted cells show the old literal allow-list cases that change in Chrome 139. The MIME string itself does not change; Chrome now recognizes the structured <code>+json</code> suffix as a JSON MIME type, matching WHATWG mimesniff.</p>
     </div>
 
     <div class="pane">
@@ -71,7 +79,7 @@ function isJSONMimeType(mt) {
       || mt.essence === 'text/json'
       || mt.subtype.endsWith('+json');
 }</pre>
-      <h3 style="margin: var(--space-4) 0 var(--space-3); font-family: var(--font-mono); font-size: 0.92rem; text-transform: uppercase;">live live-fetch</h3>
+      <h3 style="margin: var(--space-4) 0 var(--space-3); font-family: var(--font-mono); font-size: 0.92rem; text-transform: uppercase;">live classifier</h3>
       <pre class="snippet" id="curl"></pre>
     </div>
   </div>
@@ -83,7 +91,7 @@ function isJSONMimeType(mt) {
       <li><a href="/v139/spec-compliant-json-mime-type-detection/json-module-import/">JSON Module Import</a></li>
       <li><a href="/v139/spec-compliant-json-mime-type-detection/mime-classifier/">MIME Classifier</a></li>
       <li><a href="https://mimesniff.spec.whatwg.org/#json-mime-type" target="_blank" rel="noopener">mimesniff — JSON MIME type</a></li>
-      <li><a href="https://chromestatus.com/feature/5085327190196224" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://chromestatus.com/feature/5470594816278528" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -91,45 +99,100 @@ function isJSONMimeType(mt) {
 </main>
 
 <script>
-(() =&gt; {
+(() => {
   const presetEl = document.getElementById('preset'), customEl = document.getElementById('custom');
-  presetEl.addEventListener('change', () =&gt; {
+  presetEl.addEventListener('change', () => {
     if (presetEl.value === 'custom') return;
     customEl.value = presetEl.value;
     classify();
   });
 
-  function isPlusJSON(mt) { const sub = mt.split('/')[1] || ''; return sub.endsWith('+json'); }
-  function isJSON138(mt) { // legacy: only the two literal essences
-    return mt === 'application/json' || mt === 'text/json';
+  function parseMime(input) {
+    const trimmed = input.trim();
+    const essence = trimmed.split(';', 1)[0].trim().toLowerCase();
+    const parts = essence.split('/');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      return { ok: false, essence, type: '', subtype: '', parameters: trimmed.includes(';') };
+    }
+    const token = /^[!#$%&'*+.^_`|~0-9a-z-]+$/i;
+    if (!token.test(parts[0]) || !token.test(parts[1])) {
+      return { ok: false, essence, type: parts[0], subtype: parts[1], parameters: trimmed.includes(';') };
+    }
+    return { ok: true, essence, type: parts[0], subtype: parts[1], parameters: trimmed.includes(';') };
   }
-  function isJSON139(mt) { return isJSON138(mt) || isPlusJSON(mt); }
+  function isJSON138(parsed) {
+    return parsed.ok && (parsed.essence === 'application/json' || parsed.essence === 'text/json');
+  }
+  function isJSON139(parsed) {
+    return isJSON138(parsed) || (parsed.ok && parsed.subtype.endsWith('+json'));
+  }
+  function chrome138(parsed) {
+    return {
+      jsonGroup: isJSON138(parsed),
+      minimize: isJSON138(parsed) ? 'application/json' : parsed.ok ? '(not minimized)' : 'parse failure',
+      module: isJSON138(parsed),
+      suffixRecognized: false,
+      parsed: parsed.ok
+    };
+  }
+  function chrome139(parsed) {
+    const json = isJSON139(parsed);
+    return {
+      jsonGroup: json,
+      minimize: json ? 'application/json' : parsed.ok ? '(not minimized)' : 'parse failure',
+      module: json,
+      suffixRecognized: parsed.ok && parsed.subtype.endsWith('+json'),
+      parsed: parsed.ok
+    };
+  }
+  function verdict(value, yesText = 'yes', noText = 'no') {
+    return value ? yesText : noText;
+  }
+  function cellClass(text, changedToJson) {
+    if (changedToJson) return 'was-no';
+    if (['parsed', 'JSON', 'application/json', 'allowed', 'recognized'].includes(text)) return 'yes';
+    return 'no';
+  }
 
   function classify() {
-    const mt = customEl.value.trim();
+    const mt = customEl.value;
+    const parsed = parseMime(mt);
+    const oldResult = chrome138(parsed);
+    const newResult = chrome139(parsed);
     const tbody = document.querySelector('#m tbody');
     tbody.innerHTML = '';
     const surfaces = [
-      ['<code>import * from … assert { type: \'json\' }</code>', 'module load'],
-      ['<code>fetch().json()</code> auto-content-type', 'fetch'],
-      ['<code>structuredClone()</code> over Response', 'clone'],
-      ['Resource Timing entry initiatorType=fetch', 'resource'],
-      ['CORS sniff — disallow non-JSON if response sniff says otherwise', 'sniff'],
+      ['MIME parser accepts the input', verdict(oldResult.parsed, 'parsed', 'failure'), verdict(newResult.parsed, 'parsed', 'failure')],
+      ['JSON MIME type group', verdict(oldResult.jsonGroup, 'JSON', 'not JSON'), verdict(newResult.jsonGroup, 'JSON', 'not JSON')],
+      ['Supported MIME minimization', oldResult.minimize, newResult.minimize],
+      ['JSON module response allowed', verdict(oldResult.module, 'allowed', 'blocked'), verdict(newResult.module, 'allowed', 'blocked')],
+      ['+json suffix treated as JSON trigger', verdict(oldResult.suffixRecognized, 'recognized', 'ignored'), verdict(newResult.suffixRecognized, 'recognized', 'ignored')],
     ];
-    surfaces.forEach(([label]) =&gt; {
+    surfaces.forEach(([label, oldText, newText]) => {
       const tr = document.createElement('tr');
-      const t138 = isJSON138(mt);
-      const t139 = isJSON139(mt);
-      tr.innerHTML = `&lt;td&gt;${label}&lt;/td&gt;&lt;td class="${t138 ? 'yes' : (t139 ? 'was-no' : 'no')}"&gt;${t138 ? 'JSON ✓' : 'rejected'}&lt;/td&gt;&lt;td class="${t139 ? 'yes' : 'no'}"&gt;${t139 ? 'JSON ✓' : 'rejected'}&lt;/td&gt;`;
+      const labelCell = document.createElement('td');
+      labelCell.textContent = label;
+      const oldCell = document.createElement('td');
+      oldCell.className = cellClass(oldText, oldText !== newText && newResult.jsonGroup);
+      oldCell.textContent = oldText;
+      const newCell = document.createElement('td');
+      newCell.className = cellClass(newText, false);
+      newCell.textContent = newText;
+      tr.append(labelCell, oldCell, newCell);
       tbody.appendChild(tr);
     });
-    document.getElementById('curl').textContent = `curl -i -H "Accept: application/json" https://example.com/data
-Content-Type: ${mt}
-
-// in browser:
-const r = await fetch('/data');
-const data = await r.json();    // ${isJSON139(mt) ? 'works in v139' : 'fails: not a JSON MIME type'}
-`;
+    document.getElementById('curl').textContent = [
+      `input: ${mt}`,
+      `parsed essence: ${parsed.ok ? parsed.essence : 'parse failure'}`,
+      `parameters stripped: ${parsed.parameters ? 'yes' : 'no'}`,
+      `structured suffix present: ${parsed.ok && parsed.subtype.endsWith('+json') ? 'yes' : 'no'}`,
+      `Chrome 138 JSON MIME type: ${oldResult.jsonGroup ? 'yes' : 'no'}`,
+      `Chrome 139 JSON MIME type: ${newResult.jsonGroup ? 'yes' : 'no'}`,
+      '',
+      newResult.jsonGroup
+        ? 'Result: JSON-module-style consumers can treat this Content-Type as JSON in Chrome 139.'
+        : 'Result: this is not a JSON MIME type under the WHATWG mimesniff rule.',
+    ].join('\n');
   }
   document.getElementById('probe').addEventListener('click', classify);
   customEl.addEventListener('input', classify);
