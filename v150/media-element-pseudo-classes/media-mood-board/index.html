@@ -25,10 +25,6 @@
     }
 
     /* State-driven visuals using media pseudo-classes */
-    audio:playing ~ .player-status { color: var(--accent-emerald); }
-    audio:paused ~ .player-status  { color: var(--text-muted); }
-    audio:muted ~ .mute-label      { text-decoration: line-through; color: var(--accent-rose); }
-
     /* Glow ring on the album art when playing */
     .art-wrap {
       width: 200px;
@@ -38,10 +34,6 @@
       margin: 0 auto var(--space-5);
       position: relative;
       transition: box-shadow 0.4s ease;
-    }
-
-    .art-wrap audio:playing + .art-inner {
-      /* Can't quite target this way — use the :has() pattern below */
     }
 
     /* Use :has() + :playing to glow the art */
@@ -101,6 +93,15 @@
       margin-bottom: var(--space-4);
     }
 
+    .audio-build-status {
+      min-height: 1.5rem;
+      margin: calc(-1 * var(--space-2)) 0 var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      text-align: center;
+    }
+
     .status-row {
       display: flex;
       justify-content: center;
@@ -112,6 +113,12 @@
 
     .player-status {
       transition: color 0.3s ease;
+      color: var(--text-muted);
+    }
+    .player-card:has(audio:playing) .player-status {
+      color: var(--accent-emerald);
+    }
+    .player-card:has(audio:paused) .player-status {
       color: var(--text-muted);
     }
 
@@ -191,12 +198,12 @@
       </div>
 
       <p class="track-title">Imaginary Summer</p>
-      <p class="track-meta">Web Audio API · 440 Hz · generated tone</p>
+      <p class="track-meta">Web Audio API · generated in-page · playable tone</p>
 
-      <audio controls>
-        <source src="data:audio/wav;base64,UklGRjQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YRAAAAAAAAAAAAAAAAAAAAAAAAAAAA==" type="audio/wav">
+      <audio id="mood-audio" controls preload="auto" loop>
         Your browser does not support the audio element.
       </audio>
+      <div class="audio-build-status" data-audio-status>Generating playable audio...</div>
 
       <div class="status-row">
         <span class="player-status"></span>
@@ -206,7 +213,12 @@
 
     <div class="explanation">
       <h2>How it works</h2>
-      <pre><code>/* No JS needed for these visual changes */
+      <pre><code>&lt;audio controls src="generated-tone.wav"&gt;&lt;/audio&gt;
+
+/* Web Audio generates the WAV source.
+   CSS handles the visual state after playback starts. */
+
+/* No JS needed for these visual changes */
 
 /* Glow when playing */
 .card:has(audio:playing) .art-wrap {
@@ -251,22 +263,157 @@
 
 <script>
 (() => {
+  const audio = document.getElementById('mood-audio');
+  const status = document.querySelector('[data-audio-status]');
+  const SampleRate = 44100;
+  const Duration = 5.2;
+  audio.volume = 0.35;
+
+  function writeAscii(view, offset, text) {
+    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+  }
+
+  function encodeWav(samples, sampleRate) {
+    const bytesPerSample = 2;
+    const buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
+    const view = new DataView(buffer);
+    writeAscii(view, 0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * bytesPerSample, true);
+    writeAscii(view, 8, 'WAVE');
+    writeAscii(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * bytesPerSample, true);
+    view.setUint16(32, bytesPerSample, true);
+    view.setUint16(34, 16, true);
+    writeAscii(view, 36, 'data');
+    view.setUint32(40, samples.length * bytesPerSample, true);
+    let offset = 44;
+    for (const sample of samples) {
+      const clamped = Math.max(-1, Math.min(1, sample));
+      view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+      offset += bytesPerSample;
+    }
+    return new Blob([view], { type: 'audio/wav' });
+  }
+
+  async function renderWithWebAudio() {
+    const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!OfflineContext) throw new Error('OfflineAudioContext unavailable');
+
+    const frameCount = Math.floor(SampleRate * Duration);
+    const ctx = new OfflineContext(1, frameCount, SampleRate);
+    const master = ctx.createGain();
+    master.gain.value = 0.52;
+    master.connect(ctx.destination);
+
+    const notes = [
+      [261.63, 0.00, 0.42],
+      [329.63, 0.42, 0.42],
+      [392.00, 0.84, 0.56],
+      [523.25, 1.40, 0.42],
+      [440.00, 1.82, 0.42],
+      [392.00, 2.24, 0.56],
+      [329.63, 2.80, 0.42],
+      [392.00, 3.22, 0.42],
+      [493.88, 3.64, 0.56],
+      [523.25, 4.20, 0.72],
+    ];
+
+    for (const [frequency, start, length] of notes) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(frequency, start);
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.32, start + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + length);
+      osc.connect(gain);
+      gain.connect(master);
+      osc.start(start);
+      osc.stop(start + length + 0.03);
+    }
+
+    const bass = ctx.createOscillator();
+    const bassGain = ctx.createGain();
+    bass.type = 'sine';
+    bass.frequency.setValueAtTime(130.81, 0);
+    bassGain.gain.setValueAtTime(0.08, 0);
+    bassGain.gain.exponentialRampToValueAtTime(0.0001, Duration - 0.1);
+    bass.connect(bassGain);
+    bassGain.connect(master);
+    bass.start(0);
+    bass.stop(Duration);
+
+    const rendered = await ctx.startRendering();
+    return rendered.getChannelData(0);
+  }
+
+  function renderFallbackTone() {
+    const frameCount = Math.floor(SampleRate * Duration);
+    const samples = new Float32Array(frameCount);
+    for (let i = 0; i < frameCount; i++) {
+      const t = i / SampleRate;
+      const envelope = Math.min(1, t / 0.08, (Duration - t) / 0.2);
+      samples[i] = (
+        Math.sin(2 * Math.PI * 440 * t) * 0.22 +
+        Math.sin(2 * Math.PI * 660 * t) * 0.08
+      ) * Math.max(0, envelope);
+    }
+    return samples;
+  }
+
+  function installAudio(samples, sourceLabel) {
+    const blob = encodeWav(samples, SampleRate);
+    const url = URL.createObjectURL(blob);
+    audio.src = url;
+    audio.load();
+    status.textContent = `Ready: ${Duration.toFixed(1)}s looping ${sourceLabel} at low volume. Press play to hear it.`;
+    window.addEventListener('pagehide', () => URL.revokeObjectURL(url), { once: true });
+  }
+
+  renderWithWebAudio()
+    .then(samples => installAudio(samples, 'Web Audio rendered WAV'))
+    .catch(() => installAudio(renderFallbackTone(), 'generated fallback WAV'));
+
+  audio.addEventListener('error', () => {
+    status.textContent = 'Audio failed to load. The CSS pseudo-class demo is visible, but the generated source did not decode.';
+  });
+  audio.addEventListener('play', () => {
+    status.textContent = 'Playing generated audio. CSS :playing should now drive the glow and status label.';
+  });
+  audio.addEventListener('pause', () => {
+    status.textContent = audio.currentTime > 0
+      ? 'Paused. CSS :paused should dim the title and status label.'
+      : 'Ready. Press play to hear the generated audio.';
+  });
+  audio.addEventListener('volumechange', () => {
+    if (audio.muted) status.textContent = 'Muted. CSS :muted should strike through the volume label.';
+  });
+})();
+
+(() => {
   const panel = document.querySelector('[data-live-probe]');
   if (!panel) return;
   const output = panel.querySelector('[data-probe-output]');
-  const text = document.body.textContent || '';
-  const checks = [
-    ['CSS.supports', 'CSS' in window && 'supports' in CSS],
-    ['customElements', 'customElements' in window],
-    ['navigator.gpu', 'gpu' in navigator],
-    ['navigator.credentials', 'credentials' in navigator],
-    ['navigator.mediaDevices', 'mediaDevices' in navigator],
-    ['PerformanceObserver', 'PerformanceObserver' in window],
-    ['ReadableStream', 'ReadableStream' in window],
-    ['scheduler', 'scheduler' in window],
-  ].filter(([name, ok]) => ok || text.includes(name));
+  const probeAudio = document.getElementById('mood-audio');
+  function supportsSelector(selector) {
+    try {
+      return CSS.supports(`selector(${selector})`);
+    } catch (_) {
+      return false;
+    }
+  }
   panel.querySelector('[data-probe-run]').addEventListener('click', () => {
-    const rows = checks.length ? checks : [['baseline DOM APIs', true]];
+    const rows = [
+      ['selector(audio:playing)', supportsSelector('audio:playing')],
+      ['selector(audio:paused)', supportsSelector('audio:paused')],
+      ['selector(audio:muted)', supportsSelector('audio:muted')],
+      ['OfflineAudioContext', 'OfflineAudioContext' in window || 'webkitOfflineAudioContext' in window],
+      ['audio/wav playback', Boolean(probeAudio.canPlayType('audio/wav'))],
+    ];
     output.textContent = rows.map(([name, ok]) => `${name}: ${ok ? 'available' : 'not detected'}`).join('\n');
   });
   panel.querySelector('[data-probe-toggle]').addEventListener('click', () => {
