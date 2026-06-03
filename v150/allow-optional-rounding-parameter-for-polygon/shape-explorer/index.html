@@ -85,6 +85,29 @@
       min-width: 48px;
       color: var(--text-black);
     }
+    .radius-readout {
+      margin-top: var(--space-3);
+      padding-top: var(--space-3);
+      border-top: 1px solid var(--border-black);
+      display: grid;
+      gap: var(--space-1);
+      font-family: var(--font-mono);
+    }
+    .radius-readout-label {
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-muted);
+    }
+    .effective-radius {
+      font-size: 1rem;
+      color: var(--text-black);
+    }
+    .clamp-note {
+      font-size: 0.72rem;
+      line-height: 1.45;
+      color: var(--text-charcoal);
+    }
 
     /* Preview area */
     .preview-wrap {
@@ -186,6 +209,11 @@
         <input type="range" class="radius-slider" id="radius-slider" min="0" max="60" value="0" step="1">
         <span class="radius-val" id="radius-val">0px</span>
       </div>
+      <div class="radius-readout" aria-live="polite">
+        <span class="radius-readout-label">Tightest effective radius</span>
+        <strong class="effective-radius" id="effective-radius">0px</strong>
+        <span class="clamp-note" id="clamp-note">No clamping at this radius.</span>
+      </div>
     </div>
   </div>
 
@@ -229,24 +257,91 @@
 
     let currentShape = 'triangle';
     let currentRadius = 0;
+    const PREVIEW_SIZE = 200;
 
     function polygonCSS(points, radius) {
       const round = radius > 0 ? `round ${radius}px, ` : '';
       return `polygon(${round}${points})`;
     }
 
+    function parseCoordinate(value, size) {
+      const number = Number.parseFloat(value);
+      if (value.endsWith('%')) return number / 100 * size;
+      return number;
+    }
+
+    function parsePolygonPoints(points) {
+      return points.split(',').map(point => {
+        const [x, y] = point.trim().split(/\s+/);
+        return {
+          x: parseCoordinate(x, PREVIEW_SIZE),
+          y: parseCoordinate(y, PREVIEW_SIZE),
+        };
+      });
+    }
+
+    function clampNumber(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function vertexRadiusLimit(vertices, index) {
+      const current = vertices[index];
+      const previous = vertices[(index - 1 + vertices.length) % vertices.length];
+      const next = vertices[(index + 1) % vertices.length];
+      const toPrevious = { x: previous.x - current.x, y: previous.y - current.y };
+      const toNext = { x: next.x - current.x, y: next.y - current.y };
+      const previousLength = Math.hypot(toPrevious.x, toPrevious.y);
+      const nextLength = Math.hypot(toNext.x, toNext.y);
+      if (previousLength === 0 || nextLength === 0) return 0;
+
+      const dot = toPrevious.x * toNext.x + toPrevious.y * toNext.y;
+      const cosine = clampNumber(dot / (previousLength * nextLength), -1, 1);
+      const angle = Math.acos(cosine);
+      const tangent = Math.tan(angle / 2);
+      if (!Number.isFinite(tangent)) return Number.POSITIVE_INFINITY;
+
+      return Math.max(
+        0,
+        Math.min(tangent * previousLength / 2, tangent * nextLength / 2),
+      );
+    }
+
+    function radiusStats(points, radius) {
+      const vertices = parsePolygonPoints(points);
+      const limits = vertices.map((_, index) => vertexRadiusLimit(vertices, index));
+      const finiteLimits = limits.filter(Number.isFinite);
+      const limitingRadius = finiteLimits.length ? Math.min(...finiteLimits) : radius;
+      const effectiveRadius = Math.min(radius, limitingRadius);
+      const clampedVertices = limits.filter(limit => radius > limit + 0.05).length;
+      return {
+        effectiveRadius,
+        clampedVertices,
+        totalVertices: vertices.length,
+      };
+    }
+
+    function formatRadius(value) {
+      const rounded = Math.max(0, Math.round(value * 10) / 10);
+      return Number.isInteger(rounded) ? `${rounded}px` : `${rounded.toFixed(1)}px`;
+    }
+
     function update() {
       const points = SHAPES[currentShape];
       const r      = currentRadius;
+      const stats  = radiusStats(points, r);
 
       const sharpCSS = polygonCSS(points, 0);
       const roundCSS = polygonCSS(points, r);
 
       document.getElementById('shape-sharp').style.clipPath = sharpCSS;
       document.getElementById('shape-round').style.clipPath = roundCSS;
+      document.getElementById('effective-radius').textContent = formatRadius(stats.effectiveRadius);
+      document.getElementById('clamp-note').textContent = stats.clampedVertices > 0
+        ? `${stats.clampedVertices} of ${stats.totalVertices} vertices clamp below the requested ${formatRadius(r)}.`
+        : 'No clamping at this radius.';
 
       const radiusLine = r > 0
-        ? `  /* round keyword: Chrome 150+ */\n  clip-path: polygon(<span class="hl">round ${r}px</span>, ${points});\n`
+        ? `  /* round keyword: Chrome 150+ */\n  /* tightest effective radius: ${formatRadius(stats.effectiveRadius)} */\n  clip-path: polygon(<span class="hl">round ${r}px</span>, ${points});\n`
         : `  clip-path: polygon(${points});\n`;
 
       document.getElementById('css-text').innerHTML =
