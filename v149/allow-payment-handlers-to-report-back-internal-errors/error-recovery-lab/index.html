@@ -11,9 +11,11 @@
       border: 2px solid var(--border-black);
       margin: 1.5rem 0 0;
       overflow: hidden;
+      flex-wrap: wrap;
     }
     .scenario-tab {
       flex: 1;
+      min-width: 130px;
       padding: 0.6rem 0.5rem;
       font-family: var(--font-mono);
       font-size: 0.72rem;
@@ -195,6 +197,31 @@
       flex-shrink: 0;
     }
 
+    .field-map,
+    .convention-note {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-charcoal);
+      padding: var(--space-3);
+      margin: var(--space-4) 0;
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      line-height: 1.6;
+    }
+    .field-map {
+      background: var(--bg-stone);
+      display: grid;
+      gap: var(--space-2);
+    }
+    .field-map div {
+      display: flex;
+      justify-content: space-between;
+      gap: var(--space-3);
+      border-bottom: 1px solid var(--border-black);
+      padding-bottom: var(--space-1);
+    }
+    .field-map div:last-child { border-bottom: none; padding-bottom: 0; }
+
     pre code {
       display: block;
       background: var(--text-black);
@@ -264,6 +291,14 @@
       <span class="scenario-type">Scenario 3</span>
       Network Timeout
     </button>
+    <button class="scenario-tab" data-scenario="cancel">
+      <span class="scenario-type">Scenario 4</span>
+      User Cancels
+    </button>
+    <button class="scenario-tab" data-scenario="plain">
+      <span class="scenario-type">Scenario 5</span>
+      Plain Message
+    </button>
   </div>
 
   <div class="checkout-wrapper">
@@ -298,14 +333,14 @@
 
       <button class="pay-btn" id="pay-btn">Pay £151.99</button>
 
-      <div class="outcome-panel" id="outcome-funds">
+      <div class="outcome-panel error" id="outcome-funds">
         <div class="outcome-title bad">Insufficient funds</div>
         <div>The payment handler returned a structured error — your balance is below the charge amount.</div>
         <div class="error-obj" id="funds-error-obj"></div>
         <div style="margin-top:0.5rem;color:var(--text-charcoal)">Merchant action: show balance warning, offer split-payment or saved cards.</div>
       </div>
 
-      <div class="outcome-panel" id="outcome-expired">
+      <div class="outcome-panel error" id="outcome-expired">
         <div class="outcome-title bad">Card expired</div>
         <div>The handler identified which field is invalid and returned it in the error object.</div>
         <div class="error-obj" id="expired-error-obj"></div>
@@ -318,7 +353,28 @@
         <div class="error-obj" id="timeout-error-obj"></div>
         <div id="retry-status" style="margin-top:0.5rem"></div>
       </div>
+
+      <div class="outcome-panel warn" id="outcome-cancel">
+        <div class="outcome-title caution">User cancelled</div>
+        <div>The browser surfaced <code>AbortError</code>. This is user intent, not an internal payment app failure.</div>
+        <div class="error-obj" id="cancel-error-obj"></div>
+        <div style="margin-top:0.5rem;color:var(--text-charcoal)">Merchant action: do not retry automatically, keep the basket intact, and let the user continue shopping.</div>
+      </div>
+
+      <div class="outcome-panel error" id="outcome-plain">
+        <div class="outcome-title bad">Plain message fallback</div>
+        <div>The handler did not emit JSON. Merchant code should surface the raw <code>err.message</code> and use a generic fallback path.</div>
+        <div class="error-obj" id="plain-error-obj"></div>
+        <div style="margin-top:0.5rem;color:var(--text-charcoal)">Merchant action: log the raw message, avoid assuming a payload schema, and offer another payment method.</div>
+      </div>
     </div>
+  </div>
+
+  <div class="field-map">
+    <div><strong>handler field</strong><strong>merchant target</strong></div>
+    <div><code>field: "expiry"</code><code>#expiry.field-error</code></div>
+    <div><code>type: "insufficient_funds"</code><code>#funds-error-obj</code></div>
+    <div><code>retry_after_ms</code><code>#retry-status countdown</code></div>
   </div>
 
   <div class="recovery-flow">
@@ -326,6 +382,10 @@
     <ul class="recovery-steps" id="recovery-steps">
       <!-- populated by JS -->
     </ul>
+  </div>
+
+  <div class="convention-note">
+    The JSON envelope shown here is a merchant/payment-handler convention, not a required wire format in the Payment Request spec. Chrome 149 preserves a richer <code>err.name</code> and <code>err.message</code>; your app decides whether that message is JSON, a plain string, or another parseable format.
   </div>
 
   <pre><code>// Chrome 149 — payment handler reports structured error via DOMException
@@ -337,9 +397,18 @@ async function checkout(method) {
 
   } catch (err) {
     // err.name is 'AbortError' (user cancel) or 'OperationError' (handler error)
-    // err.message now carries JSON from the handler in Chrome 149
-    let errorData = {};
-    try { errorData = JSON.parse(err.message); } catch (_) {}
+    // err.message may carry JSON from your handler, but JSON is only a convention
+    if (err.name === 'AbortError') {
+      showCancelMessage('Your basket is saved.');
+      return;
+    }
+
+    let errorData = null;
+    try { errorData = JSON.parse(err.message); } catch (_) {
+      logRawPaymentHandlerMessage(err.message);
+      showFallbackPaymentMethod();
+      return;
+    }
 
     switch (errorData.type) {
       case 'insufficient_funds':
@@ -353,7 +422,8 @@ async function checkout(method) {
 
       case 'timeout':
         if (errorData.retryable) {
-          await checkout(method);           // silent retry
+          await wait(errorData.retry_after_ms);
+          await checkout(method);           // retry after visible back-off
         } else {
           showMessage('Payment service unavailable. Try again later.');
         }
@@ -414,6 +484,28 @@ async function checkout(method) {
           { icon: '5.', text: 'If second attempt also fails, retryable may be false → show manual error', highlight: false },
         ],
       },
+      cancel: {
+        label: 'scenario: user_cancelled',
+        errorObj: null,
+        outcomeId: 'outcome-cancel',
+        recoverySteps: [
+          { icon: '1.', text: 'catch block receives AbortError from PaymentRequest.show()', highlight: true },
+          { icon: '2.', text: 'Treat this as user intent, not a handler crash', highlight: true },
+          { icon: '3.', text: 'Do not retry or show a warning state', highlight: false },
+          { icon: '4.', text: 'Keep basket state and let the user continue shopping', highlight: false },
+        ],
+      },
+      plain: {
+        label: 'scenario: plain_message',
+        errorObj: null,
+        outcomeId: 'outcome-plain',
+        recoverySteps: [
+          { icon: '1.', text: 'catch block receives a non-JSON err.message', highlight: true },
+          { icon: '2.', text: 'JSON.parse throws, so merchant code falls back to the raw string', highlight: true },
+          { icon: '3.', text: 'Log the raw message without assuming a payload schema', highlight: false },
+          { icon: '4.', text: 'Offer another payment method or support path', highlight: false },
+        ],
+      },
     };
 
     let currentScenario = 'funds';
@@ -435,6 +527,16 @@ async function checkout(method) {
       const btn = document.getElementById('pay-btn');
       btn.disabled = false;
       btn.textContent = 'Pay £151.99';
+    }
+
+    async function runRetryCountdown(ms) {
+      const retryStatus = document.getElementById('retry-status');
+      const seconds = Math.max(1, Math.ceil(ms / 1000));
+      for (let remaining = seconds; remaining > 0; remaining--) {
+        retryStatus.textContent = `Retryable error received. Waiting ${remaining}s before enabling a fresh payment attempt.`;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      retryStatus.textContent = 'Back-off complete. Ask for a fresh user gesture before opening another payment request.';
     }
 
     function applyScenario(key) {
@@ -466,10 +568,11 @@ async function checkout(method) {
       resetForm();
       const btn = document.getElementById('pay-btn');
       btn.disabled = true;
-      btn.textContent = '⟳ Processing…';
+      btn.textContent = 'Processing...';
 
       const sc = SCENARIOS[currentScenario];
-      const result = await showcasePaymentHandler.run(currentScenario, showcasePaymentHandler.paymentDetails({
+      const helperScenario = currentScenario === 'plain' ? 'generic' : currentScenario === 'cancel' ? 'abort' : currentScenario;
+      const result = await showcasePaymentHandler.run(helperScenario, showcasePaymentHandler.paymentDetails({
         total: {
           label: 'Developer Conference Ticket',
           amount: { currency: 'GBP', value: '151.99' },
@@ -487,10 +590,25 @@ async function checkout(method) {
         return;
       }
 
-      if (result.name !== 'OperationError') {
-        document.getElementById('timeout-error-obj').textContent =
-          `${result.name}: ${result.message}`;
-        document.getElementById('outcome-timeout').classList.add('show');
+      if (currentScenario === 'cancel') {
+        document.getElementById('cancel-error-obj').textContent =
+          `// raw AbortError\n${result.name}: ${result.message}`;
+        document.getElementById('outcome-cancel').classList.add('show');
+        btn.disabled = false;
+        btn.textContent = 'Try Again';
+        return;
+      }
+
+      if (currentScenario === 'plain') {
+        document.getElementById('plain-error-obj').textContent =
+          [
+            '// raw err.message',
+            result.message || '(empty)',
+            '',
+            '// JSON.parse(err.message)',
+            'throws — use raw-message fallback',
+          ].join('\n');
+        document.getElementById('outcome-plain').classList.add('show');
         btn.disabled = false;
         btn.textContent = 'Try Again';
         return;
@@ -513,8 +631,7 @@ async function checkout(method) {
           '// err.message (parsed JSON)\n' + JSON.stringify(errObj, null, 2);
         const outcome = document.getElementById('outcome-timeout');
         outcome.classList.add('show');
-        const retryStatus = document.getElementById('retry-status');
-        retryStatus.textContent = 'Retryable error received. Prompt for a new user gesture before opening another payment request.';
+        await runRetryCountdown(errObj.retry_after_ms || 1000);
         btn.disabled = false;
         btn.textContent = 'Try Again';
         return;
