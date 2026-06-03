@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Streaming Demo — Out-of-order streaming — Chrome 150</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/public/styles.css">
   <style>
     .stream-display {
@@ -101,7 +102,7 @@
   </header>
 
   <div class="note">
-    This demo creates a local <code>ReadableStream</code> with simulated chunk delays to show how the stream reader receives chunks. In a real network scenario, Chrome 150 removes in-browser head-of-line blocking so network chunks are dispatched as soon as they arrive.
+    This demo creates a local <code>ReadableStream</code> with simulated absolute arrival times. In the delayed run, chunk 4 arrives at 400&nbsp;ms while chunk 3 waits until 1100&nbsp;ms, so the reader should display chunk 4 before chunk 3. In a real network scenario, Chrome 150 removes in-browser head-of-line blocking so network chunks are dispatched as soon as they arrive.
   </div>
 
   <section>
@@ -139,26 +140,52 @@
 
   <section>
     <h2>code</h2>
-    <pre><code>// Creating a ReadableStream with staggered chunk delivery
-function makeStream(chunks, delays) {
-  let i = 0;
+    <pre><code>// Creating a ReadableStream with independent chunk arrival times
+function makeStream(chunks, arrivalTimes) {
+  const enc = new TextEncoder();
+  let remaining = chunks.length;
+  const timers = [];
   return new ReadableStream({
-    pull(controller) {
-      if (i >= chunks.length) { controller.close(); return; }
-      return new Promise(resolve => {
-        setTimeout(() => {
-          controller.enqueue(new TextEncoder().encode(chunks[i]));
-          i++;
-          resolve();
-        }, delays[i - 1] || 0);
+    start(controller) {
+      chunks.forEach((chunk, index) =&gt; {
+        const delay = arrivalTimes[index] ?? 0;
+        const timer = setTimeout(() =&gt; {
+          controller.enqueue(enc.encode(chunk));
+          remaining--;
+          if (remaining === 0) controller.close();
+        }, delay);
+        timers.push(timer);
       });
+      if (remaining === 0) controller.close();
+    },
+    cancel() {
+      timers.forEach(clearTimeout);
     }
   });
 }
 
-const reader = makeStream(data, delays).getReader();
-const decoder = new TextDecoder();
+// Chunk 3 is delayed; chunk 4 can arrive first.
+const stream = makeStream(data, [0, 200, 1100, 400, 600]);
+const reader = stream.getReader();</code></pre>
+  </section>
 
+  <section>
+    <h2>old sequential anti-pattern</h2>
+    <pre><code>pull(controller) {
+  // Returning a Promise here blocks the next pull().
+  return new Promise(resolve =&gt; {
+        setTimeout(() =&gt; {
+          controller.enqueue(nextChunk);
+          resolve();
+        }, slowDelay);
+  });
+}</code></pre>
+    <p class="note">That pattern accidentally recreates head-of-line blocking inside the demo itself. The live stream above schedules every chunk independently from <code>start()</code>, so the log reflects actual arrival order.</p>
+  </section>
+
+  <section>
+    <h2>reader loop</h2>
+    <pre><code>const decoder = new TextDecoder();
 while (true) {
   const { done, value } = await reader.read();
   if (done) break;
@@ -196,22 +223,39 @@ while (true) {
     'Chunk 5: Excepteur sint occaecat cupidatat non proident. [END]\n',
   ];
 
-  function makeStream(chunks, delays) {
+  function makeStream(chunks, arrivalTimes) {
     const enc = new TextEncoder();
-    let i = 0;
+    let remaining = chunks.length;
+    const timers = [];
     return new ReadableStream({
-      pull(controller) {
-        if (i >= chunks.length) { controller.close(); return; }
-        const idx = i++;
-        const delay = delays[idx] || 0;
-        return new Promise(resolve => {
-          setTimeout(() => {
-            controller.enqueue(enc.encode(chunks[idx]));
-            resolve();
+      start(controller) {
+        if (remaining === 0) {
+          controller.close();
+          return;
+        }
+        chunks.forEach((chunk, idx) => {
+          const delay = arrivalTimes[idx] ?? 0;
+          const timer = setTimeout(() => {
+            controller.enqueue(enc.encode(chunk));
+            remaining--;
+            if (remaining === 0) controller.close();
           }, delay);
+          timers.push(timer);
         });
+      },
+      cancel() {
+        timers.forEach(clearTimeout);
       }
     });
+  }
+
+  function escapeHTML(text) {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function addChunkLog(n, bytes, preview) {
@@ -221,7 +265,7 @@ while (true) {
     entry.innerHTML =
       '<span class="chunk-t">+' + n + 'ms</span>' +
       '<span class="chunk-size">' + bytes + 'B</span>' +
-      '<span class="chunk-preview">' + preview.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>';
+      '<span class="chunk-preview">' + escapeHTML(preview) + '</span>';
     chunkLog.appendChild(entry);
     chunkLog.scrollTop = chunkLog.scrollHeight;
   }
@@ -258,12 +302,12 @@ while (true) {
 
   document.getElementById('btn-stream').addEventListener('click', () => {
     // Even delays — chunks arrive ~200ms apart
-    runStream(makeStream(CHUNKS, [0, 200, 200, 200, 200]));
+    runStream(makeStream(CHUNKS, [0, 200, 400, 600, 800]));
   });
 
   document.getElementById('btn-stream-delayed').addEventListener('click', () => {
-    // Chunk 3 is delayed — earlier chunks still dispatch immediately
-    runStream(makeStream(CHUNKS, [0, 200, 900, 200, 200]));
+    // Chunk 3 is delayed; chunks 4 and 5 arrive while it is still in flight.
+    runStream(makeStream(CHUNKS, [0, 200, 1100, 400, 600]));
   });
 
   document.getElementById('btn-clear').addEventListener('click', () => {
