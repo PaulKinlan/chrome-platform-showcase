@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SR track language picker — Web Speech API + MediaStreamTrack — Chrome 135</title>
   <link rel="stylesheet" href="/public/styles.css">
+  <link rel="icon" href="data:,">
   <style>
     .stage {
       background: var(--bg-paper); border: 2px solid var(--border-black);
@@ -33,6 +34,11 @@
       font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);
       margin: var(--space-1) 0;
     }
+    .lang-label {
+      font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);
+      margin: 0 0 var(--space-1);
+    }
+    .action-row { margin-top: var(--space-3); }
 
     .transcript {
       background: var(--bg-stone); border: 1px solid var(--border-black);
@@ -64,14 +70,14 @@
   <div class="stage">
     <div class="row">
       <span class="pill" id="srPill">SpeechRecognition: ?</span>
-      <span class="pill" id="mstPill">mediaStreamTrack: ?</span>
+      <span class="pill" id="mstPill">start(track): ?</span>
     </div>
 
-    <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted);margin:0 0 var(--space-1);">Language (<code>SpeechRecognition.lang</code>):</p>
+    <p class="lang-label">Language (<code>SpeechRecognition.lang</code>):</p>
     <div class="lang-grid" id="langGrid"><!-- filled by JS --></div>
     <div class="current-lang" id="currentLang">Selected: en-US (English)</div>
 
-    <div class="row" style="margin-top:var(--space-3);">
+    <div class="row action-row">
       <button id="startBtn">Start mic + recognise</button>
       <button id="stopBtn" disabled>Stop</button>
     </div>
@@ -86,11 +92,10 @@
 const track  = stream.getAudioTracks()[0];
 
 const rec = new SpeechRecognition();
-rec.mediaStreamTrack = track;   // Chrome 135+
 rec.lang             = 'fr-FR'; // any BCP-47 tag
 rec.continuous       = true;
 rec.interimResults   = true;
-rec.start();</code></pre>
+rec.start(track);               // Chrome 135+</code></pre>
   </section>
 
   <section>
@@ -124,16 +129,16 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let selectedLang = 'en-US';
 let micStream = null, audioCtx = null, analyser = null;
 let rec = null, rafId = null, transcript = '';
+let suppressNextEnd = false;
 
 const srPill  = document.getElementById('srPill');
 const mstPill = document.getElementById('mstPill');
 srPill.textContent  = SR ? 'SpeechRecognition: yes' : 'SpeechRecognition: no';
 srPill.className    = 'pill ' + (SR ? 'ok' : 'bad');
 
-let mstSupported = false;
-if (SR) { try { const t = new SR(); mstSupported = 'mediaStreamTrack' in t; } catch {} }
-mstPill.textContent = mstSupported ? 'mediaStreamTrack: yes' : 'mediaStreamTrack: no';
-mstPill.className   = 'pill ' + (mstSupported ? 'ok' : 'bad');
+const trackInputReady = !!SR && 'MediaStreamTrack' in window;
+mstPill.textContent = trackInputReady ? 'start(track): ready' : 'start(track): fallback';
+mstPill.className   = 'pill ' + (trackInputReady ? 'ok' : 'bad');
 
 // Build language buttons
 const grid = document.getElementById('langGrid');
@@ -152,6 +157,7 @@ LANGUAGES.forEach(l => {
 });
 
 function restartRec() {
+  suppressNextEnd = true;
   if (rec) { try { rec.abort(); } catch {} rec = null; }
   if (micStream) startRec();
 }
@@ -161,7 +167,6 @@ function startRec() {
   const el    = document.getElementById('transcript');
 
   rec = new SR();
-  if (mstSupported) rec.mediaStreamTrack = track;
   rec.lang            = selectedLang;
   rec.continuous      = true;
   rec.interimResults  = true;
@@ -175,8 +180,23 @@ function startRec() {
     el.innerHTML = transcript + (interim ? `<span class="interim">${interim}</span>` : '') || '—';
   };
   rec.onerror = e => { if (e.error !== 'aborted' && e.error !== 'no-speech') console.warn('SR error:', e.error); };
-  rec.onend   = () => { if (micStream) startRec(); };
-  try { rec.start(); } catch {}
+  rec.onend   = () => {
+    if (suppressNextEnd) {
+      suppressNextEnd = false;
+      return;
+    }
+    if (micStream) startRec();
+  };
+  try {
+    rec.start(track);
+    mstPill.textContent = 'start(track): accepted';
+    mstPill.className = 'pill ok';
+  } catch (err) {
+    mstPill.textContent = 'start(track): fallback';
+    mstPill.className = 'pill bad';
+    console.warn('SR start(track) fallback:', err.name);
+    try { rec.start(); } catch {}
+  }
 }
 
 document.getElementById('startBtn').addEventListener('click', async () => {
@@ -204,6 +224,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
 });
 
 document.getElementById('stopBtn').addEventListener('click', () => {
+  suppressNextEnd = true;
   if (rec) { try { rec.abort(); } catch {} rec = null; }
   if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
