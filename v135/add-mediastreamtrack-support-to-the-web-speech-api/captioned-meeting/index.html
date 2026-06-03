@@ -18,8 +18,10 @@
     .lane .who { font-family: var(--font-display); font-size: 1.1rem; color: var(--text-black); }
     .lane .tr { background: var(--bg-paper); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-family: var(--font-serif); font-size: 0.95rem; min-height: 90px; }
     .lane .tr .interim { color: var(--text-muted); font-style: italic; }
+    .track-meta { font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-muted); min-height: 1.4em; }
     .log { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; max-height: 160px; overflow-y: auto; }
     .log p { margin: 0.1rem 0; font-family: var(--font-mono); font-size: 0.78rem; }
+    .note { font-family: var(--font-mono); color: var(--text-muted); font-size: 0.82rem; margin: var(--space-3) 0 0; }
   </style>
 </head>
 <body>
@@ -43,14 +45,18 @@
       <div class="lane">
         <h4>track #1</h4>
         <div class="who">Alice (real mic)</div>
-        <div class="tr" id="t-1"><span class="interim">awaiting audio…</span></div>
+        <div class="track-meta" id="m-1">track not started</div>
+        <div class="tr" id="t-1" aria-live="polite"><span class="interim">awaiting audio…</span></div>
       </div>
       <div class="lane">
         <h4>track #2</h4>
-        <div class="who">Bob (synthesised tone, simulated)</div>
-        <div class="tr" id="t-2"><span class="interim">awaiting audio…</span></div>
+        <div class="who">Bob (Web Audio routed track)</div>
+        <div class="track-meta" id="m-2">track not started</div>
+        <div class="tr" id="t-2" aria-live="polite"><span class="interim">awaiting audio…</span></div>
       </div>
     </div>
+
+    <p class="note">Bob is not a timer: this demo routes the same microphone through a <code>MediaStreamDestination</code> to create a second real <code>MediaStreamTrack</code>, then starts a second recognizer with that track. In production this is where an <code>RTCPeerConnection</code> remote track would be passed.</p>
 
     <div class="log" id="log"></div>
   </div>
@@ -64,7 +70,13 @@ peer.ontrack = (e) =&gt; {
   rec.interimResults = true;
   rec.onresult = (ev) =&gt; renderCaptionsFor(e.track.id, ev);
   rec.start(e.track);             // NEW in Chrome 135
-};</code></pre>
+};
+
+// This demo creates a second real track from Web Audio so the pattern
+// works without a live peer connection.
+const destination = audioContext.createMediaStreamDestination();
+micSource.connect(destination);
+secondRecognizer.start(destination.stream.getAudioTracks()[0]);</code></pre>
   </section>
 
   <section>
@@ -82,8 +94,9 @@ peer.ontrack = (e) =&gt; {
 
 <script>
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const AC = window.AudioContext || window.webkitAudioContext;
 const cap = document.getElementById("cap");
-const ok = SR && navigator.mediaDevices?.getUserMedia;
+const ok = SR && navigator.mediaDevices?.getUserMedia && AC;
 cap.textContent = ok ? "SR + track overload: yes" : "SR + track overload: no";
 cap.classList.add(ok ? "ok" : "bad");
 
@@ -93,15 +106,11 @@ function log(m) { const p = document.createElement("p"); p.textContent = `${new 
 let stream = null;
 let recA = null;
 let recB = null;
-let bobTimer = null;
-
-const bobPhrases = [
-  "Yeah, agreed on the approach.",
-  "Can you share the doc again?",
-  "I'll take that one this sprint.",
-  "Sorry, you cut out for a second.",
-  "Let's move that to next week.",
-];
+let audioContext = null;
+let bobSource = null;
+let bobGain = null;
+let bobDestination = null;
+let bobTrack = null;
 
 function renderTrack(id, e) {
   const el = document.getElementById(id);
@@ -114,42 +123,93 @@ function renderTrack(id, e) {
   el.innerHTML = `${finalT}<span class="interim">${interimT}</span>`;
 }
 
+function setTrackMeta(id, text) {
+  document.getElementById(id).textContent = text;
+}
+
+function resetTranscript(id, text = "awaiting audio…") {
+  document.getElementById(id).innerHTML = `<span class="interim">${text}</span>`;
+}
+
+function wireRecognizer(rec, track, transcriptId, metaId, label) {
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.onresult = (e) => renderTrack(transcriptId, e);
+  rec.onerror = (e) => {
+    log(`${label} error: ${e.error}`);
+    setTrackMeta(metaId, `${label}: error ${e.error}`);
+  };
+  rec.onend = () => {
+    log(`${label} recognizer ended`);
+    setTrackMeta(metaId, `${label}: recognizer ended, track ${track.readyState}`);
+  };
+  try {
+    rec.start(track);
+    log(`${label} started with track overload (${track.id.slice(0, 8)})`);
+    setTrackMeta(metaId, `${label}: recognizing track ${track.id.slice(0, 8)}…`);
+  } catch (err) {
+    rec.start();
+    log(`${label} start(track) failed (${err.message}); fell back to default mic`);
+    setTrackMeta(metaId, `${label}: fallback default microphone`);
+  }
+}
+
+function stopMeeting() {
+  if (recA) { try { recA.stop(); } catch {} }
+  if (recB) { try { recB.stop(); } catch {} }
+  if (bobTrack) bobTrack.stop();
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  if (bobSource) { try { bobSource.disconnect(); } catch {} }
+  if (bobGain) { try { bobGain.disconnect(); } catch {} }
+  if (audioContext) { try { audioContext.close(); } catch {} }
+
+  stream = null;
+  recA = null;
+  recB = null;
+  audioContext = null;
+  bobSource = null;
+  bobGain = null;
+  bobDestination = null;
+  bobTrack = null;
+  setTrackMeta("m-1", "track not started");
+  setTrackMeta("m-2", "track not started");
+  resetTranscript("t-1");
+  resetTranscript("t-2");
+}
+
 document.getElementById("start").addEventListener("click", async () => {
   if (!SR) { log("SpeechRecognition unavailable"); return; }
+  if (!navigator.mediaDevices?.getUserMedia) { log("getUserMedia unavailable"); return; }
+  if (!AC) { log("AudioContext unavailable"); return; }
   try {
+    stopMeeting();
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const [trackA] = stream.getAudioTracks();
     log(`got track #1: ${trackA.label || "(real mic)"}`);
+    setTrackMeta("m-1", `Alice: ${trackA.label || "microphone"} (${trackA.id.slice(0, 8)})`);
+
+    audioContext = new AC();
+    await audioContext.resume();
+    bobSource = audioContext.createMediaStreamSource(stream);
+    bobGain = audioContext.createGain();
+    bobGain.gain.value = 1;
+    bobDestination = audioContext.createMediaStreamDestination();
+    bobSource.connect(bobGain).connect(bobDestination);
+    [bobTrack] = bobDestination.stream.getAudioTracks();
+    log(`created track #2 from Web Audio destination: ${bobTrack.id.slice(0, 8)}`);
+    setTrackMeta("m-2", `Bob: Web Audio track ${bobTrack.id.slice(0, 8)}`);
 
     recA = new SR();
-    recA.continuous = true;
-    recA.interimResults = true;
-    recA.onresult = (e) => renderTrack("t-1", e);
-    recA.onerror = (e) => log(`#1 error: ${e.error}`);
-    recA.onend = () => log("#1 ended");
-    try { recA.start(trackA); log("#1 started with track overload"); }
-    catch { recA.start(); log("#1 started without track overload"); }
-
-    // Synthesised Bob: a fake stream of phrases on a timer to simulate a
-    // second participant. In real code, this would be a remote
-    // RTCPeerConnection track.
-    const bob = document.getElementById("t-2");
-    let i = 0;
-    bobTimer = setInterval(() => {
-      bob.innerHTML = bobPhrases[i % bobPhrases.length];
-      i++;
-    }, 3000);
-    log("#2 simulated stream started");
+    recB = new SR();
+    wireRecognizer(recA, trackA, "t-1", "m-1", "#1 Alice");
+    wireRecognizer(recB, bobTrack, "t-2", "m-2", "#2 Bob");
   } catch (e) {
     log(`failed: ${e.message}`);
   }
 });
 
 document.getElementById("stop").addEventListener("click", () => {
-  if (recA) { try { recA.stop(); } catch {} }
-  if (recB) { try { recB.stop(); } catch {} }
-  if (stream) stream.getTracks().forEach((t) => t.stop());
-  if (bobTimer) clearInterval(bobTimer);
+  stopMeeting();
   log("stopped");
 });
 </script>
