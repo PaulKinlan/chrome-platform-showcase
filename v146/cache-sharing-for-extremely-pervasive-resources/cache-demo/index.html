@@ -77,6 +77,65 @@
       font-size: 0.875rem;
       color: var(--text-charcoal);
     }
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+      gap: 1rem;
+      margin: 1rem 0;
+    }
+    .site-card {
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: 0.85rem;
+    }
+    .site-card h3 {
+      margin: 0 0 0.5rem;
+      font-size: 0.82rem;
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+    }
+    .cache-pill {
+      display: inline-block;
+      padding: 0.1rem 0.35rem;
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.45rem;
+    }
+    .cache-pill.hit {
+      background: color-mix(in srgb, var(--accent-emerald) 18%, var(--bg-ivory));
+    }
+    .cache-pill.miss {
+      background: color-mix(in srgb, var(--accent-rose) 18%, var(--bg-ivory));
+    }
+    .site-card dl {
+      margin: 0;
+      display: grid;
+      grid-template-columns: 8rem 1fr;
+      gap: 0.25rem 0.5rem;
+      font-size: 0.76rem;
+    }
+    .site-card dt {
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+    .site-card dd {
+      margin: 0;
+      color: var(--text-charcoal);
+      word-break: break-word;
+    }
+    .model-summary {
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      padding: 0.75rem;
+      font-size: 0.84rem;
+      margin-bottom: 1rem;
+    }
     pre code { font-size: 0.8125rem; line-height: 1.6; }
   </style>
 </head>
@@ -123,6 +182,18 @@
   </section>
 
   <section>
+    <h2>cross-site partition model</h2>
+    <p style="font-size:0.85rem;color:var(--text-charcoal);margin-bottom:0.75rem;">Run the same resource through two simulated top-level sites. Allowlisted resources reuse one shared bucket, while self-hosted lookalikes keep the top-level site in the cache key.</p>
+    <div class="action-row">
+      <button type="button" data-scenario="allowlisted">Allowlisted analytics script</button>
+      <button type="button" data-scenario="private">Self-hosted lookalike</button>
+      <button type="button" data-scenario="purged">Allowlisted after purge</button>
+    </div>
+    <div class="model-summary" id="model-summary">Choose a scenario to compare partitioned and shared cache behavior.</div>
+    <div class="scenario-grid" id="scenario-grid"></div>
+  </section>
+
+  <section>
     <h2>how transferSize reveals cache hits</h2>
     <pre><code>// Resource Timing: transferSize === 0 means served from cache
 performance.getEntriesByType('resource').forEach(entry => {
@@ -146,9 +217,13 @@ performance.getEntriesByType('resource').forEach(entry => {
 // 5. No personalisation, no auth, no cookies
 
 // Examples of candidate resources:
-// - Popular JavaScript frameworks served from public CDNs
-// - Font files from web font providers
-// - Common icon / sprite sheets
+// - Common analytics scripts
+// - Social media embed loaders
+// - Video player embeds, captcha providers, and ads libraries
+
+// Non-candidates remain partitioned:
+// - Self-hosted copies
+// - Manually version-pinned framework/library URLs
 
 // Developer impact: zero. No API changes, no opt-in.
 // Chrome handles keying automatically for allowlisted URLs.</code></pre>
@@ -193,6 +268,90 @@ performance.getEntriesByType('resource').forEach(entry => {
     el.textContent = val;
     if (cls) el.className = 'timing-value ' + cls;
   }
+
+  const SCENARIOS = {
+    allowlisted: {
+      label: 'Allowlisted analytics script',
+      url: 'https://www.googletagmanager.com/gtag/js?id=G-EXAMPLE',
+      resourceOrigin: 'www.googletagmanager.com',
+      shared: true,
+      purged: false,
+      sizeKb: 46,
+      summary:
+        'The first top-level site fills the shared bucket. The second site can reuse the same public, extremely pervasive resource without a duplicate network transfer.',
+    },
+    private: {
+      label: 'Self-hosted lookalike',
+      url: 'https://news.example/assets/analytics-wrapper.js',
+      resourceOrigin: 'news.example',
+      shared: false,
+      purged: false,
+      sizeKb: 46,
+      summary:
+        'This URL resembles the analytics loader, but it is self-hosted. Chrome keeps separate entries for each top-level site, so the second site still misses.',
+    },
+    purged: {
+      label: 'Allowlisted script after purge',
+      url: 'https://www.googletagmanager.com/gtag/js?id=G-EXAMPLE',
+      resourceOrigin: 'www.googletagmanager.com',
+      shared: true,
+      purged: true,
+      sizeKb: 46,
+      summary:
+        'If the shared entry is evicted or purged before the next navigation, the second top-level site pays the network cost and then refills the shared bucket.',
+    },
+  };
+
+  function renderScenario(key) {
+    const scenario = SCENARIOS[key];
+    const grid = document.getElementById('scenario-grid');
+    const summary = document.getElementById('model-summary');
+    summary.textContent = scenario.summary;
+    grid.innerHTML = '';
+
+    const visits = [
+      {
+        site: 'news.example',
+        result: 'network miss',
+        hit: false,
+        transferSize: `${scenario.sizeKb} KB`,
+        key: scenario.shared ? `SHARED + ${scenario.resourceOrigin}` : `news.example + ${scenario.resourceOrigin}`,
+        note: scenario.shared ? 'Fills the shared cache bucket.' : 'Fills only this top-level site partition.',
+      },
+      {
+        site: 'shop.example',
+        result: scenario.shared && !scenario.purged ? 'shared hit' : 'network miss',
+        hit: scenario.shared && !scenario.purged,
+        transferSize: scenario.shared && !scenario.purged ? '0 KB' : `${scenario.sizeKb} KB`,
+        key: scenario.shared ? `SHARED + ${scenario.resourceOrigin}` : `shop.example + ${scenario.resourceOrigin}`,
+        note: scenario.shared && !scenario.purged
+          ? 'Reuses bytes fetched by the first top-level site.'
+          : 'The top-level site stays in the cache key, so this is not reused.',
+      },
+    ];
+
+    for (const visit of visits) {
+      const card = document.createElement('div');
+      card.className = 'site-card';
+      card.innerHTML = `
+        <h3>${visit.site}</h3>
+        <span class="cache-pill ${visit.hit ? 'hit' : 'miss'}">${visit.result}</span>
+        <dl>
+          <dt>resource</dt><dd>${scenario.url}</dd>
+          <dt>cache key</dt><dd>${visit.key}</dd>
+          <dt>transferSize</dt><dd>${visit.transferSize}</dd>
+          <dt>encodedBodySize</dt><dd>${scenario.sizeKb} KB</dd>
+          <dt>why</dt><dd>${visit.note}</dd>
+        </dl>
+      `;
+      grid.appendChild(card);
+    }
+  }
+
+  document.querySelectorAll('[data-scenario]').forEach((button) => {
+    button.addEventListener('click', () => renderScenario(button.dataset.scenario));
+  });
+  renderScenario('allowlisted');
 
   document.getElementById('btn-run').addEventListener('click', async () => {
     const box = document.getElementById('log');
