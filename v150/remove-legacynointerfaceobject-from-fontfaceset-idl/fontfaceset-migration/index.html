@@ -298,7 +298,8 @@ ctx.font = <span class="val">"24px WorkerFont"</span>;
       <li><a href="/v150/remove-legacynointerfaceobject-from-fontfaceset-idl/prototype-inspector/">Prototype Inspector</a></li>
       <li><a href="/v150/remove-legacynointerfaceobject-from-fontfaceset-idl/worker-exposure/">Worker Exposure</a></li>
       <li><a href="/v150/remove-legacynointerfaceobject-from-fontfaceset-idl/">Back to feature index</a></li>
-      <li><a href="https://chromestatus.com/feature/5185254595756032" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://chromestatus.com/feature/5123999844663296" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://drafts.csswg.org/css-font-loading/#fontfaceset" target="_blank" rel="noopener">CSS Font Loading — FontFaceSet</a></li>
     </ul>
   </section>
 
@@ -411,43 +412,126 @@ ctx.font = <span class="val">"24px WorkerFont"</span>;
         log.scrollTop = log.scrollHeight;
       }
 
-      appendLog('[worker] Starting…', 'log-info');
+      if (!('Worker' in window)) {
+        appendLog('[main] Worker constructor unavailable in this browser.', 'log-err');
+        return;
+      }
 
-      const isConstructible = (() => {
-        try { new FontFaceSet([]); return true; } catch(e) { return false; }
-      })();
+      appendLog('[main] Creating a real Dedicated Worker…', 'log-info');
+      const workerSource = `
+        async function run() {
+          const result = {
+            typeFontFaceSet: typeof FontFaceSet,
+            typeFontFace: typeof FontFace,
+            typeOffscreenCanvas: typeof OffscreenCanvas,
+            constructible: false,
+            setSize: null,
+            faceStatus: null,
+            metrics: null,
+            fallback: null,
+            error: null
+          };
 
-      setTimeout(() => {
-        if (!isConstructible) {
-          appendLog('[worker] FontFaceSet constructor not available (pre-Chrome 150)', 'log-err');
-          appendLog('[worker] Worker font loading not possible without constructor', 'log-err');
-          return;
+          try {
+            if (typeof FontFaceSet !== 'function') {
+              result.fallback = 'FontFaceSet is not exposed in this worker.';
+              postMessage(result);
+              return;
+            }
+            if (typeof FontFace !== 'function') {
+              result.fallback = 'FontFace is not exposed in this worker.';
+              postMessage(result);
+              return;
+            }
+
+            const face = new FontFace(
+              'WorkerProbeFont',
+              'local(Arial), local(Helvetica), local(sans-serif)'
+            );
+            const set = new FontFaceSet([]);
+            result.constructible = true;
+            set.add(face);
+            result.setSize = set.size;
+
+            try {
+              await face.load();
+              result.faceStatus = face.status;
+              if (set.ready) await set.ready;
+            } catch (fontError) {
+              result.faceStatus = face.status;
+              result.fallback = 'Font load failed; continuing with canvas fallback metrics: ' + fontError.message;
+            }
+
+            if (typeof OffscreenCanvas === 'function') {
+              const canvas = new OffscreenCanvas(420, 120);
+              const ctx = canvas.getContext('2d');
+              ctx.font = '32px sans-serif';
+              const baseline = ctx.measureText('FontFaceSet worker probe').width;
+              ctx.font = '32px WorkerProbeFont, sans-serif';
+              const workerFont = ctx.measureText('FontFaceSet worker probe').width;
+              result.metrics = {
+                baseline: Number(baseline.toFixed(2)),
+                workerFont: Number(workerFont.toFixed(2)),
+                delta: Number((workerFont - baseline).toFixed(2))
+              };
+            } else {
+              result.fallback = (result.fallback ? result.fallback + ' ' : '') +
+                'OffscreenCanvas is unavailable, so metrics cannot be measured in this worker.';
+            }
+          } catch (error) {
+            result.error = error && error.message ? error.message : String(error);
+          }
+
+          postMessage(result);
         }
-        appendLog('[worker] typeof FontFaceSet = "' + typeof FontFaceSet + '"', 'log-ok');
-        appendLog('[worker] new FontFaceSet([]) → success', 'log-ok');
-        appendLog('[worker] Creating FontFace("WorkerFont", url(…))…', 'log-info');
-      }, 100);
 
-      setTimeout(() => {
-        if (!isConstructible) return;
-        try {
-          const face = new FontFace('WorkerFont2', 'url(https://fonts.gstatic.com/s/lora/v35/0QI6MX1D_JOxE7gSbZkvfQ.woff2)');
-          const ffs  = new FontFaceSet([]);
-          ffs.add(face);
-          appendLog('[worker] new FontFaceSet([]) + ffs.add(face) → ok', 'log-ok');
-          appendLog('[worker] ffs.size = ' + ffs.size, 'log-ok');
-          appendLog('[worker] Simulating OffscreenCanvas text metrics…', 'log-info');
-        } catch(e) {
-          appendLog('[worker] Error: ' + e.message, 'log-err');
+        run();
+      `;
+
+      const url = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
+      const worker = new Worker(url);
+      const timeout = setTimeout(() => {
+        appendLog('[main] Worker timed out before returning metrics.', 'log-err');
+        worker.terminate();
+        URL.revokeObjectURL(url);
+      }, 8000);
+
+      worker.onmessage = event => {
+        clearTimeout(timeout);
+        URL.revokeObjectURL(url);
+        const result = event.data || {};
+        appendLog('[worker] typeof FontFaceSet = "' + result.typeFontFaceSet + '"', result.typeFontFaceSet === 'function' ? 'log-ok' : 'log-err');
+        appendLog('[worker] typeof FontFace = "' + result.typeFontFace + '"', result.typeFontFace === 'function' ? 'log-ok' : 'log-info');
+        appendLog('[worker] typeof OffscreenCanvas = "' + result.typeOffscreenCanvas + '"', result.typeOffscreenCanvas === 'function' ? 'log-ok' : 'log-info');
+
+        if (result.constructible) {
+          appendLog('[worker] new FontFaceSet([]) ran inside the worker.', 'log-ok');
+          appendLog('[worker] isolated set size = ' + result.setSize, 'log-ok');
         }
-      }, 400);
+        if (result.faceStatus) {
+          appendLog('[worker] FontFace status = ' + result.faceStatus, result.faceStatus === 'loaded' ? 'log-ok' : 'log-info');
+        }
+        if (result.metrics) {
+          appendLog('[worker] OffscreenCanvas measureText baseline = ' + result.metrics.baseline + 'px', 'log-ok');
+          appendLog('[worker] OffscreenCanvas measureText worker font = ' + result.metrics.workerFont + 'px', 'log-ok');
+          appendLog('[worker] measured delta = ' + result.metrics.delta + 'px', 'log-info');
+        }
+        if (result.fallback) {
+          appendLog('[worker] fallback: ' + result.fallback, 'log-info');
+        }
+        if (result.error) {
+          appendLog('[worker] error: ' + result.error, 'log-err');
+        }
+        appendLog('[main] Worker completed with real API results.', result.error ? 'log-err' : 'log-info');
+        worker.terminate();
+      };
 
-      setTimeout(() => {
-        if (!isConstructible) return;
-        appendLog('[worker] OffscreenCanvas + measureText() → width: 84.2px (simulated)', 'log-ok');
-        appendLog('[worker] Font loaded in isolated set — no document.fonts pollution', 'log-ok');
-        appendLog('[worker] Done.', 'log-info');
-      }, 900);
+      worker.onerror = event => {
+        clearTimeout(timeout);
+        URL.revokeObjectURL(url);
+        appendLog('[worker] error: ' + event.message, 'log-err');
+        worker.terminate();
+      };
     }
   </script>
 </main>
