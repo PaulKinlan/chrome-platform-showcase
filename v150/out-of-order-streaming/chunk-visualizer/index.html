@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chunk Visualizer — Out-of-order Streaming — Chrome 150</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/public/styles.css">
   <style>
     .controls {
@@ -216,6 +217,7 @@ while (true) {
       <li><a href="../streaming-demo/">Streaming Demo</a> — live ReadableStream consumption</li>
       <li><a href="../chunk-ordering/">Chunk Ordering</a> — in-order vs out-of-order explained</li>
       <li><a href="../pipeline-demo/">Pipeline Demo</a> — TransformStream pipeline</li>
+      <li><a href="https://chromestatus.com/feature/5111042975465472" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -226,6 +228,8 @@ while (true) {
   const TOTAL_CHUNKS = 6;
   let mode = 'old';
   let running = false;
+  let runToken = 0;
+  let activeTimers = [];
 
   window.setMode = function (m) {
     mode = m;
@@ -262,7 +266,36 @@ while (true) {
     });
   }
 
+  function clearActiveTimers() {
+    activeTimers.forEach(({ id, cancel }) => {
+      clearTimeout(id);
+      cancel();
+    });
+    activeTimers = [];
+  }
+
+  function schedule(delay, callback, cancel = () => {}) {
+    const timer = {
+      id: 0,
+      cancel,
+    };
+    timer.id = setTimeout(() => {
+      activeTimers = activeTimers.filter(item => item !== timer);
+      callback();
+    }, Math.max(0, delay));
+    activeTimers.push(timer);
+    return timer;
+  }
+
+  function wait(delay, token) {
+    return new Promise(resolve => {
+      schedule(delay, () => resolve(token === runToken), () => resolve(false));
+    });
+  }
+
   function resetSim() {
+    runToken++;
+    clearActiveTimers();
     running = false;
     document.getElementById('btnRun').disabled = false;
     buildTimeline();
@@ -280,6 +313,8 @@ while (true) {
 
   window.runSim = async function () {
     if (running) return;
+    clearActiveTimers();
+    const token = ++runToken;
     running = true;
     document.getElementById('btnRun').disabled = true;
     document.getElementById('dispatchLog').innerHTML = '';
@@ -291,7 +326,6 @@ while (true) {
     buildTimeline();
     const arrivalTrack  = document.getElementById('track-network-arrival');
     const dispatchTrack = document.getElementById('track-js-dispatch');
-    const trackWidth = arrivalTrack.getBoundingClientRect().width || 400;
 
     // Compute arrival times
     const arrivals = [];
@@ -338,7 +372,8 @@ while (true) {
         if (wasBlocked) blockedCount++;
         dispatchTimes.push(dispatchTime);
 
-        await new Promise(r => setTimeout(r, dispatchTime - simTime));
+        const stillActive = await wait(dispatchTime - simTime, token);
+        if (!stillActive) return;
         simTime = dispatchTime;
 
         const block = document.createElement('div');
@@ -357,23 +392,41 @@ while (true) {
           wasBlocked ? 'log-err' : 'log-ok');
 
       } else {
-        // Out-of-order: dispatch as soon as it arrives
-        await new Promise(r => setTimeout(r, arrivalTime - simTime));
-        simTime = arrivalTime;
-
-        const block = document.createElement('div');
-        block.className = 'chunk-block dispatched';
-        block.style.left = pct(arrivalTime - interval * 0.3) + '%';
-        block.style.width = pct(interval * 0.6) + '%';
-        block.textContent = 'C' + chunkNum;
-        dispatchTrack.appendChild(block);
-
-        if (firstDispatch === null) firstDispatch = performance.now() - startTs;
-        const isDelayed = chunkNum === delayedChunk;
-        log(`t=${simTime}ms: Chunk ${chunkNum} dispatched immediately${isDelayed ? ' (was the delayed chunk)' : ''}`,
-          'log-ok');
+        dispatchTimes.push(arrivalTime);
       }
     }
+
+    if (mode === 'new') {
+      const dispatchEvents = arrivals
+        .map((arrivalTime, index) => ({ arrivalTime, chunkNum: index + 1 }))
+        .sort((a, b) => a.arrivalTime - b.arrivalTime || a.chunkNum - b.chunkNum);
+
+      await Promise.all(dispatchEvents.map(event => {
+        return new Promise(resolve => {
+          schedule(event.arrivalTime, () => {
+            if (token !== runToken) {
+              resolve();
+              return;
+            }
+
+            const block = document.createElement('div');
+            block.className = 'chunk-block dispatched';
+            block.style.left = pct(event.arrivalTime - interval * 0.3) + '%';
+            block.style.width = pct(interval * 0.6) + '%';
+            block.textContent = 'C' + event.chunkNum;
+            dispatchTrack.appendChild(block);
+
+            if (firstDispatch === null) firstDispatch = performance.now() - startTs;
+            const isDelayed = event.chunkNum === delayedChunk;
+            log(`t=${event.arrivalTime}ms: Chunk ${event.chunkNum} dispatched immediately${isDelayed ? ' (was the delayed chunk)' : ''}`,
+              'log-ok');
+            resolve();
+          }, resolve);
+        });
+      }));
+    }
+
+    if (token !== runToken) return;
 
     const elapsed = performance.now() - startTs;
     document.getElementById('stat-total').textContent = Math.round(elapsed) + ' ms';
@@ -383,6 +436,7 @@ while (true) {
     log(`Simulation complete. ${TOTAL_CHUNKS} chunks in ${Math.round(elapsed)}ms.`, 'log-info');
     running = false;
     document.getElementById('btnRun').disabled = false;
+    clearActiveTimers();
   };
 
   buildTimeline();
