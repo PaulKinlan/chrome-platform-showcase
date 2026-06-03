@@ -13,7 +13,7 @@
     input[type=range] { width: 140px; accent-color: var(--text-black); }
     select { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: 0.3rem; font-family: var(--font-mono); font-size: 0.78rem; }
     .ctl-btn { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; box-shadow: var(--flat-shadow); margin-top: var(--space-3); }
-    .stage { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--space-3); }
+    .stage { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); }
     @media (max-width: 720px) { .stage { grid-template-columns: 1fr; } }
     .col { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); }
     .col h4 { margin: 0 0 var(--space-2); font-family: var(--font-mono); font-size: 0.85rem; text-transform: uppercase; }
@@ -34,7 +34,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v139</p>
     <h1>Pool Exhaustion Simulator</h1>
-    <p class="lede">A pool of <em>N</em> TCP sockets, a configurable request burst. Three pool sizes — 256 (default), 512, 1024 — run side by side. Watch when each pool exhausts, how long requests queue, and the tail-latency delta the experiment is measuring.</p>
+    <p class="lede">A pool of <em>N</em> TCP sockets, a configurable request burst. The staged experiment sizes — 255, 256, 257, 512, and 1024 — run side by side. Watch when each pool exhausts, how long requests queue, and the tail-latency delta the experiment is measuring.</p>
   </header>
 
   <div class="lab">
@@ -55,7 +55,9 @@
 
     <div>
       <div class="stage">
+        <div class="col"><h4>pool 255</h4><div id="col-255"></div></div>
         <div class="col"><h4>pool 256</h4><div id="col-256"></div></div>
+        <div class="col"><h4>pool 257</h4><div id="col-257"></div></div>
         <div class="col"><h4>pool 512</h4><div id="col-512"></div></div>
         <div class="col"><h4>pool 1024</h4><div id="col-1024"></div></div>
       </div>
@@ -74,7 +76,7 @@
       <li><a href="/v139/re-sizing-tcp-connection-pool/">Feature page</a></li>
       <li><a href="/v139/re-sizing-tcp-connection-pool/pool-note/">Pool Note</a></li>
       <li><a href="/v139/re-sizing-tcp-connection-pool/sidechannel-leak/">Sidechannel Leak</a></li>
-      <li><a href="https://chromestatus.com/feature/5174924428738560" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://chromestatus.com/feature/5182293874049024" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -82,79 +84,104 @@
 </main>
 
 <script>
-(() =&gt; {
+(() => {
   const burstEl = document.getElementById('burst'), workEl = document.getElementById('work'), mixEl = document.getElementById('mix');
   function val() { document.getElementById('burst-val').textContent = burstEl.value; document.getElementById('work-val').textContent = workEl.value; }
-  [burstEl, workEl, mixEl].forEach(e =&gt; e.addEventListener('input', val)); val();
+  [burstEl, workEl, mixEl].forEach(e => e.addEventListener('input', val)); val();
+
+  function requestWork(baseWork, mix) {
+    if (mix === 'uniform') return baseWork * (0.7 + Math.random() * 0.6);
+    if (mix === 'bimodal') return Math.random() < 0.85
+      ? baseWork * (0.5 + Math.random() * 0.3)
+      : baseWork * 6;
+    return baseWork * (1 + Math.random() * 0.3);
+  }
+
+  function percentile(values, ratio) {
+    return values[Math.min(values.length - 1, Math.floor(values.length * ratio))] || 0;
+  }
+
+  function appendMetric(parent, className, label, value) {
+    const row = document.createElement('div');
+    row.className = className;
+    const left = document.createElement('span');
+    left.textContent = label;
+    const right = document.createElement('span');
+    right.textContent = value;
+    row.append(left, right);
+    parent.appendChild(row);
+  }
+
+  function simulatePool(poolSize, durations) {
+    const lanes = Array.from({ length: poolSize }, () => 0);
+    const latencies = [];
+    const waits = [];
+
+    for (const duration of durations) {
+      let laneIndex = 0;
+      for (let index = 1; index < lanes.length; index++) {
+        if (lanes[index] < lanes[laneIndex]) laneIndex = index;
+      }
+      const start = lanes[laneIndex];
+      const finish = start + duration;
+      lanes[laneIndex] = finish;
+      waits.push(start);
+      latencies.push(finish);
+    }
+
+    latencies.sort((a, b) => a - b);
+    waits.sort((a, b) => a - b);
+    return {
+      p50: percentile(latencies, 0.5),
+      p95: percentile(latencies, 0.95),
+      p99: percentile(latencies, 0.99),
+      totalTime: Math.max(...lanes),
+      peakQueued: Math.max(0, durations.length - poolSize),
+      queuedRequests: waits.filter(wait => wait > 0).length,
+      p95Wait: percentile(waits, 0.95),
+    };
+  }
 
   function run() {
     const burst = +burstEl.value;
     const baseWork = +workEl.value;
     const mix = mixEl.value;
     const results = {};
-    const pools = [256, 512, 1024];
+    const pools = [255, 256, 257, 512, 1024];
+    const durations = Array.from({ length: burst }, () => requestWork(baseWork, mix));
 
-    pools.forEach(P =&gt; {
-      // Discrete-time simulation, 10ms tick.
-      const inFlight = []; // {finish}
-      const completionTimes = [];
-      let nextSubmit = 0, queued = 0, peakQueued = 0;
-      let t = 0;
-      let submitted = 0;
-      while (submitted &lt; burst || inFlight.length &gt; 0) {
-        // Expire
-        for (let i = inFlight.length - 1; i &gt;= 0; i--) {
-          if (inFlight[i].finish &lt;= t) { completionTimes.push(t - inFlight[i].start); inFlight.splice(i, 1); }
-        }
-        // Submit as many as we can
-        while (submitted &lt; burst &amp;&amp; nextSubmit &lt;= t) {
-          let work;
-          if (mix === 'uniform') work = baseWork * (0.7 + Math.random() * 0.6);
-          else if (mix === 'bimodal') work = Math.random() &lt; 0.85 ? baseWork * (0.5 + Math.random()*0.3) : baseWork * 6;
-          else work = baseWork * (1 + Math.random()*0.3);
-          if (inFlight.length &lt; P) {
-            inFlight.push({ start: t, finish: t + work });
-          } else {
-            queued++;
-            peakQueued = Math.max(peakQueued, queued);
-            break;
-          }
-          submitted++;
-        }
-        // Process the queue if a slot opens
-        while (queued &gt; 0 &amp;&amp; inFlight.length &lt; P &amp;&amp; submitted &lt; burst) {
-          let work = baseWork * (0.7 + Math.random()*0.6);
-          inFlight.push({ start: t, finish: t + work });
-          queued--;
-          submitted++;
-        }
-        // Slot opens for queued
-        while (queued &gt; 0 &amp;&amp; inFlight.length &lt; P) {
-          let work = baseWork * (0.7 + Math.random()*0.6);
-          inFlight.push({ start: t, finish: t + work });
-          queued--;
-        }
-        t += 10;
-        if (t &gt; 60000) break;
-      }
-      completionTimes.sort((a, b) =&gt; a - b);
-      const p50 = completionTimes[Math.floor(completionTimes.length * 0.5)] || 0;
-      const p95 = completionTimes[Math.floor(completionTimes.length * 0.95)] || 0;
-      const p99 = completionTimes[Math.floor(completionTimes.length * 0.99)] || 0;
-      results[P] = { p50, p95, p99, peakQueued, totalTime: t };
+    pools.forEach(P => {
+      results[P] = simulatePool(P, durations);
       const col = document.getElementById('col-' + P);
-      col.innerHTML = `&lt;h4&gt;pool ${P}&lt;/h4&gt;
-        &lt;div class="req complete"&gt;&lt;span&gt;burst total time&lt;/span&gt;&lt;span&gt;${(t/1000).toFixed(1)}s&lt;/span&gt;&lt;/div&gt;
-        &lt;div class="req"&gt;&lt;span&gt;p50 latency&lt;/span&gt;&lt;span&gt;${Math.round(p50)}ms&lt;/span&gt;&lt;/div&gt;
-        &lt;div class="req queued"&gt;&lt;span&gt;p95 latency&lt;/span&gt;&lt;span&gt;${Math.round(p95)}ms&lt;/span&gt;&lt;/div&gt;
-        &lt;div class="req failed"&gt;&lt;span&gt;p99 latency&lt;/span&gt;&lt;span&gt;${Math.round(p99)}ms&lt;/span&gt;&lt;/div&gt;
-        &lt;div class="req"&gt;&lt;span&gt;peak queued&lt;/span&gt;&lt;span&gt;${peakQueued}&lt;/span&gt;&lt;/div&gt;`;
+      col.textContent = '';
+      appendMetric(col, 'req complete', 'burst total time', `${(results[P].totalTime / 1000).toFixed(1)}s`);
+      appendMetric(col, 'req', 'p50 latency', `${Math.round(results[P].p50)}ms`);
+      appendMetric(col, 'req queued', 'p95 latency', `${Math.round(results[P].p95)}ms`);
+      appendMetric(col, 'req failed', 'p99 latency', `${Math.round(results[P].p99)}ms`);
+      appendMetric(col, 'req', 'queued requests', String(results[P].queuedRequests));
+      appendMetric(col, 'req', 'peak queued', String(results[P].peakQueued));
     });
 
-    document.getElementById('stats').innerHTML = `
-      &lt;div class="stat"&gt;&lt;div class="stat-l"&gt;p95 256→1024&lt;/div&gt;&lt;div class="stat-v"&gt;${Math.round(results[256].p95 - results[1024].p95)}ms&lt;/div&gt;&lt;/div&gt;
-      &lt;div class="stat"&gt;&lt;div class="stat-l"&gt;p99 256→1024&lt;/div&gt;&lt;div class="stat-v"&gt;${Math.round(results[256].p99 - results[1024].p99)}ms&lt;/div&gt;&lt;/div&gt;
-      &lt;div class="stat"&gt;&lt;div class="stat-l"&gt;burst saved&lt;/div&gt;&lt;div class="stat-v"&gt;${((results[256].totalTime - results[1024].totalTime)/1000).toFixed(1)}s&lt;/div&gt;&lt;/div&gt;`;
+    const stats = document.getElementById('stats');
+    stats.textContent = '';
+    [
+      ['p95 255→257', `${Math.round(results[255].p95 - results[257].p95)}ms`],
+      ['p95 256→1024', `${Math.round(results[256].p95 - results[1024].p95)}ms`],
+      ['p99 256→1024', `${Math.round(results[256].p99 - results[1024].p99)}ms`],
+      ['burst saved', `${((results[256].totalTime - results[1024].totalTime) / 1000).toFixed(1)}s`],
+      ['queue wait saved', `${Math.round(results[256].p95Wait - results[1024].p95Wait)}ms`],
+    ].forEach(([label, value]) => {
+      const card = document.createElement('div');
+      card.className = 'stat';
+      const cardLabel = document.createElement('div');
+      cardLabel.className = 'stat-l';
+      cardLabel.textContent = label;
+      const cardValue = document.createElement('div');
+      cardValue.className = 'stat-v';
+      cardValue.textContent = value;
+      card.append(cardLabel, cardValue);
+      stats.appendChild(card);
+    });
   }
 
   document.getElementById('run').addEventListener('click', run);
