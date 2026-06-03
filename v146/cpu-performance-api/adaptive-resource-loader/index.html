@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Adaptive Resource Loader — CPU Performance API — Chrome 146</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/public/styles.css">
   <style>
     .support-note {
@@ -53,6 +54,15 @@
       font-size: 0.72rem;
       margin: 0 0 1.5rem;
     }
+    .manifest-scroll {
+      max-width: 100%;
+      overflow-x: auto;
+      margin-bottom: 1.5rem;
+    }
+    .manifest-scroll .manifest-table {
+      margin-bottom: 0;
+      min-width: 480px;
+    }
     .manifest-table th {
       text-align: left;
       background: var(--text-black);
@@ -75,10 +85,23 @@
       font-size: 0.62rem;
       font-weight: 700;
     }
-    .load-yes    { background: #edfdf0; color: var(--accent-emerald); }
-    .load-lazy   { background: #fdf8e8; color: #b87b00; }
-    .load-skip   { background: #f0f0ec; color: var(--text-muted); text-decoration: line-through; }
-    .load-eager  { background: #e8eeff; color: var(--accent-blue); }
+    .load-yes {
+      background: color-mix(in srgb, var(--accent-emerald) 12%, var(--bg-paper));
+      color: var(--accent-emerald);
+    }
+    .load-lazy {
+      background: color-mix(in srgb, var(--accent-amber) 14%, var(--bg-paper));
+      color: var(--accent-amber);
+    }
+    .load-skip {
+      background: var(--bg-stone);
+      color: var(--text-muted);
+      text-decoration: line-through;
+    }
+    .load-eager {
+      background: color-mix(in srgb, var(--accent-blue) 12%, var(--bg-paper));
+      color: var(--accent-blue);
+    }
 
     .size-col { color: var(--text-muted); }
 
@@ -127,10 +150,28 @@
     .load-name { min-width: 160px; color: var(--text-charcoal); }
     .load-size { min-width: 55px; color: var(--text-muted); text-align: right; }
     .load-status { min-width: 60px; font-weight: 700; }
+    .load-action { min-width: 118px; }
     .ls-loading  { color: var(--accent-blue); }
     .ls-done     { color: var(--accent-emerald); }
     .ls-skipped  { color: var(--text-muted); }
-    .ls-deferred { color: #b87b00; }
+    .ls-deferred { color: var(--accent-amber); }
+
+    .import-btn {
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      font-weight: 700;
+      padding: 0.25rem 0.45rem;
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-black);
+      cursor: pointer;
+      width: 100%;
+    }
+    .import-btn:disabled {
+      border-color: var(--bg-stone);
+      color: var(--text-muted);
+      cursor: default;
+    }
 
     /* ── Summary ─────────────────────────────────────────────── */
     .summary-row {
@@ -171,6 +212,23 @@
       cursor: pointer;
       margin-bottom: 1rem;
     }
+
+    @media (max-width: 640px) {
+      .load-item {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 0.45rem 0.65rem;
+      }
+      .load-name,
+      .load-size,
+      .load-status,
+      .load-action {
+        min-width: 0;
+      }
+      .load-bar-wrap {
+        grid-column: 1 / -1;
+      }
+    }
   </style>
 </head>
 <body>
@@ -195,14 +253,16 @@
   </div>
 
   <h2>Resource manifest × tier</h2>
-  <p style="font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);margin-bottom:0.5rem">Green=eager · Blue=lazy · Amber=deferred · Grey=skipped. Click a tier to update.</p>
+  <p style="font-family:var(--font-mono);font-size:0.8rem;color:var(--text-muted);margin-bottom:0.5rem">Blue=eager · Amber=deferred · Grey=skipped. Click a tier to update.</p>
 
-  <table class="manifest-table" id="manifest-table">
-    <thead>
-      <tr><th>Resource</th><th>Category</th><th>Size</th><th>Low tier</th><th>Mid tier</th><th>High tier</th></tr>
-    </thead>
-    <tbody id="manifest-tbody"></tbody>
-  </table>
+  <div class="manifest-scroll">
+    <table class="manifest-table" id="manifest-table">
+      <thead>
+        <tr><th>Resource</th><th>Category</th><th>Size</th><th>Low tier</th><th>Mid tier</th><th>High tier</th></tr>
+      </thead>
+      <tbody id="manifest-tbody"></tbody>
+    </table>
+  </div>
 
   <h2>Simulated load sequence</h2>
   <button class="simulate-btn" id="simulate-btn" onclick="simulate()">Simulate page load</button>
@@ -220,13 +280,17 @@
     <div class="sum-card"><div class="sum-label">vs high tier</div><div class="sum-value" id="sum-savings">—</div></div>
   </div>
 
-  <pre><code>// Read tier once at startup — no polling
+  <pre><code>// Read the CPU Performance API once at startup — no polling
 async function detectTier() {
-  const cores = navigator.hardwareConcurrency ?? 2;
-  const mem   = navigator.deviceMemory        ?? 1;
-  if (cores >= 8 && mem >= 8) return 'high';
-  if (cores >= 4 && mem >= 4) return 'mid';
-  return 'low';
+  const rawTier =
+    typeof navigator.cpuPerformance === 'number'
+      ? navigator.cpuPerformance
+      : typeof navigator.cpu?.performance === 'function'
+      ? await navigator.cpu.performance()
+      : 0;
+
+  const normalized = normalizeCpuTier(rawTier);
+  return normalized === 'unknown' ? heuristicTier() : normalized;
 }
 
 const tier = await detectTier();
@@ -254,6 +318,8 @@ await Promise.all(eager.map(r => import(r.module)));
       <li><a href="../device-tier-readout/">Device Tier Readout</a> — reading the tier</li>
       <li><a href="../compute-pressure-pairing/">Compute Pressure Pairing</a> — tier + live CPU load</li>
       <li><a href="../tier-policy-router/">Tier Policy Router</a> — feature flags per tier</li>
+      <li><a href="https://chromestatus.com/feature/5189864286978048" target="_blank" rel="noopener">ChromeStatus: CPU Performance API</a></li>
+      <li><a href="https://wicg.github.io/cpu-performance/" target="_blank" rel="noopener">WICG CPU Performance API draft</a></li>
     </ul>
   </section>
 
@@ -262,19 +328,7 @@ await Promise.all(eager.map(r => import(r.module)));
 
 <script>
 const statusEl = document.getElementById('support-status');
-
-// Detect real tier
-const concurrency = navigator.hardwareConcurrency ?? 2;
-const memory      = navigator.deviceMemory        ?? 1;
-let realTier;
-if      (concurrency >= 8 && memory >= 8)  realTier = 'high';
-else if (concurrency >= 4 && memory >= 4)  realTier = 'mid';
-else                                        realTier = 'low';
-
-statusEl.textContent = `Detected: ${concurrency} cores, ${memory ?? '?'} GB RAM → tier: ${realTier}`;
-statusEl.style.color = 'var(--accent-emerald)';
-document.getElementById('detected-label').textContent = `(detected: ${realTier})`;
-
+const detectedLabel = document.getElementById('detected-label');
 let currentTier = 'high';
 
 // Resource manifest
@@ -342,6 +396,118 @@ function updateSummary(tier) {
   document.getElementById('sum-savings').textContent  = savings > 0 ? '-' + fmt(savings) : 'baseline';
 }
 
+function heuristicTier() {
+  const concurrency = navigator.hardwareConcurrency ?? 2;
+  const memory = navigator.deviceMemory ?? 1;
+  if (concurrency >= 8 && memory >= 8) return 'high';
+  if (concurrency >= 4 && memory >= 4) return 'mid';
+  return 'low';
+}
+
+function normalizeCpuTier(rawTier) {
+  const value = Number(rawTier);
+  if (!Number.isFinite(value) || value <= 0) return 'unknown';
+  if (value <= 1) return 'low';
+  if (value === 2) return 'mid';
+  return 'high';
+}
+
+async function readCpuPerformanceSignal() {
+  if (typeof navigator.cpuPerformance === 'number') {
+    return {
+      source: 'navigator.cpuPerformance',
+      raw: navigator.cpuPerformance,
+      tier: normalizeCpuTier(navigator.cpuPerformance),
+    };
+  }
+
+  if (navigator.cpu && typeof navigator.cpu.performance === 'function') {
+    try {
+      const raw = await navigator.cpu.performance();
+      return {
+        source: 'navigator.cpu.performance() legacy draft',
+        raw,
+        tier: normalizeCpuTier(raw),
+      };
+    } catch (error) {
+      return {
+        source: 'navigator.cpu.performance() legacy draft',
+        raw: 'error',
+        tier: 'unknown',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  return { source: 'unavailable', raw: 'missing', tier: 'unknown' };
+}
+
+function selectTier(tier) {
+  document.querySelectorAll('.tier-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tier === tier);
+  });
+  currentTier = tier;
+  updateSummary(currentTier);
+}
+
+async function initializeTierDetection() {
+  const concurrency = navigator.hardwareConcurrency ?? 2;
+  const memory = navigator.deviceMemory ?? 1;
+  const fallbackTier = heuristicTier();
+  const signal = await readCpuPerformanceSignal();
+  const detectedTier = signal.tier === 'unknown' ? fallbackTier : signal.tier;
+
+  if (signal.tier === 'unknown') {
+    const suffix = signal.error ? `; API error: ${signal.error}` : '';
+    statusEl.textContent =
+      `CPU Performance API unavailable; heuristic fallback: ${concurrency} cores, ${memory} GB RAM → ${fallbackTier}${suffix}`;
+  } else {
+    statusEl.textContent =
+      `${signal.source}: ${signal.raw} → ${signal.tier}; heuristic fallback: ${concurrency} cores, ${memory} GB RAM → ${fallbackTier}`;
+  }
+
+  statusEl.style.color = signal.tier === 'unknown' ? 'var(--accent-amber)' : 'var(--accent-emerald)';
+  detectedLabel.textContent = `(selected: ${detectedTier})`;
+  selectTier(detectedTier);
+}
+
+function safeId(name) {
+  return name.replace(/[^a-z0-9]/gi, '_');
+}
+
+function startLoad(resource, labelWhenDone = 'done') {
+  const id = safeId(resource.name);
+  const bar = document.getElementById(`bar-${id}`);
+  const status = document.getElementById(`status-${id}`);
+  const duration = Math.max(200, resource.size / 8);
+  if (!bar || !status) return Promise.resolve();
+
+  status.textContent = 'loading…';
+  status.className = 'load-status ls-loading';
+  bar.style.width = '0';
+  bar.style.transitionDuration = `${duration / 1000}s`;
+  requestAnimationFrame(() => {
+    bar.style.width = '100%';
+  });
+
+  return new Promise(resolve => {
+    setTimeout(() => {
+      status.textContent = labelWhenDone;
+      status.className = 'load-status ls-done';
+      resolve();
+    }, duration + 100);
+  });
+}
+
+function triggerDeferredImport(resource, button) {
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = 'Importing…';
+  startLoad(resource, 'done').then(() => {
+    button.textContent = 'Imported';
+  });
+}
+
 let simRunning = false;
 function simulate() {
   if (simRunning) return;
@@ -359,14 +525,18 @@ function simulate() {
   const elements = [];
   items.forEach(r => {
     const strat = r.strategy[currentTier];
+    const id = safeId(r.name);
     const div = document.createElement('div');
     div.className = 'load-item';
     div.innerHTML = `
       <span class="load-name">${r.name}</span>
-      <div class="load-bar-wrap"><div class="load-bar-fill" id="bar-${r.name.replace(/[^a-z]/gi,'_')}"></div></div>
+      <div class="load-bar-wrap"><div class="load-bar-fill" id="bar-${id}"></div></div>
       <span class="load-size">${r.size} KB</span>
-      <span class="load-status ls-${strat === 'eager' ? 'loading' : 'deferred'}" id="status-${r.name.replace(/[^a-z]/gi,'_')}">${strat === 'eager' ? 'loading…' : 'deferred'}</span>`;
+      <span class="load-status ls-${strat === 'eager' ? 'loading' : 'deferred'}" id="status-${id}">${strat === 'eager' ? 'queued' : 'deferred'}</span>
+      <span class="load-action">${strat === 'lazy' ? '<button class="import-btn" type="button">Import now</button>' : ''}</span>`;
     container.appendChild(div);
+    const importBtn = div.querySelector('.import-btn');
+    if (importBtn) importBtn.addEventListener('click', () => triggerDeferredImport(r, importBtn));
     elements.push({ r, div, strat });
   });
 
@@ -376,18 +546,9 @@ function simulate() {
   function loadNext() {
     if (idx >= eager.length) { simRunning = false; return; }
     const item = eager[idx++];
-    const barId = 'bar-' + item.r.name.replace(/[^a-z]/gi,'_');
-    const staId = 'status-' + item.r.name.replace(/[^a-z]/gi,'_');
-    const bar = document.getElementById(barId);
-    const sta = document.getElementById(staId);
-    const dur = Math.max(200, item.r.size / 8); // simulate load time proportional to size
-    bar.style.width = '100%';
-    bar.style.transitionDuration = (dur / 1000) + 's';
-    setTimeout(() => {
-      sta.textContent = 'done';
-      sta.className = 'load-status ls-done';
+    startLoad(item.r).then(() => {
       loadNext();
-    }, dur + 100);
+    });
   }
   loadNext();
 }
@@ -402,16 +563,9 @@ document.querySelectorAll('.tier-btn').forEach(btn => {
   });
 });
 
-// Auto-select detected tier
-const autoBtn = document.querySelector(`[data-tier="${realTier}"]`);
-if (autoBtn) {
-  document.querySelectorAll('.tier-btn').forEach(b => b.classList.remove('active'));
-  autoBtn.classList.add('active');
-  currentTier = realTier;
-}
-
 renderManifest();
 updateSummary(currentTier);
+initializeTierDetection();
 </script>
 </body>
 </html>
