@@ -37,11 +37,11 @@
         <select id="strategy">
           <option value="random">random (v139+)</option>
           <option value="sequential">sequential (pre-v139)</option>
-          <option value="rfc6056">RFC 6056 hash</option>
+          <option value="rfc6056">RFC 6056-style hash</option>
         </select>
       </div>
-      <div class="row"><label>connections/sec</label><span id="rate-val">200</span></div>
-      <div class="row"><input type="range" id="rate" min="20" max="2000" step="20" value="200"></div>
+      <div class="row"><label>connections/sec</label><span id="rate-val">100</span></div>
+      <div class="row"><input type="range" id="rate" min="20" max="2000" step="20" value="100"></div>
       <div class="row"><label>TIME_WAIT seconds</label><span id="tw-val">120</span></div>
       <div class="row"><input type="range" id="tw" min="30" max="240" step="10" value="120"></div>
       <div class="row"><label>port range</label>
@@ -60,12 +60,18 @@
         <div class="stat"><div class="stat-l">first collision at</div><div class="stat-v" id="s-first">—</div></div>
         <div class="stat"><div class="stat-l">total collisions / 60s</div><div class="stat-v" id="s-tot">—</div></div>
         <div class="stat"><div class="stat-l">peak in-flight</div><div class="stat-v" id="s-peak">—</div></div>
+        <div class="stat"><div class="stat-l">busy-pick share</div><div class="stat-v" id="s-share">—</div></div>
       </div>
+      <div class="note" id="diagnostic">Adjust a control or run the simulation to compare the allocation strategies.</div>
     </div>
   </div>
 
   <div class="note">
-    The pre-v139 Windows allocator picked the lowest available port in a deterministic sweep — fast, but predictable. RFC 6056 (the random algorithm Chrome 139 turns on for Windows 2020 H1+) breaks that predictability with a 2-byte hash + offset, with a small allowance for backwards compatibility on older builds. Side-channel attacks that fingerprinted users by inducing rapid same-port reuse are no longer practical.
+    ChromeStatus describes this as a Windows-only networking change, not a JavaScript API. The old
+    deterministic allocation made the next source port predictable enough for a site to infer how
+    many TCP connections another tab opened. Randomized allocation on supported Windows builds hides
+    that counter, while the collision model explains why the rollout is gated to versions with safer
+    port reuse behavior.
   </div>
 
   <section>
@@ -75,7 +81,7 @@
       <li><a href="/v139/randomizing-tcp-port-allocation-on-windows/birthday-collision/">Birthday Collision (math)</a></li>
       <li><a href="/v139/randomizing-tcp-port-allocation-on-windows/implementation-note/">Implementation Note</a></li>
       <li><a href="https://www.rfc-editor.org/rfc/rfc6056" target="_blank" rel="noopener">RFC 6056 — Recommendations for Transport-Protocol Port Randomization</a></li>
-      <li><a href="https://chromestatus.com/feature/5106425915482112" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://chromestatus.com/feature/5106900286570496" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -83,17 +89,31 @@
 </main>
 
 <script>
-(() =&gt; {
+(() => {
   const c = document.getElementById('canvas');
   const ctx = c.getContext('2d');
   const stratEl = document.getElementById('strategy'), rateEl = document.getElementById('rate'), twEl = document.getElementById('tw'), rngEl = document.getElementById('range');
+  const css = getComputedStyle(document.documentElement);
+  const colors = {
+    border: css.getPropertyValue('--border-black').trim() || 'black',
+    muted: css.getPropertyValue('--text-muted').trim() || 'dimgray',
+    rose: css.getPropertyValue('--accent-rose').trim() || 'crimson',
+    emerald: css.getPropertyValue('--accent-emerald').trim() || 'seagreen',
+    paper: css.getPropertyValue('--bg-paper').trim() || 'white',
+    ink: css.getPropertyValue('--text-black').trim() || 'black',
+  };
 
   function val() {
     document.getElementById('rate-val').textContent = rateEl.value;
     document.getElementById('tw-val').textContent = twEl.value;
   }
-  [stratEl,rateEl,twEl,rngEl].forEach(e =&gt; e.addEventListener('input', val));
+  [stratEl, rateEl, twEl, rngEl].forEach((e) => e.addEventListener('input', val));
   val();
+
+  function gcd(a, b) {
+    while (b) [a, b] = [b, a % b];
+    return Math.abs(a);
+  }
 
   function simulate() {
     const seconds = 60;
@@ -101,67 +121,111 @@
     const tw = +twEl.value;
     const portCount = +rngEl.value;
     const strategy = stratEl.value;
+    const firstPort = 65536 - portCount;
+    const maxRetries = 16;
     const inUse = new Map(); // port -> expiry time
-    let collisions = [];
+    const collisions = [];
+    let totalAttempts = 0;
+    let blocked = 0;
+    let peakInUse = 0;
     let nextSeq = 0;
+    let hashCursor = Math.floor(Math.random() * portCount);
+    let hashStep = Math.max(1, Math.floor(portCount * 0.381966));
+    if (hashStep % 2 === 0) hashStep += 1;
+    while (gcd(hashStep, portCount) !== 1) hashStep += 2;
 
     function pickPort() {
       if (strategy === 'sequential') {
-        let p = (nextSeq++ % portCount) + (65535 - portCount);
-        return p;
+        return firstPort + (nextSeq++ % portCount);
       }
       if (strategy === 'random') {
-        return Math.floor(Math.random() * portCount) + (65535 - portCount);
+        return firstPort + Math.floor(Math.random() * portCount);
       }
-      // RFC6056: hash + offset bounded; approximate as random but with a 3% bias.
-      return Math.floor(Math.random() * portCount) + (65535 - portCount);
+      hashCursor = (hashCursor + hashStep) % portCount;
+      return firstPort + hashCursor;
     }
 
-    for (let t = 0; t &lt; seconds; t++) {
-      for (let i = 0; i &lt; cps; i++) {
-        // expire
-        for (const [p, exp] of inUse) if (exp &lt;= t) inUse.delete(p);
+    function expire(t) {
+      for (const [p, exp] of inUse) {
+        if (exp <= t) inUse.delete(p);
+      }
+    }
+
+    function allocate(t) {
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        totalAttempts++;
         const port = pickPort();
         if (inUse.has(port)) {
           collisions.push({ t, port });
+          continue;
         }
         inUse.set(port, t + tw);
+        peakInUse = Math.max(peakInUse, inUse.size);
+        return;
+      }
+      blocked++;
+    }
+
+    for (let t = 0; t < seconds; t++) {
+      expire(t);
+      for (let i = 0; i < cps; i++) {
+        allocate(t);
       }
     }
 
-    // Draw
+    const busyShare = totalAttempts === 0 ? 0 : collisions.length / totalAttempts;
+
     ctx.clearRect(0, 0, c.width, c.height);
-    ctx.strokeStyle = '#222';
+    ctx.fillStyle = colors.paper;
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.strokeStyle = colors.border;
     ctx.lineWidth = 2;
     ctx.strokeRect(0.5, 0.5, c.width - 1, c.height - 1);
-    // Axis
-    ctx.fillStyle = '#999';
+    ctx.fillStyle = colors.muted;
     ctx.font = '12px ui-monospace, monospace';
-    for (let s = 0; s &lt;= 60; s += 10) {
+    for (let s = 0; s <= 60; s += 10) {
       const x = 30 + (s / 60) * (c.width - 50);
       ctx.fillRect(x, c.height - 18, 1, 6);
       ctx.fillText(s + 's', x - 8, c.height - 4);
     }
 
-    // Plot collisions over time (binned per second)
     const bins = new Array(60).fill(0);
-    collisions.forEach(({t}) =&gt; bins[t]++);
+    collisions.forEach(({ t }) => bins[t]++);
     const maxBin = Math.max(...bins, 1);
-    ctx.fillStyle = strategy === 'sequential' ? '#d11a2a' : '#0a8f5c';
-    bins.forEach((v, i) =&gt; {
+    ctx.fillStyle = strategy === 'sequential' ? colors.rose : colors.emerald;
+    bins.forEach((v, i) => {
       const x = 30 + (i / 60) * (c.width - 50);
       const h = (v / maxBin) * (c.height - 50);
       ctx.fillRect(x, c.height - 20 - h, (c.width - 50) / 60 - 2, h);
     });
-    ctx.fillStyle = '#444';
-    ctx.fillText('collisions/s · peak ' + maxBin, 40, 20);
+    ctx.fillStyle = colors.ink;
+    ctx.fillText('busy picks/s · peak ' + maxBin, 40, 20);
 
-    // Stats
     document.getElementById('s-first').textContent = collisions.length ? collisions[0].t + 's' : 'none';
-    document.getElementById('s-tot').textContent = collisions.length;
-    document.getElementById('s-peak').textContent = Math.max(0, ...Array.from(inUse.values()).map(() =&gt; 1)) === 1 ? inUse.size.toLocaleString() : 0;
+    document.getElementById('s-tot').textContent = blocked
+      ? collisions.length.toLocaleString() + ' +' + blocked.toLocaleString() + ' blocked'
+      : collisions.length.toLocaleString();
+    document.getElementById('s-peak').textContent = peakInUse.toLocaleString();
+    document.getElementById('s-share').textContent = (busyShare * 100).toFixed(1) + '%';
+
+    const pressure = (cps * tw) / portCount;
+    const diagnostic = document.getElementById('diagnostic');
+    if (pressure >= 1) {
+      diagnostic.textContent = 'Boundary case: this workload tries to hold more ports than the selected range contains. Any allocator must retry or fail until TIME_WAIT entries expire.';
+    } else if (strategy === 'sequential') {
+      diagnostic.textContent = 'Sequential allocation has low retry pressure before wraparound, but the next port is predictable. ChromeStatus calls out this predictability as the side channel fixed by v139 on supported Windows builds.';
+    } else if (strategy === 'random') {
+      diagnostic.textContent = 'Random allocation removes the observable counter, but the birthday curve means busy picks can happen before the range is exhausted. That is why the rollout is limited to Windows versions with safer port reuse behavior.';
+    } else {
+      diagnostic.textContent = 'The RFC 6056-style mode uses a deterministic scatter through the range: less predictable than a simple counter, while still making collision pressure visible when the held-port set grows.';
+    }
   }
   document.getElementById('run').addEventListener('click', simulate);
+  [stratEl, rngEl].forEach((e) => {
+    e.addEventListener('input', simulate);
+    e.addEventListener('change', simulate);
+  });
+  [rateEl, twEl].forEach((e) => e.addEventListener('change', simulate));
   setTimeout(simulate, 200);
 })();
 </script>
