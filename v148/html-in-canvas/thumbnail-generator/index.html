@@ -8,7 +8,7 @@
   <style>
     .demo-area {
       display: grid;
-      grid-template-columns: 1fr 280px;
+      grid-template-columns: minmax(0, 1fr) 300px;
       gap: var(--space-5);
       margin: var(--space-5) 0;
       align-items: start;
@@ -76,6 +76,42 @@
       background: var(--bg-stone);
     }
 
+    .control-stack {
+      display: grid;
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+
+    .control-row {
+      display: grid;
+      gap: var(--space-1);
+    }
+
+    .control-row label {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--text-charcoal);
+    }
+
+    .control-row select,
+    .control-row input[type="range"] {
+      width: 100%;
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-black);
+      font-family: var(--font-mono);
+    }
+
+    .check-row {
+      display: flex;
+      gap: var(--space-2);
+      align-items: center;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+    }
+
     .output-label {
       font-family: var(--font-mono);
       font-size: 0.72rem;
@@ -106,7 +142,7 @@
       cursor: pointer;
     }
 
-    .render-btn:hover { background: var(--text-charcoal); }
+    .render-btn:hover { background: var(--text-charcoal); color: var(--bg-ivory); }
     .render-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
     .download-btn {
@@ -131,6 +167,17 @@
 
     .status-line.ok { color: var(--accent-emerald); }
     .status-line.err { color: var(--accent-rose); }
+
+    .capability-list {
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+      line-height: 1.5;
+      margin-top: var(--space-3);
+    }
 
     .note {
       background: var(--bg-stone);
@@ -175,14 +222,14 @@
   <header class="lede-block">
     <p class="eyebrow">v148 · Canvas · DOM · origin trial · demo</p>
     <h1>Thumbnail Generator</h1>
-    <p class="lede">Select a content card and click Render — the browser uses <code>ctx.drawElement()</code> to rasterise the live DOM element (including CSS, fonts, and custom properties) into a canvas thumbnail. No SVG serialisation, no html2canvas, no screenshot API.</p>
+    <p class="lede">Select a content card and click Render — the browser attempts the HTML-in-canvas <code>ctx.drawElementImage()</code> path to rasterise the live DOM element, then falls back to an explicit canvas simulation when the origin trial API is unavailable.</p>
   </header>
 
   <div class="note">
-    <strong>Origin Trial — Chrome 148+</strong> — <code>ctx.drawElement()</code> / <code>layoutsubtree</code>. In browsers without the origin trial, the render button simulates the API with a fallback message. To enable, join the origin trial at chromestatus.com.
+    <strong>Origin Trial — Chrome 148+</strong> — <code>layoutsubtree</code> plus <code>CanvasRenderingContext2D.drawElementImage()</code>. The controls below show the detected method and make the unsupported-browser fallback visible instead of pretending the native API ran.
   </div>
 
-  <p class="instruction">Click a card to select it · click "Render thumbnail" · download the PNG</p>
+  <p class="instruction">Pick a card, set the output size and scale, then render or force the fallback path.</p>
 
   <div class="demo-area">
     <div>
@@ -211,14 +258,57 @@
     <div class="output-panel">
       <div class="output-label">Canvas thumbnail</div>
       <canvas id="thumb-canvas" width="260" height="160"></canvas>
+      <div class="control-stack">
+        <div class="control-row">
+          <label for="size-select">Thumbnail size</label>
+          <select id="size-select" onchange="applySize(); renderThumbnail(false)">
+            <option value="260x160">260 x 160</option>
+            <option value="320x180">320 x 180</option>
+            <option value="200x200">200 x 200 square</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <label for="scale-range">CSS scale before capture: <span id="scale-value">100%</span></label>
+          <input id="scale-range" type="range" min="80" max="125" value="100" step="5" oninput="updateScale(); renderThumbnail(false)">
+        </div>
+        <label class="check-row">
+          <input id="force-fallback" type="checkbox" onchange="renderThumbnail(false)">
+          Force fallback simulation
+        </label>
+      </div>
       <button class="render-btn" id="render-btn" onclick="renderThumbnail()">Render thumbnail</button>
       <a class="download-btn" id="download-btn" style="display:none;text-align:center;text-decoration:none" download="thumbnail.png">Download PNG</a>
       <div class="status-line" id="status-line">Select a card above</div>
+      <div class="capability-list" id="capability-list"></div>
     </div>
   </div>
 
   <script>
     let selectedCard = 0;
+    const palette = {};
+
+    function cssVar(name) {
+      if (!palette[name]) {
+        palette[name] = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      }
+      return palette[name];
+    }
+
+    function detectDrawMethod(ctx) {
+      for (const name of ['drawElementImage', 'drawHTMLElement', 'drawElement']) {
+        if (typeof ctx[name] === 'function') return name;
+      }
+      return '';
+    }
+
+    function updateCapabilities() {
+      const ctx = document.getElementById('thumb-canvas').getContext('2d');
+      const method = detectDrawMethod(ctx);
+      document.getElementById('capability-list').innerHTML = `
+        <div><strong>2D method:</strong> ${method ? 'ctx.' + method + '()' : 'not exposed'}</div>
+        <div><strong>layoutsubtree:</strong> ${'layoutSubtree' in HTMLElement.prototype ? 'IDL present' : 'attribute-only / trial-gated'}</div>
+        <div><strong>mode:</strong> ${method ? 'native render available unless forced' : 'fallback simulation'}</div>`;
+    }
 
     function selectCard(i) {
       document.querySelectorAll('.card-source').forEach(c => c.classList.remove('selected'));
@@ -226,35 +316,54 @@
       selectedCard = i;
       document.getElementById('status-line').textContent = 'Card ' + i + ' selected — click Render';
       document.getElementById('status-line').className = 'status-line';
+      updateScale();
     }
 
-    async function renderThumbnail() {
+    function applySize() {
+      const canvas = document.getElementById('thumb-canvas');
+      const [w, h] = document.getElementById('size-select').value.split('x').map(Number);
+      canvas.width = w;
+      canvas.height = h;
+    }
+
+    function updateScale() {
+      const scale = Number(document.getElementById('scale-range').value);
+      document.getElementById('scale-value').textContent = scale + '%';
+      document.querySelectorAll('.card-source').forEach(card => {
+        card.style.transform = card.classList.contains('selected') ? `scale(${scale / 100})` : '';
+        card.style.transformOrigin = 'top left';
+      });
+    }
+
+    async function renderThumbnail(showBusy = true) {
       const btn = document.getElementById('render-btn');
       const status = document.getElementById('status-line');
       const canvas = document.getElementById('thumb-canvas');
       const ctx = canvas.getContext('2d');
+      const method = detectDrawMethod(ctx);
+      const forceFallback = document.getElementById('force-fallback').checked;
 
       btn.disabled = true;
-      status.textContent = 'Rendering…';
+      if (showBusy) status.textContent = 'Rendering...';
       status.className = 'status-line';
 
       const source = document.getElementById('card-' + selectedCard);
+      const scale = Number(document.getElementById('scale-range').value) / 100;
 
       try {
-        if (typeof ctx.drawElement === 'function') {
+        if (method && !forceFallback) {
           // Chrome 148+ with html-in-canvas origin trial
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.fillStyle = '#fdfcf8';
+          ctx.fillStyle = cssVar('--bg-ivory');
           ctx.fillRect(0, 0, canvas.width, canvas.height);
-          await ctx.drawElement(source, 0, 0, canvas.width, canvas.height);
-          status.textContent = 'Rendered via ctx.drawElement() ✓';
+          await ctx[method](source, 0, 0, canvas.width, canvas.height);
+          status.textContent = 'Rendered via ctx.' + method + '()';
           status.className = 'status-line ok';
         } else {
-          // Fallback: simulate with text
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.fillStyle = '#f4f3ee';
+          ctx.fillStyle = cssVar('--bg-stone');
           ctx.fillRect(0, 0, canvas.width, canvas.height);
-          ctx.strokeStyle = '#000';
+          ctx.strokeStyle = cssVar('--border-black');
           ctx.lineWidth = 2;
           ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
 
@@ -262,16 +371,18 @@
           const desc = source.querySelector('.card-desc').textContent;
           const tag = source.querySelector('.card-tag').textContent;
 
-          ctx.fillStyle = '#000';
+          ctx.fillStyle = cssVar('--text-black');
           ctx.font = 'bold 13px monospace';
           ctx.fillText(tag, 12, 24);
-          ctx.font = 'bold 15px serif';
+          ctx.font = 'bold ' + Math.round(15 * scale) + 'px serif';
           ctx.fillText(title, 12, 48);
           ctx.font = '11px sans-serif';
-          ctx.fillStyle = '#2d2d2d';
-          wrapText(ctx, desc, 12, 68, 236, 14);
+          ctx.fillStyle = cssVar('--text-charcoal');
+          wrapText(ctx, desc, 12, 68, canvas.width - 24, 14);
 
-          status.textContent = 'Simulated — ctx.drawElement() requires Chrome 148 OT';
+          status.textContent = forceFallback
+            ? 'Forced fallback: native path intentionally skipped'
+            : 'Fallback simulation: drawElementImage is not exposed in this browser';
           status.className = 'status-line err';
         }
 
@@ -300,6 +411,11 @@
       }
       ctx.fillText(line, x, y);
     }
+
+    applySize();
+    updateScale();
+    updateCapabilities();
+    renderThumbnail(false);
   </script>
 
   <pre><code>// HTML in Canvas — Chrome 148 origin trial
@@ -309,8 +425,9 @@ const canvas = document.querySelector('canvas');
 const ctx = canvas.getContext('2d');
 const card = document.querySelector('.card');
 
-// drawElement renders the live DOM element into the canvas
-await ctx.drawElement(card, 0, 0, 300, 200);
+// drawElementImage renders the live DOM element into the canvas.
+// Older prototypes used drawHTMLElement() or drawElement().
+await ctx.drawElementImage(card, 0, 0, 300, 200);
 
 // The element stays in the DOM, fully functional.
 // Its CSS (variables, custom fonts, transitions) all render correctly.
@@ -322,12 +439,19 @@ const png = canvas.toDataURL('image/png');
 card.setAttribute('layoutsubtree', '');</code></pre>
 
   <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5172548013916160" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/whatwg/html/pull/11588" target="_blank" rel="noopener">WHATWG HTML pull request</a></li>
+    </ul>
+  </section>
+
+  <section>
     <h2>see also</h2>
     <ul>
       <li><a href="../dom-to-canvas-bridge/">DOM-to-Canvas Bridge</a></li>
       <li><a href="../layout-subtree-explorer/">layoutsubtree Explorer</a></li>
       <li><a href="../canvas-renderer/">Canvas Renderer</a></li>
-      <li><a href="https://chromestatus.com/feature/5172548013916160" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
