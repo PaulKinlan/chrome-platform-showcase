@@ -68,6 +68,13 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
 - Concept pages must be genuinely interactive. Do not ship static code cards. Use real controls,
   live output, feature detection, graceful fallback, and server routes where HTTP/header behavior is
   the feature.
+- Do not add generic "live probe" panels. A live probe must test the exact feature contract the demo
+  claims to demonstrate: the real CSS declaration/selector/at-rule, the real IDL member or method
+  call, the real media state, or the real server/header/resource behavior. Never use broad baseline
+  checks like `CSS.supports`, `customElements`, `navigator.gpu`, `ReadableStream`, or "baseline DOM
+  APIs" unless that exact surface is the feature. If the behavior is visual, OS-specific,
+  hardware-specific, or otherwise not directly probeable, label it as a manual observation or
+  fallback state instead of calling it a live probe.
 - Browser verification for demos, bug fixes, critique, and conformance must use
   `chrome-devtools-mcp` only. Do not substitute Playwright, the in-app browser, screenshots from a
   non-DevTools tool, or generic browser automation. Chrome Canary is acceptable when the target
@@ -85,7 +92,11 @@ trial, flag-gated, OS-specific, or device-specific features, show capability det
 fallback rather than skipping the interaction.
 
 For HTTP, header, MIME, cache, redirect, or negotiation features, wire the relevant route in
-`server.ts` and have the concept page fetch it and surface status, headers, and body in-page.
+`server.ts` and have the concept page fetch it and surface status, headers, and body in-page. For
+CSS features, pair syntax detection with an observable effect when possible, such as
+`getComputedStyle()`, layout measurements, active selector state, or a visible before/after. For API
+features, feature-detect the exact constructor/member and make a real, safe call; unsupported or
+permission-gated results must be surfaced as unsupported/fallback, not hidden behind a generic pass.
 
 ## Auto-Research, Conformance, And Goal-Setting
 
@@ -143,6 +154,8 @@ exercised, console/network status, Deno checks, and JSON files refreshed.
 For a conformance pass, skip features that already have `conformance.json`. Write 3-10 assertions
 covering distinct spec contracts. Use only real `css-supports`, `exists`, `typeof`, `script`, or
 `throws` checks; do not invent API names or broad "exists" checks that miss the actual contract.
+Assertions should mirror the same contract as the demo's probe; a conformance suite that only checks
+unrelated baseline browser APIs is invalid.
 
 If using multiple background agents, avoid shared-worktree races: commit one generated JSON file at
 a time, stage only that file, and do not use `git add -A` for per-file critique/conformance commits.

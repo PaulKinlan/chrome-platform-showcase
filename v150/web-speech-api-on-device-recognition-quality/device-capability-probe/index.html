@@ -225,7 +225,7 @@
   const PROBES = [
     { id: 'sr-basic',    label: 'SpeechRecognition API',      desc: 'window.SpeechRecognition or webkitSpeechRecognition exists' },
     { id: 'sr-quality',  label: 'quality property',           desc: 'recognition.quality writable property (Chrome 150)' },
-    { id: 'sr-ondevice', label: 'on-device recognition',      desc: 'Non-network recognition (Chrome 149+)' },
+    { id: 'sr-ondevice', label: 'local recognition pack',     desc: 'processLocally plus SpeechRecognition.available() for en-US dictation' },
     { id: 'sr-punct',    label: 'unspokenPunctuation',        desc: 'Auto-inferred punctuation without speaking it (Chrome 150)' },
     { id: 'sr-perm',     label: 'Microphone permission',      desc: 'navigator.permissions — microphone access state' },
     { id: 'sr-secure',   label: 'Secure context',             desc: 'SpeechRecognition requires HTTPS or localhost' },
@@ -275,6 +275,31 @@
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${probe}</td><td>${result}</td><td>${notes}</td>`;
     tbody.appendChild(tr);
+  }
+
+  function hasProcessLocally() {
+    if (!SR) return false;
+    if ('processLocally' in SR.prototype) return true;
+    try {
+      return 'processLocally' in new SR();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function localSpeechPolicyDetail() {
+    const policy = document.permissionsPolicy || document.featurePolicy;
+    if (!policy || typeof policy.allowsFeature !== 'function') {
+      return 'Permissions Policy not introspectable in this browser.';
+    }
+    try {
+      const allowed = policy.allowsFeature('on-device-speech-recognition');
+      return allowed
+        ? 'Permissions Policy allows on-device-speech-recognition.'
+        : 'Permissions Policy blocks on-device-speech-recognition.';
+    } catch (error) {
+      return 'Permissions Policy check failed: ' + (error.name || 'Error');
+    }
   }
 
   window.resetProbe = function () {
@@ -328,36 +353,50 @@
       addResult('quality property', 'N/A', 'SpeechRecognition not available');
     }
 
-    // 3. on-device recognition (Chrome 149+)
+    // 3. on-device recognition contract
     await delay(120);
     if (SR) {
-      const sr = new SR();
-      const hasOnDevice = 'ondevice' in sr || 'continuous' in sr;
-      // Use user-agent heuristic for Chrome 149+
-      const ua = navigator.userAgent;
-      const chromeMatch = ua.match(/Chrome\/(\d+)/);
-      const chromeMajor = chromeMatch ? parseInt(chromeMatch[1]) : 0;
-      const isChrome149Plus = chromeMajor >= 149;
-
-      if (isChrome149Plus) {
-        setBadge('sr-ondevice', 'badge-yes', 'yes');
-        setDetail('sr-ondevice', 'Chrome ' + chromeMajor + ': on-device recognition available. Recognition runs locally without network round-trip.');
-        log('✓ On-device recognition: Chrome ' + chromeMajor + ' (≥149)', 'log-ok');
-        addResult('On-device recognition', 'Available', 'Chrome ' + chromeMajor);
-      } else if (chromeMajor > 0) {
+      const canRequestLocal = hasProcessLocally();
+      const canQueryPacks = typeof SR.available === 'function';
+      const canInstallPacks = typeof SR.install === 'function';
+      const policy = localSpeechPolicyDetail();
+      if (!canRequestLocal) {
         setBadge('sr-ondevice', 'badge-no', 'no');
-        setDetail('sr-ondevice', 'Chrome ' + chromeMajor + ': on-device recognition requires Chrome 149+.');
-        log('✗ On-device recognition: Chrome ' + chromeMajor + ' is below 149', 'log-warn');
-        addResult('On-device recognition', 'Not available', 'Requires Chrome 149+');
-      } else {
+        setDetail('sr-ondevice', '<strong>processLocally</strong> is not exposed, so the page cannot require local-only recognition.');
+        log('✗ processLocally not found on SpeechRecognition', 'log-warn');
+        addResult('Local recognition', 'Not controllable', policy);
+      } else if (!canQueryPacks) {
         setBadge('sr-ondevice', 'badge-partial', '?');
-        setDetail('sr-ondevice', 'Non-Chrome browser detected — on-device recognition availability unknown.');
-        log('? On-device recognition: non-Chrome browser', 'log-warn');
-        addResult('On-device recognition', 'Unknown', 'Non-Chrome browser');
+        setDetail('sr-ondevice', '<strong>processLocally</strong> is exposed, but <strong>SpeechRecognition.available()</strong> is missing, so the selected pack cannot be preflighted.');
+        log('? processLocally exists but available() is missing', 'log-warn');
+        addResult('Local recognition', 'Cannot preflight pack', policy);
+      } else {
+        try {
+          const status = await SR.available({
+            langs: ['en-US'],
+            processLocally: true,
+            quality: 'dictation',
+          });
+          const ok = status === 'available';
+          setBadge('sr-ondevice', ok ? 'badge-yes' : 'badge-partial', ok ? 'yes' : String(status));
+          setDetail(
+            'sr-ondevice',
+            'en-US dictation local pack status: <strong>' + status + '</strong>. ' +
+              (canInstallPacks ? 'install() is exposed for downloadable packs. ' : 'install() is not exposed. ') +
+              policy,
+          );
+          log('Local pack status: ' + status, ok ? 'log-ok' : 'log-warn');
+          addResult('Local recognition', status, policy);
+        } catch (error) {
+          setBadge('sr-ondevice', 'badge-no', 'error');
+          setDetail('sr-ondevice', 'SpeechRecognition.available() threw <strong>' + (error.name || 'Error') + '</strong>. ' + policy);
+          log('✗ available() failed: ' + (error.name || 'Error'), 'log-warn');
+          addResult('Local recognition', 'available() failed', policy);
+        }
       }
     } else {
       setBadge('sr-ondevice', 'badge-no', 'n/a');
-      addResult('On-device recognition', 'N/A', 'SpeechRecognition not available');
+      addResult('Local recognition', 'N/A', 'SpeechRecognition not available');
     }
 
     // 4. unspokenPunctuation

@@ -136,6 +136,14 @@
       color: var(--text-charcoal);
       margin: var(--space-4) 0;
     }
+    .warn.ok {
+      background: var(--bg-paper);
+      border-color: var(--accent-blue);
+    }
+    .warn.error {
+      background: var(--bg-paper);
+      border-color: var(--accent-rose);
+    }
     .legend {
       display: flex;
       gap: var(--space-4);
@@ -178,6 +186,7 @@
 
   <div class="controls">
     <button class="ctl-btn" id="start">Start mic + simulation</button>
+    <button class="ctl-btn secondary" id="synthetic">Run synthetic fallback</button>
     <button class="ctl-btn secondary" id="stop">Stop</button>
     <div class="knob">
       <label for="floor">Silence floor (dBov)</label>
@@ -190,6 +199,7 @@
       <span class="knob-val" id="hold-val">800 ms</span>
     </div>
   </div>
+  <div class="warn" id="edge-note">Move the silence floor or start the router to inspect boundary cases.</div>
 
   <div class="stage">
     <div class="tiles" id="tiles"></div>
@@ -216,6 +226,10 @@
     <div class="stat">
       <div class="stat-label">Bandwidth saved (est)</div>
       <div class="stat-val" id="s-bw">0%</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Mode</div>
+      <div class="stat-val" id="s-mode">idle</div>
     </div>
   </div>
 
@@ -281,39 +295,37 @@ self.onrtctransform = (event) =&gt; {
 </main>
 
 <script>
-(() =&gt; {
-  // Feature detect
+(() => {
   const probe = document.getElementById('probe');
-  let supported = false;
-  try {
-    if (typeof RTCRtpScriptTransform !== 'undefined' &amp;&amp;
-        'audioLevel' in (window.RTCEncodedAudioFrameMetadata?.prototype ?? {})) {
-      supported = true;
-    } else if (typeof RTCRtpScriptTransform !== 'undefined') {
-      // Heuristic: feature shipped in Chrome 139. Trust UA fact-check at runtime.
-      supported = true;
-    }
-  } catch (e) { /* ignore */ }
-  if (supported) {
-    probe.innerHTML = 'Encoded-frame transforms are available. The simulation below routes one real mic stream as four virtual participants by offsetting their level peaks — the routing logic is identical to a real multi-party SFU read of <code>audioLevel</code>.';
-    probe.style.background = '#e6f3ff';
-    probe.style.borderColor = 'var(--accent-blue)';
+  const edgeNote = document.getElementById('edge-note');
+
+  function setNotice(target, kind, html) {
+    target.className = kind ? `warn ${kind}` : 'warn';
+    target.innerHTML = html;
+  }
+
+  const hasScriptTransform = typeof RTCRtpScriptTransform !== 'undefined';
+  const hasAudioFrame = typeof RTCEncodedAudioFrame !== 'undefined' &&
+    typeof RTCEncodedAudioFrame.prototype?.getMetadata === 'function';
+
+  if (hasScriptTransform && hasAudioFrame) {
+    setNotice(probe, 'ok', 'Encoded-frame transform primitives are available. This page simulates an SFU using the same per-frame <code>audioLevel</code> routing decisions a worker would make from <code>RTCEncodedAudioFrame.getMetadata()</code>.');
+  } else if (hasScriptTransform) {
+    setNotice(probe, 'ok', 'Encoded transforms are available, but this page cannot prove <code>audioLevel</code> until real encoded audio frames arrive. The router remains usable with microphone or synthetic levels.');
   } else {
-    probe.innerHTML = '<strong>RTCRtpScriptTransform not detected.</strong> The visual router will still run against a synthetic level source so you can see the algorithm. Use Chrome 139+ to read <code>audioLevel</code> from real encoded frames.';
-    probe.style.background = '#fde7e9';
-    probe.style.borderColor = 'var(--accent-rose)';
+    setNotice(probe, 'error', '<strong>RTCRtpScriptTransform not detected.</strong> The visual router still runs against microphone or synthetic levels so the active-speaker and silence-suppression algorithm is visible. Use Chrome 139+ to read <code>audioLevel</code> from real encoded frames.');
   }
 
   const NAMES = ['Mei', 'Aanya', 'Diego', 'Lior'];
   const tilesEl = document.getElementById('tiles');
-  const tiles = NAMES.map((name, i) =&gt; {
+  const tiles = NAMES.map((name, i) => {
     const el = document.createElement('div');
     el.className = 'tile';
     el.innerHTML = `
-      &lt;div class="tile-name"&gt;${name}&lt;/div&gt;
-      &lt;div class="tile-level" data-l&gt;-127&lt;/div&gt;
-      &lt;div class="tile-bar"&gt;&lt;div class="tile-bar-fill" data-bar&gt;&lt;/div&gt;&lt;/div&gt;
-      &lt;div class="tile-status" data-s&gt;idle&lt;/div&gt;
+      <div class="tile-name">${name}</div>
+      <div class="tile-level" data-l>-127</div>
+      <div class="tile-bar"><div class="tile-bar-fill" data-bar></div></div>
+      <div class="tile-status" data-s>idle</div>
     `;
     tilesEl.appendChild(el);
     return {
@@ -331,26 +343,34 @@ self.onrtctransform = (event) =&gt; {
   const holdEl = document.getElementById('hold');
   const floorValEl = document.getElementById('floor-val');
   const holdValEl = document.getElementById('hold-val');
-  floorEl.addEventListener('input', () =&gt; floorValEl.textContent = floorEl.value + ' dBov');
-  holdEl.addEventListener('input', () =&gt; holdValEl.textContent = holdEl.value + ' ms');
+  floorEl.addEventListener('input', () => {
+    floorValEl.textContent = floorEl.value + ' dBov';
+    describeFloorBoundary();
+  });
+  holdEl.addEventListener('input', () => holdValEl.textContent = holdEl.value + ' ms');
 
   const sSeen = document.getElementById('s-seen');
   const sFwd = document.getElementById('s-fwd');
   const sSup = document.getElementById('s-sup');
   const sBw = document.getElementById('s-bw');
+  const sMode = document.getElementById('s-mode');
 
   let stream = null, ctx = null, analyser = null, raf = null;
   let seen = 0, fwd = 0, sup = 0;
   let spotlightIdx = -1, holdUntil = 0;
+  let mode = 'idle';
 
   async function start() {
-    if (stream) return;
+    if (raf || stream || ctx) stop();
+    resetCounters();
+    if (!navigator.mediaDevices?.getUserMedia) {
+      startSynthetic('<strong>Microphone capture API unavailable.</strong> Running a deterministic synthetic source so unsupported-browser fallback behavior is still explorable.');
+      return;
+    }
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
-      probe.innerHTML = '&lt;strong&gt;Mic permission denied.&lt;/strong&gt; Re-run with mic access; the router needs a real level signal.';
-      probe.style.background = '#fde7e9';
-      probe.style.borderColor = 'var(--accent-rose)';
+      startSynthetic('<strong>Mic permission denied or unavailable.</strong> The router switched to synthetic levels instead of leaving the demo blank.');
       return;
     }
     ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -358,34 +378,72 @@ self.onrtctransform = (event) =&gt; {
     analyser = ctx.createAnalyser();
     analyser.fftSize = 1024;
     src.connect(analyser);
+    mode = 'microphone';
+    sMode.textContent = 'microphone';
+    setNotice(edgeNote, 'ok', 'Microphone mode is running. The first tile follows the live mic level, while the other tiles simulate remote participants with offset peaks.');
+    loop();
+  }
+
+  function startSynthetic(reason) {
+    if (raf || stream || ctx) stop();
+    resetCounters();
+    analyser = null;
+    mode = 'synthetic';
+    sMode.textContent = 'synthetic';
+    setNotice(edgeNote, 'error', reason + ' The synthetic fallback intentionally cycles through silence, dominant speakers, and low-level frames.');
     loop();
   }
 
   function stop() {
     if (raf) cancelAnimationFrame(raf);
     raf = null;
-    if (stream) stream.getTracks().forEach(t =&gt; t.stop());
+    if (stream) stream.getTracks().forEach((t) => t.stop());
     stream = null;
     if (ctx) ctx.close();
     ctx = null;
-    tiles.forEach(t =&gt; {
+    analyser = null;
+    mode = 'idle';
+    sMode.textContent = 'idle';
+    tiles.forEach((t) => {
       t.el.classList.remove('active', 'suppressed');
       t.statusEl.textContent = 'idle';
       t.barEl.style.width = '0%';
       t.lvlEl.textContent = '-127';
     });
+    describeFloorBoundary();
+  }
+
+  function resetCounters() {
+    seen = 0;
+    fwd = 0;
+    sup = 0;
+    spotlightIdx = -1;
+    holdUntil = 0;
+    sSeen.textContent = '0';
+    sFwd.textContent = '0';
+    sSup.textContent = '0';
+    sBw.textContent = '0%';
+  }
+
+  function describeFloorBoundary(forwarded = null, suppressed = null) {
+    const floor = +floorEl.value;
+    if (forwarded === 0 && suppressed !== null && suppressed > 0) {
+      setNotice(edgeNote, 'error', 'Boundary: this silence floor suppresses every participant. Lower the floor toward -60 dBov to forward quiet speakers.');
+    } else if (suppressed === 0 && forwarded !== null && forwarded > 0) {
+      setNotice(edgeNote, 'ok', 'Boundary: this silence floor forwards every participant, including low-level frames. Raise the floor toward -20 dBov to save bandwidth.');
+    } else if (floor <= -55) {
+      setNotice(edgeNote, null, 'Lenient floor: only near-silent frames are suppressed. This is safer for accessibility but saves less bandwidth.');
+    } else if (floor >= -25) {
+      setNotice(edgeNote, null, 'Aggressive floor: more frames are suppressed. Watch for quiet speakers being dropped.');
+    } else if (mode === 'idle') {
+      setNotice(edgeNote, null, 'Move the silence floor or start the router to inspect boundary cases.');
+    }
   }
 
   function loop() {
     raf = requestAnimationFrame(loop);
-    if (!analyser) return;
-    const buf = new Float32Array(analyser.fftSize);
-    analyser.getFloatTimeDomainData(buf);
-    let sum = 0;
-    for (let i = 0; i &lt; buf.length; i++) sum += buf[i] * buf[i];
-    const rms = Math.sqrt(sum / buf.length);
-    // Convert RMS [0..1] to dBov-like 0..127, lower=louder
-    const baseLevel = rms &gt; 0 ? Math.max(0, Math.min(127, -20 * Math.log10(rms + 1e-6) * 4)) : 127;
+    if (!analyser && mode !== 'synthetic') return;
+    const baseLevel = analyser ? readMicLevel() : syntheticBaseLevel(performance.now());
 
     const floor = +floorEl.value;
     const hold = +holdEl.value;
@@ -394,24 +452,25 @@ self.onrtctransform = (event) =&gt; {
 
     const now = performance.now();
     let loudestIdx = -1, loudestLvl = 127;
+    let frameForwarded = 0, frameSuppressed = 0;
 
-    tiles.forEach((t, i) =&gt; {
-      // Each virtual participant is the base mic level + a per-tile offset modulated by time,
-      // so all four tiles have distinguishable but realistic patterns.
-      const wobble = 18 * Math.sin(now / 700 + t.offset * Math.PI);
-      const idle = 110 - 18 * Math.sin(now / 1100 + t.offset);
-      const level = i === 0
-        ? baseLevel
-        : Math.max(0, Math.min(127, baseLevel + wobble + (i === 1 ? 6 : i === 2 ? 14 : 22)));
-      // When mic is quiet (baseLevel high), simulate ambient idle.
-      const effective = baseLevel &gt; 100 ? Math.min(127, idle) : level;
+    tiles.forEach((t, i) => {
+      const effective = mode === 'synthetic'
+        ? syntheticParticipantLevel(i, now)
+        : microphoneParticipantLevel(i, baseLevel, now, t.offset);
       t.level = effective;
       seen++;
 
-      const suppressed = effective &gt; floorMapped;
-      if (suppressed) sup++; else fwd++;
+      const suppressed = effective > floorMapped;
+      if (suppressed) {
+        sup++;
+        frameSuppressed++;
+      } else {
+        fwd++;
+        frameForwarded++;
+      }
 
-      if (!suppressed &amp;&amp; effective &lt; loudestLvl) {
+      if (!suppressed && effective < loudestLvl) {
         loudestLvl = effective;
         loudestIdx = i;
       }
@@ -428,14 +487,14 @@ self.onrtctransform = (event) =&gt; {
 
     // Active-speaker hold
     if (loudestIdx !== -1) {
-      if (loudestIdx !== spotlightIdx &amp;&amp; now &gt;= holdUntil) {
+      if (loudestIdx !== spotlightIdx && now >= holdUntil) {
         spotlightIdx = loudestIdx;
         holdUntil = now + hold;
       } else if (loudestIdx === spotlightIdx) {
         holdUntil = now + hold;
       }
     }
-    tiles.forEach((t, i) =&gt; t.el.classList.toggle('active', i === spotlightIdx &amp;&amp; !t.el.classList.contains('suppressed')));
+    tiles.forEach((t, i) => t.el.classList.toggle('active', i === spotlightIdx && !t.el.classList.contains('suppressed')));
 
     // Stats (refresh sparingly)
     if (seen % 8 === 0) {
@@ -445,10 +504,42 @@ self.onrtctransform = (event) =&gt; {
       const pct = seen ? Math.round((sup / seen) * 100) : 0;
       sBw.textContent = pct + '%';
     }
+    describeFloorBoundary(frameForwarded, frameSuppressed);
+  }
+
+  function readMicLevel() {
+    const buf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rms = Math.sqrt(sum / buf.length);
+    return rms > 0 ? Math.max(0, Math.min(127, -20 * Math.log10(rms + 1e-6) * 4)) : 127;
+  }
+
+  function syntheticBaseLevel(now) {
+    return 76 + 34 * Math.sin(now / 900);
+  }
+
+  function syntheticParticipantLevel(i, now) {
+    const phase = now / (560 + i * 80) + i * 1.45;
+    const envelope = 72 + 40 * Math.sin(phase);
+    const turnTaking = (Math.sin(now / 1800 + i * 1.1) > 0.45) ? -34 : 18;
+    return Math.max(0, Math.min(127, envelope + turnTaking + i * 5));
+  }
+
+  function microphoneParticipantLevel(i, baseLevel, now, offset) {
+    const wobble = 18 * Math.sin(now / 700 + offset * Math.PI);
+    const idle = 110 - 18 * Math.sin(now / 1100 + offset);
+    const level = i === 0
+      ? baseLevel
+      : Math.max(0, Math.min(127, baseLevel + wobble + (i === 1 ? 6 : i === 2 ? 14 : 22)));
+    return baseLevel > 100 ? Math.min(127, idle) : level;
   }
 
   document.getElementById('start').addEventListener('click', start);
+  document.getElementById('synthetic').addEventListener('click', () => startSynthetic('<strong>Synthetic fallback selected.</strong> This branch exercises the no-microphone path while keeping active-speaker routing live.'));
   document.getElementById('stop').addEventListener('click', stop);
+  describeFloorBoundary();
 })();
 </script>
 </body>

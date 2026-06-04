@@ -202,21 +202,147 @@ function renderReferrerEcho(req: Request): Response {
   });
 }
 
+const CSS_URL_MODIFIER_DEMO_PREFIX = "/css-url-request-modifiers/crossorigin-integrity-demo";
+
+const CSS_URL_MODIFIER_CLEAN_SVG =
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" role="img" aria-label="Verified CSS resource">
+  <rect width="320" height="180" fill="ivory"/>
+  <path d="M40 130 L118 58 L170 100 L214 72 L280 130 Z" fill="teal"/>
+  <circle cx="238" cy="52" r="20" fill="royalblue"/>
+  <text x="34" y="34" font-family="monospace" font-size="16" fill="black">verified CSS resource</text>
+</svg>`;
+
+const CSS_URL_MODIFIER_TAMPERED_SVG = CSS_URL_MODIFIER_CLEAN_SVG
+  .replace("verified CSS resource", "tampered CSS resource")
+  .replace('fill="teal"', 'fill="crimson"');
+
+function appendVary(headers: Headers, value: string): void {
+  const existing = headers.get("vary");
+  if (!existing) {
+    headers.set("vary", value);
+    return;
+  }
+  const parts = existing.split(",").map((part) => part.trim().toLowerCase());
+  if (!parts.includes(value.toLowerCase())) {
+    headers.set("vary", `${existing}, ${value}`);
+  }
+}
+
+async function sha384Sri(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-384", toArrayBuffer(bytes)));
+  let binary = "";
+  for (const byte of digest) binary += String.fromCharCode(byte);
+  return `sha384-${btoa(binary)}`;
+}
+
+function applyCssUrlModifierDemoCors(headers: Headers, req: Request, mode: string): void {
+  appendVary(headers, "Origin");
+  headers.set("access-control-allow-methods", "GET, HEAD, OPTIONS");
+  headers.set("access-control-allow-headers", "content-type");
+  headers.set(
+    "access-control-expose-headers",
+    "x-demo-cors-mode, x-demo-sha384, x-demo-variant, x-demo-resource-bytes",
+  );
+  headers.set("timing-allow-origin", "*");
+
+  if (mode === "public") {
+    headers.set("access-control-allow-origin", "*");
+    return;
+  }
+
+  if (mode === "credentialed") {
+    const origin = req.headers.get("origin") ?? new URL(req.url).origin;
+    headers.set("access-control-allow-origin", origin);
+    headers.set("access-control-allow-credentials", "true");
+  }
+}
+
+async function renderCssUrlModifierDemoRoute(
+  req: Request,
+  sub: string,
+): Promise<Response | null> {
+  if (!sub.startsWith(`${CSS_URL_MODIFIER_DEMO_PREFIX}/`)) return null;
+
+  const route = sub.slice(CSS_URL_MODIFIER_DEMO_PREFIX.length);
+  if (route !== "/asset-meta" && route !== "/resource.svg") return null;
+
+  const url = new URL(req.url);
+  const cleanHash = await sha384Sri(CSS_URL_MODIFIER_CLEAN_SVG);
+  const tamperedHash = await sha384Sri(CSS_URL_MODIFIER_TAMPERED_SVG);
+  const variant = url.searchParams.get("variant") === "tampered" ||
+      url.searchParams.get("tamper") === "1"
+    ? "tampered"
+    : "clean";
+  const body = variant === "tampered" ? CSS_URL_MODIFIER_TAMPERED_SVG : CSS_URL_MODIFIER_CLEAN_SVG;
+  const hash = variant === "tampered" ? tamperedHash : cleanHash;
+  const corsMode = ["public", "credentialed", "blocked"].includes(
+      url.searchParams.get("cors") ?? "",
+    )
+    ? url.searchParams.get("cors")!
+    : "public";
+  const headers = new Headers({
+    "cache-control": "no-store",
+    "x-demo-cors-mode": corsMode,
+  });
+  applyCssUrlModifierDemoCors(headers, req, corsMode);
+
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers });
+  }
+
+  if (route === "/asset-meta") {
+    return jsonResponse({
+      cleanUrl: `/v150${CSS_URL_MODIFIER_DEMO_PREFIX}/resource.svg?variant=clean`,
+      tamperedUrl: `/v150${CSS_URL_MODIFIER_DEMO_PREFIX}/resource.svg?variant=tampered`,
+      cleanSha384: cleanHash,
+      tamperedSha384: tamperedHash,
+      corsModes: {
+        public: "Access-Control-Allow-Origin: *",
+        credentialed:
+          "Access-Control-Allow-Origin: <request Origin>, Access-Control-Allow-Credentials: true",
+        blocked: "No Access-Control-Allow-Origin response header",
+      },
+    }, { headers });
+  }
+
+  headers.set("content-type", "image/svg+xml; charset=utf-8");
+  headers.set("x-demo-variant", variant);
+  headers.set("x-demo-sha384", hash);
+  headers.set("x-demo-resource-bytes", String(new TextEncoder().encode(body).byteLength));
+
+  if (req.method === "HEAD") {
+    return new Response(null, { headers });
+  }
+
+  return new Response(body, { headers });
+}
+
+const DEVICE_MEMORY_CLIENT_HINT_ECHO_ROUTES = new Set([
+  "/update-device-memory-api-limits/compatibility-lab/client-hint-echo",
+  "/update-device-memory-api-limits/memory-inspector/client-hint-echo",
+]);
+
 function renderDeviceMemoryClientHintRoute(req: Request, sub: string): Response | null {
-  if (sub !== "/update-device-memory-api-limits/compatibility-lab/client-hint-echo") {
+  if (!DEVICE_MEMORY_CLIENT_HINT_ECHO_ROUTES.has(sub)) {
     return null;
   }
 
+  const url = new URL(req.url);
+  const secCHDeviceMemory = req.headers.get("sec-ch-device-memory");
+  const legacyDeviceMemory = req.headers.get("device-memory");
   const payload = {
-    endpoint: new URL(req.url).pathname,
+    endpoint: url.pathname,
+    round: url.searchParams.get("round"),
     optInResponseHeader: "Accept-CH: Sec-CH-Device-Memory",
     expectedRequestHeader: "Sec-CH-Device-Memory",
     received: {
-      secCHDeviceMemory: req.headers.get("sec-ch-device-memory"),
+      secCHDeviceMemory,
+      legacyDeviceMemory,
       accept: req.headers.get("accept"),
       userAgent: req.headers.get("user-agent"),
     },
-    note: req.headers.get("sec-ch-device-memory")
+    note: secCHDeviceMemory
       ? "The browser sent the Device Memory client hint after this origin opted in."
       : "No Device Memory client hint was received. That is the failure mode for unsupported browsers, first requests before opt-in, or clients that do not expose this Chromium-only hint.",
   };
@@ -6350,10 +6476,12 @@ Deno.serve({ port: PORT }, async (req) => {
       }
     }
 
-    if (release === "v150" && sub === "/css-url-request-modifiers/referrer-echo") {
-      return renderReferrerEcho(req);
-    }
     if (release === "v150") {
+      const cssUrlModifierDemoResponse = await renderCssUrlModifierDemoRoute(req, sub);
+      if (cssUrlModifierDemoResponse) return cssUrlModifierDemoResponse;
+      if (sub === "/css-url-request-modifiers/referrer-echo") {
+        return renderReferrerEcho(req);
+      }
       const processingInstructionStreamResponse = renderProcessingInstructionStreamingUseCaseRoute(
         req,
         sub,
@@ -6423,7 +6551,10 @@ Deno.serve({ port: PORT }, async (req) => {
       if (
         sub === "/update-device-memory-api-limits/compatibility-lab" ||
         sub === "/update-device-memory-api-limits/compatibility-lab/" ||
-        sub === "/update-device-memory-api-limits/compatibility-lab/index.html"
+        sub === "/update-device-memory-api-limits/compatibility-lab/index.html" ||
+        sub === "/update-device-memory-api-limits/memory-inspector" ||
+        sub === "/update-device-memory-api-limits/memory-inspector/" ||
+        sub === "/update-device-memory-api-limits/memory-inspector/index.html"
       ) {
         const asset = await readReleaseAsset(release, sub);
         if (asset) {

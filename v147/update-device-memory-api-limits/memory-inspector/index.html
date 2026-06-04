@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Memory Inspector — Update Device Memory API limits — Chrome 147</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/public/styles.css">
   <style>
     .status-strip {
@@ -412,6 +413,10 @@
       <span class="status-kicker">WorkerNavigator</span>
       <span class="status-value">Not probed yet</span>
     </div>
+    <div class="status-item" id="hint-status" data-state="warn">
+      <span class="status-kicker">HTTP client hint</span>
+      <span class="status-value">Not probed yet</span>
+    </div>
   </section>
 
   <section class="inspector-grid" aria-label="Live memory inspector">
@@ -428,6 +433,7 @@
       <div class="action-row">
         <button type="button" id="read-button">Read navigator.deviceMemory</button>
         <button type="button" id="worker-button" class="secondary">Probe worker exposure</button>
+        <button type="button" id="hint-button" class="secondary">Probe HTTP header</button>
       </div>
       <label class="toggle-row">
         <input type="checkbox" id="missing-toggle">
@@ -440,7 +446,7 @@
         </div>
         <div>
           <dt>Sec-CH-Device-Memory</dt>
-          <dd>The client hint uses the same approximate bucket after an origin opts in with <code>Accept-CH: Sec-CH-Device-Memory</code>.</dd>
+          <dd id="hint-contract">This page opts in with <code>Accept-CH: Sec-CH-Device-Memory</code>. Run the HTTP probe to check the echoed request header.</dd>
         </div>
       </dl>
     </div>
@@ -527,8 +533,26 @@
     </div>
 
     <div class="tool-panel">
-      <h2>client hint equivalent</h2>
-      <p><code>Sec-CH-Device-Memory</code> is a structured decimal request header. The browser sends it only after opt-in; this panel formats the matching bucket from the current live read or fallback mode.</p>
+      <h2>HTTP Client Hint probe</h2>
+      <p><code>Sec-CH-Device-Memory</code> is a structured decimal request header. This page is served with <code>Accept-CH: Sec-CH-Device-Memory</code>; the probe fetches a local server echo endpoint twice and shows whether the browser actually sent the hint.</p>
+      <dl class="contract-list">
+        <div>
+          <dt>Response opt-in</dt>
+          <dd id="hint-accept-ch">Accept-CH: waiting</dd>
+        </div>
+        <div>
+          <dt>Cache key</dt>
+          <dd id="hint-vary">Vary: waiting</dd>
+        </div>
+        <div>
+          <dt>Request echo</dt>
+          <dd id="hint-request">Sec-CH-Device-Memory: waiting</dd>
+        </div>
+        <div>
+          <dt>Fallback path</dt>
+          <dd id="hint-note">Run the HTTP probe to surface the sent-header or missing-header path.</dd>
+        </div>
+      </dl>
       <div class="code-output" id="hint-output"></div>
     </div>
   </section>
@@ -573,12 +597,15 @@
       secureStatus: document.getElementById('secure-status'),
       apiStatus: document.getElementById('api-status'),
       workerStatus: document.getElementById('worker-status'),
+      hintStatus: document.getElementById('hint-status'),
       memValue: document.getElementById('mem-value'),
       memUnit: document.getElementById('mem-unit'),
       memNote: document.getElementById('mem-note'),
       navigatorContract: document.getElementById('navigator-contract'),
+      hintContract: document.getElementById('hint-contract'),
       readButton: document.getElementById('read-button'),
       workerButton: document.getElementById('worker-button'),
+      hintButton: document.getElementById('hint-button'),
       missingToggle: document.getElementById('missing-toggle'),
       physicalRange: document.getElementById('physical-range'),
       physicalNumber: document.getElementById('physical-number'),
@@ -594,6 +621,10 @@
       roundingDetail: document.getElementById('rounding-detail'),
       privacyDetail: document.getElementById('privacy-detail'),
       fallbackOutput: document.getElementById('fallback-output'),
+      hintAcceptCH: document.getElementById('hint-accept-ch'),
+      hintVary: document.getElementById('hint-vary'),
+      hintRequest: document.getElementById('hint-request'),
+      hintNote: document.getElementById('hint-note'),
       hintOutput: document.getElementById('hint-output'),
       snippetOutput: document.getElementById('snippet-output'),
     };
@@ -607,6 +638,19 @@
       worker: {
         state: 'warn',
         text: 'Not probed yet',
+      },
+      hint: {
+        state: 'warn',
+        text: 'Not probed yet',
+        acceptCH: 'waiting',
+        vary: 'waiting',
+        request: 'waiting',
+        note: 'Run the HTTP probe to surface the sent-header or missing-header path.',
+        output: [
+          'HTTP probe:',
+          '  response header = Accept-CH: Sec-CH-Device-Memory',
+          '  request header = waiting for server echo',
+        ].join('\n'),
       },
     };
 
@@ -749,6 +793,7 @@
       );
 
       setStatus(els.workerStatus, state.worker.state, state.worker.text);
+      setStatus(els.hintStatus, state.hint.state, state.hint.text);
 
       els.memValue.textContent = state.liveSupported
         ? formatValue(state.liveMemory)
@@ -763,6 +808,13 @@
       els.navigatorContract.textContent = state.liveSupported
         ? `Window.navigator exposes NavigatorDeviceMemory.deviceMemory as ${formatBucket(state.liveMemory)}.`
         : 'Window.navigator does not expose a numeric deviceMemory value in this browser.';
+      els.hintContract.textContent = state.hint.request === 'waiting'
+        ? 'This page opts in with Accept-CH: Sec-CH-Device-Memory. Run the HTTP probe to check the echoed request header.'
+        : state.hint.request === 'not received'
+        ? 'The server echo route responded, but the request did not include Sec-CH-Device-Memory.'
+        : state.hint.request === 'unavailable'
+        ? 'The HTTP probe failed before the server echo could report request headers.'
+        : `Server echo observed Sec-CH-Device-Memory: ${state.hint.request}.`;
 
       els.newBarLabel.textContent = profile.label;
       renderBucketBar(els.oldBar, OLD_PROFILE, oldBucket, liveValue, profile);
@@ -800,21 +852,11 @@
           `  selected tier = ${tier.name}`,
         ].join('\n');
 
-      els.hintOutput.textContent = liveValue === null
-        ? [
-          'Response opt-in:',
-          '  Accept-CH: Sec-CH-Device-Memory',
-          '',
-          'Later request:',
-          '  Sec-CH-Device-Memory: <absent in this fallback mode>',
-        ].join('\n')
-        : [
-          'Response opt-in:',
-          '  Accept-CH: Sec-CH-Device-Memory',
-          '',
-          'Later request:',
-          `  Sec-CH-Device-Memory: ${formatValue(liveValue)}`,
-        ].join('\n');
+      els.hintAcceptCH.textContent = `Accept-CH: ${state.hint.acceptCH}`;
+      els.hintVary.textContent = `Vary: ${state.hint.vary}`;
+      els.hintRequest.textContent = `Sec-CH-Device-Memory: ${state.hint.request}`;
+      els.hintNote.textContent = state.hint.note;
+      els.hintOutput.textContent = state.hint.output;
 
       els.snippetOutput.textContent = [
         'const mem = typeof navigator.deviceMemory === "number"',
@@ -898,12 +940,99 @@
       };
     }
 
+    function liveMemorySnapshot() {
+      return typeof navigator.deviceMemory === 'number' ? navigator.deviceMemory : null;
+    }
+
+    async function fetchClientHintEcho(round) {
+      const url = new URL(
+        '/v147/update-device-memory-api-limits/memory-inspector/client-hint-echo',
+        location.origin,
+      );
+      url.searchParams.set('round', String(round));
+      url.searchParams.set('t', `${Date.now()}-${round}`);
+
+      const response = await fetch(url, { cache: 'no-store' });
+      const body = await response.json();
+      return {
+        ok: response.ok,
+        status: response.status,
+        responseHeaders: {
+          acceptCH: response.headers.get('accept-ch'),
+          vary: response.headers.get('vary'),
+          cacheControl: response.headers.get('cache-control'),
+        },
+        body,
+      };
+    }
+
+    async function probeClientHint() {
+      state.hint = {
+        state: 'warn',
+        text: 'HTTP probe running...',
+        acceptCH: 'fetching',
+        vary: 'fetching',
+        request: 'fetching',
+        note: 'Fetching the local echo endpoint twice after the page opt-in.',
+        output: 'Fetching /memory-inspector/client-hint-echo twice...',
+      };
+      els.hintButton.disabled = true;
+      render();
+
+      try {
+        const first = await fetchClientHintEcho(1);
+        const second = await fetchClientHintEcho(2);
+        const received = second.body.received?.secCHDeviceMemory ||
+          first.body.received?.secCHDeviceMemory || '';
+        const legacyReceived = second.body.received?.legacyDeviceMemory ||
+          first.body.received?.legacyDeviceMemory || '';
+        const acceptCH = second.responseHeaders.acceptCH ||
+          first.responseHeaders.acceptCH || 'not visible';
+        const vary = second.responseHeaders.vary ||
+          first.responseHeaders.vary || 'not visible';
+
+        state.hint = {
+          state: received ? 'pass' : 'warn',
+          text: received ? `Header sent: ${received}` : 'Header not sent',
+          acceptCH,
+          vary,
+          request: received || 'not received',
+          note: received
+            ? 'The echoed request carried the client hint value, so server-side tiering can use it before JavaScript runs.'
+            : 'The endpoint worked, but the browser did not send the client hint on these requests. Use navigator.deviceMemory or a conservative default in this branch.',
+          output: JSON.stringify({
+            navigatorDeviceMemory: liveMemorySnapshot(),
+            legacyDeviceMemoryHeader: legacyReceived || null,
+            first,
+            second,
+          }, null, 2),
+        };
+      } catch (err) {
+        state.hint = {
+          state: 'fail',
+          text: 'HTTP probe failed',
+          acceptCH: 'unavailable',
+          vary: 'unavailable',
+          request: 'unavailable',
+          note: 'The local echo endpoint could not be reached.',
+          output: err instanceof Error ? err.message : String(err),
+        };
+      } finally {
+        els.hintButton.disabled = false;
+        render();
+      }
+    }
+
     els.readButton.addEventListener('click', () => {
       readDeviceMemory();
     });
 
     els.workerButton.addEventListener('click', () => {
       probeWorkerExposure();
+    });
+
+    els.hintButton.addEventListener('click', () => {
+      probeClientHint();
     });
 
     els.missingToggle.addEventListener('change', (event) => {

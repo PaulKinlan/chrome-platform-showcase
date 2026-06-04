@@ -38,6 +38,17 @@ For every concept critique or user-reported fix, the reviewer must capture concr
 A page load without exercising the controls is not a critique. A passing conformance rollup without
 testing the changed concept UI is not enough evidence for a bug fix.
 
+Live probes are only evidence when they test the actual feature contract. Do not accept or generate
+generic probe panels that check broad baseline surfaces like `CSS.supports`, `customElements`,
+`navigator.gpu`, `ReadableStream`, or "baseline DOM APIs" unless that surface is the feature being
+demonstrated. CSS probes must use the exact property/value/selector/at-rule and, where possible,
+verify an observable computed style, layout measurement, active state, or before/after rendering.
+API probes must check the exact constructor/member and make a real, safe call when the API contract
+requires one. HTTP/header/cache/redirect probes must use a real `server.ts` route and surface
+status, headers, and body. If the behavior is visual, OS-specific, hardware-specific, or
+policy-gated and cannot be directly observed, record it as a manual observation or unsupported
+fallback, not as a live probe.
+
 ---
 
 ## 1. Data models & file locations
@@ -142,15 +153,18 @@ browser pass is blocked rather than downgraded to a different browser tool. Cove
 > the live DOM/readout changes after each interaction, inspect console and network logs, and open
 > the feature or concept `/conformance/` route. Record the tested URL, browser/channel, exercised
 > controls, console/network result, and conformance route in the critique summary or rationale.
-> **Browser version exception**: Milestone `v<N>` might represent a future release (e.g., `v150`
-> Canary) that is newer than the browser environment you are running. If the API is missing or fails
-> feature-detection because the browser is too old, **do not fail the page or the run**. Instead,
-> verify that the page has capability detection and displays a clean, friendly fallback warning or a
-> behind-a-flag note rather than completely crashing, throwing unhandled exceptions, or rendering a
-> broken blank screen. Do not score the page as `fail` on the rubric solely due to lack of browser
-> support, as long as this fallback behavior is correctly implemented. Score the six-criterion
-> rubric in `lib/critique.ts` honestly — partial/fail are useful, don't inflate. Write the
-> `CritiqueReport` JSON to `v<N>/<feature>/<concept>/_questions.json`. Use the exact shape of
+> Reject any "live probe" that checks unrelated baseline APIs instead of the feature's actual CSS,
+> IDL, media, or server contract. The probe and the conformance assertions should agree on the same
+> observable behavior. **Browser version exception**: Milestone `v<N>` might represent a future
+> release (e.g., `v150` Canary) that is newer than the browser environment you are running. If the
+> API is missing or fails feature-detection because the browser is too old, **do not fail the page
+> or the run**. Instead, verify that the page has capability detection and displays a clean,
+> friendly fallback warning or a behind-a-flag note rather than completely crashing, throwing
+> unhandled exceptions, or rendering a broken blank screen. Do not score the page as `fail` on the
+> rubric solely due to lack of browser support, as long as this fallback behavior is correctly
+> implemented. Score the six-criterion rubric in `lib/critique.ts` honestly — partial/fail are
+> useful, don't inflate. Write the `CritiqueReport` JSON to
+> `v<N>/<feature>/<concept>/_questions.json`. Use the exact shape of
 > `v149/css-gap-decorations/rule-builder/_questions.json`. Commit and push **each file on its own**
 > with a single bash call:
 > `git add <file> && git commit -m "critique: v<N>/<feature>/<concept>" && git push` (see the race

@@ -165,6 +165,16 @@ A "concept" is supposed to be hands-on. The shape depends on what the feature ac
   yes/no"), but pair it with a working example of the recommended replacement API so the page is
   useful, not just historical.
 
+Do not add a generic "live probe" panel. A live probe must exercise the exact contract the concept
+claims to demonstrate: the actual CSS declaration/selector/at-rule, the actual IDL member or method
+call, the actual media state, or the actual server/header/resource behavior. Broad baseline checks
+like `CSS.supports`, `customElements`, `navigator.gpu`, `ReadableStream`, or "baseline DOM APIs" are
+forbidden unless that exact surface is the feature. For CSS, pair syntax checks with an observable
+effect when possible (`getComputedStyle()`, layout measurements, active selector state, or visible
+before/after). If a visual, OS-specific, hardware-specific, or policy-gated feature cannot be
+directly probed, label the page state as manual observation or unsupported/fallback rather than
+calling it a live probe.
+
 Pure code-snippet cards (snippet + paragraph + no UI) are NOT acceptable as concept pages. Bug
 history: 2026-05-30, mass backfill of v130-v144 shipped static cards in the name of throughput; Paul
 flagged it as a serious regression because the site is live and depth matters more than coverage.
@@ -186,6 +196,10 @@ For every user-reported URL bug:
    so the quality and conformance files match the repaired behavior.
 5. In the handoff, report the browser/channel, URL, controls exercised, expected vs observed
    behavior, console/network result, screenshots or DOM observations, and Deno checks.
+
+When a bug report involves a live probe, verify that the probe is not just present but meaningful:
+its checks must match the feature's spec contract and the page's conformance assertions. Remove or
+rename any probe that cannot actually observe the claimed browser behavior.
 
 **Also non-negotiable: build EVERY distinct use case the API has. No ceiling.** 2-3 concepts is the
 floor, not the cap. If the spec / planning discussion identifies five distinct use cases, build five
