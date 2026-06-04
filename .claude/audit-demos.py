@@ -17,7 +17,8 @@ CHROMESTATUS_RE = re.compile(r"https://chromestatus\.com/feature/\d+")
 TITLE_CHROME_RE = re.compile(r"<title>[^<]*Chrome (\d{3})[^<]*</title>", re.I | re.S)
 CRUMBS_RE = re.compile(r'<p class="crumbs">.*?</p>', re.I | re.S)
 INTERNAL_RELEASE_LINK_RE = re.compile(r'href="/v(\d{3})(/[^"]*)?"')
-RAW_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3,8}|rgba\(|hsla\(", re.I)
+RAW_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3,8}(?![0-9A-Za-z_-])|rgba\([^)]*\)|hsla\([^)]*\)", re.I)
+CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 STYLE_BLOCK_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.I | re.S)
 STYLE_ATTR_RE = re.compile(r'\sstyle="([^"]*)"', re.I | re.S)
 
@@ -82,6 +83,7 @@ def own_release_link_mismatches(path: Path, html: str, mstone: int) -> list[str]
 def css_raw_color_count(html: str) -> int:
     count = 0
     for block in STYLE_BLOCK_RE.findall(html):
+        block = CSS_COMMENT_RE.sub("", block)
         count += len(RAW_COLOR_RE.findall(block))
     for attr in STYLE_ATTR_RE.findall(html):
         # Color swatches and SVG demo markup sometimes intentionally expose raw
