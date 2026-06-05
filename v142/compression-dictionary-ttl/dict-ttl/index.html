@@ -19,6 +19,8 @@
     .field-row { display: flex; justify-content: space-between; align-items: baseline; }
     .field-val { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
     input[type="range"] { width: 100%; accent-color: var(--text-black); }
+    input[type="range"]:disabled { opacity: 0.45; }
+    input[type="checkbox"] { accent-color: var(--text-black); }
     input[type="text"] {
       border: 2px solid var(--border-black);
       padding: 0.4rem 0.6rem;
@@ -52,9 +54,14 @@
       overflow-x: auto;
       white-space: pre-wrap;
     }
+    .check-field label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
     .outcome {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: var(--space-3);
       margin: var(--space-3) 0;
     }
@@ -80,6 +87,7 @@
     }
     .outcome-val.fresh { color: var(--accent-emerald); }
     .outcome-val.stale { color: var(--accent-rose); }
+    .outcome-val.warn { color: var(--accent-amber); }
     .note { font-family: var(--font-mono); color: var(--text-muted); font-size: 0.85rem; margin-top: var(--space-3); }
   </style>
 </head>
@@ -90,7 +98,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v142</p>
     <h1>Dictionary TTL</h1>
-    <p class="lede">Pick a TTL and how long since the dictionary was last fetched. The simulator shows the <code>Use-As-Dictionary</code> response header the server would send, and tells you whether the browser would still use that dictionary or evict it.</p>
+    <p class="lede">Pick a TTL, cache lifetime, and elapsed time. The simulator shows the <code>Use-As-Dictionary</code> response header the server would send, including the <code>ttl=0</code> immediately-expires corner case, and tells you whether the browser would still offer the dictionary on the next request.</p>
   </header>
 
   <section class="stage">
@@ -105,7 +113,21 @@
           <label for="ttl">ttl (seconds)</label>
           <span class="field-val" id="ttl-display">86400 (1d)</span>
         </div>
-        <input type="range" id="ttl" min="60" max="2592000" value="86400" step="60">
+        <input type="range" id="ttl" min="0" max="2592000" value="86400" step="60" aria-describedby="ttl-zero-note">
+        <p class="note" id="ttl-zero-note">Set ttl to 0 to emit an explicit immediately-expiring dictionary: the response can register the dictionary, but no subsequent request should offer it.</p>
+      </div>
+
+      <div class="field check-field">
+        <label><input type="checkbox" id="explicit-ttl" checked> send explicit ttl parameter</label>
+        <p class="note" id="ttl-mode-note">When ttl is omitted, this demo falls back to the older default: dictionary usefulness follows the HTTP cache lifetime.</p>
+      </div>
+
+      <div class="field">
+        <div class="field-row">
+          <label for="cache">Cache-Control max-age (seconds)</label>
+          <span class="field-val" id="cache-display">3600 (1h)</span>
+        </div>
+        <input type="range" id="cache" min="0" max="2592000" value="3600" step="60">
       </div>
 
       <div class="field">
@@ -123,7 +145,7 @@
     </div>
 
     <div class="panel">
-      <div class="panel-label">subsequent request (1 hour later)</div>
+      <div class="panel-label" id="req-label">subsequent request (1 hour later)</div>
       <pre id="req-resp"></pre>
     </div>
 
@@ -135,6 +157,14 @@
       <div class="outcome-item">
         <div class="outcome-label">expires in</div>
         <div class="outcome-val" id="remaining">—</div>
+      </div>
+      <div class="outcome-item">
+        <div class="outcome-label">HTTP cache state</div>
+        <div class="outcome-val" id="cache-state">—</div>
+      </div>
+      <div class="outcome-item">
+        <div class="outcome-label">lifetime rule</div>
+        <div class="outcome-val" id="limiter">—</div>
       </div>
     </div>
 
@@ -151,7 +181,10 @@
     <h2>see also</h2>
     <ul>
       <li><a href="../">Compression Dictionary TTL</a> — feature index</li>
+      <li><a href="../ttl-vs-cache-control/">TTL vs Cache-Control</a> — detailed cache lifetime comparison</li>
       <li><a href="https://chromestatus.com/feature/6408307086589952" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://datatracker.ietf.org/doc/draft-ietf-httpbis-compression-dictionary/" target="_blank" rel="noopener">IETF Compression Dictionary Transport draft</a></li>
+      <li><a href="https://github.com/httpwg/http-extensions/issues/2649" target="_blank" rel="noopener">HTTPWG ttl discussion</a></li>
     </ul>
   </section>
 
@@ -161,13 +194,19 @@
 <script>
   const matchEl = document.getElementById("match");
   const ttlEl = document.getElementById("ttl");
+  const explicitTtlEl = document.getElementById("explicit-ttl");
+  const cacheEl = document.getElementById("cache");
   const ageEl = document.getElementById("age");
   const ttlDisplay = document.getElementById("ttl-display");
+  const cacheDisplay = document.getElementById("cache-display");
   const ageDisplay = document.getElementById("age-display");
   const serverResp = document.getElementById("server-resp");
+  const reqLabel = document.getElementById("req-label");
   const reqResp = document.getElementById("req-resp");
   const state = document.getElementById("state");
   const remaining = document.getElementById("remaining");
+  const cacheState = document.getElementById("cache-state");
+  const limiter = document.getElementById("limiter");
 
   function fmtSec(s) {
     s = Math.round(s);
@@ -179,23 +218,32 @@
 
   function update() {
     const m = matchEl.value || "/";
+    const explicitTtl = explicitTtlEl.checked;
     const ttl = +ttlEl.value;
+    const cacheMaxAge = +cacheEl.value;
     const age = +ageEl.value;
 
-    ttlDisplay.textContent = ttl + " (" + fmtSec(ttl) + ")";
+    ttlEl.disabled = !explicitTtl;
+    ttlDisplay.textContent = explicitTtl ? ttl + " (" + fmtSec(ttl) + ")" : "omitted";
+    cacheDisplay.textContent = cacheMaxAge + " (" + fmtSec(cacheMaxAge) + ")";
     ageDisplay.textContent = age + " (" + fmtSec(age) + ")";
 
     const dictHash = "sha-256=:NWQ5MTZkY2I0OGFiNzNkNTlmYzM1...:";
+    const useAsDictionary = 'Use-As-Dictionary: match="' + m + '"' +
+      (explicitTtl ? ", ttl=" + ttl : "");
     serverResp.textContent =
       "HTTP/2 200 OK\n" +
       "Content-Type: application/octet-stream\n" +
-      'Use-As-Dictionary: match="' + m + '", ttl=' + ttl + "\n" +
-      "Cache-Control: max-age=3600\n" +
+      useAsDictionary + "\n" +
+      "Cache-Control: max-age=" + cacheMaxAge + "\n" +
       "\n" +
       "<dictionary bytes>";
 
-    const fresh = age < ttl;
-    if (fresh) {
+    const cacheFresh = age < cacheMaxAge;
+    const dictionaryFresh = explicitTtl ? ttl > 0 && age < ttl : cacheFresh;
+    reqLabel.textContent = "subsequent request (" + fmtSec(age) + " later)";
+
+    if (dictionaryFresh) {
       reqResp.textContent =
         "GET " + (m.replace("*", "1") || "/page-1") + "\n" +
         "Sec-Fetch-Dest: document\n" +
@@ -203,9 +251,9 @@
         "Accept-Encoding: gzip, br, dcb, dcz\n" +
         "\n" +
         "→ server may respond with dcb/dcz delta-encoded body";
-      state.textContent = "FRESH — used as dictionary";
+      state.textContent = explicitTtl ? "FRESH — ttl allows dictionary" : "FRESH — follows HTTP cache";
       state.className = "outcome-val fresh";
-      remaining.textContent = fmtSec(ttl - age) + " left";
+      remaining.textContent = fmtSec((explicitTtl ? ttl : cacheMaxAge) - age) + " left";
       remaining.className = "outcome-val fresh";
     } else {
       reqResp.textContent =
@@ -214,15 +262,41 @@
         "Accept-Encoding: gzip, br\n" +
         "\n" +
         "→ no Available-Dictionary header — dictionary evicted";
-      state.textContent = "EVICTED — past TTL";
+      state.textContent = explicitTtl && ttl === 0 ? "IMMEDIATE EXPIRE — ttl=0" : "EVICTED — not offered";
       state.className = "outcome-val stale";
-      remaining.textContent = "expired " + fmtSec(age - ttl) + " ago";
+      if (explicitTtl && ttl === 0) {
+        remaining.textContent = "no subsequent requests";
+      } else {
+        remaining.textContent = "expired " + fmtSec(age - (explicitTtl ? ttl : cacheMaxAge)) + " ago";
+      }
       remaining.className = "outcome-val stale";
+    }
+
+    cacheState.textContent = cacheFresh ? "CACHED — resource fresh" : "STALE — resource cache expired";
+    cacheState.className = cacheFresh ? "outcome-val fresh" : "outcome-val stale";
+
+    if (!explicitTtl) {
+      limiter.textContent = "no ttl — cache lifetime controls";
+      limiter.className = cacheFresh ? "outcome-val fresh" : "outcome-val stale";
+    } else if (ttl === 0) {
+      limiter.textContent = "ttl=0 overrides cache";
+      limiter.className = "outcome-val warn";
+    } else if (dictionaryFresh && !cacheFresh) {
+      limiter.textContent = "ttl outlives Cache-Control";
+      limiter.className = "outcome-val warn";
+    } else if (!dictionaryFresh && cacheFresh) {
+      limiter.textContent = "ttl shorter than cache";
+      limiter.className = "outcome-val warn";
+    } else {
+      limiter.textContent = "ttl and cache agree";
+      limiter.className = "outcome-val fresh";
     }
   }
 
   matchEl.addEventListener("input", update);
+  explicitTtlEl.addEventListener("input", update);
   ttlEl.addEventListener("input", update);
+  cacheEl.addEventListener("input", update);
   ageEl.addEventListener("input", update);
   update();
 </script>
