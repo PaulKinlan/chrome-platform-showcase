@@ -203,6 +203,10 @@
       border-radius: 50%;
       flex-shrink: 0;
     }
+    .actor-dot.iwa { background: var(--accent-blue); }
+    .actor-dot.frame { background: var(--accent-emerald); }
+    .actor-dot.socket { background: var(--accent-rose); }
+    .actor-dot.server { background: var(--accent-amber); }
 
 
     .demo-walkthrough {
@@ -271,10 +275,10 @@
   <section>
     <h2>actors</h2>
     <div class="actor-row">
-      <div class="actor-box"><div class="actor-dot" style="background:var(--accent-blue)"></div>IWA (Isolated Web App)</div>
-      <div class="actor-box"><div class="actor-dot" style="background:var(--accent-emerald)"></div>ControlledFrame</div>
-      <div class="actor-box"><div class="actor-dot" style="background:var(--accent-rose)"></div>Direct Socket (TCP/UDP)</div>
-      <div class="actor-box"><div class="actor-dot" style="background:var(--accent-amber)"></div>Remote Server</div>
+      <div class="actor-box"><div class="actor-dot iwa"></div>IWA (Isolated Web App)</div>
+      <div class="actor-box"><div class="actor-dot frame"></div>ControlledFrame</div>
+      <div class="actor-box"><div class="actor-dot socket"></div>Direct Socket (TCP/UDP)</div>
+      <div class="actor-box"><div class="actor-dot server"></div>Remote Server</div>
     </div>
   </section>
 
@@ -296,18 +300,18 @@
           <div class="flow-step">
             <div class="step-num highlight">2</div>
             <div class="step-content">
-              <div class="step-title">Register a webRequest listener requesting <code>tlsInfo</code></div>
-              <p class="step-desc">Before navigating, the IWA registers a <code>webRequest.onCompleted</code> listener with <code>'tlsInfo'</code> in the <code>extraInfoSpec</code>. Chrome populates <code>details.tlsInfo</code> with the browser-verified certificate chain.</p>
-              <code class="step-api">frame.webRequest.onCompleted.addListener(handler, filter, ['tlsInfo'])</code>
+              <div class="step-title">Register a webRequest listener requesting <code>securityInfo</code></div>
+              <p class="step-desc">Before navigating, the IWA registers a <code>webRequest.onHeadersReceived</code> listener with <code>'securityInfo'</code> in the <code>extraInfoSpec</code>. Chrome populates <code>details.securityInfo</code> with the browser-verified certificate data.</p>
+              <code class="step-api">frame.webRequest.onHeadersReceived.addListener(handler, filter, ['securityInfo'])</code>
             </div>
           </div>
 
           <div class="flow-step">
             <div class="step-num highlight">3</div>
             <div class="step-content">
-              <div class="step-title">Extract <code>SecurityInfo.certificate.fingerprint.sha256</code></div>
-              <p class="step-desc">The listener receives the <code>tlsInfo</code> object with the verified leaf certificate fingerprint. This fingerprint is exactly what Chrome confirmed via its root trust store — it is not attacker-supplied.</p>
-              <code class="step-api">details.tlsInfo.certificate.fingerprint.sha256</code>
+              <div class="step-title">Extract <code>SecurityInfo.certificates[0].fingerprint.sha256</code></div>
+              <p class="step-desc">The listener receives the <code>securityInfo</code> object with the verified leaf certificate fingerprint. This fingerprint is exactly what Chrome confirmed via its root trust store — it is not attacker-supplied.</p>
+              <code class="step-api">details.securityInfo.certificates[0].fingerprint.sha256</code>
             </div>
           </div>
 
@@ -325,7 +329,7 @@
             <div class="step-content">
               <div class="step-title">Compare fingerprints — pin the Direct Socket to the verified cert</div>
               <p class="step-desc">Hash the certificate from the Direct Socket TLS handshake and compare it to the fingerprint extracted in step 3. If they match, the IWA can be confident the raw connection reaches the same server Chrome has already authenticated.</p>
-              <code class="step-api">if (rawCertSha256 === details.tlsInfo.certificate.fingerprint.sha256) {…}</code>
+              <code class="step-api">if (rawCertSha256 === details.securityInfo.certificates[0].fingerprint.sha256) {…}</code>
             </div>
           </div>
 
@@ -350,14 +354,38 @@
         <div class="compare-label">Chrome 147+</div>
         <div class="compare-title">Browser-verified cert as trust anchor</div>
         <p class="compare-body">By routing an HTTPS request through <code>ControlledFrame</code> and reading <code>SecurityInfo</code>, the IWA gets a fingerprint from Chrome's verified TLS session. Any raw socket that presents the same certificate is pinned to the same verified identity.</p>
-        <pre class="compare-code">frame.webRequest.onCompleted.addListener(
+        <pre class="compare-code">frame.webRequest.onHeadersReceived.addListener(
   (d) => {
-    <span class="kw">const</span> knownFp = d.tlsInfo.certificate.fingerprint.sha256;
+    <span class="kw">const</span> knownFp = d.securityInfo.certificates[0].fingerprint.sha256;
     <span class="kw">const</span> s = <span class="kw">new</span> TCPSocket(host, port, { sslEnabled: true });
     <span class="cmt">// verify s presents same cert as knownFp</span>
   },
-  filter, [<span class="str">'tlsInfo'</span>]
+  filter, [<span class="str">'securityInfo'</span>]
 );</pre>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>failure branch</h2>
+    <p>If <code>securityInfo</code> is omitted from <code>extraInfoSpec</code>, the request still completes but no browser-verified certificate fingerprint is available. The IWA must block or retry the HTTPS preflight before opening a Direct Socket.</p>
+    <div class="compare-grid">
+      <div class="compare-col">
+        <div class="compare-label">Missing extraInfoSpec</div>
+        <div class="compare-title">No trust anchor</div>
+        <pre class="compare-code">frame.webRequest.onHeadersReceived.addListener(
+  d =&gt; {
+    <span class="kw">if</span> (!d.securityInfo) throw new Error(<span class="str">'retry with securityInfo'</span>);
+  },
+  filter, [<span class="str">'responseHeaders'</span>]
+);</pre>
+      </div>
+      <div class="compare-col">
+        <div class="compare-label">Broken TLS</div>
+        <div class="compare-title">Do not pin</div>
+        <pre class="compare-code"><span class="kw">if</span> (d.securityInfo.state !== <span class="str">'secure'</span>) {
+  blockDirectSocket(host);
+}</pre>
       </div>
     </div>
   </section>
