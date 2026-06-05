@@ -28,10 +28,18 @@
       background: var(--bg-stone);
       color: var(--text-muted);
     }
-    .drop.have { color: var(--accent-emerald); background: var(--accent-emerald); }
+    .drop.have { color: var(--text-black); background: var(--accent-emerald); }
+    .drop.error { color: var(--accent-rose); background: var(--bg-paper); }
     .response { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; min-height: 80px; line-height: 1.6; white-space: pre-wrap; }
     .stats { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); display: flex; gap: var(--space-3); flex-wrap: wrap; margin-top: var(--space-2); }
     .warn-block { background: var(--accent-amber); border: 2px solid var(--accent-amber); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.85rem; margin: var(--space-3) 0; }
+    .warn-block.ok { background: var(--bg-paper); border-color: var(--accent-emerald); }
+    .warn-block.error { background: var(--bg-paper); border-color: var(--accent-rose); }
+    .availability-panel { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3); margin: var(--space-3) 0; }
+    .availability-buttons { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-2) 0; }
+    .state-btn { background: var(--bg-ivory); color: var(--text-black); border: 2px solid var(--border-black); padding: var(--space-1) var(--space-2); font-family: var(--font-mono); font-size: 0.75rem; cursor: pointer; }
+    .state-btn.active { background: var(--text-black); color: var(--bg-ivory); }
+    .availability-note { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
     pre.snippet { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; overflow-x: auto; }
     .preview-img { max-width: 100%; max-height: 220px; border: 2px solid var(--border-black); margin-top: var(--space-2); }
   </style>
@@ -47,6 +55,18 @@
   </header>
 
   <div class="warn-block" id="probe">Checking Prompt API availability&hellip;</div>
+  <div class="availability-panel">
+    <strong>Availability branch</strong>
+    <div class="availability-buttons" id="availability-buttons">
+      <button class="state-btn active" data-availability-state="live">live probe</button>
+      <button class="state-btn" data-availability-state="available">available</button>
+      <button class="state-btn" data-availability-state="downloadable">downloadable</button>
+      <button class="state-btn" data-availability-state="downloading">downloading</button>
+      <button class="state-btn" data-availability-state="unavailable">unavailable</button>
+      <button class="state-btn" data-availability-state="error">error</button>
+    </div>
+    <div class="availability-note" id="availability-note">Waiting for the live availability probe.</div>
+  </div>
 
   <div class="lab">
     <div class="pane">
@@ -99,7 +119,7 @@
       <li><a href="/v139/prompt-api/prompt-playground/">Prompt Playground</a></li>
       <li><a href="/v139/prompt-api/structured-output/">Structured Output</a></li>
       <li><a href="https://developer.chrome.com/docs/ai/prompt-api" target="_blank" rel="noopener">Prompt API docs</a></li>
-      <li><a href="https://chromestatus.com/feature/5169108904902656" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://chromestatus.com/feature/5134603979063296" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -107,142 +127,331 @@
 </main>
 
 <script>
-(() =&gt; {
+(() => {
   const probe = document.getElementById('probe');
-  const hasAPI = 'LanguageModel' in self || 'ai' in self;
-  if (hasAPI) {
-    probe.textContent = 'Prompt API detected. Make sure you\'re in the origin trial / enabled flag for image + audio modalities.';
-    probe.style.background = '#e0f7e8';
-    probe.style.borderColor = 'var(--accent-emerald)';
-  } else {
-    probe.innerHTML = '&lt;strong&gt;Prompt API not available.&lt;/strong&gt; Enable Gemini Nano via chrome://flags#prompt-api-for-gemini-nano-multimodal-input. The UI still works — the model call will produce a synthetic placeholder response so you can explore the request shape.';
-    probe.style.background = '#fde7e9';
-    probe.style.borderColor = 'var(--accent-rose)';
+  const availabilityNote = document.getElementById('availability-note');
+  const stateButtons = [...document.querySelectorAll('[data-availability-state]')];
+  const response = document.getElementById('response');
+  const stats = document.getElementById('stats');
+  const runButton = document.getElementById('run');
+  const imgDrop = document.getElementById('img-drop');
+  const imgFile = document.getElementById('img-file');
+  const imgPreview = document.getElementById('img-preview');
+  const recStart = document.getElementById('rec-start');
+  const recStop = document.getElementById('rec-stop');
+  const recStatus = document.getElementById('rec-status');
+  const audioPreview = document.getElementById('audio-preview');
+
+  const availabilityCopy = {
+    available: 'Model is ready for this modality; the next request can create a session immediately.',
+    downloadable: 'Model is supported but needs a download before the request can run.',
+    downloading: 'Model download is already in progress; the UI should stay responsive and ask the user to retry.',
+    unavailable: 'Model is unavailable for this device, browser channel, language, or modality.',
+    error: 'Availability or session creation threw; the page should keep the request shape visible and show the failure.',
+  };
+
+  let activeTab = 'text';
+  let availabilityPreview = 'live';
+  let liveAvailability = 'unavailable';
+  let liveAvailabilityDetail = 'Prompt API not checked yet.';
+  let imgBlob = null;
+  let recorder = null;
+  let chunks = [];
+  let audioBlob = null;
+
+  function promptAPI() {
+    return self.LanguageModel || self.ai?.languageModel || null;
   }
 
-  // Tabs
-  let activeTab = 'text';
-  document.querySelectorAll('.tab').forEach(t =&gt; t.addEventListener('click', () =&gt; {
-    document.querySelectorAll('.tab').forEach(x =&gt; x.classList.remove('active'));
-    t.classList.add('active');
-    activeTab = t.dataset.tab;
-    document.querySelectorAll('.tab-pane').forEach(p =&gt; p.style.display = 'none');
-    document.getElementById('tab-' + activeTab).style.display = '';
-    showShape();
-  }));
+  function setNotice(target, kind, html) {
+    target.className = kind ? `warn-block ${kind}` : 'warn-block';
+    target.innerHTML = html;
+  }
 
-  // Image picker
-  let imgBlob = null;
-  document.getElementById('img-drop').addEventListener('click', () =&gt; document.getElementById('img-file').click());
-  document.getElementById('img-file').addEventListener('change', (e) =&gt; {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    imgBlob = f;
-    const url = URL.createObjectURL(f);
-    const pv = document.getElementById('img-preview');
-    pv.src = url; pv.style.display = 'block';
-    document.getElementById('img-drop').classList.add('have');
-    document.getElementById('img-drop').textContent = `picked ${f.name} (${(f.size/1024).toFixed(0)} KB)`;
-    showShape();
+  function optionsFor(tab = activeTab) {
+    const expectedInputs = [{ type: 'text', languages: ['en'] }];
+    if (tab === 'image') expectedInputs.push({ type: 'image' });
+    if (tab === 'audio') expectedInputs.push({ type: 'audio' });
+    return {
+      expectedInputs,
+      expectedOutputs: [{ type: 'text', languages: ['en'] }],
+    };
+  }
+
+  function normalizeAvailability(value) {
+    const raw = typeof value === 'object' && value ? value.available : value;
+    const aliases = {
+      readily: 'available',
+      'after-download': 'downloadable',
+      no: 'unavailable',
+    };
+    const normalized = aliases[raw] || raw;
+    return availabilityCopy[normalized] ? normalized : 'error';
+  }
+
+  function renderAvailabilityNote() {
+    const state = availabilityPreview === 'live' ? liveAvailability : availabilityPreview;
+    const source = availabilityPreview === 'live' ? 'live probe' : 'branch preview';
+    const detail = availabilityPreview === 'live' ? liveAvailabilityDetail : availabilityCopy[state];
+    availabilityNote.textContent = `${source}: ${state} — ${detail}`;
+  }
+
+  async function checkAvailability() {
+    const LM = promptAPI();
+    if (!LM) {
+      liveAvailability = 'unavailable';
+      liveAvailabilityDetail = 'LanguageModel is not exposed in this browser context.';
+      setNotice(probe, 'error', '<strong>Prompt API not available.</strong> Enable Gemini Nano via chrome://flags#prompt-api-for-gemini-nano-multimodal-input. The UI still works with synthetic responses so each request shape and error branch is explorable.');
+      renderAvailabilityNote();
+      return;
+    }
+
+    try {
+      if (typeof LM.availability === 'function') {
+        liveAvailability = normalizeAvailability(await LM.availability(optionsFor()));
+        liveAvailabilityDetail = availabilityCopy[liveAvailability];
+      } else {
+        liveAvailability = 'available';
+        liveAvailabilityDetail = 'LanguageModel is exposed, but availability() is not available on this implementation.';
+      }
+      setNotice(probe, liveAvailability === 'unavailable' ? 'error' : 'ok', `Prompt API detected for ${activeTab} input. Live availability: <strong>${liveAvailability}</strong>.`);
+    } catch (error) {
+      liveAvailability = 'error';
+      liveAvailabilityDetail = error.message || String(error);
+      setNotice(probe, 'error', `<strong>Prompt API availability check failed.</strong> ${liveAvailabilityDetail}`);
+    }
+    renderAvailabilityNote();
+  }
+
+  function selectAvailabilityPreview(state) {
+    availabilityPreview = state;
+    stateButtons.forEach((button) => {
+      button.classList.toggle('active', button.dataset.availabilityState === state);
+    });
+    renderAvailabilityNote();
+  }
+
+  function effectiveAvailability() {
+    return availabilityPreview === 'live' ? liveAvailability : availabilityPreview;
+  }
+
+  document.querySelectorAll('.tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach((button) => button.classList.remove('active'));
+      tab.classList.add('active');
+      activeTab = tab.dataset.tab;
+      document.querySelectorAll('.tab-pane').forEach((pane) => pane.style.display = 'none');
+      document.getElementById('tab-' + activeTab).style.display = '';
+      showShape();
+      checkAvailability();
+    });
   });
 
-  // Audio recorder
-  let recorder = null, chunks = [], audioBlob = null;
-  document.getElementById('rec-start').addEventListener('click', async () =&gt; {
+  stateButtons.forEach((button) => {
+    button.addEventListener('click', () => selectAvailabilityPreview(button.dataset.availabilityState));
+  });
+
+  function handleImageFile(file) {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      imgBlob = null;
+      imgDrop.classList.remove('have');
+      imgDrop.classList.add('error');
+      imgDrop.textContent = `Unsupported file type: ${file.type || 'unknown'}`;
+      imgPreview.style.display = 'none';
+      showShape();
+      return;
+    }
+    imgBlob = file;
+    imgPreview.src = URL.createObjectURL(file);
+    imgPreview.style.display = 'block';
+    imgDrop.classList.remove('error');
+    imgDrop.classList.add('have');
+    imgDrop.textContent = `picked ${file.name} (${(file.size / 1024).toFixed(0)} KB)`;
+    showShape();
+  }
+
+  imgDrop.addEventListener('click', () => imgFile.click());
+  imgDrop.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    imgDrop.classList.add('have');
+  });
+  imgDrop.addEventListener('dragleave', () => {
+    if (!imgBlob) imgDrop.classList.remove('have');
+  });
+  imgDrop.addEventListener('drop', (event) => {
+    event.preventDefault();
+    handleImageFile(event.dataTransfer?.files?.[0]);
+  });
+  imgFile.addEventListener('change', (event) => handleImageFile(event.target.files?.[0]));
+
+  recStop.disabled = true;
+  recStart.addEventListener('click', async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      recStatus.textContent = 'mic unavailable: getUserMedia is not exposed';
+      return;
+    }
+    if (typeof MediaRecorder === 'undefined') {
+      recStatus.textContent = 'recorder unavailable: MediaRecorder is not exposed';
+      return;
+    }
+    recStatus.textContent = 'requesting microphone...';
+    recStart.disabled = true;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       recorder = new MediaRecorder(stream);
       chunks = [];
-      recorder.ondataavailable = e =&gt; chunks.push(e.data);
-      recorder.onstop = () =&gt; {
+      recorder.ondataavailable = (event) => chunks.push(event.data);
+      recorder.onstop = () => {
         audioBlob = new Blob(chunks, { type: 'audio/webm' });
-        const url = URL.createObjectURL(audioBlob);
-        const pv = document.getElementById('audio-preview');
-        pv.src = url; pv.style.display = 'block';
-        stream.getTracks().forEach(t =&gt; t.stop());
-        document.getElementById('rec-status').textContent = `recorded ${(audioBlob.size/1024).toFixed(0)} KB`;
+        audioPreview.src = URL.createObjectURL(audioBlob);
+        audioPreview.style.display = 'block';
+        stream.getTracks().forEach((track) => track.stop());
+        recStatus.textContent = `recorded ${(audioBlob.size / 1024).toFixed(0)} KB`;
+        recStart.disabled = false;
+        recStop.disabled = true;
         showShape();
       };
       recorder.start();
-      document.getElementById('rec-status').textContent = 'recording…';
-    } catch (e) { document.getElementById('rec-status').textContent = 'mic error: ' + e.message; }
+      recStop.disabled = false;
+      recStatus.textContent = 'recording...';
+    } catch (error) {
+      recStart.disabled = false;
+      recStop.disabled = true;
+      recStatus.textContent = 'mic error: ' + (error.message || error.name || String(error));
+    }
   });
-  document.getElementById('rec-stop').addEventListener('click', () =&gt; recorder?.stop());
+  recStop.addEventListener('click', () => {
+    if (!recorder || recorder.state === 'inactive') {
+      recStatus.textContent = 'nothing to stop yet';
+      return;
+    }
+    recorder.stop();
+  });
 
   function showShape() {
     const shape = document.getElementById('shape');
     if (activeTab === 'text') {
-      shape.textContent = `const session = await LanguageModel.create();
+      shape.textContent = `const availability = await LanguageModel.availability({
+  expectedInputs: [{ type: "text", languages: ["en"] }],
+  expectedOutputs: [{ type: "text", languages: ["en"] }],
+});
+if (availability !== "available") renderFallback(availability);
+
+const session = await LanguageModel.create({
+  expectedInputs: [{ type: "text", languages: ["en"] }],
+  expectedOutputs: [{ type: "text", languages: ["en"] }],
+});
 const stream = session.promptStreaming(
   ${JSON.stringify(document.getElementById('text-input').value)}
 );
 for await (const chunk of stream) render(chunk);`;
     } else if (activeTab === 'image') {
-      shape.textContent = `const session = await LanguageModel.create({
-  expectedInputs: [{ type: 'image' }],
+      shape.textContent = `const availability = await LanguageModel.availability({
+  expectedInputs: [
+    { type: "text", languages: ["en"] },
+    { type: "image" },
+  ],
+  expectedOutputs: [{ type: "text", languages: ["en"] }],
+});
+if (availability !== "available") renderFallback(availability);
+
+const session = await LanguageModel.create({
+  expectedInputs: [
+    { type: "text", languages: ["en"] },
+    { type: "image" },
+  ],
+  expectedOutputs: [{ type: "text", languages: ["en"] }],
 });
 const stream = session.promptStreaming([
   { role: 'user', content: [
-    { type: 'image', value: imageBlob },     // ← ${imgBlob ? imgBlob.name : '(no image picked)'}
+    { type: 'image', value: imageBlob },     // ${imgBlob ? imgBlob.name : '(no image picked)'}
     { type: 'text',  value: ${JSON.stringify(document.getElementById('img-prompt').value)} },
   ]},
 ]);`;
     } else {
-      shape.textContent = `const session = await LanguageModel.create({
-  expectedInputs: [{ type: 'audio' }],
+      shape.textContent = `const availability = await LanguageModel.availability({
+  expectedInputs: [
+    { type: "text", languages: ["en"] },
+    { type: "audio" },
+  ],
+  expectedOutputs: [{ type: "text", languages: ["en"] }],
+});
+if (availability !== "available") renderFallback(availability);
+
+const session = await LanguageModel.create({
+  expectedInputs: [
+    { type: "text", languages: ["en"] },
+    { type: "audio" },
+  ],
+  expectedOutputs: [{ type: "text", languages: ["en"] }],
 });
 const stream = session.promptStreaming([
   { role: 'user', content: [
-    { type: 'audio', value: audioBlob },     // ← ${audioBlob ? Math.round(audioBlob.size/1024) + ' KB' : '(no recording)'}
+    { type: 'audio', value: audioBlob },     // ${audioBlob ? Math.round(audioBlob.size / 1024) + ' KB' : '(no recording)'}
     { type: 'text',  value: ${JSON.stringify(document.getElementById('audio-prompt').value)} },
   ]},
 ]);`;
     }
   }
-  ['text-input','img-prompt','audio-prompt'].forEach(id =&gt; document.getElementById(id).addEventListener('input', showShape));
-  showShape();
 
-  document.getElementById('run').addEventListener('click', async () =&gt; {
-    const out = document.getElementById('response');
-    const stats = document.getElementById('stats');
-    out.textContent = '…';
-    stats.innerHTML = '';
+  ['text-input', 'img-prompt', 'audio-prompt'].forEach((id) => {
+    document.getElementById(id).addEventListener('input', showShape);
+  });
+
+  async function runPrompt() {
+    response.textContent = '...';
+    stats.textContent = '';
+    runButton.disabled = true;
     const t0 = performance.now();
     let tokens = 0;
     try {
-      if (!hasAPI) throw new Error('no Prompt API in this UA');
-      const LM = self.LanguageModel || self.ai?.languageModel;
-      const opts = activeTab === 'text' ? {} :
-                   activeTab === 'image' ? { expectedInputs: [{ type: 'image' }] } :
-                                            { expectedInputs: [{ type: 'audio' }] };
-      const session = await LM.create(opts);
+      const branch = effectiveAvailability();
+      if (branch === 'downloadable') throw new Error('model is downloadable but not installed yet');
+      if (branch === 'downloading') throw new Error('model download is already in progress');
+      if (branch === 'unavailable') throw new Error('model unavailable for this browser, device, language, or modality');
+      if (branch === 'error') throw new Error('availability probe failed before session creation');
+
+      const LM = promptAPI();
+      if (!LM?.create) throw new Error('no Prompt API in this UA');
+
       let result;
       if (activeTab === 'text') {
+        const session = await LM.create(optionsFor('text'));
         result = session.promptStreaming(document.getElementById('text-input').value);
       } else if (activeTab === 'image') {
         if (!imgBlob) throw new Error('pick an image first');
+        const session = await LM.create(optionsFor('image'));
         result = session.promptStreaming([{ role: 'user', content: [
           { type: 'image', value: imgBlob },
-          { type: 'text',  value: document.getElementById('img-prompt').value },
-        ]}]);
+          { type: 'text', value: document.getElementById('img-prompt').value },
+        ] }]);
       } else {
         if (!audioBlob) throw new Error('record audio first');
+        const session = await LM.create(optionsFor('audio'));
         result = session.promptStreaming([{ role: 'user', content: [
           { type: 'audio', value: audioBlob },
-          { type: 'text',  value: document.getElementById('audio-prompt').value },
-        ]}]);
+          { type: 'text', value: document.getElementById('audio-prompt').value },
+        ] }]);
       }
-      out.textContent = '';
+
+      response.textContent = '';
       for await (const chunk of result) {
-        out.textContent += chunk;
+        response.textContent += chunk;
         tokens++;
-        stats.innerHTML = `tokens: ${tokens} · ${((performance.now() - t0)/1000).toFixed(1)}s`;
+        stats.textContent = `tokens: ${tokens} · ${((performance.now() - t0) / 1000).toFixed(1)}s`;
       }
-    } catch (e) {
-      out.textContent = `(synthetic response — Prompt API not available or errored)\n\nerror: ${e.message}\n\n[a real model would stream tokens here]`;
-      stats.innerHTML = `simulated · ${((performance.now() - t0)/1000).toFixed(1)}s`;
+    } catch (error) {
+      response.textContent = `(synthetic response — Prompt API not available or branch rejected)\n\nerror: ${error.message}\n\n[a real model would stream tokens here]`;
+      stats.textContent = `simulated · ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+    } finally {
+      runButton.disabled = false;
     }
-  });
+  }
+
+  runButton.addEventListener('click', runPrompt);
+  showShape();
+  checkAvailability();
 })();
 </script>
 </body>
