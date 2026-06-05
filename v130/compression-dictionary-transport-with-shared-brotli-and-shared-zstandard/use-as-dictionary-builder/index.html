@@ -11,7 +11,7 @@
     .panel { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
     .col-label { font-family: var(--font-mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); border-bottom: 1px solid var(--border-black); padding-bottom: 0.4rem; }
     .field { display: flex; flex-direction: column; gap: 0.3rem; }
-    label { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 600; }
+    label, .field-label { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 600; }
     input[type="text"], select { border: 2px solid var(--border-black); padding: 0.4rem 0.6rem; font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-ivory); color: var(--text-black); }
     .chip-row { display: flex; flex-wrap: wrap; gap: 0.35rem; }
     .chip { padding: 0.25rem 0.6rem; font-family: var(--font-mono); font-size: 0.74rem; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); cursor: pointer; }
@@ -20,6 +20,12 @@
 
     .url-tester { display: flex; gap: 0.5rem; }
     .url-tester input { flex: 1; }
+    .probe-dest { min-width: 110px; }
+    .field-note { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+    .validation { border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: 0.4rem 0.55rem; font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.4; }
+    .validation.ok { border-color: var(--accent-emerald); }
+    .validation.error { border-color: var(--accent-rose); color: var(--accent-rose); }
+    input[aria-invalid="true"] { border-color: var(--accent-rose); }
     .match-row { display: grid; grid-template-columns: 1fr auto auto; gap: 0.5rem; align-items: center; padding: 0.45rem 0.5rem; border-bottom: 1px solid var(--bg-stone); font-family: var(--font-mono); font-size: 0.78rem; }
     .badge-ok { font-size: 0.72rem; padding: 0.1rem 0.4rem; background: var(--accent-emerald); color: var(--bg-ivory); border: 1px solid var(--border-black); }
     .badge-no { font-size: 0.72rem; padding: 0.1rem 0.4rem; background: var(--bg-stone); color: var(--text-muted); border: 1px solid var(--border-black); }
@@ -44,11 +50,12 @@
         <label for="match">match</label>
         <input id="match" type="text" value="/static/app-*">
         <span class="field-val">URL pattern (UrlPattern syntax)</span>
+        <span class="validation ok" id="match-status" role="status"></span>
       </div>
 
       <div class="field">
-        <label>match-dest</label>
-        <div class="chip-row" id="dest-chips">
+        <span class="field-label" id="match-dest-label">match-dest</span>
+        <div class="chip-row" id="dest-chips" role="group" aria-labelledby="match-dest-label">
           <button class="chip" data-d="document">document</button>
           <button class="chip" data-d="script" aria-pressed="true">script</button>
           <button class="chip" data-d="style">style</button>
@@ -84,12 +91,12 @@
       <pre class="header-out" id="header-out"></pre>
 
       <p class="col-label">match probe</p>
-      <p style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted);">would these future requests pick this dictionary up?</p>
+      <p class="field-note">would these future requests pick this dictionary up?</p>
       <div id="probes"></div>
 
       <div class="url-tester">
-        <input id="probe-url" type="text" placeholder="/static/app-v4.js" value="/static/app-v4.js">
-        <select id="probe-dest" style="min-width: 110px;">
+        <input id="probe-url" type="text" aria-label="Probe URL" placeholder="/static/app-v4.js" value="/static/app-v4.js">
+        <select id="probe-dest" class="probe-dest" aria-label="Probe request destination">
           <option>script</option>
           <option>style</option>
           <option>document</option>
@@ -149,41 +156,105 @@ res.headers.set("Cache-Control", "max-age=2592000");
   ];
 
   function patternToRegex(pat) {
-    // Minimal UrlPattern-ish: '*' wildcard
     return new RegExp("^" + pat.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$");
   }
 
-  function matchProbe(p) {
-    const pat = document.getElementById("match").value;
-    const rx = patternToRegex(pat);
-    const urlOk = rx.test(p.url);
+  function validatePattern(pattern) {
+    const value = pattern.trim();
+    if (!value) {
+      return { ok: false, message: "match is required before this response can advertise a dictionary." };
+    }
+
+    if ("URLPattern" in window) {
+      try {
+        return {
+          ok: true,
+          matcher: new URLPattern({ baseURL: location.origin, pathname: value }),
+          message: "valid URLPattern pathname; future requests are tested against this pattern.",
+        };
+      } catch (error) {
+        return { ok: false, message: `Invalid URLPattern: ${error.message}` };
+      }
+    }
+
+    try {
+      return {
+        ok: true,
+        fallbackRegex: patternToRegex(value),
+        message: "URLPattern is unavailable here; using the page's wildcard fallback.",
+      };
+    } catch (error) {
+      return { ok: false, message: `Invalid wildcard fallback: ${error.message}` };
+    }
+  }
+
+  function escapedHeaderValue(value) {
+    return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  }
+
+  function matchProbe(p, validation) {
+    let urlOk = false;
+    if (validation.ok && validation.matcher) {
+      try {
+        urlOk = validation.matcher.test(new URL(p.url, location.origin).href);
+      } catch {
+        urlOk = false;
+      }
+    } else if (validation.ok && validation.fallbackRegex) {
+      urlOk = validation.fallbackRegex.test(p.url);
+    }
     const destOk = selectedDests.size === 0 || selectedDests.has(p.dest);
-    return { urlOk, destOk, all: urlOk && destOk };
+    return { urlOk, destOk, all: validation.ok && urlOk && destOk };
+  }
+
+  function renderProbe(p, validation) {
+    const r = matchProbe(p, validation);
+    const row = document.createElement("div");
+    row.className = "match-row";
+
+    const code = document.createElement("code");
+    code.textContent = `${p.dest} ${p.url}`;
+
+    const badge = document.createElement("span");
+    badge.className = r.all ? "badge-ok" : "badge-no";
+    badge.textContent = r.all ? "picks up dictionary" : "no match";
+
+    const why = document.createElement("span");
+    why.className = "field-val";
+    why.textContent = r.all
+      ? ""
+      : (!validation.ok ? "invalid match pattern" : (!r.urlOk ? "url pattern fails" : "dest not in list"));
+
+    row.append(code, badge, why);
+    return row;
   }
 
   function update() {
-    const match = document.getElementById("match").value;
+    const matchInput = document.getElementById("match");
+    const match = matchInput.value.trim();
+    const validation = validatePattern(match);
+    const status = document.getElementById("match-status");
     const type = document.getElementById("type").value;
     const ttl = document.getElementById("ttl").value;
     const idTag = document.getElementById("id-tag").value.trim();
 
     const dests = [...selectedDests].map((d) => `"${d}"`).join(" ");
-    let line = `Use-As-Dictionary: match="${match}"`;
-    if (dests) line += `, match-dest=(${dests})`;
-    line += `, type="${type}"`;
-    if (idTag) line += `, id="${idTag}"`;
-    let headers = line + `\nCache-Control: max-age=${ttl}`;
+    matchInput.setAttribute("aria-invalid", validation.ok ? "false" : "true");
+    status.className = validation.ok ? "validation ok" : "validation error";
+    status.textContent = validation.message;
+
+    let headers = `Invalid match pattern. Fix match before emitting Use-As-Dictionary.\nCache-Control: max-age=${ttl}`;
+    if (validation.ok) {
+      let line = `Use-As-Dictionary: match=${escapedHeaderValue(match)}`;
+      if (dests) line += `, match-dest=(${dests})`;
+      line += `, type=${escapedHeaderValue(type)}`;
+      if (idTag) line += `, id=${escapedHeaderValue(idTag)}`;
+      headers = line + `\nCache-Control: max-age=${ttl}`;
+    }
     document.getElementById("header-out").textContent = headers;
 
     const probesEl = document.getElementById("probes");
-    probesEl.innerHTML = probes.map((p) => {
-      const r = matchProbe(p);
-      const badge = r.all
-        ? '<span class="badge-ok">picks up dictionary</span>'
-        : '<span class="badge-no">no match</span>';
-      const why = r.all ? "" : (!r.urlOk ? "url pattern fails" : "dest not in list");
-      return `<div class="match-row"><code>${p.dest} ${p.url}</code> ${badge} <span class="field-val">${why}</span></div>`;
-    }).join("");
+    probesEl.replaceChildren(...probes.map((p) => renderProbe(p, validation)));
   }
 
   document.getElementById("probe-add").addEventListener("click", () => {
