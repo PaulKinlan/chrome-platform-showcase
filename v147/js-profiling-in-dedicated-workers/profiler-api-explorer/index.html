@@ -146,17 +146,17 @@
 
     <div class="param-row">
       <div class="param-group">
-        <label>sampleInterval (ms)</label>
+        <label for="mainInterval">sampleInterval (ms)</label>
         <input type="range" id="mainInterval" min="1" max="50" value="10">
         <span class="param-value" id="mainIntervalVal">10 ms</span>
       </div>
       <div class="param-group">
-        <label>maxBufferSize</label>
+        <label for="mainBuffer">maxBufferSize</label>
         <input type="range" id="mainBuffer" min="100" max="2000" step="100" value="300">
         <span class="param-value" id="mainBufferVal">300 samples</span>
       </div>
       <div class="param-group">
-        <label>Workload</label>
+        <label for="mainWorkload">Workload</label>
         <select id="mainWorkload" style="font-family:var(--font-mono);font-size:0.82rem;border:2px solid var(--border-black);padding:0.4rem 0.6rem;background:var(--bg-paper);color:var(--text-black);">
           <option value="fib">Fibonacci (recursive)</option>
           <option value="sort">Array sort (10k items)</option>
@@ -194,12 +194,12 @@
 
     <div class="param-row">
       <div class="param-group">
-        <label>sampleInterval (ms)</label>
+        <label for="workerInterval">sampleInterval (ms)</label>
         <input type="range" id="workerInterval" min="1" max="50" value="10">
         <span class="param-value" id="workerIntervalVal">10 ms</span>
       </div>
       <div class="param-group">
-        <label>maxBufferSize</label>
+        <label for="workerBuffer">maxBufferSize</label>
         <input type="range" id="workerBuffer" min="100" max="2000" step="100" value="300">
         <span class="param-value" id="workerBufferVal">300 samples</span>
       </div>
@@ -246,6 +246,15 @@
     </div>
   </div>
 
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5159559872249856" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://wicg.github.io/js-self-profiling/" target="_blank" rel="noopener">JS Self-Profiling specification</a></li>
+      <li><a href="/v147/js-profiling-in-dedicated-workers/">Feature overview</a></li>
+    </ul>
+  </section>
+
 </main>
 
 <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
@@ -255,7 +264,7 @@
 const hasProfiler = typeof Profiler !== 'undefined';
 const banner = document.getElementById('supportBanner');
 if (hasProfiler) {
-  banner.innerHTML = '<div class="notice" style="border-left-color:var(--accent-emerald);"><strong>Profiler API available.</strong> This page is served with <code>Document-Policy: js-profiling-mode=lazy, js-profiling</code>; all traces below come from real <code>new Profiler()</code> calls.</div>';
+  banner.innerHTML = '<div class="notice" style="border-left-color:var(--accent-emerald);"><strong>Profiler API available on the main thread.</strong> This page is served with <code>Document-Policy: js-profiling-mode=lazy, js-profiling</code>; each tab tests its own context and reports an unsupported worker separately.</div>';
 } else {
   banner.innerHTML = '<div class="notice" style="border-left-color:var(--accent-rose);"><strong>Profiler API not available</strong> in this context. Use a browser with JS Self-Profiling enabled; this page already sends the required <code>Document-Policy</code> response header.</div>';
 }
@@ -342,26 +351,42 @@ function renderFlame(containerId, frames, totalSamples, barClass) {
 // ── Parse real Profiler trace ─────────────────────────────────────────────
 function parseTrace(trace) {
   const fnMap = {};
-  (trace.frames || []).forEach((frame, i) => {
+  const traceFrames = trace.frames || [];
+  const traceStacks = trace.stacks || [];
+  let unstackedSamples = 0;
+  traceFrames.forEach(frame => {
     const name = frame.name || '(anonymous)';
     fnMap[name] = (fnMap[name] || 0);
   });
   (trace.samples || []).forEach(sample => {
-    const stackId = sample.stackId;
-    if (stackId == null) return;
-    let stack = trace.stacks?.[stackId];
-    while (stack) {
-      const frame = trace.frames?.[stack.frameId];
+    let stackId = sample.stackId;
+    let countedFrame = false;
+    if (stackId == null || !traceStacks[stackId]) {
+      unstackedSamples += 1;
+      return;
+    }
+    let depth = 0;
+    while (stackId != null && depth <= traceStacks.length) {
+      const stack = traceStacks[stackId];
+      if (!stack) break;
+      const frame = traceFrames[stack.frameId];
       if (frame) {
         const name = frame.name || '(anonymous)';
         fnMap[name] = (fnMap[name] || 0) + 1;
+        countedFrame = true;
       }
-      stack = stack.parentId != null ? trace.stacks[stack.parentId] : null;
+      stackId = stack.parentId != null ? stack.parentId : null;
+      depth += 1;
     }
+    if (!countedFrame) unstackedSamples += 1;
   });
+  if (unstackedSamples > 0) {
+    fnMap['(no JS stack)'] = (fnMap['(no JS stack)'] || 0) + unstackedSamples;
+  }
   const total = (trace.samples || []).length;
   const frames = Object.entries(fnMap)
     .map(([name, count]) => ({ name, count }))
+    .filter(frame => frame.count > 0)
     .sort((a, b) => b.count - a.count);
   return { samples: total, frames };
 }

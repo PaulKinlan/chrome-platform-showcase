@@ -7,6 +7,15 @@ import {
   renderConformanceRunAllPage,
 } from "./conformance-renderers.ts";
 
+function conformanceHeaders(release: string, featureSlug: string): HeadersInit | undefined {
+  if (release === "v147" && featureSlug === "js-profiling-in-dedicated-workers") {
+    return {
+      "document-policy": "js-profiling-mode=lazy, js-profiling",
+    };
+  }
+  return undefined;
+}
+
 export async function handleConformanceRoute(req: Request): Promise<Response | null> {
   const path = new URL(req.url).pathname;
 
@@ -38,5 +47,7 @@ export async function handleConformanceRoute(req: Request): Promise<Response | n
   if (!suite) {
     return new Response("No conformance suite yet for this page", { status: 404 });
   }
-  return htmlResponse(renderConformancePage(suite));
+  return htmlResponse(renderConformancePage(suite), {
+    headers: conformanceHeaders(release, featureSlug),
+  });
 }
