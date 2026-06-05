@@ -19,13 +19,18 @@
     .flow-step { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; }
     .flow-step strong { display: block; font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.4rem; }
     .flow-step.routed { border-color: var(--accent-emerald); }
+    .flow-step.warn { border-color: var(--accent-amber); }
     .flow-step.dropped { opacity: 0.55; }
     .report-card { display: flex; align-items: center; justify-content: space-between; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-black); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-1) 0; background: var(--bg-paper); }
+    .report-card.mirror { background: var(--bg-ivory); }
     .badge { display: inline-block; padding: 0.15rem 0.5rem; border: 1px solid var(--border-black); font-size: 0.72rem; }
     .badge.crash { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
     .badge.csp { background: var(--accent-amber); color: var(--bg-ivory); border-color: var(--accent-amber); }
     .badge.deprecation { background: var(--text-muted); color: var(--bg-ivory); border-color: var(--text-muted); }
     .badge.intervention { background: var(--accent-blue); color: var(--bg-ivory); border-color: var(--accent-blue); }
+    .badge.permissions-policy { background: var(--bg-stone); color: var(--text-black); }
+    .diagnostic { margin-top: var(--space-3); }
+    .diagnostic-list { margin: 0; padding-left: 1.2rem; }
   </style>
 </head>
 <body>
@@ -76,6 +81,9 @@
       <div id="inbox-default" class="flow-step"><strong>default inbox</strong><div data-list></div></div>
       <div id="inbox-crash" class="flow-step routed"><strong>crash-reporting inbox</strong><div data-list></div></div>
       <div id="inbox-csp" class="flow-step"><strong>csp-endpoint inbox</strong><div data-list></div></div>
+      <div id="inbox-deprecation" class="flow-step"><strong>deprecation inbox</strong><div data-list></div></div>
+      <div id="inbox-dropped" class="flow-step warn"><strong>not delivered</strong><div data-list></div></div>
+      <div id="diagnostic" class="flow-step diagnostic"><strong>routing status</strong><div data-list></div></div>
     </div>
   </div>
 
@@ -100,7 +108,7 @@
       <li><a href="/v139/crash-reporting-api-specify-crash-reporting-to-receive-only-crash-reports/report-to-config/">Report-To Configuration</a></li>
       <li><a href="/v139/crash-reporting-api-specify-crash-reporting-to-receive-only-crash-reports/triage-dashboard/">Triage Dashboard</a></li>
       <li><a href="https://w3c.github.io/reporting/" target="_blank" rel="noopener">Reporting API spec</a></li>
-      <li><a href="https://chromestatus.com/feature/6376976812834816" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://chromestatus.com/feature/5129218731802624" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -108,29 +116,128 @@
 </main>
 
 <script>
-(() =&gt; {
-  const ids = ['ep-default','ep-crash','ep-csp','ep-deprecation','csp-uses-named','exclude-default'];
-  const els = Object.fromEntries(ids.map(id =&gt; [id, document.getElementById(id)]));
+(() => {
+  const ids = ['ep-default', 'ep-crash', 'ep-csp', 'ep-deprecation', 'csp-uses-named', 'exclude-default'];
+  const els = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
   const headerOut = document.getElementById('header-out');
   const inboxes = {
     default: document.querySelector('#inbox-default [data-list]'),
     crash: document.querySelector('#inbox-crash [data-list]'),
     csp: document.querySelector('#inbox-csp [data-list]'),
+    deprecation: document.querySelector('#inbox-deprecation [data-list]'),
+    dropped: document.querySelector('#inbox-dropped [data-list]'),
+    diagnostic: document.querySelector('#diagnostic [data-list]')
   };
 
-  function render() {
-    // Build Reporting-Endpoints header
-    const parts = [];
-    const epDefault = els['ep-default'].value.trim();
-    const epCrash = els['ep-crash'].value.trim();
-    const epCsp = els['ep-csp'].value.trim();
-    const epDeprecation = els['ep-deprecation'].value.trim();
-    if (epDefault) parts.push(`default="${epDefault}"`);
-    if (epCrash) parts.push(`crash-reporting="${epCrash}"`);
-    if (epCsp) parts.push(`csp-endpoint="${epCsp}"`);
-    if (epDeprecation) parts.push(`deprecation="${epDeprecation}"`);
+  const reports = [
+    { type: 'crash', label: 'crash · oom' },
+    { type: 'crash', label: 'crash · gpu-process' },
+    { type: 'deprecation', label: 'deprecation · webgl1' },
+    { type: 'intervention', label: 'intervention · paused-iframe' },
+    { type: 'csp', label: 'csp · script-src' },
+    { type: 'permissions-policy', label: 'permissions-policy · camera' }
+  ];
 
-    const cspHeader = els['csp-uses-named'].checked &amp;&amp; epCsp
+  function endpointValue(id) {
+    const value = els[id].value.trim();
+    if (!value) return { value: '', valid: false, empty: true };
+    try {
+      const parsed = new URL(value);
+      return {
+        value,
+        valid: parsed.protocol === 'https:' || parsed.protocol === 'http:',
+        empty: false
+      };
+    } catch (_) {
+      return { value, valid: false, empty: false };
+    }
+  }
+
+  function addCard(target, report, note = '') {
+    const card = document.createElement('div');
+    card.className = `report-card${note ? ' mirror' : ''}`;
+    const label = document.createElement('span');
+    label.textContent = note ? `${report.label} ${note}` : report.label;
+    const badge = document.createElement('span');
+    badge.className = `badge ${report.type}`;
+    badge.textContent = report.type;
+    card.append(label, badge);
+    inboxes[target].appendChild(card);
+  }
+
+  function addDiagnostic(message) {
+    const line = document.createElement('div');
+    line.textContent = message;
+    inboxes.diagnostic.appendChild(line);
+  }
+
+  function stateSignature() {
+    return ids.map(id => {
+      const el = els[id];
+      return `${id}:${el.type === 'checkbox' ? el.checked : el.value}`;
+    }).join('|');
+  }
+
+  let lastSignature = '';
+
+  function routeReport(report, endpoints) {
+    if (report.type === 'crash') {
+      if (endpoints.crash) {
+        addCard('crash', report);
+        if (!els['exclude-default'].checked && endpoints.default) {
+          addCard('default', report, '(mirror)');
+        }
+        return;
+      }
+      if (els['exclude-default'].checked) {
+        addCard('dropped', report, '(no crash-reporting endpoint)');
+        return;
+      }
+      if (endpoints.default) {
+        addCard('default', report, '(legacy default)');
+        return;
+      }
+      addCard('dropped', report, '(no default endpoint)');
+      return;
+    }
+
+    if (report.type === 'csp' && endpoints.csp && els['csp-uses-named'].checked) {
+      addCard('csp', report);
+      return;
+    }
+
+    if (report.type === 'deprecation' && endpoints.deprecation) {
+      addCard('deprecation', report);
+      return;
+    }
+
+    if (endpoints.default) {
+      addCard('default', report);
+      return;
+    }
+
+    addCard('dropped', report, '(no default endpoint)');
+  }
+
+  function render() {
+    lastSignature = stateSignature();
+    const endpointInputs = {
+      default: endpointValue('ep-default'),
+      crash: endpointValue('ep-crash'),
+      csp: endpointValue('ep-csp'),
+      deprecation: endpointValue('ep-deprecation')
+    };
+    const endpoints = Object.fromEntries(
+      Object.entries(endpointInputs).map(([name, endpoint]) => [name, endpoint.valid ? endpoint.value : ''])
+    );
+
+    const parts = [];
+    if (endpoints.default) parts.push(`default="${endpoints.default}"`);
+    if (endpoints.crash) parts.push(`crash-reporting="${endpoints.crash}"`);
+    if (endpoints.csp) parts.push(`csp-endpoint="${endpoints.csp}"`);
+    if (endpoints.deprecation) parts.push(`deprecation="${endpoints.deprecation}"`);
+
+    const cspHeader = els['csp-uses-named'].checked && endpoints.csp
       ? `Content-Security-Policy: script-src 'self'; report-to csp-endpoint`
       : `Content-Security-Policy: script-src 'self'; report-uri /legacy-csp`;
 
@@ -138,41 +245,40 @@
 `Reporting-Endpoints: ${parts.join(', ') || '(empty)'}
 ${cspHeader}`;
 
-    // Simulate a fixed mix of reports
-    const reports = [
-      { type: 'crash', label: 'crash · oom' },
-      { type: 'crash', label: 'crash · gpu-process' },
-      { type: 'deprecation', label: 'deprecation · webgl1' },
-      { type: 'intervention', label: 'intervention · paused-iframe' },
-      { type: 'csp', label: 'csp · script-src' },
-    ];
+    Object.values(inboxes).forEach(el => el.textContent = '');
+    reports.forEach(report => routeReport(report, endpoints));
 
-    Object.values(inboxes).forEach(el =&gt; el.innerHTML = '');
-
-    for (const r of reports) {
-      let target = 'default';
-      if (r.type === 'crash' &amp;&amp; epCrash) target = 'crash';
-      else if (r.type === 'csp' &amp;&amp; epCsp &amp;&amp; els['csp-uses-named'].checked) target = 'csp';
-      else if (r.type === 'crash' &amp;&amp; els['exclude-default'].checked &amp;&amp; !epCrash) target = 'dropped';
-
-      if (target === 'dropped') continue;
-      const card = document.createElement('div');
-      card.className = 'report-card';
-      card.innerHTML = `&lt;span&gt;${r.label}&lt;/span&gt;&lt;span class="badge ${r.type}"&gt;${r.type}&lt;/span&gt;`;
-      inboxes[target].appendChild(card);
+    for (const [name, endpoint] of Object.entries(endpointInputs)) {
+      if (!endpoint.empty && !endpoint.valid) {
+        addDiagnostic(`${name} endpoint omitted: enter an absolute http(s) URL.`);
+      }
     }
-    // Also handle: when crash endpoint exists AND exclude-default is OFF, mirror crash to default
-    if (epCrash &amp;&amp; !els['exclude-default'].checked) {
-      reports.filter(r =&gt; r.type === 'crash').forEach(r =&gt; {
-        const card = document.createElement('div');
-        card.className = 'report-card';
-        card.innerHTML = `&lt;span&gt;${r.label} &lt;em&gt;(mirror)&lt;/em&gt;&lt;/span&gt;&lt;span class="badge ${r.type}"&gt;${r.type}&lt;/span&gt;`;
-        inboxes.default.appendChild(card);
-      });
+
+    if (endpoints.crash && els['exclude-default'].checked) {
+      addDiagnostic('crash-reporting is clean: crash reports route only to the named crash endpoint.');
+    } else if (endpoints.crash) {
+      addDiagnostic('crash reports route to crash-reporting and mirror to default because exclusion is off.');
+    } else {
+      addDiagnostic('no crash-reporting endpoint is declared, so crash reports fall back or drop according to the default settings.');
+    }
+
+    for (const [key, inbox] of Object.entries(inboxes)) {
+      if (key === 'diagnostic') continue;
+      if (!inbox.children.length) {
+        const empty = document.createElement('div');
+        empty.textContent = 'empty';
+        inbox.appendChild(empty);
+      }
     }
   }
 
-  ids.forEach(id =&gt; els[id].addEventListener('input', render));
+  ids.forEach(id => {
+    els[id].addEventListener('input', render);
+    els[id].addEventListener('change', render);
+  });
+  setInterval(() => {
+    if (stateSignature() !== lastSignature) render();
+  }, 250);
   render();
 })();
 </script>
