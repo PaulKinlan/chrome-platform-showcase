@@ -26,6 +26,8 @@
     .ok { color: var(--accent-emerald); }
     .warn { color: var(--accent-rose); }
     .na { color: var(--text-muted); }
+    .empty-row { text-align: center; }
+    .detail-text { font-size: 0.68rem; color: var(--text-muted); display: block; margin-top: 0.2rem; }
 
     .controls {
       border: 1px solid var(--border-black);
@@ -101,6 +103,10 @@
       <button class="preset-btn" data-url="data:text/plain;charset=utf-8,hello">text/plain;charset=utf-8</button>
       <button class="preset-btn" data-url="data:text/html;charset=utf-8,&lt;b&gt;hi&lt;/b&gt;">text/html;charset=utf-8</button>
       <button class="preset-btn" data-url="data:text/csv;charset=utf-8,a,b,c">text/csv;charset=utf-8</button>
+      <button class="preset-btn" data-url="data:multipart/mixed;boundary=abc;charset=utf-8,--abc%0D%0AContent-Type%3A%20text/plain%0D%0A%0D%0Ahello%0D%0A--abc--">multipart boundary + charset</button>
+      <button class="preset-btn" data-url="data:application/calendar+xml;profile=urn:ietf:params:xml:ns:icalendar-2.0;charset=utf-8,BEGIN:VCALENDAR">calendar profile + charset</button>
+      <button class="preset-btn" data-url="data:text/plain;name=alpha%3Bbeta;charset=utf-8,hello">encoded semicolon param</button>
+      <button class="preset-btn" data-url="data:text/plain;name=alpha;beta;charset=utf-8,hello">malformed semicolon param</button>
       <button class="preset-btn" data-url="data:application/json,{&quot;ok&quot;:true}">application/json</button>
       <button class="preset-btn" data-url="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E">image/svg+xml</button>
     </div>
@@ -110,7 +116,7 @@
     <h2>custom URL</h2>
     <div class="controls">
       <div class="field-row">
-        <label>Data URL:</label>
+        <label for="url-input">Data URL:</label>
         <input type="text" id="url-input" value="data:text/plain;charset=utf-8,hello" placeholder="data:mime/type;param=val,content">
       </div>
       <div class="btn-row">
@@ -127,12 +133,14 @@
         <tr>
           <th>Data URL (truncated)</th>
           <th>content-type header</th>
+          <th>Expected parameters</th>
+          <th>Returned parameters</th>
           <th>Parameters preserved?</th>
           <th>Status</th>
         </tr>
       </thead>
       <tbody id="result-body">
-        <tr><td colspan="4" class="na" style="text-align:center;">Fetch a URL above to see results</td></tr>
+        <tr><td colspan="6" class="na empty-row">Fetch a URL above to see results</td></tr>
       </tbody>
     </table>
   </section>
@@ -153,56 +161,175 @@
   const urlInput = document.getElementById('url-input');
   const resultBody = document.getElementById('result-body');
 
+  function splitMimeParts(input) {
+    const parts = [];
+    let current = '';
+    let quoted = false;
+    let escaped = false;
+    for (const char of input) {
+      if (escaped) {
+        current += char;
+        escaped = false;
+        continue;
+      }
+      if (quoted && char === '\\') {
+        current += char;
+        escaped = true;
+        continue;
+      }
+      if (char === '"') quoted = !quoted;
+      if (char === ';' && !quoted) {
+        parts.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    parts.push(current.trim());
+    return parts;
+  }
+
+  function stripQuotes(value) {
+    const trimmed = value.trim();
+    if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+      return trimmed.slice(1, -1).replace(/\\(.)/g, '$1');
+    }
+    return trimmed;
+  }
+
+  function parseMimeType(input) {
+    const [mimePart = '', ...rawParams] = splitMimeParts(input);
+    const params = [];
+    const ignored = [];
+    const seen = new Set();
+    for (const raw of rawParams) {
+      if (!raw) continue;
+      if (raw.toLowerCase() === 'base64') {
+        ignored.push(raw);
+        continue;
+      }
+      const eq = raw.indexOf('=');
+      if (eq === -1) {
+        ignored.push(raw);
+        continue;
+      }
+      const name = raw.slice(0, eq).trim().toLowerCase();
+      const value = stripQuotes(raw.slice(eq + 1));
+      if (!name || seen.has(name)) {
+        ignored.push(raw);
+        continue;
+      }
+      seen.add(name);
+      params.push({ name, value });
+    }
+    return { mime: mimePart.trim().toLowerCase(), params, ignored };
+  }
+
   function extractParams(url) {
-    // data:[mime][;params][;base64],data
-    const match = url.match(/^data:([^,]*),/);
-    if (!match) return { mime: '', params: [] };
-    const parts = match[1].split(';');
-    const mime = parts[0];
-    const params = parts.slice(1).filter(p => p !== 'base64');
-    return { mime, params };
+    // data:[mime][;params][;base64],data. The comma is the boundary.
+    const match = url.match(/^data:([^,]*),/i);
+    if (!match) return { mime: '', params: [], ignored: [] };
+    return parseMimeType(match[1]);
+  }
+
+  function formatParams(parsed) {
+    const values = parsed.params.map(({ name, value }) => `${name}=${value}`);
+    const ignored = parsed.ignored.map((token) => `ignored:${token}`);
+    return [...values, ...ignored].join(' · ') || '(none)';
+  }
+
+  function compareParams(expected, actual) {
+    const actualMap = new Map(actual.params.map((p) => [p.name, p.value]));
+    const missing = [];
+    const changed = [];
+    for (const param of expected.params) {
+      if (!actualMap.has(param.name)) {
+        missing.push(`${param.name}=${param.value}`);
+      } else if (actualMap.get(param.name) !== param.value) {
+        changed.push(`${param.name}: expected ${param.value}, got ${actualMap.get(param.name)}`);
+      }
+    }
+    return { ok: missing.length === 0 && changed.length === 0, missing, changed };
+  }
+
+  function setStatus(cell, className, text) {
+    cell.replaceChildren();
+    const span = document.createElement('span');
+    span.className = className;
+    span.textContent = text;
+    cell.appendChild(span);
+  }
+
+  function addDetail(cell, text) {
+    if (!text) return;
+    const detail = document.createElement('span');
+    detail.className = 'detail-text';
+    detail.textContent = text;
+    cell.appendChild(detail);
+  }
+
+  function resetResults() {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 6;
+    cell.className = 'na empty-row';
+    cell.textContent = 'Fetch a URL above to see results';
+    row.append(cell);
+    resultBody.replaceChildren(row);
   }
 
   async function fetchAndInspect(url) {
     const tbody = resultBody;
     const row = document.createElement('tr');
-    const { params } = extractParams(url);
-    const hasParams = params.length > 0;
+    const expected = extractParams(url);
+    const hasParams = expected.params.length > 0;
 
     const urlCell = document.createElement('td');
     urlCell.textContent = url.length > 60 ? url.slice(0, 57) + '…' : url;
 
     const ctCell = document.createElement('td');
+    const expectedCell = document.createElement('td');
+    const actualCell = document.createElement('td');
     const preservedCell = document.createElement('td');
     const statusCell = document.createElement('td');
+    expectedCell.textContent = formatParams(expected);
 
     try {
       const resp = await fetch(url);
       const ct = resp.headers.get('content-type') || '(none)';
+      const actual = parseMimeType(ct === '(none)' ? '' : ct);
       ctCell.textContent = ct;
+      actualCell.textContent = formatParams(actual);
 
       if (!hasParams) {
-        preservedCell.innerHTML = '<span class="na">n/a (no params in URL)</span>';
-        statusCell.innerHTML = '<span class="ok">✓ fetched</span>';
+        setStatus(preservedCell, 'na', 'n/a (no params in URL)');
+        addDetail(preservedCell, expected.ignored.length ? `ignored tokens: ${expected.ignored.join(', ')}` : '');
+        setStatus(statusCell, 'ok', '✓ fetched');
       } else {
-        const allPreserved = params.every(p => ct.includes(p.split('=')[1] || p));
-        preservedCell.innerHTML = allPreserved
-          ? '<span class="ok">✓ yes (Chrome 146+)</span>'
-          : '<span class="warn">✗ no — stripped (pre-Chrome 146)</span>';
-        statusCell.innerHTML = allPreserved
-          ? '<span class="ok">✓</span>'
-          : '<span class="warn">✗</span>';
+        const comparison = compareParams(expected, actual);
+        setStatus(
+          preservedCell,
+          comparison.ok ? 'ok' : 'warn',
+          comparison.ok ? '✓ yes (Chrome 146+)' : '✗ no — missing or changed'
+        );
+        addDetail(
+          preservedCell,
+          [...comparison.missing, ...comparison.changed].join(' · ')
+        );
+        if (expected.ignored.length) addDetail(preservedCell, `ignored URL tokens: ${expected.ignored.join(', ')}`);
+        setStatus(statusCell, comparison.ok ? 'ok' : 'warn', comparison.ok ? '✓' : '✗');
       }
     } catch (e) {
       ctCell.textContent = 'error';
-      preservedCell.innerHTML = '<span class="warn">' + e.message + '</span>';
-      statusCell.innerHTML = '<span class="warn">✗</span>';
+      actualCell.textContent = '(none)';
+      setStatus(preservedCell, 'warn', e.message);
+      setStatus(statusCell, 'warn', '✗');
     }
 
-    row.append(urlCell, ctCell, preservedCell, statusCell);
+    row.append(urlCell, ctCell, expectedCell, actualCell, preservedCell, statusCell);
 
     // Remove placeholder row
-    if (tbody.firstElementChild?.querySelector('[colspan]')) tbody.innerHTML = '';
+    if (tbody.firstElementChild?.querySelector('[colspan]')) tbody.replaceChildren();
     tbody.prepend(row);
   }
 
@@ -213,7 +340,7 @@
   });
 
   document.getElementById('btn-clear').addEventListener('click', () => {
-    resultBody.innerHTML = '<tr><td colspan="4" class="na" style="text-align:center;">Fetch a URL above to see results</td></tr>';
+    resetResults();
   });
 
   document.querySelectorAll('.preset-btn').forEach(btn => {
