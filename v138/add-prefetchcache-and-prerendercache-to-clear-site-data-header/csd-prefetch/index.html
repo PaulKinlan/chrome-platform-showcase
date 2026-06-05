@@ -30,9 +30,44 @@
     table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.78rem; }
     th, td { padding: 0.5rem; text-align: left; border-bottom: 1px solid var(--border-black); vertical-align: top; }
     th { background: var(--text-black); color: var(--bg-ivory); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem; }
+    .token-note {
+      margin-top: var(--space-2);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.5;
+      border-left: 3px solid var(--accent-blue);
+      padding-left: var(--space-2);
+    }
+    .token-note:empty { display: none; }
     .kept { color: var(--accent-emerald); font-weight: 600; }
     .cleared { color: var(--accent-rose); font-weight: 600; }
     .new { background: color-mix(in srgb, var(--accent-blue) 8%, transparent); }
+    .implicit { background: color-mix(in srgb, var(--accent-rose) 7%, var(--bg-paper)); }
+    .row-label { display: inline-flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
+    .row-key {
+      color: var(--text-muted);
+      font-size: 0.75rem;
+    }
+    .new-token {
+      color: var(--accent-blue);
+      font-weight: 700;
+    }
+    .new-chip {
+      color: var(--accent-blue);
+      border: 1px solid currentColor;
+      padding: 0.02rem 0.3rem;
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .state-note {
+      display: block;
+      color: var(--text-muted);
+      font-size: 0.72rem;
+      font-weight: 500;
+      margin-top: 0.15rem;
+    }
   </style>
 </head>
 <body>
@@ -51,11 +86,12 @@
       <label class="opt"><input type="checkbox" value="cookies"> cookies</label>
       <label class="opt"><input type="checkbox" value="storage"> storage</label>
       <label class="opt"><input type="checkbox" value="executionContexts"> executionContexts</label>
-      <label class="opt"><input type="checkbox" value="prefetchCache" checked> prefetchCache <span style="color:var(--accent-blue)">(new)</span></label>
-      <label class="opt"><input type="checkbox" value="prerenderCache" checked> prerenderCache <span style="color:var(--accent-blue)">(new)</span></label>
+      <label class="opt"><input type="checkbox" value="prefetchCache" checked> prefetchCache <span class="new-token">(new)</span></label>
+      <label class="opt"><input type="checkbox" value="prerenderCache" checked> prerenderCache <span class="new-token">(new)</span></label>
       <label class="opt"><input type="checkbox" value="*"> * (all)</label>
     </div>
     <div class="out" id="hdr"></div>
+    <div class="token-note" id="token-note" aria-live="polite"></div>
     <div class="table-wrap">
       <table>
         <thead>
@@ -96,20 +132,90 @@ Clear-Site-Data: "prefetchCache", "prerenderCache"
     { key: "cookies", label: "Cookies" },
     { key: "storage", label: "Local/Session storage, IndexedDB, Cache Storage" },
     { key: "executionContexts", label: "Open execution contexts (reload page)" },
-    { key: "prefetchCache", label: "Speculation Rules prefetch cache (NEW 138)", isNew: true },
-    { key: "prerenderCache", label: "Speculation Rules prerender cache (NEW 138)", isNew: true },
+    { key: "prefetchCache", label: "Speculation Rules prefetch cache", isNew: true },
+    { key: "prerenderCache", label: "Speculation Rules prerender cache", isNew: true },
   ];
+
+  const headerOutput = document.getElementById("hdr");
+  const noteOutput = document.getElementById("token-note");
+  const rowsBody = document.getElementById("rows");
+
+  function buildClearingModel(selected) {
+    const explicit = new Set(selected);
+    const effective = new Set(explicit);
+    const implicit = new Map();
+
+    if (explicit.has("*")) {
+      tiers.forEach((tier) => effective.add(tier.key));
+      if (!explicit.has("prefetchCache")) {
+        implicit.set("prefetchCache", {
+          source: "\"*\"",
+          note: "The wildcard token expands through the legacy cache bucket, so Chrome 138 also clears \"prefetchCache\".",
+        });
+      }
+    } else if (explicit.has("cache")) {
+      effective.add("prefetchCache");
+      if (!explicit.has("prefetchCache")) {
+        implicit.set("prefetchCache", {
+          source: "\"cache\"",
+          note: "Because \"cache\" is set, Chrome 138 also clears \"prefetchCache\" implicitly.",
+        });
+      }
+    }
+
+    return { effective, implicit };
+  }
+
+  function renderRows(model) {
+    rowsBody.replaceChildren();
+
+    for (const tier of tiers) {
+      const row = document.createElement("tr");
+      row.dataset.tier = tier.key;
+      if (tier.isNew) row.classList.add("new");
+      const implicitReason = model.implicit.get(tier.key);
+      if (implicitReason) row.classList.add("implicit");
+
+      const labelCell = document.createElement("td");
+      const label = document.createElement("span");
+      label.className = "row-label";
+      label.append(document.createTextNode(tier.label));
+      if (tier.isNew) {
+        const chip = document.createElement("span");
+        chip.className = "new-chip";
+        chip.textContent = "new in 138";
+        label.append(chip);
+      }
+      labelCell.append(label, document.createElement("br"));
+      const key = document.createElement("span");
+      key.className = "row-key";
+      key.textContent = tier.key;
+      labelCell.append(key);
+
+      const stateCell = document.createElement("td");
+      const cleared = model.effective.has(tier.key);
+      stateCell.className = cleared ? "cleared" : "kept";
+      stateCell.dataset.state = cleared ? "cleared" : "kept";
+      stateCell.append(document.createTextNode(cleared ? "CLEARED" : "untouched"));
+      if (implicitReason) {
+        const source = document.createElement("span");
+        source.className = "state-note";
+        source.textContent = `implicit from ${implicitReason.source}`;
+        stateCell.append(source);
+      }
+
+      row.append(labelCell, stateCell);
+      rowsBody.append(row);
+    }
+  }
 
   function update() {
     const selected = Array.from(document.querySelectorAll("#opts input:checked")).map((i) => i.value);
     const hdrVal = selected.length ? selected.map((s) => `"${s}"`).join(", ") : "(none — header not set)";
-    document.getElementById("hdr").textContent = "Clear-Site-Data: " + hdrVal;
-    const all = selected.includes("*");
-    const rows = tiers.map((t) => {
-      const cleared = all || selected.includes(t.key);
-      return `<tr class="${t.isNew ? "new" : ""}"><td>${t.label}<br><span style="color:var(--text-muted);font-size:0.75rem">${t.key}</span></td><td class="${cleared ? "cleared" : "kept"}">${cleared ? "CLEARED" : "untouched"}</td></tr>`;
-    });
-    document.getElementById("rows").innerHTML = rows.join("");
+    const model = buildClearingModel(selected);
+    headerOutput.textContent = "Clear-Site-Data: " + hdrVal;
+    noteOutput.textContent = model.implicit.get("prefetchCache")?.note ?? "";
+    renderRows(model);
   }
   document.querySelectorAll("#opts input").forEach((i) => i.addEventListener("change", update));
   update();
