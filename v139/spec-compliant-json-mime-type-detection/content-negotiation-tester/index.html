@@ -174,6 +174,28 @@
       overflow-x: auto;
       margin: var(--space-4) 0;
     }
+    .browser-probe {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--flat-shadow);
+      padding: var(--space-4);
+      margin: var(--space-5) 0;
+    }
+    .browser-probe p {
+      color: var(--text-charcoal);
+      font-size: 0.9rem;
+      margin-top: 0;
+    }
+    .probe-output {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      line-height: 1.7;
+      min-height: 3rem;
+    }
+    .probe-output strong { color: var(--accent-rose); }
     code { font-family: var(--font-mono); font-size: 0.85em; }
   </style>
 </head>
@@ -214,6 +236,13 @@
       <div class="rule-trace" id="rule-trace"></div>
     </div>
   </div>
+
+  <section class="browser-probe">
+    <h2>browser JSON module probe</h2>
+    <p>Use the current MIME type as the media type for a JSON module <code>data:</code> URL. The probe imports with <code>{ with: { type: "json" } }</code> when the classifier says the essence is JSON; non-JSON and malformed values are blocked first so the page shows a clean fallback path.</p>
+    <button class="classify-btn" id="browser-probe" type="button">Run browser import probe</button>
+    <div class="probe-output" id="probe-output" aria-live="polite">Not run yet.</div>
+  </section>
 
   <h2>types that changed in Chrome 139</h2>
   <p style="color:var(--text-charcoal);font-size:0.9rem;margin-bottom:var(--space-4);">Before Chrome 139, only <code>application/json</code> and <code>text/json</code> were accepted as JSON. Chrome 139 aligns with the WHATWG MIME Sniff spec, adding any subtype ending in <code>+json</code>.</p>
@@ -268,7 +297,7 @@ function isJSONMIMEType(rawContentType) {
       <li><a href="/v139/spec-compliant-json-mime-type-detection/plus-json-explorer/">+json MIME Explorer</a></li>
       <li><a href="/v139/spec-compliant-json-mime-type-detection/json-module-import/">JSON Module Import</a></li>
       <li><a href="https://mimesniff.spec.whatwg.org/#json-mime-type" target="_blank" rel="noopener">WHATWG mimesniff — JSON MIME type</a></li>
-      <li><a href="https://chromestatus.com/feature/5085327190196224" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://chromestatus.com/feature/5470594816278528" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -282,11 +311,14 @@ function isJSONMIMEType(rawContentType) {
     { mime: 'text/json', json: true },
     { mime: 'application/ld+json', json: true },
     { mime: 'application/vnd.api+json', json: true },
+    { mime: 'image/svg+json', json: true },
     { mime: 'application/problem+json', json: true },
     { mime: 'application/json; charset=utf-8', json: true },
+    { mime: 'Application/Problem+JSON; charset=UTF-8', json: true },
     { mime: 'text/plain', json: false },
     { mime: 'text/html', json: false },
     { mime: 'application/octet-stream', json: false },
+    { mime: 'not-a-mime', json: false },
   ];
 
   const presetsEl = document.getElementById('presets');
@@ -303,6 +335,10 @@ function isJSONMIMEType(rawContentType) {
 
   function parseEssence(raw) {
     return raw.split(';')[0].trim().toLowerCase();
+  }
+
+  function normalizeDataUrlType(raw) {
+    return raw.trim().replace(/\s*;\s*/g, ';');
   }
 
   function classifyMIME(raw) {
@@ -347,6 +383,11 @@ function isJSONMIMEType(rawContentType) {
     return { result, essence, type, subtype, params, rules };
   }
 
+  function hasValidEssence(essence) {
+    const parts = essence.split('/');
+    return parts.length === 2 && Boolean(parts[0]) && Boolean(parts[1]);
+  }
+
   function classify() {
     const raw = document.getElementById('mime-input').value.trim();
     if (!raw) return;
@@ -371,6 +412,39 @@ function isJSONMIMEType(rawContentType) {
     trace.innerHTML = rules.map(r =>
       `<div class="rule-line"><span class="rule-check ${r.pass ? 'rule-pass' : 'rule-fail'}">${r.pass ? '✓' : '✗'}</span><span class="${r.pass ? 'rule-match' : ''}">${r.text}</span></div>`
     ).join('');
+    document.getElementById('probe-output').textContent = 'Not run yet.';
+  }
+
+  async function runBrowserProbe() {
+    const raw = document.getElementById('mime-input').value.trim();
+    const classification = classifyMIME(raw);
+    const output = document.getElementById('probe-output');
+    if (!raw) {
+      output.innerHTML = '<strong>Blocked:</strong> enter a Content-Type value before running the browser probe.';
+      return;
+    }
+    if (!hasValidEssence(classification.essence)) {
+      output.innerHTML = `<strong>Blocked:</strong> "${raw}" does not have a type/subtype essence, so it cannot be tested as a module Content-Type.`;
+      return;
+    }
+    if (!classification.result) {
+      output.innerHTML = `<strong>Blocked before import:</strong> "${classification.essence}" is not a JSON MIME type, so production code should avoid a JSON module import and use a fallback response path.`;
+      return;
+    }
+
+    const mediaType = normalizeDataUrlType(raw);
+    const body = encodeURIComponent(JSON.stringify({ ok: true, mime: raw }));
+    const url = `data:${mediaType},${body}`;
+    try {
+      const module = await import(url, { with: { type: 'json' } });
+      output.textContent = classification.result
+        ? `Browser imported the JSON module. Default export: ${JSON.stringify(module.default)}`
+        : `Unexpected import: the classifier says "${classification.essence}" is not JSON, but the browser imported it.`;
+    } catch (err) {
+      output.innerHTML = classification.result
+        ? `<strong>Import rejected:</strong> ${err.name}: ${err.message}`
+        : `Browser rejected the module as expected for non-JSON essence "${classification.essence}": ${err.name}: ${err.message}`;
+    }
   }
 
   document.getElementById('classify').addEventListener('click', classify);
@@ -378,6 +452,7 @@ function isJSONMIMEType(rawContentType) {
     if (e.key === 'Enter') classify();
   });
   document.getElementById('mime-input').addEventListener('input', classify);
+  document.getElementById('browser-probe').addEventListener('click', runBrowserProbe);
 
   classify();
 })();
