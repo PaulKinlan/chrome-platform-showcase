@@ -91,6 +91,10 @@
       cursor: pointer;
     }
     .ctl-btn:hover { transform: translate(-1px,-1px); }
+    .ctl-btn:disabled {
+      cursor: wait;
+      opacity: 0.65;
+    }
     .ctl-btn.secondary {
       background: var(--bg-ivory);
       color: var(--text-black);
@@ -341,6 +345,7 @@ self.onrtctransform = (event) =&gt; {
 
   const floorEl = document.getElementById('floor');
   const holdEl = document.getElementById('hold');
+  const startBtn = document.getElementById('start');
   const floorValEl = document.getElementById('floor-val');
   const holdValEl = document.getElementById('hold-val');
   floorEl.addEventListener('input', () => {
@@ -359,19 +364,36 @@ self.onrtctransform = (event) =&gt; {
   let seen = 0, fwd = 0, sup = 0;
   let spotlightIdx = -1, holdUntil = 0;
   let mode = 'idle';
+  let runToken = 0;
+  let runMessage = '';
 
   async function start() {
     if (raf || stream || ctx) stop();
+    const token = ++runToken;
+    runMessage = '';
     resetCounters();
     if (!navigator.mediaDevices?.getUserMedia) {
       startSynthetic('<strong>Microphone capture API unavailable.</strong> Running a deterministic synthetic source so unsupported-browser fallback behavior is still explorable.');
       return;
     }
+    mode = 'requesting microphone';
+    sMode.textContent = 'requesting mic';
+    startBtn.disabled = true;
+    setNotice(edgeNote, null, 'Requesting microphone permission. Accept to run live mic mode, or deny to verify that the router falls back to synthetic audio levels.');
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const nextStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (token !== runToken) {
+        nextStream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      stream = nextStream;
     } catch (e) {
-      startSynthetic('<strong>Mic permission denied or unavailable.</strong> The router switched to synthetic levels instead of leaving the demo blank.');
+      if (token === runToken) {
+        startSynthetic('<strong>Mic permission denied or unavailable.</strong> The router switched to synthetic levels instead of leaving the demo blank.');
+      }
       return;
+    } finally {
+      if (token === runToken) startBtn.disabled = false;
     }
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     const src = ctx.createMediaStreamSource(stream);
@@ -380,21 +402,28 @@ self.onrtctransform = (event) =&gt; {
     src.connect(analyser);
     mode = 'microphone';
     sMode.textContent = 'microphone';
+    runMessage = '';
     setNotice(edgeNote, 'ok', 'Microphone mode is running. The first tile follows the live mic level, while the other tiles simulate remote participants with offset peaks.');
     loop();
   }
 
   function startSynthetic(reason) {
     if (raf || stream || ctx) stop();
+    runToken++;
+    startBtn.disabled = false;
     resetCounters();
     analyser = null;
     mode = 'synthetic';
     sMode.textContent = 'synthetic';
-    setNotice(edgeNote, 'error', reason + ' The synthetic fallback intentionally cycles through silence, dominant speakers, and low-level frames.');
+    runMessage = reason + ' The synthetic fallback intentionally cycles through silence, dominant speakers, and low-level frames.';
+    setNotice(edgeNote, 'error', runMessage);
     loop();
   }
 
   function stop() {
+    runToken++;
+    startBtn.disabled = false;
+    runMessage = '';
     if (raf) cancelAnimationFrame(raf);
     raf = null;
     if (stream) stream.getTracks().forEach((t) => t.stop());
@@ -427,14 +456,16 @@ self.onrtctransform = (event) =&gt; {
 
   function describeFloorBoundary(forwarded = null, suppressed = null) {
     const floor = +floorEl.value;
+    const withRunMessage = (message) =>
+      mode === 'synthetic' && runMessage ? runMessage + ' ' + message : message;
     if (forwarded === 0 && suppressed !== null && suppressed > 0) {
-      setNotice(edgeNote, 'error', 'Boundary: this silence floor suppresses every participant. Lower the floor toward -60 dBov to forward quiet speakers.');
+      setNotice(edgeNote, 'error', withRunMessage('Boundary: this silence floor suppresses every participant. Lower the floor toward -60 dBov to forward quiet speakers.'));
     } else if (suppressed === 0 && forwarded !== null && forwarded > 0) {
-      setNotice(edgeNote, 'ok', 'Boundary: this silence floor forwards every participant, including low-level frames. Raise the floor toward -20 dBov to save bandwidth.');
+      setNotice(edgeNote, 'ok', withRunMessage('Boundary: this silence floor forwards every participant, including low-level frames. Raise the floor toward -20 dBov to save bandwidth.'));
     } else if (floor <= -55) {
-      setNotice(edgeNote, null, 'Lenient floor: only near-silent frames are suppressed. This is safer for accessibility but saves less bandwidth.');
+      setNotice(edgeNote, null, withRunMessage('Lenient floor: only near-silent frames are suppressed. This is safer for accessibility but saves less bandwidth.'));
     } else if (floor >= -25) {
-      setNotice(edgeNote, null, 'Aggressive floor: more frames are suppressed. Watch for quiet speakers being dropped.');
+      setNotice(edgeNote, null, withRunMessage('Aggressive floor: more frames are suppressed. Watch for quiet speakers being dropped.'));
     } else if (mode === 'idle') {
       setNotice(edgeNote, null, 'Move the silence floor or start the router to inspect boundary cases.');
     }
@@ -536,7 +567,7 @@ self.onrtctransform = (event) =&gt; {
     return baseLevel > 100 ? Math.min(127, idle) : level;
   }
 
-  document.getElementById('start').addEventListener('click', start);
+  startBtn.addEventListener('click', start);
   document.getElementById('synthetic').addEventListener('click', () => startSynthetic('<strong>Synthetic fallback selected.</strong> This branch exercises the no-microphone path while keeping active-speaker routing live.'));
   document.getElementById('stop').addEventListener('click', stop);
   describeFloorBoundary();
