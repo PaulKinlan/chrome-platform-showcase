@@ -23,6 +23,11 @@
       background: var(--bg-ivory);
       color: var(--text-black);
     }
+    .row input:disabled {
+      background: var(--bg-stone);
+      color: var(--text-muted);
+      opacity: 1;
+    }
     .result {
       background: var(--bg-stone);
       border: 1px solid var(--border-black);
@@ -92,12 +97,21 @@
       </select>
     </div>
     <div class="row">
-      <label for="src-key">source_debug_key (registered)</label>
-      <input type="text" id="src-key" value="42">
+      <label for="key-registration">debug-key registration shape</label>
+      <select id="key-registration">
+        <option value="both" selected>source + trigger debug keys</option>
+        <option value="source-only">source debug key only</option>
+        <option value="trigger-only">trigger debug key only</option>
+        <option value="neither">no debug keys</option>
+      </select>
     </div>
     <div class="row">
-      <label for="trg-key">trigger_debug_key (registered)</label>
-      <input type="text" id="trg-key" value="99">
+      <label for="src-key">source_debug_key value</label>
+      <input type="text" id="src-key" inputmode="numeric" pattern="[0-9]*" value="42">
+    </div>
+    <div class="row">
+      <label for="trg-key">trigger_debug_key value</label>
+      <input type="text" id="trg-key" inputmode="numeric" pattern="[0-9]*" value="99">
     </div>
   </section>
 
@@ -109,10 +123,17 @@
   <section>
     <h2>the rule</h2>
 <pre><code>// Both source and trigger must opt in via the ar_debug cookie
-// for debug keys to flow through. Cross-app/web reports lose
-// them entirely because the cookie boundary can't be crossed.
+// and both source_debug_key + trigger_debug_key must be non-null.
+// Cross-app/web reports lose them because the cookie boundary can't
+// be crossed.
 
-if (sourceCookie && triggerCookie && !crossAppWeb) {
+if (
+  sourceCookie &&
+  triggerCookie &&
+  sourceDebugKey !== null &&
+  triggerDebugKey !== null &&
+  !crossAppWeb
+) {
   report.source_debug_key  = registeredSourceDebugKey;
   report.trigger_debug_key = registeredTriggerDebugKey;
 } else {
@@ -132,13 +153,52 @@ if (sourceCookie && triggerCookie && !crossAppWeb) {
 </main>
 <script>
   const out = document.getElementById("report");
+  const maxDebugKey = (1n << 64n) - 1n;
+
+  function keyShape() {
+    const shape = document.getElementById("key-registration").value;
+    return {
+      sourceRegistered: shape === "both" || shape === "source-only",
+      triggerRegistered: shape === "both" || shape === "trigger-only",
+    };
+  }
+
+  function currentDebugKey(inputId, registered, label) {
+    const input = document.getElementById(inputId);
+    const value = document.getElementById(inputId).value.trim();
+    input.setAttribute("aria-invalid", "false");
+    if (!registered) return { value: null, reason: `${label} is not present` };
+    if (!value) {
+      input.setAttribute("aria-invalid", "true");
+      return { value: null, reason: `${label} has no value` };
+    }
+    if (!/^\d+$/.test(value) || BigInt(value) > maxDebugKey) {
+      input.setAttribute("aria-invalid", "true");
+      return { value: null, reason: `${label} must be a non-negative 64-bit integer` };
+    }
+    return { value, reason: null };
+  }
+
+  function syncKeyInputs() {
+    const { sourceRegistered, triggerRegistered } = keyShape();
+    document.getElementById("src-key").disabled = !sourceRegistered;
+    document.getElementById("trg-key").disabled = !triggerRegistered;
+  }
+
   function render() {
     const srcCookie = document.getElementById("src-cookie").value === "true";
     const trgCookie = document.getElementById("trg-cookie").value === "true";
     const cross = document.getElementById("cross-app").value === "cross";
-    const sKey = document.getElementById("src-key").value;
-    const tKey = document.getElementById("trg-key").value;
-    const allowed = srcCookie && trgCookie && !cross;
+    const { sourceRegistered, triggerRegistered } = keyShape();
+    const sourceDebugKey = currentDebugKey("src-key", sourceRegistered, "source_debug_key");
+    const triggerDebugKey = currentDebugKey("trg-key", triggerRegistered, "trigger_debug_key");
+    const reasons = [];
+    if (sourceDebugKey.reason) reasons.push(sourceDebugKey.reason);
+    if (triggerDebugKey.reason) reasons.push(triggerDebugKey.reason);
+    if (!srcCookie) reasons.push("source ar_debug cookie missing");
+    if (!trgCookie) reasons.push("trigger ar_debug cookie missing");
+    if (cross) reasons.push("cross-app/web context");
+    const allowed = reasons.length === 0;
     const report = {
       attribution_destination: "https://shop.example",
       source_event_id: "1234",
@@ -146,18 +206,36 @@ if (sourceCookie && triggerCookie && !crossAppWeb) {
       randomized_trigger_rate: 0.0024,
     };
     if (allowed) {
-      report.source_debug_key = sKey;
-      report.trigger_debug_key = tKey;
+      report.source_debug_key = sourceDebugKey.value;
+      report.trigger_debug_key = triggerDebugKey.value;
     }
-    const verdict = allowed
-      ? '<span class="ok">DEBUG KEYS INCLUDED</span>'
-      : '<span class="blocked">DEBUG KEYS STRIPPED</span> — '
-        + (!srcCookie ? "source ar_debug cookie missing" : !trgCookie ? "trigger ar_debug cookie missing" : "cross-app/web context");
-    out.innerHTML = `${verdict}\n\n` + JSON.stringify(report, null, 2);
+
+    const debugInfo = {
+      source_debug_key: sourceDebugKey.value,
+      trigger_debug_key: triggerDebugKey.value,
+    };
+    const verdict = document.createElement("span");
+    verdict.className = allowed ? "ok" : "blocked";
+    verdict.textContent = allowed ? "DEBUG KEYS INCLUDED" : "DEBUG KEYS STRIPPED";
+
+    const reason = allowed
+      ? "both debug keys are present, both ar_debug cookies are present, and the report is same-context"
+      : reasons.join("; ");
+
+    out.replaceChildren(
+      verdict,
+      document.createTextNode(
+        ` — ${reason}\n\nDebug info tuple before serialization:\n${
+          JSON.stringify(debugInfo, null, 2)
+        }\n\nSerialized attribution report:\n${JSON.stringify(report, null, 2)}`,
+      ),
+    );
   }
-  for (const id of ["src-cookie", "trg-cookie", "cross-app", "src-key", "trg-key"]) {
+  for (const id of ["src-cookie", "trg-cookie", "cross-app", "key-registration", "src-key", "trg-key"]) {
     document.getElementById(id).addEventListener("input", render);
   }
+  document.getElementById("key-registration").addEventListener("input", syncKeyInputs);
+  syncKeyInputs();
   render();
 </script>
 </body>
