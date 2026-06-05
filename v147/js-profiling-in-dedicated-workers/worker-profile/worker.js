@@ -5,7 +5,7 @@ self.addEventListener("message", async (e) => {
   if (typeof self.Profiler !== "function") {
     self.postMessage({
       error:
-        "Profiler not available in this worker. This demo is served with Document-Policy: js-profiling-mode=lazy, js-profiling; use a browser with JS Self-Profiling enabled.",
+        "Profiler not available in this worker. This demo is served with Document-Policy: js-profiling; use a browser with JS Self-Profiling enabled.",
     });
     return;
   }

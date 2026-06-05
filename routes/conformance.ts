@@ -10,7 +10,7 @@ import {
 function conformanceHeaders(release: string, featureSlug: string): HeadersInit | undefined {
   if (release === "v147" && featureSlug === "js-profiling-in-dedicated-workers") {
     return {
-      "document-policy": "js-profiling-mode=lazy, js-profiling",
+      "document-policy": "js-profiling",
     };
   }
   return undefined;

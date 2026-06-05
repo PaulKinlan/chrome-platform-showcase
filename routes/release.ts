@@ -3998,7 +3998,7 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
       const asset = await readReleaseAsset(release, sub);
       if (asset) {
         return withHeaders(asset, {
-          "document-policy": "js-profiling-mode=lazy, js-profiling",
+          "document-policy": "js-profiling",
         });
       }
     }
