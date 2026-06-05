@@ -34,6 +34,10 @@
     .controls label { font-family: var(--font-mono); font-size: 0.85rem; }
     .controls input { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: 0.3rem; font-family: var(--font-mono); font-size: 0.85rem; }
     .annot { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.78rem; margin-top: var(--space-3); line-height: 1.7; }
+    .probe { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); margin: var(--space-4) 0; }
+    .probe-status { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.7; }
+    .probe-status strong { color: var(--accent-rose); }
+    .probe button { background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-4); font-family: var(--font-sans); font-weight: 600; cursor: pointer; box-shadow: var(--flat-shadow); margin-top: var(--space-3); }
   </style>
 </head>
 <body>
@@ -48,7 +52,7 @@
 
   <div class="controls">
     <label>Merchant <input id="merchant" value="Tailored Co."></label>
-    <label>Amount <input id="amt" type="number" value="42" min="1"></label>
+    <label>Amount <input id="amt" type="number" value="42" min="1" step="0.01"></label>
     <label>Currency <input id="cur" value="GBP" maxlength="3" style="width:60px"></label>
     <label>Card last 4 <input id="last4" value="9912" maxlength="4" style="width:80px"></label>
   </div>
@@ -64,7 +68,7 @@
         <div class="row total">Total<span data-t></span></div>
         <div class="bio-icon">F</div>
         <p style="text-align: center; font-size: 0.78rem; color: var(--text-muted); margin: 0;">Use your fingerprint to confirm</p>
-        <button class="ctl-btn">Confirm</button>
+        <button class="ctl-btn" type="button" data-dialog-action="old">Confirm</button>
       </div>
       <div class="annot">
         Issues called out by the SPC working group:
@@ -87,7 +91,7 @@
         </div>
         <div class="bio-icon">✓</div>
         <p style="text-align: center; font-size: 0.78rem; color: var(--text-muted); margin: 0;">Authenticate with your device passkey to authorise this payment.</p>
-        <button class="ctl-btn">Authorise</button>
+        <button class="ctl-btn" type="button" data-dialog-action="new">Authorise</button>
       </div>
       <div class="annot">
         Refresh fixes:
@@ -100,6 +104,15 @@
     </div>
   </div>
 
+  <p class="probe-status" id="dialog-status" aria-live="polite">No simulated dialog action yet.</p>
+
+  <section class="probe">
+    <h2>SPC request probe</h2>
+    <p class="probe-status" id="validation" aria-live="polite"></p>
+    <button id="probe-spc" type="button">Check SPC request shape</button>
+    <p class="probe-status" id="probe-log" aria-live="polite">Not run yet. The probe constructs a safe Secure Payment Confirmation request and a deliberately invalid HTTP payeeOrigin request; it never calls <code>show()</code>.</p>
+  </section>
+
   <section>
     <h2>see also</h2>
     <ul>
@@ -107,7 +120,7 @@
       <li><a href="/v139/secure-payment-confirmation-ux-refresh/ux-changes/">UX Changes</a></li>
       <li><a href="/v139/secure-payment-confirmation-ux-refresh/spc-ux-demo/">SPC UX Demo</a></li>
       <li><a href="https://w3c.github.io/secure-payment-confirmation/" target="_blank" rel="noopener">SPC spec</a></li>
-      <li><a href="https://chromestatus.com/feature/5145018724319232" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://chromestatus.com/feature/5206050462236672" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
 
@@ -115,18 +128,117 @@
 </main>
 
 <script>
-(() =&gt; {
-  function update() {
-    const m = document.getElementById('merchant').value;
-    const a = (+document.getElementById('amt').value).toFixed(2);
-    const c = document.getElementById('cur').value;
-    const l = document.getElementById('last4').value;
-    document.querySelectorAll('[data-m]').forEach(e =&gt; e.textContent = m);
-    document.querySelectorAll('[data-t]').forEach(e =&gt; e.textContent = `${c} ${a}`);
-    document.querySelectorAll('[data-c]').forEach(e =&gt; e.textContent = '••••' + l);
-    document.querySelectorAll('[data-host]').forEach(e =&gt; e.textContent = m.toLowerCase().replace(/\s+/g, '') + '.example');
+(() => {
+  const icon = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+P+/HgAFhAJ/wlseKgAAAABJRU5ErkJggg==';
+  const validation = document.getElementById('validation');
+  const probeLog = document.getElementById('probe-log');
+  const dialogStatus = document.getElementById('dialog-status');
+
+  function checkoutState() {
+    const merchant = document.getElementById('merchant').value.trim();
+    const amount = Number(document.getElementById('amt').value);
+    const currency = document.getElementById('cur').value.trim().toUpperCase();
+    const last4 = document.getElementById('last4').value.trim();
+
+    return {
+      merchant,
+      amount,
+      amountText: Number.isFinite(amount) ? amount.toFixed(2) : '0.00',
+      currency,
+      last4,
+      host: (merchant.toLowerCase().replace(/[^a-z0-9]+/g, '') || 'merchant') + '.example',
+    };
   }
-  ['merchant','amt','cur','last4'].forEach(id =&gt; document.getElementById(id).addEventListener('input', update));
+
+  function validate(state) {
+    const issues = [];
+    if (!state.merchant) issues.push('merchant name is empty');
+    if (!Number.isFinite(state.amount) || state.amount <= 0) issues.push('amount must be greater than zero');
+    if (!/^[A-Z]{3}$/.test(state.currency)) issues.push('currency must be a 3-letter ISO 4217 code');
+    if (!/^\d{4}$/.test(state.last4)) issues.push('card last 4 must be exactly four digits');
+    return issues;
+  }
+
+  function update() {
+    const state = checkoutState();
+    const issues = validate(state);
+    document.querySelectorAll('[data-m]').forEach(e => e.textContent = state.merchant || 'Missing merchant');
+    document.querySelectorAll('[data-t]').forEach(e => e.textContent = `${state.currency || '---'} ${state.amountText}`);
+    document.querySelectorAll('[data-c]').forEach(e => e.textContent = '••••' + (state.last4 || '----'));
+    document.querySelectorAll('[data-host]').forEach(e => e.textContent = state.host);
+    validation.innerHTML = issues.length
+      ? `<strong>Blocked:</strong> ${issues.join('; ')}. SPC code should fall back before asking the browser to show native payment UI.`
+      : `Ready: the synthetic request has merchant, amount, currency, and instrument details populated for the refreshed SPC dialog.`;
+    dialogStatus.textContent = 'No simulated dialog action yet.';
+  }
+
+  function spcMethodData(state, payeeOrigin = 'https://merchant.example') {
+    return [{
+      supportedMethods: 'secure-payment-confirmation',
+      data: {
+        rpId: location.hostname,
+        credentialIds: [new Uint8Array([1, 2, 3, 4]).buffer],
+        challenge: new Uint8Array([5, 6, 7, 8]).buffer,
+        instrument: {
+          displayName: `${state.currency} card ending ${state.last4}`,
+          details: state.merchant,
+          icon,
+          iconMustBeShown: false,
+        },
+        payeeOrigin,
+        payeeName: state.merchant,
+        timeout: 60000,
+        showOptOut: true,
+      },
+    }];
+  }
+
+  async function runProbe() {
+    const state = checkoutState();
+    const issues = validate(state);
+    if (issues.length) {
+      probeLog.innerHTML = `<strong>Blocked before PaymentRequest:</strong> ${issues.join('; ')}.`;
+      return;
+    }
+
+    if (typeof PaymentRequest === 'undefined' || typeof PublicKeyCredential === 'undefined') {
+      probeLog.innerHTML = '<strong>Unsupported in this browser:</strong> PaymentRequest or PublicKeyCredential is missing, so merchant code should offer a fallback checkout.';
+      return;
+    }
+
+    try {
+      const details = { total: { label: 'Total', amount: { currency: state.currency, value: state.amountText } } };
+      const request = new PaymentRequest(spcMethodData(state), details);
+      let canMake = 'not checked';
+      if (typeof request.canMakePayment === 'function') {
+        canMake = String(await request.canMakePayment());
+      }
+
+      let invalidBranch = 'not rejected';
+      try {
+        new PaymentRequest(spcMethodData(state, 'http://merchant.example'), details);
+      } catch (err) {
+        invalidBranch = `${err.name}: ${err.message}`;
+      }
+
+      probeLog.innerHTML = `Constructed SPC PaymentRequest without calling <code>show()</code>. <code>canMakePayment()</code>: ${canMake}. Invalid HTTP payeeOrigin branch: ${invalidBranch}.`;
+    } catch (err) {
+      probeLog.innerHTML = `<strong>SPC unavailable:</strong> ${err.name}: ${err.message}`;
+    }
+  }
+
+  function recordDialogAction(kind) {
+    const state = checkoutState();
+    dialogStatus.textContent = kind === 'new'
+      ? `Refreshed dialog would authorise ${state.currency} ${state.amountText} for ${state.merchant || 'the merchant'} with passkey wording and promoted merchant identity.`
+      : `Legacy dialog would confirm ${state.currency} ${state.amountText} for ${state.merchant || 'the merchant'} with older fingerprint wording.`;
+  }
+
+  ['merchant','amt','cur','last4'].forEach(id => document.getElementById(id).addEventListener('input', update));
+  document.getElementById('probe-spc').addEventListener('click', runProbe);
+  document.querySelectorAll('[data-dialog-action]').forEach(button => {
+    button.addEventListener('click', () => recordDialogAction(button.dataset.dialogAction));
+  });
   update();
 })();
 </script>
