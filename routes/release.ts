@@ -3878,7 +3878,7 @@ function renderOutOfOrderStreamingLiveRoute(req: Request, sub: string): Response
       return {
         title: "AI response patch stream",
         lede:
-          "The server appends each generated token with repeated template patches and a marker that keeps the insertion point alive.",
+          "The server appends each generated token with repeated template patches and a marker that keeps the insertion point alive while preserving token order.",
         body: `
           <section class="panel chat-panel">
             <h2>Assistant reply</h2>
@@ -3895,7 +3895,9 @@ function renderOutOfOrderStreamingLiveRoute(req: Request, sub: string): Response
           </section>`,
         chunks: tokens.map((token, index) => {
           const position = index + 1;
-          const delay = position === slowToken ? baseDelay + 900 : 180 + index * 130;
+          const delay = position < slowToken
+            ? 180 + index * 130
+            : baseDelay + 900 + (position - slowToken) * 130;
           return {
             delay,
             label: `token ${position}`,
