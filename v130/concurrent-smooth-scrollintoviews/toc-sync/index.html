@@ -19,7 +19,15 @@
       gap: var(--space-3);
       height: 460px;
     }
-    @media (max-width: 640px) { .docs { grid-template-columns: 1fr; height: auto; } }
+    @media (max-width: 640px) {
+      .docs {
+        grid-template-columns: 1fr;
+        grid-template-rows: minmax(11rem, 0.45fr) minmax(18rem, 1fr);
+        height: 70vh;
+        min-height: 520px;
+        max-height: 680px;
+      }
+    }
 
     .toc {
       border: 2px solid var(--border-black);
@@ -104,7 +112,8 @@
       font-family: var(--font-mono);
       font-size: 0.78rem;
       color: var(--text-charcoal);
-      white-space: pre;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
       margin: var(--space-3) 0;
     }
   </style>
@@ -122,7 +131,7 @@
   <div class="stage">
     <div class="controls">
       <button id="random">Click a random TOC item</button>
-      <label><input type="checkbox" id="serial"> simulate pre-v130 (sequential, second cancels first)</label>
+      <label><input type="checkbox" id="serial"> simulate pre-v130 (wait for article, then scroll TOC)</label>
     </div>
 
     <div class="docs">
@@ -140,19 +149,24 @@
     <h2>what changed</h2>
     <p>Before Chrome 130, <code>scrollIntoView({behavior: "smooth"})</code> on a scroll container would cancel any other in-flight smooth scroll on <em>another</em> container — even if the two containers had no parent/child relationship. The browser tracked exactly one active smooth-scroll operation per top-level scroll attempt.</p>
     <p>That made the canonical docs / books / long-form layout pattern impossible to write without a JS animation loop: tap a TOC entry → the article scrolls to the heading <em>and</em> the TOC scrolls to keep the entry visible. Whichever <code>scrollIntoView</code> call fired second would silently snap the first to its end position.</p>
-    <p>Chrome 130 aligned with Firefox and Safari: smooth scrolls on containers that are <em>neither descendants nor ancestors of one another</em> run concurrently. The default-on checkbox above (turn it off) replays the old behaviour using sequential timing — you can see the TOC entry snap into view instantly while the article animates smoothly.</p>
+    <p>Chrome 130 aligned with Firefox and Safari: smooth scrolls on containers that are <em>neither descendants nor ancestors of one another</em> run concurrently. Turn on the simulator above to replay the old defensive workaround: wait for the article&apos;s smooth scroll to finish, then start the TOC scroll as a second beat.</p>
   </section>
 
   <section>
     <h2>the code</h2>
-<pre><code>tocList.addEventListener("click", (e) => {
+<pre><code>tocList.addEventListener("click", async (e) => {
   const li = e.target.closest("li[data-target]");
   if (!li) return;
 
-  // Chrome 130+: these animate together.
   const heading = body.querySelector(`#${li.dataset.target}`);
-  heading.scrollIntoView({ behavior: "smooth", block: "start" });
-  li.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  if (serial.checked) {
+    await scrollAndWait(heading, body, { block: "start" });
+    await scrollAndWait(li, toc, { block: "nearest" });
+  } else {
+    // Chrome 130+: these animate together.
+    heading.scrollIntoView({ behavior: "smooth", block: "start" });
+    li.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
 });</code></pre>
   </section>
 
@@ -204,47 +218,117 @@
 
   const meta = document.getElementById("meta");
   const serial = document.getElementById("serial");
+  const toc = document.getElementById("toc");
+  let runId = 0;
 
-  function activate(id, source) {
+  function isVisibleWithin(element, scroller) {
+    const elementRect = element.getBoundingClientRect();
+    const scrollerRect = scroller.getBoundingClientRect();
+    return elementRect.top >= scrollerRect.top && elementRect.bottom <= scrollerRect.bottom;
+  }
+
+  function waitForScrollEnd(scroller, timeoutMs = 1600) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (reason) => {
+        if (settled) return;
+        settled = true;
+        scroller.removeEventListener("scrollend", onEnd);
+        clearTimeout(timer);
+        resolve(reason);
+      };
+      const onEnd = () => done("scrollend");
+      const timer = setTimeout(() => done("timeout"), timeoutMs);
+      scroller.addEventListener("scrollend", onEnd, { once: true });
+    });
+  }
+
+  async function scrollAndWait(element, scroller, options) {
+    const alreadyVisible = isVisibleWithin(element, scroller);
+    const waitForEnd = alreadyVisible ? null : waitForScrollEnd(scroller);
+    element.scrollIntoView({ behavior: "smooth", ...options });
+    return alreadyVisible ? "already visible" : await waitForEnd;
+  }
+
+  function movement(start) {
+    return {
+      body: body.scrollTop - start.body,
+      toc: toc.scrollTop - start.toc,
+    };
+  }
+
+  function formatPx(value) {
+    return `${Math.round(value)}px`;
+  }
+
+  function serialResult(delta) {
+    const bodyMoved = Math.abs(delta.body) > 4;
+    const tocMoved = Math.abs(delta.toc) > 4;
+    if (bodyMoved && tocMoved) return "result: two visible beats, not concurrent";
+    if (bodyMoved) return "result: article moved first; TOC entry was already visible";
+    if (tocMoved) return "result: article was already at target; TOC moved second";
+    return "result: both targets were already visible";
+  }
+
+  function setActive(id) {
     for (const li of tocList.querySelectorAll("li")) {
       li.classList.toggle("active", li.dataset.target === id);
     }
+  }
+
+  async function activate(id, source) {
+    const currentRun = ++runId;
+    setActive(id);
     const heading = body.querySelector("#" + id);
     const li = tocList.querySelector(`li[data-target="${id}"]`);
     if (!heading || !li) return;
 
     const t0 = performance.now();
-    const startBodyTop = body.scrollTop;
-    const startTocTop = document.getElementById("toc").scrollTop;
+    const start = { body: body.scrollTop, toc: toc.scrollTop };
 
     if (serial.checked) {
-      // Pre-v130 simulation: fire serially, the second one's smooth ends
-      // up snapping because the engine cancels in-flight smooths.
-      heading.scrollIntoView({ behavior: "smooth", block: "start" });
-      // immediately fire a second smooth on the TOC; in pre-130 this
-      // would cancel the first. We approximate by doing instant after rAF.
-      requestAnimationFrame(() => {
-        li.scrollIntoView({ behavior: "auto", block: "nearest" });
-      });
-    } else {
-      // Chrome 130 path: concurrent smooth scrolls — both animate.
-      heading.scrollIntoView({ behavior: "smooth", block: "start" });
-      li.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    }
-
-    // Measure how much each moved at +600ms to confirm both animated.
-    setTimeout(() => {
-      const dBody = body.scrollTop - startBodyTop;
-      const dToc = document.getElementById("toc").scrollTop - startTocTop;
       meta.textContent =
         `clicked: ${id} (source: ${source})\n` +
-        `mode:    ${serial.checked ? "pre-v130 (sequential)" : "Chrome 130+ (concurrent smooth)"}\n` +
-        `body scroller moved:  ${dBody}px\n` +
-        `toc scroller moved:   ${dToc}px\n` +
-        ((Math.abs(dBody) > 4 && Math.abs(dToc) > 4)
-          ? "both animated together"
-          : (Math.abs(dToc) > 4 ? "toc animated, body snapped" : "body animated, toc snapped"));
-    }, 650);
+        "mode:    pre-v130 simulator\n" +
+        "phase:   1/2 article smooth scroll running; TOC is waiting";
+      const bodyEndReason = await scrollAndWait(heading, body, { block: "start" });
+      if (currentRun !== runId) return;
+      const afterBody = movement(start);
+      meta.textContent =
+        `clicked: ${id} (source: ${source})\n` +
+        "mode:    pre-v130 simulator\n" +
+        `phase:   2/2 article finished via ${bodyEndReason}; TOC smooth scroll now starts\n` +
+        `body moved before TOC: ${formatPx(afterBody.body)}\n` +
+        `toc moved before TOC:  ${formatPx(afterBody.toc)}`;
+      const tocEndReason = await scrollAndWait(li, toc, { block: "nearest" });
+      if (currentRun !== runId) return;
+      const delta = movement(start);
+      meta.textContent =
+        `clicked: ${id} (source: ${source})\n` +
+        "mode:    pre-v130 simulator (sequential workaround)\n" +
+        `article scroll finished before TOC started (${bodyEndReason})\n` +
+        `toc scroll finished after the second request (${tocEndReason})\n` +
+        `body scroller moved:  ${formatPx(delta.body)}\n` +
+        `toc scroller moved:   ${formatPx(delta.toc)}\n` +
+        `elapsed: ${Math.round(performance.now() - t0)}ms\n` +
+        serialResult(delta);
+    } else {
+      // Chrome 130 path: concurrent smooth scrolls — both animate.
+      const bodyWait = scrollAndWait(heading, body, { block: "start" });
+      const tocWait = scrollAndWait(li, toc, { block: "nearest" });
+      await Promise.all([bodyWait, tocWait]);
+      if (currentRun !== runId) return;
+      const delta = movement(start);
+      const bothMoved = Math.abs(delta.body) > 4 && Math.abs(delta.toc) > 4;
+      meta.textContent =
+        `clicked: ${id} (source: ${source})\n` +
+        "mode:    Chrome 130+ (concurrent smooth)\n" +
+        "requests: article and TOC scrollIntoView() fired in the same task\n" +
+        `body scroller moved:  ${formatPx(delta.body)}\n` +
+        `toc scroller moved:   ${formatPx(delta.toc)}\n` +
+        `elapsed: ${Math.round(performance.now() - t0)}ms\n` +
+        (bothMoved ? "result: both animated during the same run" : "result: one scroller was already at its target");
+    }
   }
 
   tocList.addEventListener("click", (e) => {
@@ -258,8 +342,8 @@
     activate(s.id, "random");
   });
 
-  // Default selection.
-  activate("intro", "init");
+  // Default selection without scrolling the page on load.
+  setActive("intro");
 </script>
 </body>
 </html>
