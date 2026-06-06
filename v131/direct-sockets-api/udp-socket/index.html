@@ -27,6 +27,10 @@
     .card h3 { font-family: var(--font-display); font-size: 1rem; margin: 0 0 var(--space-2); }
     .card .role { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); }
     .status { font-family: var(--font-mono); font-size: 0.8rem; padding: 0.5rem 0.8rem; border: 2px solid var(--border-black); background: var(--bg-stone); display: inline-block; margin: var(--space-3) 0; }
+    .status.ok { color: var(--accent-emerald); }
+    .status.warn { color: var(--accent-amber); }
+    .preset-row { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-2) 0; }
+    .hint { font-family: var(--font-mono); color: var(--text-muted); font-size: 0.78rem; margin-top: var(--space-2); }
   </style>
 </head>
 <body>
@@ -36,7 +40,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v131</p>
     <h1>UDPSocket — datagrams from JavaScript</h1>
-    <p class="lede"><code>TCPSocket</code> got most of the attention, but the Direct Sockets API ships <code>UDPSocket</code> too — for protocols that need datagram semantics: DNS clients, NTP, mDNS / SSDP service discovery, IoT control planes that speak custom binary. Probe support and attempt to bind below.</p>
+    <p class="lede"><code>TCPSocket</code> got most of the attention, but the Direct Sockets API ships <code>UDPSocket</code> too — for protocols that need datagram semantics: DNS clients, NTP, mDNS / SSDP service discovery, IoT control planes that speak custom binary. Probe connected UDP and bound multicast modes below.</p>
   </header>
 
   <div class="warn-block">
@@ -60,9 +64,28 @@
   <div class="toolbar">
     <label>host <input id="host" value="192.168.1.50" size="14"></label>
     <label>port <input id="port" value="53" size="4"></label>
-    <button id="probe">probe UDPSocket</button>
+    <button id="probe">probe connected UDP</button>
     <button id="clear">clear log</button>
   </div>
+
+  <section class="card">
+    <span class="role">multicast bind probe</span>
+    <h3>mDNS / SSDP listener</h3>
+    <p style="font-family: var(--font-serif); font-size: 0.95rem; color: var(--text-charcoal);">Bound UDP listens on a local port, then joins a multicast group through the socket's multicast controller. This is the service-discovery path for protocols like mDNS and SSDP.</p>
+    <div class="toolbar">
+      <label>group <input id="group" value="224.0.0.251" size="15"></label>
+      <label>bind port <input id="bind-port" value="5353" size="4"></label>
+      <label>local <input id="local-address" value="0.0.0.0" size="9"></label>
+      <button id="multicast">probe multicast bind</button>
+    </div>
+    <div class="preset-row">
+      <button class="preset" data-group="224.0.0.251" data-port="5353">mDNS</button>
+      <button class="preset" data-group="239.255.255.250" data-port="1900">SSDP</button>
+      <button class="preset" data-group="10.0.0.5" data-port="5353">invalid unicast</button>
+    </div>
+    <div id="multicast-status" class="status"></div>
+    <div class="hint">Requires an IWA manifest with <code>direct-sockets</code>, <code>direct-sockets-multicast</code>, private/local network policy, and cross-origin isolation.</div>
+  </section>
 
   <div id="support" class="status"></div>
   <div class="log" id="log"></div>
@@ -78,6 +101,19 @@ const { writable, readable } = await sock.opened;
 
 const writer = writable.getWriter();
 await writer.write({ data: new Uint8Array([0x12, 0x34]) });
+
+const reader = readable.getReader();
+const { value } = await reader.read();
+// value: { data: Uint8Array, remoteAddress, remotePort }</code></pre>
+
+<pre><code>// bound multicast listener for mDNS / SSDP-style discovery
+const socket = new UDPSocket({
+  localAddress: "0.0.0.0",
+  localPort: 5353,
+  multicastAllowAddressSharing: true
+});
+const { readable, multicastController } = await socket.opened;
+await multicastController.joinGroup("224.0.0.251");
 
 const reader = readable.getReader();
 const { value } = await reader.read();
@@ -104,6 +140,12 @@ const { value } = await reader.read();
 
 <script>
   const logEl = document.getElementById("log");
+  const supportEl = document.getElementById("support");
+  const multicastStatus = document.getElementById("multicast-status");
+  const groupEl = document.getElementById("group");
+  const bindPortEl = document.getElementById("bind-port");
+  const localAddressEl = document.getElementById("local-address");
+
   function log(cls, msg) {
     const p = document.createElement("p");
     p.className = cls;
@@ -111,15 +153,76 @@ const { value } = await reader.read();
     logEl.prepend(p);
   }
 
+  function currentPolicy() {
+    return document.permissionsPolicy || document.featurePolicy || null;
+  }
+
+  function policySummary(name) {
+    const policy = currentPolicy();
+    if (!policy) return `${name}=not introspectable`;
+    let advertised;
+    try {
+      if (typeof policy.features === "function") {
+        advertised = policy.features().includes(name);
+      }
+    } catch (error) {
+      return `${name}=unreadable (${error.name})`;
+    }
+    try {
+      if (typeof policy.allowedFeatures === "function") {
+        return `${name}=${policy.allowedFeatures().includes(name) ? "allowed" : "not listed"}`;
+      }
+    } catch (error) {
+      return `${name}=unreadable (${error.name})`;
+    }
+    if (advertised === false) return `${name}=not advertised`;
+    if (advertised === true) return `${name}=known feature`;
+    try {
+      if (typeof policy.allowsFeature === "function") {
+        return `${name}=${policy.allowsFeature(name) ? "allowed" : "blocked"}`;
+      }
+    } catch (error) {
+      return `${name}=unknown (${error.name})`;
+    }
+    return `${name}=not introspectable`;
+  }
+
+  function classifyMulticastGroup(address) {
+    const match = address.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!match) return { ok: false, label: "invalid IPv4 address" };
+    const octets = match.slice(1).map(Number);
+    if (octets.some((octet) => octet > 255)) return { ok: false, label: "invalid IPv4 address" };
+    const [first, second, third, fourth] = octets;
+    if (first < 224 || first > 239) return { ok: false, label: "unicast / not multicast" };
+    if (first === 224 && second === 0 && third === 0 && fourth === 251) return { ok: true, label: "mDNS link-local multicast" };
+    if (first === 239 && second === 255 && third === 255 && fourth === 250) return { ok: true, label: "SSDP site-local multicast" };
+    if (first === 224 && second === 0 && third === 0) return { ok: true, label: "IPv4 link-local multicast" };
+    if (first === 239) return { ok: true, label: "administratively scoped multicast" };
+    return { ok: true, label: "globally scoped multicast" };
+  }
+
+  function updateMulticastStatus() {
+    const group = groupEl.value.trim();
+    const port = parseInt(bindPortEl.value, 10);
+    const groupInfo = classifyMulticastGroup(group);
+    const validPort = Number.isInteger(port) && port > 0 && port <= 65535;
+    multicastStatus.className = "status " + (groupInfo.ok && validPort ? "ok" : "warn");
+    multicastStatus.textContent = groupInfo.ok && validPort
+      ? `ready: bind ${localAddressEl.value.trim()}:${port}, then join ${group} (${groupInfo.label})`
+      : `check inputs: ${groupInfo.label}; port ${validPort ? "ok" : "must be 1-65535"}`;
+  }
+
   const hasUdp = typeof UDPSocket !== "undefined";
-  document.getElementById("support").textContent = hasUdp
+  supportEl.textContent = hasUdp
     ? "supported: globalThis.UDPSocket is defined"
     : "not supported: UDPSocket is undefined on this origin (expected outside an Isolated Web App)";
+  supportEl.className = "status " + (hasUdp ? "ok" : "warn");
 
   document.getElementById("probe").addEventListener("click", async () => {
     const host = document.getElementById("host").value;
     const port = parseInt(document.getElementById("port").value, 10);
     log("", `attempting new UDPSocket({ remoteAddress: "${host}", remotePort: ${port} })…`);
+    log("", `preflight: secure=${window.isSecureContext}, scheme=${location.protocol}, ${policySummary("direct-sockets")}, ${policySummary("local-network")}`);
     if (!hasUdp) {
       log("err", "UDPSocket is undefined; cannot construct. (Open this page in an IWA with the direct-sockets permission policy.)");
       return;
@@ -139,7 +242,66 @@ const { value } = await reader.read();
     }
   });
 
+  document.getElementById("multicast").addEventListener("click", async () => {
+    const group = groupEl.value.trim();
+    const port = parseInt(bindPortEl.value, 10);
+    const localAddress = localAddressEl.value.trim();
+    const groupInfo = classifyMulticastGroup(group);
+    updateMulticastStatus();
+
+    log("", `attempting multicast bind: new UDPSocket({ localAddress: "${localAddress}", localPort: ${port}, multicastAllowAddressSharing: true })`);
+    log("", `preflight: secure=${window.isSecureContext}, scheme=${location.protocol}, ${policySummary("direct-sockets")}, ${policySummary("direct-sockets-multicast")}, ${policySummary("direct-sockets-private")}`);
+
+    if (!groupInfo.ok) {
+      log("err", `not a multicast group: ${group} (${groupInfo.label})`);
+      return;
+    }
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      log("err", "bind port must be between 1 and 65535.");
+      return;
+    }
+    if (!hasUdp) {
+      log("err", "UDPSocket is undefined; multicast bind is unavailable outside an IWA or without the Direct Sockets feature enabled.");
+      return;
+    }
+
+    let socket;
+    try {
+      socket = new UDPSocket({
+        localAddress,
+        localPort: port,
+        multicastAllowAddressSharing: true,
+      });
+      const opened = await socket.opened;
+      log("ok", `bound ${opened.localAddress || localAddress}:${opened.localPort || port}.`);
+      const controller = opened.multicastController || socket.multicastController;
+      if (!controller || typeof controller.joinGroup !== "function") {
+        log("err", "bound UDP opened, but multicastController.joinGroup() is unavailable. The direct-sockets-multicast permission is likely missing or the browser has only unicast UDP.");
+        return;
+      }
+      await controller.joinGroup(group);
+      log("ok", `joined multicast group ${group}:${port} (${groupInfo.label}).`);
+      if (typeof controller.leaveGroup === "function") {
+        await controller.leaveGroup(group);
+        log("ok", `left multicast group ${group}.`);
+      }
+    } catch (e) {
+      log("err", `${e.name}: ${e.message}`);
+    } finally {
+      if (socket && typeof socket.close === "function") socket.close();
+    }
+  });
+
   document.getElementById("clear").addEventListener("click", () => logEl.innerHTML = "");
+  document.querySelectorAll(".preset").forEach((button) => {
+    button.addEventListener("click", () => {
+      groupEl.value = button.dataset.group;
+      bindPortEl.value = button.dataset.port;
+      updateMulticastStatus();
+    });
+  });
+  [groupEl, bindPortEl, localAddressEl].forEach((input) => input.addEventListener("input", updateMulticastStatus));
+  updateMulticastStatus();
 </script>
 </body>
 </html>

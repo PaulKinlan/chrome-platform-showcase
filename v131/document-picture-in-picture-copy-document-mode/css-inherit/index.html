@@ -15,6 +15,8 @@
     .design-card.minimal { background: var(--bg-paper); color: var(--text-black); font-family: system-ui; border: 1px solid var(--text-black); box-shadow: none; }
     .design-card h3 { margin: 0 0 var(--space-2); }
     .design-card button { margin-top: 0.5rem; }
+    .status { font-family: var(--font-mono); font-size: 0.82rem; padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-stone); margin: var(--space-3) 0; }
+    .mode-note { max-width: 60ch; }
   </style>
 </head>
 <body>
@@ -24,19 +26,24 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v131</p>
     <h1>style inheritance: host theme follows the PiP</h1>
-    <p class="lede">Pick a design (cyber, editorial, minimal). Open the PiP window. Notice the card inside the PiP picks up the host's styles thanks to copy-style-sheets. Before this and the v131 quirks-mode fix, the popout was a bare unstyled document.</p>
+    <p class="lede">Pick a design (cyber, editorial, minimal). Open the PiP window with copied styles, then open the same card without copied styles. The v131 option makes the popout inherit the host theme instead of rendering as a bare unstyled document.</p>
   </header>
 
+  <div class="status" id="status"></div>
+
   <div class="toolbar">
-    <label>theme</label>
+    <label for="theme">theme</label>
     <select id="theme">
       <option value="cyber" selected>cyber</option>
       <option value="editorial">editorial</option>
       <option value="minimal">minimal</option>
     </select>
-    <button id="open">open PiP</button>
+    <button id="open-styled">open with copyStyleSheets</button>
+    <button id="open-bare">open without copyStyleSheets</button>
     <button id="close" disabled>close PiP</button>
   </div>
+
+  <p class="mode-note">The two buttons clone the same node. Only the request option changes, so the PiP window either receives this page's <code>&lt;link&gt;</code>/<code>&lt;style&gt;</code> sheets or falls back to browser defaults.</p>
 
   <div class="preview">
     <div class="design-card cyber" id="card">
@@ -65,6 +72,18 @@
   const themes = ["cyber","editorial","minimal"];
   const card = document.getElementById("card");
   const sel = document.getElementById("theme");
+  const statusEl = document.getElementById("status");
+  const closeButton = document.getElementById("close");
+  const hasDocPiP = "documentPictureInPicture" in window;
+
+  function setStatus(message) {
+    statusEl.textContent = message;
+  }
+
+  setStatus(hasDocPiP
+    ? "supported: documentPictureInPicture is available; choose styled or bare PiP."
+    : "not supported: Document Picture-in-Picture is unavailable in this browser.");
+
   function applyTheme() {
     themes.forEach(t => card.classList.remove(t));
     card.classList.add(sel.value);
@@ -75,31 +94,68 @@
   }
   sel.addEventListener("change", applyTheme);
   let pip = null;
-  document.getElementById("open").addEventListener("click", async () => {
-    if (!("documentPictureInPicture" in window)) { alert("Document Picture-in-Picture unavailable in this browser"); return; }
+
+  function waitForFrame(win) {
+    return new Promise(resolve => win.requestAnimationFrame(() => win.requestAnimationFrame(resolve)));
+  }
+
+  async function copyRegularStyleSheetsFallback(targetDocument) {
+    const loads = [];
+    document.querySelectorAll('link[rel="stylesheet"]').forEach(source => {
+      const link = targetDocument.createElement("link");
+      link.rel = "stylesheet";
+      link.href = source.href;
+      loads.push(new Promise(resolve => {
+        link.addEventListener("load", resolve, { once: true });
+        link.addEventListener("error", resolve, { once: true });
+      }));
+      targetDocument.head.appendChild(link);
+    });
+    document.querySelectorAll("style").forEach(source => {
+      const style = targetDocument.createElement("style");
+      style.textContent = source.textContent;
+      targetDocument.head.appendChild(style);
+    });
+    await Promise.all(loads);
+    await waitForFrame(targetDocument.defaultView);
+  }
+
+  async function openPiP(copyStyleSheets) {
+    if (!hasDocPiP) {
+      setStatus("fallback: requestWindow was not called because Document Picture-in-Picture is missing.");
+      return;
+    }
     try {
-      pip = await documentPictureInPicture.requestWindow({ width: 320, height: 220 });
-      [...document.styleSheets].forEach(sheet => {
-        try {
-          const link = pip.document.createElement("link");
-          link.rel = "stylesheet";
-          link.href = sheet.href || "";
-          if (sheet.href) pip.document.head.appendChild(link);
-        } catch (e) {}
-      });
-      const style = pip.document.createElement("style");
-      style.textContent = document.querySelector("style")?.textContent || "";
-      pip.document.head.appendChild(style);
+      pip?.close();
+      pip = await documentPictureInPicture.requestWindow({ width: 320, height: 220, copyStyleSheets });
       const clone = card.cloneNode(true);
       clone.id = "pip-card";
       pip.document.body.appendChild(clone);
-      pip.document.body.style.margin = "0";
-      pip.document.body.style.padding = "1rem";
-      pip.window.addEventListener("pagehide", () => { pip = null; document.getElementById("close").disabled = true; });
-      document.getElementById("close").disabled = false;
-    } catch (e) { console.error(e); }
-  });
-  document.getElementById("close").addEventListener("click", () => { if (pip) pip.close(); });
+      pip.addEventListener("pagehide", () => { pip = null; closeButton.disabled = true; });
+      closeButton.disabled = false;
+      await waitForFrame(pip);
+
+      const nativeSheetCount = pip.document.styleSheets.length;
+      const usedManualFallback = copyStyleSheets && nativeSheetCount === 0;
+      if (usedManualFallback) {
+        await copyRegularStyleSheetsFallback(pip.document);
+      }
+
+      const style = pip.getComputedStyle(clone);
+      const mode = copyStyleSheets ? "copyStyleSheets: true" : "copyStyleSheets: false";
+      const copyStatus = usedManualFallback
+        ? "native copied stylesheet count 0; manual regular-sheet fallback applied for visual contrast"
+        : `native copied stylesheet count ${nativeSheetCount}`;
+      setStatus(`opened PiP with ${mode}; ${copyStatus}; card background ${style.backgroundColor}, border ${style.borderTopWidth} ${style.borderTopStyle}, font ${style.fontFamily}.`);
+    } catch (e) {
+      console.error(e);
+      setStatus(`requestWindow rejected: ${e.name} - ${e.message}`);
+    }
+  }
+
+  document.getElementById("open-styled").addEventListener("click", () => openPiP(true));
+  document.getElementById("open-bare").addEventListener("click", () => openPiP(false));
+  closeButton.addEventListener("click", () => { if (pip) pip.close(); });
 </script>
 </body>
 </html>

@@ -26,7 +26,7 @@
     }
     .probe-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
       gap: var(--space-3);
       margin: var(--space-4) 0;
     }
@@ -39,9 +39,32 @@
       font-size: 0.78rem;
     }
     .probe .name { color: var(--text-muted); }
-    .probe .val { font-weight: 600; }
+    .probe .val { font-weight: 600; margin: 0.25rem 0; }
+    .probe .detail { color: var(--text-charcoal); line-height: 1.45; }
     .probe .ok { color: var(--accent-emerald); }
     .probe .bad { color: var(--accent-rose); }
+    .probe .warn { color: var(--accent-amber); }
+    .error-map {
+      width: 100%;
+      border-collapse: collapse;
+      margin: var(--space-4) 0;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+    }
+    .error-map th,
+    .error-map td {
+      border: 1px solid var(--border-black);
+      padding: 0.45rem;
+      text-align: left;
+      vertical-align: top;
+      background: var(--bg-paper);
+    }
+    .error-map th {
+      background: var(--bg-stone);
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
     .log { font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin: var(--space-3) 0; max-height: 220px; overflow-y: auto; }
     .log p { margin: 0.1rem 0; }
   </style>
@@ -53,7 +76,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v131</p>
     <h1>Direct Sockets API</h1>
-    <p class="lede">TCPSocket and UDPSocket from JavaScript - bypassing the HTTP layer entirely. Restricted to Isolated Web Apps with the <code>direct-sockets</code> permission policy. This page probes for the constructors and tries to open a connection so you can see the exact rejection on a normal origin.</p>
+    <p class="lede">TCPSocket and UDPSocket from JavaScript - bypassing the HTTP layer entirely. Restricted to secure Isolated Web Apps with the <code>direct-sockets</code> permissions-policy gate. This page probes the origin, policy, and constructors before trying to open a connection so you can see which precondition failed.</p>
   </header>
 
   <div class="warn-block">
@@ -61,13 +84,31 @@
     Outside an Isolated Web App these constructors are either undefined or throw on <code>open()</code>. The probe + try-it buttons below show exactly what your browser exposes here.
   </div>
 
-  <div class="probe-grid" id="probes"></div>
+  <section>
+    <h2>precondition gates</h2>
+    <div class="probe-grid" id="probes"></div>
+  </section>
+
+  <section>
+    <h2>error-name map</h2>
+    <table class="error-map">
+      <thead>
+        <tr><th>error</th><th>likely gate</th><th>what to check next</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>ReferenceError</code> / constructor undefined</td><td>API not exposed</td><td>Check Chrome version, flag state, IWA install state, and <code>isolated-app:</code> origin.</td></tr>
+        <tr><td><code>SecurityError</code></td><td>Origin or isolation gate</td><td>Check secure context, cross-origin isolation, IWA scheme, and manifest permissions.</td></tr>
+        <tr><td><code>NotAllowedError</code></td><td>Permissions-policy gate</td><td>Check <code>direct-sockets</code>, local/loopback/private network policy, and enterprise/user policy.</td></tr>
+        <tr><td><code>NetworkError</code> / <code>AbortError</code></td><td>Endpoint or transport failure</td><td>Check DNS, port reachability, firewall, private-network target gates, and protocol handshake.</td></tr>
+      </tbody>
+    </table>
+  </section>
 
   <h2>try it</h2>
   <div class="toolbar">
-    <label style="font-family: var(--font-mono); font-size: 0.85rem;">host</label>
+    <label for="host" style="font-family: var(--font-mono); font-size: 0.85rem;">host</label>
     <input type="text" id="host" value="example.com">
-    <input type="number" id="port" value="80">
+    <input type="number" id="port" value="80" aria-label="port">
     <button id="run">open TCPSocket</button>
   </div>
 
@@ -98,21 +139,167 @@ await w.write(new TextEncoder().encode("GET / HTTP/1.0\r\n\r\n"));</code></pre>
   const probes = document.getElementById("probes");
   const logEl = document.getElementById("log");
   function log(s) { const p = document.createElement("p"); p.textContent = new Date().toLocaleTimeString() + " - " + s; logEl.prepend(p); }
-  function probe(name, ok) {
+
+  function currentPolicy() {
+    return document.permissionsPolicy || document.featurePolicy || null;
+  }
+
+  function policyProbe(name) {
+    const policy = currentPolicy();
+    if (!policy) {
+      return {
+        state: "warn",
+        value: "not introspectable",
+        detail: "document.permissionsPolicy / featurePolicy is unavailable in this browser.",
+      };
+    }
+
+    let advertised;
+    try {
+      if (typeof policy.features === "function") {
+        advertised = policy.features().includes(name);
+      }
+    } catch (error) {
+      return {
+        state: "warn",
+        value: "read failed",
+        detail: `${error.name}: ${error.message}`,
+      };
+    }
+
+    try {
+      if (typeof policy.allowedFeatures === "function") {
+        const allowed = policy.allowedFeatures().includes(name);
+        return {
+          state: allowed ? "ok" : "bad",
+          value: allowed ? "allowed" : "not allowed",
+          detail: `allowedFeatures() ${allowed ? "includes" : "does not include"} "${name}".`,
+        };
+      }
+    } catch (error) {
+      return {
+        state: "warn",
+        value: "read failed",
+        detail: `${error.name}: ${error.message}`,
+      };
+    }
+
+    if (advertised === false) {
+      return {
+        state: "warn",
+        value: "not advertised",
+        detail: `features() does not list "${name}" in this browser context.`,
+      };
+    }
+    if (advertised === true) {
+      return {
+        state: "warn",
+        value: "known feature",
+        detail: "This browser lists the policy name but not the current allow state.",
+      };
+    }
+
+    try {
+      if (typeof policy.allowsFeature === "function") {
+        const allowed = policy.allowsFeature(name);
+        return {
+          state: allowed ? "ok" : "bad",
+          value: allowed ? "allowed" : "blocked",
+          detail: `allowsFeature("${name}") returned ${allowed}.`,
+        };
+      }
+    } catch (error) {
+      return {
+        state: "warn",
+        value: "unknown directive",
+        detail: `${error.name}: ${error.message}`,
+      };
+    }
+
+    return {
+      state: "warn",
+      value: "not introspectable",
+      detail: "Policy object exists but does not expose allowsFeature(), allowedFeatures(), or features().",
+    };
+  }
+
+  function probe(name, state, value, detail) {
     const d = document.createElement("div");
     d.className = "probe";
-    d.innerHTML = `<div class="name">${name}</div><div class="val ${ok ? "ok" : "bad"}">${ok ? "available" : "undefined"}</div>`;
+    const nameEl = document.createElement("div");
+    nameEl.className = "name";
+    nameEl.textContent = name;
+    const valueEl = document.createElement("div");
+    valueEl.className = `val ${state}`;
+    valueEl.textContent = value;
+    const detailEl = document.createElement("div");
+    detailEl.className = "detail";
+    detailEl.textContent = detail;
+    d.append(nameEl, valueEl, detailEl);
     probes.appendChild(d);
   }
-  probe("TCPSocket", typeof TCPSocket !== "undefined");
-  probe("UDPSocket", typeof UDPSocket !== "undefined");
-  probe("TCPServerSocket", typeof TCPServerSocket !== "undefined");
-  probe("isolated context", self.crossOriginIsolated === true);
+
+  function booleanProbe(name, ok, good, bad, detail) {
+    probe(name, ok ? "ok" : "bad", ok ? good : bad, detail);
+  }
+
+  booleanProbe(
+    "secure context",
+    window.isSecureContext === true,
+    "yes",
+    "no",
+    "Direct Sockets is exposed only to secure contexts; localhost is secure, plain HTTP elsewhere is not.",
+  );
+  booleanProbe(
+    "IWA URL scheme",
+    location.protocol === "isolated-app:",
+    "isolated-app:",
+    location.protocol,
+    "Installed Isolated Web Apps load from isolated-app:// origins; a normal localhost page stays outside the gate.",
+  );
+  booleanProbe(
+    "cross-origin isolated",
+    self.crossOriginIsolated === true,
+    "yes",
+    "no",
+    "IWA manifests also enable the cross-origin-isolated permission policy for APIs that require isolation.",
+  );
+
+  const directSocketsPolicy = policyProbe("direct-sockets");
+  probe("direct-sockets policy", directSocketsPolicy.state, directSocketsPolicy.value, directSocketsPolicy.detail);
+  for (const policyName of ["local-network", "loopback-network", "direct-sockets-private"]) {
+    const result = policyProbe(policyName);
+    probe(`${policyName} policy`, result.state, result.value, `${result.detail} Needed when socket targets enter private, loopback, or legacy private-address gates.`);
+  }
+
+  booleanProbe(
+    "TCPSocket constructor",
+    typeof TCPSocket !== "undefined",
+    typeof TCPSocket,
+    "undefined",
+    "The constructor appears only after the IWA and direct-sockets gates are satisfied.",
+  );
+  booleanProbe(
+    "UDPSocket constructor",
+    typeof UDPSocket !== "undefined",
+    typeof UDPSocket,
+    "undefined",
+    "Datagram sockets share the same direct-sockets preconditions.",
+  );
+  booleanProbe(
+    "TCPServerSocket constructor",
+    typeof TCPServerSocket !== "undefined",
+    typeof TCPServerSocket,
+    "undefined",
+    "Inbound listening uses the same constructor gate.",
+  );
 
   document.getElementById("run").addEventListener("click", async () => {
     const host = document.getElementById("host").value;
     const port = +document.getElementById("port").value;
     log("opening TCPSocket(" + host + ":" + port + ")");
+    log(`preflight: secure=${window.isSecureContext}, scheme=${location.protocol}, crossOriginIsolated=${self.crossOriginIsolated}`);
+    log(`preflight: direct-sockets policy is ${directSocketsPolicy.value}`);
     try {
       if (typeof TCPSocket === "undefined") throw new Error("TCPSocket not defined");
       const sock = new TCPSocket(host, port);

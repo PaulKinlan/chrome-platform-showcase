@@ -21,6 +21,10 @@
     .support { font-family: var(--font-mono); font-size: 0.8rem; padding: 0.5rem 0.8rem; border: 2px solid var(--border-black); background: var(--bg-stone); display: inline-block; margin: var(--space-3) 0; }
     .log { font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); margin: var(--space-3) 0; max-height: 160px; overflow-y: auto; }
     .log p { margin: 0.1rem 0; }
+    .probe-panel { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); margin: var(--space-4) 0; }
+    .probe-panel h2 { margin-top: 0; }
+    .probe-readout { font-family: var(--font-mono); font-size: 0.8rem; margin: var(--space-2) 0; }
+    .probe-panel button { margin-top: var(--space-2); }
   </style>
 </head>
 <body>
@@ -30,7 +34,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v131</p>
     <h1>Document PiP - copy document mode</h1>
-    <p class="lede"><code>copyStyleSheets: true</code> tells the Document PiP window to inherit every stylesheet from this page. Toggle the option and click the button - the popped-out window picks up the editorial styling automatically.</p>
+    <p class="lede"><code>copyStyleSheets: true</code> tells the Document PiP window to inherit every regular stylesheet from this page. Toggle the option and compare it with a constructed <code>CSSStyleSheet</code> attached through <code>adoptedStyleSheets</code>.</p>
   </header>
 
   <div class="support" id="support"></div>
@@ -46,6 +50,16 @@
     <p style="font-family: var(--font-serif); color: var(--text-charcoal);">A toy player view. With copyStyleSheets on, the PiP window will look like this. Off, you get unstyled content.</p>
     <span class="pill">now playing</span>
     <span class="pill">04:12 / 18:33</span>
+    <span class="constructed-chip" id="constructed-marker">constructed CSSStyleSheet marker</span>
+  </div>
+
+  <div class="probe-panel">
+    <h2>adoptedStyleSheets probe</h2>
+    <p>The blue pills are styled by this page's regular <code>&lt;style&gt;</code> block. The constructed marker is styled only by a runtime-created <code>CSSStyleSheet</code> assigned to <code>document.adoptedStyleSheets</code>.</p>
+    <p class="probe-readout" id="host-probe">Host probe pending.</p>
+    <p class="probe-readout" id="pip-probe">Open a PiP window to compare copied regular styles with copied constructed styles.</p>
+    <button id="late-style">inject late stylesheet after PiP opens</button>
+    <p class="probe-readout" id="late-probe">Late stylesheet probe has not run yet.</p>
   </div>
 
   <div class="log" id="log"></div>
@@ -74,24 +88,137 @@ win.document.body.append(node.cloneNode(true));</code></pre>
 
 <script>
   const logEl = document.getElementById("log");
+  const hostProbeEl = document.getElementById("host-probe");
+  const pipProbeEl = document.getElementById("pip-probe");
+  const lateProbeEl = document.getElementById("late-probe");
   function log(s) { const p = document.createElement("p"); p.textContent = new Date().toLocaleTimeString() + " - " + s; logEl.prepend(p); }
 
   const has = "documentPictureInPicture" in window;
+  const hasConstructedSheets = "CSSStyleSheet" in window && "adoptedStyleSheets" in Document.prototype;
   document.getElementById("support").textContent = has
-    ? "supported: window.documentPictureInPicture is defined"
-    : "not supported - the buttons will throw";
+    ? `supported: window.documentPictureInPicture is defined; constructed stylesheets ${hasConstructedSheets ? "available" : "unavailable"}`
+    : "not supported - Document Picture-in-Picture is unavailable in this browser";
+
+  if (hasConstructedSheets) {
+    try {
+      const constructedSheet = new CSSStyleSheet();
+      constructedSheet.replaceSync(`
+        .constructed-chip {
+          display: inline-block;
+          background: var(--accent-emerald);
+          color: var(--text-black);
+          border: 2px dashed var(--text-black);
+          padding: 0.2rem 0.5rem;
+          font-family: var(--font-mono);
+          font-size: 0.78rem;
+          margin: 0.3rem 0.3rem 0 0;
+        }
+      `);
+      document.adoptedStyleSheets = [...document.adoptedStyleSheets, constructedSheet];
+    } catch (e) {
+      log("constructed stylesheet install failed: " + e.name + " - " + e.message);
+    }
+  }
+
+  function snapshotStyles(doc) {
+    const view = doc.defaultView;
+    const regular = doc.querySelector(".pill");
+    const constructed = doc.querySelector(".constructed-chip");
+    const regularStyle = regular ? view.getComputedStyle(regular) : null;
+    const constructedStyle = constructed ? view.getComputedStyle(constructed) : null;
+    return {
+      regularBackground: regularStyle?.backgroundColor || "missing",
+      regularColor: regularStyle?.color || "missing",
+      constructedBackground: constructedStyle?.backgroundColor || "missing",
+      constructedBorderStyle: constructedStyle?.borderTopStyle || "missing",
+      constructedFont: constructedStyle?.fontFamily || "missing"
+    };
+  }
+
+  function ensureLateChip(doc) {
+    const source = doc.querySelector("#src");
+    if (!source) return null;
+    let chip = source.querySelector(".late-chip");
+    if (!chip) {
+      chip = doc.createElement("span");
+      chip.className = "late-chip";
+      chip.textContent = "late stylesheet marker";
+      source.appendChild(chip);
+    }
+    return chip;
+  }
+
+  function snapshotLateStyle(doc) {
+    const chip = doc.querySelector(".late-chip");
+    if (!chip) return { background: "missing", borderStyle: "missing" };
+    const style = doc.defaultView.getComputedStyle(chip);
+    return { background: style.backgroundColor, borderStyle: style.borderTopStyle };
+  }
+
+  const hostStyles = snapshotStyles(document);
+  hostProbeEl.textContent = `Host: regular background ${hostStyles.regularBackground}; constructed background ${hostStyles.constructedBackground}, border ${hostStyles.constructedBorderStyle}.`;
+
+  function comparePiPStyles(copyss, pipStyles) {
+    const regularCopied = pipStyles.regularBackground === hostStyles.regularBackground && pipStyles.regularColor === hostStyles.regularColor;
+    const constructedCopied = pipStyles.constructedBackground === hostStyles.constructedBackground && pipStyles.constructedBorderStyle === hostStyles.constructedBorderStyle;
+    const mode = copyss ? "copyStyleSheets=true" : "copyStyleSheets=false";
+    pipProbeEl.textContent = `PiP ${mode}: regular link/style copied=${regularCopied}; adopted CSSStyleSheet copied=${constructedCopied}; regular background ${pipStyles.regularBackground}; constructed background ${pipStyles.constructedBackground}, border ${pipStyles.constructedBorderStyle}.`;
+    log(`probe result (${mode}): regular=${regularCopied}, adoptedStyleSheets=${constructedCopied}`);
+  }
 
   let pipWin = null;
   document.getElementById("open").addEventListener("click", async () => {
     const copyss = document.getElementById("copyss").checked;
     log("requesting PiP with copyStyleSheets=" + copyss);
+    if (!has) {
+      pipProbeEl.textContent = "fallback: requestWindow was not called because Document Picture-in-Picture is missing.";
+      log("api missing");
+      return;
+    }
     try {
+      pipWin?.close();
       pipWin = await documentPictureInPicture.requestWindow({ width: 420, height: 260, copyStyleSheets: copyss });
       const clone = document.getElementById("src").cloneNode(true);
       pipWin.document.body.append(clone);
       pipWin.document.body.style.margin = "16px";
+      await new Promise(resolve => pipWin.requestAnimationFrame(() => pipWin.requestAnimationFrame(resolve)));
+      comparePiPStyles(copyss, snapshotStyles(pipWin.document));
+      lateProbeEl.textContent = "PiP is open. Inject a late stylesheet to test whether post-open opener styles propagate.";
       log("PiP opened - check the popped window");
     } catch (e) { log("rejected: " + e.name + " - " + e.message); }
+  });
+  document.getElementById("late-style").addEventListener("click", async () => {
+    if (!pipWin) {
+      lateProbeEl.textContent = "Open a PiP window first; the late stylesheet probe compares opener and existing PiP documents.";
+      log("late stylesheet probe skipped: no PiP window");
+      return;
+    }
+    let style = document.getElementById("late-style-probe");
+    if (!style) {
+      style = document.createElement("style");
+      style.id = "late-style-probe";
+      style.textContent = `
+        .late-chip {
+          display: inline-block;
+          background: var(--accent-rose);
+          color: var(--bg-ivory);
+          border: 2px solid var(--text-black);
+          padding: 0.2rem 0.5rem;
+          font-family: var(--font-mono);
+          font-size: 0.78rem;
+          margin: 0.3rem 0.3rem 0 0;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+    ensureLateChip(document);
+    ensureLateChip(pipWin.document);
+    await new Promise(resolve => requestAnimationFrame(() => pipWin.requestAnimationFrame(resolve)));
+    const hostLate = snapshotLateStyle(document);
+    const pipLate = snapshotLateStyle(pipWin.document);
+    const propagated = hostLate.background === pipLate.background && hostLate.borderStyle === pipLate.borderStyle;
+    lateProbeEl.textContent = `Late stylesheet propagation: ${propagated}. Host marker ${hostLate.background}/${hostLate.borderStyle}; PiP marker ${pipLate.background}/${pipLate.borderStyle}.`;
+    log(`late stylesheet propagation=${propagated}`);
   });
   document.getElementById("close").addEventListener("click", () => {
     if (pipWin) { pipWin.close(); pipWin = null; log("closed"); }
