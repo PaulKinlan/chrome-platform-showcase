@@ -160,14 +160,14 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v131</p>
     <h1>beforetoggle Interceptor</h1>
-    <p class="lede">A multi-step wizard dialog that uses <code>beforetoggle</code> to intercept close attempts mid-flow. Instead of a simple dirty-check alert, the dialog catches the close, slides to an in-dialog confirmation step, and lets the user choose: resume or abandon. Calling <code>event.preventDefault()</code> keeps the dialog open while the internal state changes.</p>
+    <p class="lede">A multi-step wizard dialog that sends close attempts through <code>requestClose()</code>, catches the cancellable <code>cancel</code> event mid-flow, and then logs the final <code>beforetoggle</code> transition when the close is allowed. Instead of a simple dirty-check alert, the dialog slides to an in-dialog confirmation step and lets the user choose: resume or abandon.</p>
   </header>
 
   <section class="stage">
     <div class="toggle-controls">
       <label>
         <input type="checkbox" id="intercept-toggle" checked>
-        enable beforetoggle interception
+        enable cancel-event interception
       </label>
     </div>
 
@@ -199,16 +199,16 @@
 
     <!-- Steps -->
     <div class="dialog-body" id="step-1">
-      <label>Project name</label>
+      <label for="proj-name">Project name</label>
       <input type="text" id="proj-name" placeholder="My Awesome Project">
-      <label>Description</label>
+      <label for="proj-desc">Description</label>
       <textarea rows="3" id="proj-desc" placeholder="What does this project do?"></textarea>
     </div>
 
     <div class="dialog-body" id="step-2" style="display:none">
-      <label>Visibility</label>
+      <label for="proj-vis">Visibility</label>
       <select id="proj-vis"><option>Public</option><option>Private</option><option>Internal</option></select>
-      <label>Default branch</label>
+      <label for="proj-branch">Default branch</label>
       <input type="text" id="proj-branch" value="main">
     </div>
 
@@ -242,16 +242,21 @@
 <pre><code>let currentStep = 1;
 let showingExitConfirm = false;
 
-dialog.addEventListener("beforetoggle", (e) => {
-  if (e.newState !== "closed") return;
+cancelButton.addEventListener("click", () =&gt; dialog.requestClose("cancel"));
+
+dialog.addEventListener("cancel", (e) =&gt; {
   if (!interceptEnabled) return;
   if (currentStep <= 1) return; // step 1 has no data yet
 
-  // Prevent the default close
+  // Prevent this close request
   e.preventDefault();
 
   // Instead: show an in-dialog confirmation
   showExitConfirm();
+});
+
+dialog.addEventListener("beforetoggle", (e) =&gt; {
+  console.log(e.oldState, e.newState, e.cancelable);
 });
 
 function showExitConfirm() {
@@ -267,9 +272,7 @@ resumeBtn.onclick = () => {
 
 abandonBtn.onclick = () => {
   showingExitConfirm = false;
-  interceptEnabled = false; // disable guard for this close
-  dialog.close();
-  interceptEnabled = true;
+  dialog.close("abandon");
 };</code></pre>
   </section>
 
@@ -277,7 +280,7 @@ abandonBtn.onclick = () => {
     <h2>see also</h2>
     <ul>
       <li><a href="../">Dialog Toggle Events</a> — feature index</li>
-      <li><a href="../cancel-with-guard/">Cancel a close with a dirty guard</a> — simpler preventDefault pattern</li>
+      <li><a href="../cancel-with-guard/">Cancel a close with a dirty guard</a> — requestClose and cancel-event guard</li>
       <li><a href="../history-aware-dialog/">History-aware dialog</a> — URL hash integration</li>
       <li><a href="https://chromestatus.com/feature/5078613609938944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
@@ -290,6 +293,7 @@ abandonBtn.onclick = () => {
   const log = document.getElementById("log");
   let currentStep = 1;
   let showingExitConfirm = false;
+  let pendingCloseReason = "none";
 
   function addLog(msg, cls) {
     const ts = new Date().toLocaleTimeString("en", { hour12: false });
@@ -335,15 +339,27 @@ abandonBtn.onclick = () => {
     }
   }
 
-  dialog.addEventListener("beforetoggle", (e) => {
-    if (e.newState !== "closed") return;
+  function requestWizardClose(reason) {
+    if (!dialog.open) return;
+    pendingCloseReason = reason;
+    if (typeof dialog.requestClose === "function") {
+      dialog.requestClose(reason);
+      return;
+    }
+    const event = new Event("cancel", { cancelable: true });
+    if (dialog.dispatchEvent(event)) {
+      dialog.close(reason);
+    }
+  }
+
+  dialog.addEventListener("cancel", (e) => {
     const intercept = document.getElementById("intercept-toggle").checked;
     if (!intercept || currentStep <= 1 || showingExitConfirm) {
-      addLog(`beforetoggle (→closed): allowed through`, "log-allow");
+      addLog(`cancel (${pendingCloseReason}): allowed`, "log-allow");
       return;
     }
     e.preventDefault();
-    addLog(`beforetoggle (→closed): preventDefault() — showing exit confirm`, "log-prevent");
+    addLog(`cancel (${pendingCloseReason}): preventDefault() — showing exit confirm`, "log-prevent");
     document.getElementById("exit-step-label").textContent = currentStep;
     hideAllSteps();
     document.getElementById("step-exit").style.display = "";
@@ -354,6 +370,11 @@ abandonBtn.onclick = () => {
     document.getElementById("cancel-footer-btn").style.display = "none";
   });
 
+  dialog.addEventListener("beforetoggle", (e) => {
+    if (e.newState !== "closed") return;
+    addLog(`beforetoggle: ${e.oldState} → ${e.newState}, cancelable=${e.cancelable}`, "log-allow");
+  });
+
   dialog.addEventListener("toggle", (e) => {
     addLog(`toggle: ${e.oldState} → ${e.newState}`, e.newState === "open" ? "log-allow" : "");
     if (e.newState === "closed") {
@@ -361,6 +382,10 @@ abandonBtn.onclick = () => {
       document.getElementById("next-btn").style.display = "";
       document.getElementById("cancel-footer-btn").style.display = "";
     }
+  });
+  dialog.addEventListener("close", () => {
+    addLog(`close event: returnValue=${dialog.returnValue || "none"}`, "log-allow");
+    pendingCloseReason = "none";
   });
 
   document.getElementById("resume-btn").addEventListener("click", () => {
@@ -375,7 +400,7 @@ abandonBtn.onclick = () => {
     showingExitConfirm = true; // flag so beforetoggle skips interception
     document.getElementById("next-btn").style.display = "";
     document.getElementById("cancel-footer-btn").style.display = "";
-    dialog.close();
+    dialog.close("abandon");
     showStep(1);
     document.getElementById("proj-name").value = "";
     document.getElementById("proj-desc").value = "";
@@ -386,7 +411,7 @@ abandonBtn.onclick = () => {
     else {
       addLog("Wizard complete — closing normally", "log-allow");
       showingExitConfirm = true;
-      dialog.close();
+      dialog.close("complete");
       showStep(1);
       document.getElementById("proj-name").value = "";
       document.getElementById("proj-desc").value = "";
@@ -397,11 +422,15 @@ abandonBtn.onclick = () => {
     if (currentStep > 1) showStep(currentStep - 1);
   });
 
-  document.getElementById("cancel-footer-btn").addEventListener("click", () => dialog.close());
-  document.getElementById("close-x").addEventListener("click", () => dialog.close());
+  document.getElementById("cancel-footer-btn").addEventListener("click", () =>
+    requestWizardClose("footer cancel")
+  );
+  document.getElementById("close-x").addEventListener("click", () => requestWizardClose("close button"));
 
   document.getElementById("open-btn").addEventListener("click", () => {
     showStep(1);
+    dialog.returnValue = "";
+    pendingCloseReason = "none";
     dialog.showModal();
     addLog("dialog opened", "log-allow");
   });
