@@ -22,6 +22,9 @@
     .canvas-card h3 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: var(--space-2); }
     canvas { display: block; max-width: 100%; border: 1px solid var(--border-black); background: var(--bg-paper); }
     .readout { font-family: var(--font-mono); font-size: 0.8rem; background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); margin-top: var(--space-3); }
+    .readout dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 0.8rem; margin: 0; }
+    .readout dt { color: var(--text-muted); }
+    .readout dd { margin: 0; }
     .support {
       font-family: var(--font-mono);
       font-size: 0.78rem;
@@ -58,11 +61,11 @@
       </label>
       <label>flip
         <select id="flip">
-          <option value="none" selected>none</option>
-          <option value="h">horizontal</option>
-          <option value="v">vertical</option>
+          <option value="false" selected>none</option>
+          <option value="true">horizontal</option>
         </select>
       </label>
+      <button id="preset-camera" type="button">Android front camera preset</button>
       <button id="render">build VideoFrame &amp; draw</button>
     </div>
     <div class="grid">
@@ -83,7 +86,7 @@
 <pre><code>const frame = new VideoFrame(canvas, {
   timestamp: 0,
   rotation: 90,     // NEW in 138 (degrees clockwise)
-  flip: "horizontal", // NEW in 138 ("none" | "horizontal" | "vertical")
+  flip: true,       // NEW in 138 (boolean horizontal mirror)
 });
 // frame.rotation / frame.flip are then queryable. Most pipelines
 // (canvas drawImage, MediaStreamTrack capture) honour them.
@@ -106,9 +109,17 @@ ctx.drawImage(frame, 0, 0); // automatically rotated &amp; flipped</code></pre>
   const supportEl = document.getElementById("support");
   let supports = false;
   try {
-    const c = new OffscreenCanvas(2, 2);
-    const f = new VideoFrame(c, { timestamp: 0, rotation: 90, flip: "horizontal" });
-    supports = (f.rotation === 90 && f.flip === "horizontal");
+    const buffer = new Uint8Array(4 * 3 * 4);
+    const f = new VideoFrame(buffer, {
+      format: "RGBA",
+      codedWidth: 4,
+      codedHeight: 3,
+      timestamp: 0,
+      rotation: 90,
+      flip: true,
+    });
+    supports = (f.rotation === 90 && f.flip === true &&
+      f.displayWidth === 3 && f.displayHeight === 4);
     f.close();
   } catch (_) {}
   supportEl.className = "support " + (supports ? "yes" : "no");
@@ -139,10 +150,25 @@ ctx.drawImage(frame, 0, 0); // automatically rotated &amp; flipped</code></pre>
     ctx.strokeRect(2, 2, c.width - 4, c.height - 4);
   }
 
-  document.getElementById("render").addEventListener("click", () => {
+  function displaySize(width, height, rotation) {
+    return (rotation === 90 || rotation === 270)
+      ? { width: height, height: width }
+      : { width, height };
+  }
+
+  function drawManualOriented(ctx, src, rotation, flip) {
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.save();
+    ctx.translate(ctx.canvas.width / 2, ctx.canvas.height / 2);
+    if (flip) ctx.scale(-1, 1);
+    ctx.rotate(rotation * Math.PI / 180);
+    ctx.drawImage(src, -src.width / 2, -src.height / 2);
+    ctx.restore();
+  }
+
+  function renderFrame() {
     const rotation = +document.getElementById("rot").value;
-    const flip = document.getElementById("flip").value;
-    const flipStr = flip === "h" ? "horizontal" : flip === "v" ? "vertical" : "none";
+    const flip = document.getElementById("flip").value === "true";
 
     // Source pixels: a 200x280 "portrait" canvas with an UP arrow
     const src = document.createElement("canvas");
@@ -156,24 +182,57 @@ ctx.drawImage(frame, 0, 0); // automatically rotated &amp; flipped</code></pre>
 
     // Oriented canvas: respect rotation/flip
     const ori = document.getElementById("oriented");
+    const size = displaySize(src.width, src.height, rotation);
+    ori.width = size.width;
+    ori.height = size.height;
     const octx = ori.getContext("2d");
-    octx.clearRect(0, 0, ori.width, ori.height);
-    octx.save();
-    octx.translate(ori.width / 2, ori.height / 2);
-    octx.rotate(rotation * Math.PI / 180);
-    if (flipStr === "horizontal") octx.scale(-1, 1);
-    if (flipStr === "vertical") octx.scale(1, -1);
-    octx.drawImage(src, -src.width / 2, -src.height / 2);
-    octx.restore();
 
-    let supports2 = false, frame;
+    let supports2 = false, frame, dimensions, renderPath = "manual canvas fallback";
     try {
-      frame = new VideoFrame(src, { timestamp: 0, rotation, flip: flipStr });
-      supports2 = (frame.rotation === rotation && frame.flip === flipStr);
+      frame = new VideoFrame(src, { timestamp: 0, rotation, flip });
+      supports2 = (frame.rotation === rotation && frame.flip === flip);
+      dimensions = {
+        codedWidth: frame.codedWidth,
+        codedHeight: frame.codedHeight,
+        displayWidth: frame.displayWidth,
+        displayHeight: frame.displayHeight,
+        rotation: frame.rotation,
+        flip: frame.flip,
+      };
+      ori.width = frame.displayWidth;
+      ori.height = frame.displayHeight;
+      octx.drawImage(frame, 0, 0);
+      renderPath = "native ctx.drawImage(VideoFrame)";
       frame.close();
-    } catch (_) {}
-    document.getElementById("readout").textContent = "new VideoFrame(src, { timestamp: 0, rotation: " + rotation + ", flip: \"" + flipStr + "\" })  →  " + (supports2 ? "metadata stored on the VideoFrame" : "fallback: metadata not preserved in this browser, applied manually instead");
+    } catch (_) {
+      dimensions = {
+        codedWidth: src.width,
+        codedHeight: src.height,
+        displayWidth: size.width,
+        displayHeight: size.height,
+        rotation,
+        flip,
+      };
+      drawManualOriented(octx, src, rotation, flip);
+    }
+
+    document.getElementById("readout").innerHTML =
+      "<dl>" +
+      "<dt>constructor</dt><dd>new VideoFrame(src, { timestamp: 0, rotation: " + rotation + ", flip: " + flip + " })</dd>" +
+      "<dt>readback</dt><dd>rotation=" + dimensions.rotation + " flip=" + dimensions.flip + "</dd>" +
+      "<dt>coded</dt><dd>" + dimensions.codedWidth + " x " + dimensions.codedHeight + "</dd>" +
+      "<dt>display</dt><dd>" + dimensions.displayWidth + " x " + dimensions.displayHeight + "</dd>" +
+      "<dt>render path</dt><dd>" + (supports2 ? renderPath : renderPath + " (metadata unsupported)") + "</dd>" +
+      "<dt>composition</dt><dd>rotate clockwise, then mirror horizontally when flip is true</dd>" +
+      "</dl>";
+  }
+
+  document.getElementById("preset-camera").addEventListener("click", () => {
+    document.getElementById("rot").value = "90";
+    document.getElementById("flip").value = "true";
+    renderFrame();
   });
+  document.getElementById("render").addEventListener("click", renderFrame);
 
   // Initial draw
   document.getElementById("render").click();

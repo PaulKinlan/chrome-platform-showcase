@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Encode-decode round-trip — VideoFrame orientation — Chrome 138</title>
+  <title>Encode-decode carriage check — VideoFrame orientation — Chrome 138</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
     .stage {
@@ -54,8 +54,8 @@
 
   <header class="lede-block">
     <p class="eyebrow">demo · v138</p>
-    <h1>Encode &rarr; decode round-trip</h1>
-    <p class="lede">The motivation case from the spec: an Android camera produces a portrait frame, the container records orientation as metadata, but a decoded <code>VideoFrame</code> historically had no way to carry that. Run the encoder, run the decoder, see whether <code>rotation</code> + <code>flip</code> survive the trip.</p>
+    <h1>Encode &rarr; decode carriage check</h1>
+    <p class="lede">An Android camera can capture sensor-native pixels and attach portrait orientation as <code>VideoFrame</code> metadata. Run a VP8 WebCodecs round-trip and inspect whether the decoded frame keeps <code>rotation</code> + <code>flip</code> or comes back normalized for this codec/backend.</p>
   </header>
 
   <div id="support" class="support">checking VideoEncoder/Decoder support&hellip;</div>
@@ -72,11 +72,11 @@
       </label>
       <label>flip
         <select id="flip">
-          <option value="none" selected>none</option>
-          <option value="horizontal">horizontal (front camera mirror)</option>
+          <option value="false" selected>false</option>
+          <option value="true">true (horizontal mirror)</option>
         </select>
       </label>
-      <button id="run">encode &rarr; decode &rarr; render</button>
+      <button id="run">encode &rarr; decode &rarr; inspect</button>
     </div>
 
     <div class="grid3">
@@ -89,7 +89,7 @@
         <canvas id="decoded" width="240" height="320"></canvas>
       </div>
       <div class="stage-card">
-        <h3>3. rendered honouring metadata</h3>
+        <h3>3. rendered from decoded metadata or sidecar</h3>
         <canvas id="rendered" width="320" height="320"></canvas>
       </div>
     </div>
@@ -103,22 +103,24 @@
 const sourceFrame = new VideoFrame(srcCanvas, {
   timestamp: 0,
   rotation: 90,              // NEW in 138
-  flip: "horizontal",        // NEW in 138
+  flip: true,                // NEW in 138 (horizontal mirror)
 });
 
 // 2. encode it
 encoder.encode(sourceFrame);
 
-// 3. on the decoder side, the new VideoFrame carries
-//    the same metadata through to the renderer.
+// 3. on the decoder side, inspect what the codec returned.
 const decoder = new VideoDecoder({
   output: (frame) =&gt; {
-    console.log(frame.rotation, frame.flip); // 90, "horizontal"
+    const preserved =
+      frame.rotation === sourceFrame.rotation &amp;&amp;
+      frame.flip === sourceFrame.flip;
+    console.log(frame.rotation, frame.flip, preserved);
     frame.close();
   },
   error: console.error,
 });</code></pre>
-    <p>Before Chrome 138, the only way to carry orientation across the encode/decode boundary was a separate JS sidecar &mdash; awkward to wire, easy to lose during a worker hop or a transmuxed format. Now the metadata travels on the <code>VideoFrame</code> itself.</p>
+    <p>Before Chrome 138, decoded frames had no standard <code>rotation</code> / <code>flip</code> fields to inspect. The fields now exist on <code>VideoFrame</code>; whether an encode/decode path serializes them is still codec and backend specific, so production pipelines should verify the path and keep a sidecar/container value when needed.</p>
   </section>
 
   <section>
@@ -126,6 +128,7 @@ const decoder = new VideoDecoder({
     <ul>
       <li><a href="../">VideoFrame orientation metadata</a> &mdash; feature index</li>
       <li><a href="../video-orient/">VideoFrame { rotation, flip } &mdash; constructor demo</a></li>
+      <li><a href="../codec-orientation-carriage/">Codec-specific orientation carriage</a></li>
       <li><a href="https://w3c.github.io/webcodecs/#dom-videoframe-rotation" target="_blank" rel="noopener">WebCodecs spec &mdash; rotation</a></li>
       <li><a href="https://chromestatus.com/feature/5128855343595520" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
@@ -149,15 +152,23 @@ const decoder = new VideoDecoder({
   let supportsMeta = false;
   if (supports) {
     try {
-      const c = new OffscreenCanvas(2, 2);
-      const f = new VideoFrame(c, { timestamp: 0, rotation: 90, flip: "horizontal" });
-      supportsMeta = (f.rotation === 90 && f.flip === "horizontal");
+      const buffer = new Uint8Array(4 * 3 * 4);
+      const f = new VideoFrame(buffer, {
+        format: "RGBA",
+        codedWidth: 4,
+        codedHeight: 3,
+        timestamp: 0,
+        rotation: 90,
+        flip: true,
+      });
+      supportsMeta = (f.rotation === 90 && f.flip === true &&
+        f.displayWidth === 3 && f.displayHeight === 4);
       f.close();
     } catch (_) {}
   }
   supportEl.className = "support " + (supportsMeta ? "yes" : "no");
   supportEl.textContent = supportsMeta
-    ? "VideoEncoder / VideoDecoder available, VideoFrame carries { rotation, flip }"
+    ? "VideoEncoder / VideoDecoder available, source VideoFrame exposes { rotation, flip }"
     : (supports ? "WebCodecs present but VideoFrame doesn't preserve rotation/flip — falling back to manual transform" : "WebCodecs not available in this browser");
 
   function paintSource(c, label) {
@@ -186,25 +197,43 @@ const decoder = new VideoDecoder({
     ctx.strokeRect(2, 2, c.width - 4, c.height - 4);
   }
 
-  function drawFrameWithMeta(canvas, src, rotation, flip) {
+  function strokeCanvas(canvas) {
     const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.save();
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.rotate(rotation * Math.PI / 180);
-    if (flip === "horizontal") ctx.scale(-1, 1);
-    if (flip === "vertical") ctx.scale(1, -1);
-    ctx.drawImage(src, -src.width / 2, -src.height / 2);
-    ctx.restore();
     ctx.strokeStyle = "#000";
     ctx.lineWidth = 2;
     ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
   }
 
+  function drawFrameWithMeta(canvas, src, rotation, flip) {
+    const ctx = canvas.getContext("2d");
+    const sourceWidth = src.width ?? src.codedWidth;
+    const sourceHeight = src.height ?? src.codedHeight;
+    const quarterTurn = rotation === 90 || rotation === 270;
+    canvas.width = quarterTurn ? sourceHeight : sourceWidth;
+    canvas.height = quarterTurn ? sourceWidth : sourceHeight;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    if (flip) ctx.scale(-1, 1);
+    ctx.rotate(rotation * Math.PI / 180);
+    ctx.drawImage(src, -sourceWidth / 2, -sourceHeight / 2, sourceWidth, sourceHeight);
+    ctx.restore();
+    strokeCanvas(canvas);
+  }
+
+  function drawDecodedFrame(canvas, frame) {
+    canvas.width = frame.displayWidth;
+    canvas.height = frame.displayHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(frame, 0, 0);
+    strokeCanvas(canvas);
+  }
+
   $("run").addEventListener("click", async () => {
     log.innerHTML = "";
     const rotation = +$("rot").value;
-    const flip = $("flip").value;
+    const flip = $("flip").value === "true";
 
     const src = $("src");
     paintSource(src, `sensor ${src.width}x${src.height}`);
@@ -213,14 +242,14 @@ const decoder = new VideoDecoder({
     let sourceFrame;
     try {
       sourceFrame = new VideoFrame(src, { timestamp: 0, rotation, flip });
-      logLine("ok", `   VideoFrame metadata: rotation=${sourceFrame.rotation}, flip="${sourceFrame.flip}"`);
+      logLine("ok", `   VideoFrame metadata: rotation=${sourceFrame.rotation}, flip=${sourceFrame.flip}, coded=${sourceFrame.codedWidth}x${sourceFrame.codedHeight}, display=${sourceFrame.displayWidth}x${sourceFrame.displayHeight}`);
     } catch (e) {
       logLine("warn", `   VideoFrame construction failed: ${e.message}`);
       return;
     }
 
     if (!supports) {
-      logLine("warn", "WebCodecs not available &mdash; skipping encode/decode and showing direct render");
+      logLine("warn", "WebCodecs not available &mdash; skipping encode/decode and showing direct sidecar render");
       drawFrameWithMeta($("decoded"), src, rotation, flip);
       drawFrameWithMeta($("rendered"), src, rotation, flip);
       sourceFrame.close();
@@ -233,41 +262,55 @@ const decoder = new VideoDecoder({
       if (!supportInfo.supported) throw new Error("vp8 not supported");
 
       const chunks = [];
+      let decoderConfig = null;
       const encoder = new VideoEncoder({
-        output: (chunk, meta) => chunks.push({ chunk, meta }),
+        output: (chunk, meta) => {
+          if (meta?.decoderConfig) decoderConfig = meta.decoderConfig;
+          chunks.push({ chunk, meta });
+        },
         error: (e) => logLine("warn", `encoder error: ${e.message}`),
       });
       encoder.configure({ codec: "vp8", width: src.width, height: src.height, bitrate: 1_000_000, framerate: 30 });
       encoder.encode(sourceFrame, { keyFrame: true });
       await encoder.flush();
       logLine("ok", `2. encoded &rarr; ${chunks.length} chunk(s), ${chunks.reduce((s, c) => s + c.chunk.byteLength, 0)} bytes`);
+      logLine(
+        decoderConfig ? "info" : "warn",
+        decoderConfig ? "   decoder configured from encoder metadata" : "   encoder did not expose decoderConfig; using bare codec fallback",
+      );
 
       let decodedOnce = false;
       const decoder = new VideoDecoder({
         output: (frame) => {
           if (decodedOnce) { frame.close(); return; }
           decodedOnce = true;
-          logLine("ok", `3. decoded VideoFrame: ${frame.codedWidth}x${frame.codedHeight} &mdash; rotation=${frame.rotation ?? "(none)"} flip="${frame.flip ?? "(none)"}"`);
-          const dec = $("decoded");
-          const dctx = dec.getContext("2d");
-          dctx.clearRect(0, 0, dec.width, dec.height);
-          dctx.drawImage(frame, 0, 0, dec.width, dec.height);
-          const r = frame.rotation ?? rotation;
-          const f = frame.flip ?? flip;
-          drawFrameWithMeta($("rendered"), frame, r, f);
-          logLine("info", `4. compositor applied rotation=${r} flip="${f}" &mdash; image upright again`);
+          const decodedRotation = frame.rotation ?? 0;
+          const decodedFlip = frame.flip ?? false;
+          const preserved = decodedRotation === rotation && decodedFlip === flip;
+          logLine(
+            preserved ? "ok" : "warn",
+            `3. decoded VideoFrame: coded=${frame.codedWidth}x${frame.codedHeight}, display=${frame.displayWidth}x${frame.displayHeight} &mdash; rotation=${decodedRotation} flip=${decodedFlip}`,
+          );
+          drawDecodedFrame($("decoded"), frame);
+          if (preserved) {
+            drawDecodedFrame($("rendered"), frame);
+            logLine("ok", `4. decoded metadata preserved; renderer used rotation=${decodedRotation} flip=${decodedFlip}`);
+          } else {
+            drawFrameWithMeta($("rendered"), src, rotation, flip);
+            logLine("warn", `4. metadata changed in this VP8 path; sidecar render used source rotation=${rotation} flip=${flip}`);
+          }
           frame.close();
         },
         error: (e) => logLine("warn", `decoder error: ${e.message}`),
       });
-      decoder.configure({ codec: "vp8" });
+      decoder.configure(decoderConfig ?? { codec: "vp8" });
       for (const { chunk } of chunks) decoder.decode(chunk);
       await decoder.flush();
       decoder.close();
       encoder.close();
       ran = true;
     } catch (e) {
-      logLine("warn", `WebCodecs encode/decode unavailable (${e.message}). Showing simulated decode.`);
+      logLine("warn", `WebCodecs encode/decode unavailable (${e.message}). Showing sidecar render.`);
     }
 
     if (!ran) {
@@ -286,7 +329,7 @@ const decoder = new VideoDecoder({
   $("decoded").getContext("2d").fillRect(0, 0, 240, 320);
   $("rendered").getContext("2d").fillStyle = "#f4f3ee";
   $("rendered").getContext("2d").fillRect(0, 0, 320, 320);
-  logLine("info", `Ready. Press "encode &rarr; decode &rarr; render".`);
+  logLine("info", `Ready. Press "encode &rarr; decode &rarr; inspect".`);
 </script>
 </body>
 </html>

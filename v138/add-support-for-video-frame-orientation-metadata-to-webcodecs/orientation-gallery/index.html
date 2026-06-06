@@ -38,6 +38,8 @@
       padding: 3px 10px; font-family: var(--font-mono); font-size: 0.75rem;
       border: 1px solid var(--border-black);
     }
+    .support-badge.yes { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .support-badge.no { background: var(--accent-rose); color: var(--bg-ivory); }
 
     .code-box {
       background: var(--bg-stone); border: 1px solid var(--border-black);
@@ -95,13 +97,10 @@ console.log(frame.<span class="hi">rotation</span>);   <span class="cm">// 90</s
 console.log(frame.<span class="hi">displayWidth</span>);  <span class="cm">// rotated logical width</span>
 console.log(frame.<span class="hi">displayHeight</span>); <span class="cm">// rotated logical height</span>
 
-<span class="cm">// Draw respecting orientation (canvas 2D)</span>
-const ctx = canvas.getContext('2d');
-ctx.save();
-ctx.translate(canvas.width / 2, canvas.height / 2);
-ctx.rotate(frame.rotation * Math.PI / 180);
-ctx.drawImage(frame, -frame.codedWidth/2, -frame.codedHeight/2);
-ctx.restore();</div>
+<span class="cm">// Canvas drawImage consumes the VideoFrame display orientation</span>
+canvas.width = frame.displayWidth;
+canvas.height = frame.displayHeight;
+canvas.getContext('2d').drawImage(frame, 0, 0);</div>
 
     <div class="info-box">
       <strong>Why it matters:</strong> Mobile video is often recorded in portrait mode and stored
@@ -119,7 +118,7 @@ ctx.restore();</div>
       <li><a href="../video-orient/">Video orient demo</a></li>
       <li><a href="../rotation-matrix-test/">Rotation matrix test</a></li>
       <li><a href="../encode-decode-roundtrip/">Encode-decode roundtrip demo</a></li>
-      <li><a href="../invalid-rotation-probe/">Invalid rotation probe</a></li>
+      <li><a href="../invalid-rotation-probe/">Rotation rounding probe</a></li>
       <li><a href="https://www.w3.org/TR/webcodecs" target="_blank" rel="noopener">WebCodecs spec</a></li>
       <li><a href="https://chromestatus.com/feature/5128855343595520" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
@@ -128,40 +127,52 @@ ctx.restore();</div>
 
 <script>
 const ORIENTATIONS = [
-  { rotation: 0,   flip: false, label: 'Normal (0°)' },
-  { rotation: 0,   flip: true,  label: 'H-flip (0°+flip)' },
-  { rotation: 180, flip: false, label: 'Upside-down (180°)' },
-  { rotation: 180, flip: true,  label: '180°+flip' },
-  { rotation: 90,  flip: false, label: 'CW 90°' },
-  { rotation: 90,  flip: true,  label: 'CW 90°+flip' },
-  { rotation: 270, flip: false, label: 'CCW 90° (CW 270°)' },
-  { rotation: 270, flip: true,  label: 'CCW 90°+flip' },
+  { exif: 1, rotation: 0,   flip: false, label: 'Normal (0°)' },
+  { exif: 2, rotation: 0,   flip: true,  label: 'H-flip (0°+flip)' },
+  { exif: 3, rotation: 180, flip: false, label: 'Upside-down (180°)' },
+  { exif: 4, rotation: 180, flip: true,  label: '180°+flip' },
+  { exif: 6, rotation: 90,  flip: false, label: 'CW 90°' },
+  { exif: 7, rotation: 90,  flip: true,  label: 'CW 90°+flip' },
+  { exif: 8, rotation: 270, flip: false, label: 'CCW 90° (CW 270°)' },
+  { exif: 5, rotation: 270, flip: true,  label: 'CCW 90°+flip' },
 ];
 
 // Support probe
 const hasRotation = (() => {
   try {
-    const vf = new VideoFrame(new ImageData(2, 2), { timestamp: 0 });
-    const ok = typeof vf.rotation !== 'undefined';
+    const vf = new VideoFrame(new Uint8Array(4 * 3 * 4), {
+      format: 'RGBA',
+      codedWidth: 4,
+      codedHeight: 3,
+      timestamp: 0,
+      rotation: 90,
+      flip: true,
+    });
+    const ok = vf.rotation === 90 && vf.flip === true &&
+      vf.displayWidth === 3 && vf.displayHeight === 4;
     vf.close();
     return ok;
   } catch { return false; }
 })();
 
 const sb = document.getElementById('support-badge');
-sb.textContent = 'VideoFrame.rotation: ' + (hasRotation ? '✓ supported' : '✗ not supported (visual demo only)');
-sb.style.background = hasRotation ? '#d4f5e2' : '#fde8e8';
+sb.textContent = 'VideoFrame.orientation: ' + (hasRotation ? 'supported' : 'not supported (visual fallback)');
+sb.className = 'support-badge ' + (hasRotation ? 'yes' : 'no');
 
-function drawOriented(ctx, pixels, W, H, rotation, flip) {
+function drawOriented(ctx, source, rotation, flip) {
   ctx.save();
   ctx.translate(ctx.canvas.width / 2, ctx.canvas.height / 2);
   if (flip) ctx.scale(-1, 1);
   ctx.rotate(rotation * Math.PI / 180);
-  ctx.putImageData(pixels, -W / 2, -H / 2);
+  ctx.drawImage(source, -source.width / 2, -source.height / 2);
   ctx.restore();
 }
 
-function makeSourcePixels(W, H) {
+function makeSourceCanvas(W, H) {
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
   const data = new Uint8ClampedArray(W * H * 4);
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
@@ -181,49 +192,67 @@ function makeSourcePixels(W, H) {
       data[i] = 255; data[i+1] = 255; data[i+2] = 255;
     }
   }
-  return new ImageData(data, W, H);
+  ctx.putImageData(new ImageData(data, W, H), 0, 0);
+  return canvas;
 }
 
 async function generate() {
   const gallery = document.getElementById('gallery');
   gallery.innerHTML = '';
   const W = 80, H = 60;
-  const source = makeSourcePixels(W, H);
+  const source = makeSourceCanvas(W, H);
 
   for (const orient of ORIENTATIONS) {
     const card = document.createElement('div');
     card.className = 'frame-card';
 
-    const sw = (orient.rotation === 90 || orient.rotation === 270) ? H : W;
-    const sh = (orient.rotation === 90 || orient.rotation === 270) ? W : H;
+    let sw = (orient.rotation === 90 || orient.rotation === 270) ? H : W;
+    let sh = (orient.rotation === 90 || orient.rotation === 270) ? W : H;
+    let codedWidth = W;
+    let codedHeight = H;
+    let frameRotation = orient.rotation;
+    let frameFlip = orient.flip;
+    let renderNote = 'manual fallback';
+
+    let vf;
+    if (hasRotation) {
+      try {
+        vf = new VideoFrame(source, { timestamp: 0, rotation: orient.rotation, flip: orient.flip });
+        sw = vf.displayWidth;
+        sh = vf.displayHeight;
+        codedWidth = vf.codedWidth;
+        codedHeight = vf.codedHeight;
+        frameRotation = vf.rotation;
+        frameFlip = vf.flip;
+        renderNote = 'native VideoFrame draw';
+      } catch (e) {
+        renderNote = 'fallback: ' + e.message.slice(0, 36);
+      }
+    }
 
     const cv = document.createElement('canvas');
     cv.width = sw; cv.height = sh;
     const ctx = cv.getContext('2d');
     ctx.fillStyle = '#f0f0f0';
     ctx.fillRect(0, 0, sw, sh);
-    drawOriented(ctx, source, W, H, orient.rotation, orient.flip);
+    if (vf) {
+      ctx.drawImage(vf, 0, 0);
+    } else {
+      drawOriented(ctx, source, orient.rotation, orient.flip);
+    }
 
-    card.innerHTML = `<h4>${orient.label}</h4>`;
+    card.innerHTML = `<h4>EXIF ${orient.exif}: ${orient.label}</h4>`;
     card.appendChild(cv);
 
     let metaHtml = `<div class="orient-badge">rotation: ${orient.rotation}°${orient.flip ? ', flip' : ''}</div>`;
+    metaHtml += `<div class="meta-line">coded: ${codedWidth}×${codedHeight}</div>`;
     metaHtml += `<div class="meta-line">display: ${sw}×${sh}</div>`;
-
-    // Try creating a VideoFrame with orientation metadata
-    if (hasRotation) {
-      try {
-        const bitmap = await createImageBitmap(cv);
-        const vf = new VideoFrame(bitmap, { timestamp: 0, rotation: orient.rotation, flip: orient.flip });
-        metaHtml += `<div class="meta-line">VF.rotation: ${vf.rotation}° VF.flip: ${vf.flip}</div>`;
-        vf.close();
-      } catch (e) {
-        metaHtml += `<div class="meta-line" style="color:var(--accent-rose)">VideoFrame: ${e.message.slice(0,40)}</div>`;
-      }
-    }
+    metaHtml += `<div class="meta-line">VF.rotation: ${frameRotation}° VF.flip: ${frameFlip}</div>`;
+    metaHtml += `<div class="meta-line">render: ${renderNote}; rotate, then horizontal flip</div>`;
 
     card.insertAdjacentHTML('beforeend', metaHtml);
     gallery.appendChild(card);
+    if (vf) vf.close();
   }
 }
 
