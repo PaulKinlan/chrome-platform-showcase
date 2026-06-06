@@ -24,7 +24,7 @@
       font-family: var(--font-mono);
       font-size: 0.78rem;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
+      letter-spacing: 0;
       color: var(--text-muted);
       margin: 0 0 var(--space-2);
     }
@@ -34,6 +34,10 @@
       border: 1px solid var(--border-black);
       background: var(--bg-stone);
       scroll-behavior: smooth;
+    }
+    .scroller.interrupted {
+      border-color: var(--accent-rose);
+      box-shadow: inset 0 0 0 3px var(--bg-paper);
     }
     .item {
       padding: var(--space-3);
@@ -47,6 +51,38 @@
       color: var(--bg-ivory);
     }
     .controls { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-3) 0; }
+    .controls .secondary {
+      background: var(--bg-paper);
+      color: var(--text-black);
+      box-shadow: var(--thin-shadow);
+    }
+    .readout {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-3);
+      margin: var(--space-3) 0;
+    }
+    @media (max-width: 640px) { .readout { grid-template-columns: 1fr; } }
+    .metric {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-3);
+      min-height: 8rem;
+    }
+    .metric[data-state="pass"] { border-color: var(--accent-emerald); }
+    .metric[data-state="warn"] { border-color: var(--accent-rose); }
+    .metric h3 {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin: 0 0 var(--space-2);
+    }
+    .metric strong { display: block; font-family: var(--font-mono); margin-bottom: var(--space-2); }
+    .metric p { margin: 0; color: var(--text-charcoal); }
     .log {
       background: var(--bg-stone);
       border: 1px solid var(--border-black);
@@ -84,8 +120,22 @@
 
   <div class="controls">
     <button id="both">Scroll both to item 15 (smooth)</button>
+    <button class="secondary" id="serial">Pre-130 serial simulation</button>
     <button id="reset">Reset</button>
   </div>
+
+  <section class="readout" aria-live="polite" aria-label="scroll run measurements">
+    <div class="metric" id="modern-card" data-state="idle">
+      <h3>modern concurrent run</h3>
+      <strong>not run yet</strong>
+      <p>Calls <code>scrollIntoView()</code> on both sibling scrollers in the same frame.</p>
+    </div>
+    <div class="metric" id="serial-card" data-state="idle">
+      <h3>pre-130 counterfactual</h3>
+      <strong>not run yet</strong>
+      <p>Starts A first, then simulates the old interruption before starting B.</p>
+    </div>
+  </section>
 
   <section>
     <h2>log</h2>
@@ -94,12 +144,19 @@
 
   <section>
     <h2>the code</h2>
-<pre><code>const a = document.querySelector("#a .target");
-const b = document.querySelector("#b .target");
+<pre><code>const scrollerA = document.querySelector("#a");
+const targetA = document.querySelector("#a .target");
+const targetB = document.querySelector("#b .target");
 
 // Both scroll concurrently — neither cancels the other.
-a.scrollIntoView({ behavior: "smooth", block: "center" });
-b.scrollIntoView({ behavior: "smooth", block: "center" });</code></pre>
+targetA.scrollIntoView({ behavior: "smooth", block: "center" });
+targetB.scrollIntoView({ behavior: "smooth", block: "center" });
+
+// Counterfactual: interrupt A before starting B to show the old failure mode.
+targetA.scrollIntoView({ behavior: "smooth", block: "center" });
+await new Promise((resolve) => setTimeout(resolve, 140));
+scrollerA.scrollTo({ top: scrollerA.scrollTop, behavior: "instant" });
+targetB.scrollIntoView({ behavior: "smooth", block: "center" });</code></pre>
   </section>
 
   <section>
@@ -114,12 +171,37 @@ b.scrollIntoView({ behavior: "smooth", block: "center" });</code></pre>
 </main>
 <script>
   const logEl = document.getElementById("log");
+  const scrollers = {
+    a: document.getElementById("a"),
+    b: document.getElementById("b"),
+  };
+  const buttons = {
+    both: document.getElementById("both"),
+    serial: document.getElementById("serial"),
+    reset: document.getElementById("reset"),
+  };
+  const cards = {
+    modern: document.getElementById("modern-card"),
+    serial: document.getElementById("serial-card"),
+  };
+
   function log(msg) {
     const p = document.createElement("p");
     p.textContent = `${new Date().toISOString().slice(11, 23)}  ${msg}`;
     logEl.prepend(p);
     while (logEl.children.length > 25) logEl.lastChild.remove();
   }
+
+  function setBusy(isBusy) {
+    Object.values(buttons).forEach((button) => button.disabled = isBusy);
+  }
+
+  function setCard(card, state, value, detail) {
+    card.dataset.state = state;
+    card.querySelector("strong").textContent = value;
+    card.querySelector("p").textContent = detail;
+  }
+
   function fill(scrollerId) {
     const s = document.getElementById(scrollerId);
     s.innerHTML = "";
@@ -133,36 +215,99 @@ b.scrollIntoView({ behavior: "smooth", block: "center" });</code></pre>
   fill("a");
   fill("b");
 
-  function reset() {
-    document.getElementById("a").scrollTop = 0;
-    document.getElementById("b").scrollTop = 0;
+  function snapshot() {
+    return {
+      a: Math.round(scrollers.a.scrollTop),
+      b: Math.round(scrollers.b.scrollTop),
+    };
+  }
+
+  function moved(start, end) {
+    return {
+      a: Math.abs(end.a - start.a),
+      b: Math.abs(end.b - start.b),
+    };
+  }
+
+  function target(scrollerId) {
+    return document.querySelector(`#${scrollerId} .target`);
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function nextFrame() {
+    return new Promise((resolve) => requestAnimationFrame(resolve));
+  }
+
+  function reset({ clearCards = false } = {}) {
+    Object.values(scrollers).forEach((scroller) => {
+      scroller.classList.remove("interrupted");
+      scroller.scrollTo({ top: 0, behavior: "instant" });
+    });
+    if (clearCards) {
+      setCard(cards.modern, "idle", "not run yet", "Calls scrollIntoView() on both sibling scrollers in the same frame.");
+      setCard(cards.serial, "idle", "not run yet", "Starts A first, then simulates the old interruption before starting B.");
+    }
     log("reset both scrollers to top");
   }
   reset();
 
-  document.getElementById("both").addEventListener("click", () => {
+  async function runConcurrent() {
+    setBusy(true);
     reset();
-    requestAnimationFrame(() => {
-      const tA = document.querySelector("#a .target");
-      const tB = document.querySelector("#b .target");
-      const startA = document.getElementById("a").scrollTop;
-      const startB = document.getElementById("b").scrollTop;
-      tA.scrollIntoView({ behavior: "smooth", block: "center" });
-      tB.scrollIntoView({ behavior: "smooth", block: "center" });
-      log("fired scrollIntoView on both targets");
-      setTimeout(() => {
-        const endA = document.getElementById("a").scrollTop;
-        const endB = document.getElementById("b").scrollTop;
-        const aMoved = Math.abs(endA - startA);
-        const bMoved = Math.abs(endB - startB);
-        log(`after 800ms: A moved ${aMoved}px, B moved ${bMoved}px`);
-        if (aMoved > 0 && bMoved > 0) log("→ both animated concurrently ✓");
-        else log("→ one didn't animate — looks like pre-v130 behaviour");
-      }, 800);
-    });
-  });
+    await nextFrame();
+    const start = snapshot();
+    target("a").scrollIntoView({ behavior: "smooth", block: "center" });
+    target("b").scrollIntoView({ behavior: "smooth", block: "center" });
+    log("fired scrollIntoView on both targets in the same frame");
+    await wait(850);
+    const end = snapshot();
+    const delta = moved(start, end);
+    const passed = delta.a > 0 && delta.b > 0;
+    setCard(
+      cards.modern,
+      passed ? "pass" : "warn",
+      `A moved ${delta.a}px, B moved ${delta.b}px`,
+      passed
+        ? "Both independent scrollers moved during the same timed window, demonstrating the Chrome 130 behavior."
+        : "One scroller did not move in the timed window; this would match the old cancellation failure."
+    );
+    log(`after 850ms: A moved ${delta.a}px, B moved ${delta.b}px`);
+    log(passed ? "→ both animated concurrently ✓" : "→ one did not animate in the timed window");
+    setBusy(false);
+  }
 
-  document.getElementById("reset").addEventListener("click", reset);
+  async function runSerialCounterfactual() {
+    setBusy(true);
+    reset();
+    await nextFrame();
+    const start = snapshot();
+    target("a").scrollIntoView({ behavior: "smooth", block: "center" });
+    log("counterfactual: started A first");
+    await wait(140);
+    const interruptedTop = Math.round(scrollers.a.scrollTop);
+    scrollers.a.scrollTo({ top: interruptedTop, behavior: "instant" });
+    scrollers.a.classList.add("interrupted");
+    target("b").scrollIntoView({ behavior: "smooth", block: "center" });
+    log(`counterfactual: interrupted A at ${interruptedTop}px, then started B`);
+    await wait(850);
+    const end = snapshot();
+    const delta = moved(start, end);
+    setCard(
+      cards.serial,
+      "warn",
+      `A ended ${delta.a}px from start, B moved ${delta.b}px`,
+      `This is a labeled simulation of the pre-130 failure mode: A was interrupted at ${interruptedTop}px before B started, so the pair no longer completes together.`
+    );
+    log(`counterfactual result: A ${delta.a}px from start, B ${delta.b}px from start`);
+    setBusy(false);
+  }
+
+  buttons.both.addEventListener("click", runConcurrent);
+  buttons.serial.addEventListener("click", runSerialCounterfactual);
+  buttons.reset.addEventListener("click", () => reset({ clearCards: true }));
 </script>
 </body>
 </html>
