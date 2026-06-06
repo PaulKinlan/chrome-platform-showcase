@@ -35,6 +35,20 @@
       padding: 0.55rem 0.7rem; margin-top: var(--space-2);
     }
     .probe-label { display: block; font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); margin-top: var(--space-3); }
+    .probe-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+    .event-log {
+      background: var(--bg-ivory); border: 1px solid var(--border-black);
+      font-family: var(--font-mono); font-size: 0.76rem;
+      max-height: 18rem; overflow: auto; margin-top: var(--space-4);
+    }
+    .event-log .entry {
+      display: grid; grid-template-columns: 5.5rem 6.5rem 9rem 1fr;
+      gap: var(--space-2); padding: 0.45rem 0.55rem;
+      border-bottom: 1px dashed var(--text-muted);
+    }
+    .event-log .entry:last-child { border-bottom: none; }
+    .event-log .muted { color: var(--text-muted); }
+    .event-log .inputtype { color: var(--accent-blue); }
     .read {
       background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow);
       padding: var(--space-4); margin: var(--space-4) 0;
@@ -46,6 +60,10 @@
     .read .v { color: var(--text-black); }
     .read .v.bad { color: var(--accent-rose); }
     .read .v.ok  { color: var(--accent-emerald); }
+    @media (max-width: 720px) {
+      .read .row,
+      .event-log .entry { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -55,7 +73,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v151</p>
     <h1>Cross-Browser Matrix</h1>
-    <p class="lede">The <code>autocorrect</code> attribute is finally interoperable. Here's the support matrix across engines plus a live probe that reads the IDL property in this browser and reports whether the attribute reflects, inherits, and survives DOM mutation.</p>
+    <p class="lede">The <code>autocorrect</code> attribute is finally interoperable. Here's the support matrix across engines plus a live probe that separates IDL reflection from the browser events produced while you edit text.</p>
   </header>
 
   <div class="warn-block">
@@ -86,11 +104,21 @@
   <section>
     <h2>live probe in this browser</h2>
     <div class="probe-wrap">
-      <label class="probe-label">Plain text input with <code>autocorrect="off"</code> — try typing "teh quick brwon fox"</label>
-      <input class="probe-input" type="text" id="pOff" autocorrect="off" placeholder="autocorrect=off">
+      <p>Type "teh quick brwon fox" into each field, then accept or reject any OS suggestion if one appears. The log records the <code>beforeinput</code>/<code>input</code> events this browser exposes; OS autocorrection itself is still a platform observation, not the same thing as IDL support.</p>
 
-      <label class="probe-label">Plain text input with <code>autocorrect="on"</code></label>
-      <input class="probe-input" type="text" id="pOn" autocorrect="on" placeholder="autocorrect=on">
+      <label class="probe-label" for="pOff">Plain text input with <code>autocorrect="off"</code></label>
+      <input class="probe-input" type="text" id="pOff" autocorrect="off" autocomplete="off" spellcheck="false" placeholder="autocorrect=off">
+
+      <label class="probe-label" for="pOn">Plain text input with <code>autocorrect="on"</code></label>
+      <input class="probe-input" type="text" id="pOn" autocorrect="on" autocomplete="off" spellcheck="true" placeholder="autocorrect=on">
+
+      <div class="probe-actions">
+        <button type="button" id="focusOff">Focus OFF field</button>
+        <button type="button" id="focusOn">Focus ON field</button>
+        <button type="button" id="clearProbe">Clear fields + log</button>
+      </div>
+
+      <div class="event-log" id="eventLog" aria-live="polite"></div>
     </div>
     <div class="read" id="read"></div>
   </section>
@@ -104,6 +132,14 @@ const ok = "autocorrect" in HTMLElement.prototype;
 const inputOff = document.querySelector("#pOff");
 console.log(inputOff.autocorrect);          // false  (autocorrect=off)
 inputOff.autocorrect = true;                 // sets attribute back to "on"
+
+// The behaviour probe is separate: real edits surface through beforeinput/input.
+inputOff.addEventListener("beforeinput", event => {
+  console.log(event.inputType, inputOff.value); // value before the edit lands
+});
+inputOff.addEventListener("input", event => {
+  console.log(event.inputType, inputOff.value); // value after the edit lands
+});
 
 // Inheritance: set on the form, override on a field.
 &lt;form autocorrect="off"&gt;
@@ -119,6 +155,7 @@ inputOff.autocorrect = true;                 // sets attribute back to "on"
       <li><a href="../autocorrect-playground/">Autocorrect Playground</a></li>
       <li><a href="../form-audit-tool/">Form Audit Tool</a></li>
       <li><a href="../inheritance-explorer/">Inheritance Explorer</a></li>
+      <li><a href="https://chromestatus.com/feature/6264645053710336" target="_blank" rel="noopener">ChromeStatus entry</a></li>
       <li><a href="https://html.spec.whatwg.org/multipage/interaction.html#autocorrection" target="_blank" rel="noopener">HTML Living Standard — Autocorrection</a></li>
     </ul>
   </section>
@@ -128,8 +165,42 @@ inputOff.autocorrect = true;                 // sets attribute back to "on"
 
 <script>
   const r = document.getElementById("read");
+  const eventLog = document.getElementById("eventLog");
   const pOff = document.getElementById("pOff");
   const pOn = document.getElementById("pOn");
+  const fields = [pOff, pOn];
+  const editEvents = [];
+  let editEventTotal = 0;
+  const replacementInputTypes = new Set(["insertReplacementText"]);
+  const compositionInputTypes = new Set([
+    "insertCompositionText",
+    "insertFromComposition",
+    "deleteCompositionText",
+  ]);
+
+  const htmlEscapes = new Map([
+    ["&", "&amp;"],
+    ["<", "&lt;"],
+    [">", "&gt;"],
+    ["\"", "&quot;"],
+    ["'", "&#39;"],
+  ]);
+
+  function escapeHTML(value) {
+    return String(value).replace(/[&<>"']/g, char => htmlEscapes.get(char));
+  }
+
+  function fieldName(field) {
+    return field === pOn ? "on field" : "off field";
+  }
+
+  function eventInputType(event) {
+    return "inputType" in event && event.inputType ? event.inputType : "(not exposed)";
+  }
+
+  function eventData(event) {
+    return "data" in event && event.data !== null && event.data !== "" ? event.data : "(none)";
+  }
 
   function check() {
     const idlOnProto = "autocorrect" in HTMLElement.prototype;
@@ -138,6 +209,14 @@ inputOff.autocorrect = true;                 // sets attribute back to "on"
     const onVal = pOn.autocorrect;
     const offAttr = pOff.getAttribute("autocorrect");
     const onAttr = pOn.getAttribute("autocorrect");
+    const observedInputTypes = [...new Set(editEvents.map(entry => entry.inputType))];
+    const replacementEvents = editEvents.filter(entry => replacementInputTypes.has(entry.inputType)).length;
+    const compositionEvents = editEvents.filter(entry => compositionInputTypes.has(entry.inputType)).length;
+    const correctionObservation = replacementEvents
+      ? `${replacementEvents} replacement-style edit event(s) observed`
+      : editEvents.length
+      ? "No replacement-style autocorrection event observed yet"
+      : "Type in a field to start the observation";
 
     function pill(v) {
       return `<span class="v ${v ? 'ok' : 'bad'}">${v ? 'yes' : 'no'}</span>`;
@@ -145,13 +224,68 @@ inputOff.autocorrect = true;                 // sets attribute back to "on"
     r.innerHTML = `
       <div class="row"><div class="label">IDL on HTMLElement.prototype</div>${pill(idlOnProto)}</div>
       <div class="row"><div class="label">IDL on HTMLInputElement.prototype</div>${pill(idlOnInput)}</div>
-      <div class="row"><div class="label">pOff.autocorrect IDL value</div><div class="v">${String(offVal)} (${typeof offVal})</div></div>
-      <div class="row"><div class="label">pOn.autocorrect IDL value</div><div class="v">${String(onVal)} (${typeof onVal})</div></div>
-      <div class="row"><div class="label">pOff attribute reflection</div><div class="v">${offAttr ?? '(none)'}</div></div>
-      <div class="row"><div class="label">pOn attribute reflection</div><div class="v">${onAttr ?? '(none)'}</div></div>
-      <div class="row"><div class="label">user agent</div><div class="v">${navigator.userAgentData?.brands?.map(b => b.brand + ' ' + b.version).join(', ') ?? navigator.userAgent.slice(0,90)}</div></div>
+      <div class="row"><div class="label">pOff.autocorrect IDL value</div><div class="v">${escapeHTML(String(offVal))} (${escapeHTML(typeof offVal)})</div></div>
+      <div class="row"><div class="label">pOn.autocorrect IDL value</div><div class="v">${escapeHTML(String(onVal))} (${escapeHTML(typeof onVal)})</div></div>
+      <div class="row"><div class="label">pOff attribute reflection</div><div class="v">${escapeHTML(offAttr ?? '(none)')}</div></div>
+      <div class="row"><div class="label">pOn attribute reflection</div><div class="v">${escapeHTML(onAttr ?? '(none)')}</div></div>
+      <div class="row"><div class="label">current pOff value</div><div class="v">${escapeHTML(pOff.value || '(empty)')}</div></div>
+      <div class="row"><div class="label">current pOn value</div><div class="v">${escapeHTML(pOn.value || '(empty)')}</div></div>
+      <div class="row"><div class="label">edit events logged</div><div class="v">${editEventTotal} total, ${editEvents.length} shown</div></div>
+      <div class="row"><div class="label">inputType values seen</div><div class="v">${escapeHTML(observedInputTypes.join(', ') || '(none)')}</div></div>
+      <div class="row"><div class="label">IME composition events</div><div class="v">${compositionEvents}</div></div>
+      <div class="row"><div class="label">OS autocorrection observation</div><div class="v">${escapeHTML(correctionObservation)}</div></div>
+      <div class="row"><div class="label">user agent</div><div class="v">${escapeHTML(navigator.userAgentData?.brands?.map(b => b.brand + ' ' + b.version).join(', ') ?? navigator.userAgent.slice(0,90))}</div></div>
     `;
+    renderEventLog();
   }
+
+  function renderEventLog() {
+    if (editEvents.length === 0) {
+      eventLog.innerHTML = '<div class="entry"><div class="muted">waiting</div><div>no events yet</div><div class="inputtype">(none)</div><div>Type in either field to log beforeinput/input activity.</div></div>';
+      return;
+    }
+
+    eventLog.innerHTML = editEvents.map(entry => `
+      <div class="entry">
+        <div class="muted">${escapeHTML(entry.time)}</div>
+        <div>${escapeHTML(entry.field)}</div>
+        <div class="inputtype">${escapeHTML(entry.event)} · ${escapeHTML(entry.inputType)}</div>
+        <div>data=${escapeHTML(entry.data)} · value=${escapeHTML(entry.value || '(empty)')}</div>
+      </div>
+    `).join("");
+  }
+
+  function logEdit(event) {
+    const field = event.currentTarget;
+    editEventTotal += 1;
+    editEvents.unshift({
+      time: new Date().toLocaleTimeString([], { hour12: false }),
+      field: fieldName(field),
+      event: event.type,
+      inputType: eventInputType(event),
+      data: eventData(event),
+      value: field.value,
+    });
+    editEvents.splice(12);
+    check();
+  }
+
+  fields.forEach(field => {
+    field.addEventListener("beforeinput", logEdit);
+    field.addEventListener("input", logEdit);
+  });
+
+  document.getElementById("focusOff").addEventListener("click", () => pOff.focus());
+  document.getElementById("focusOn").addEventListener("click", () => pOn.focus());
+  document.getElementById("clearProbe").addEventListener("click", () => {
+    fields.forEach(field => {
+      field.value = "";
+    });
+    editEvents.length = 0;
+    editEventTotal = 0;
+    check();
+  });
+
   check();
   setInterval(check, 1500);
 </script>
