@@ -24,16 +24,17 @@
   </header>
 
   <div class="toolbar">
-    <label>preset</label>
+    <label for="preset">preset</label>
     <select id="preset">
       <option value="prerender" selected>prerender on hover</option>
       <option value="prefetch">prefetch on navigation</option>
       <option value="prerender-eager">prerender entire section</option>
+      <option value="multi-doc">prefetch + prerender documents</option>
     </select>
     <button id="build">build</button>
   </div>
 
-  <h3 style="font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted);">JSON document</h3>
+  <h3 style="font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted);"><label for="json">JSON document</label></h3>
   <textarea id="json"></textarea>
 
   <div class="grid">
@@ -63,37 +64,103 @@
 
 <script>
   const PRESETS = {
-    prerender: { prerender: [{ where: { href_matches: "/article/*" }, eagerness: "moderate" }] },
-    prefetch: { prefetch: [{ source: "list", urls: ["/", "/about"] }] },
-    "prerender-eager": { prerender: [{ where: { href_matches: "/*" }, eagerness: "eager" }] },
+    prerender: {
+      docs: [{
+        path: "/rules.json",
+        rules: { prerender: [{ where: { href_matches: "/article/*" }, eagerness: "moderate" }] },
+      }],
+    },
+    prefetch: {
+      docs: [{
+        path: "/rules.json",
+        rules: { prefetch: [{ source: "list", urls: ["/", "/about"] }] },
+      }],
+    },
+    "prerender-eager": {
+      docs: [{
+        path: "/rules.json",
+        rules: { prerender: [{ where: { href_matches: "/*" }, eagerness: "eager" }] },
+      }],
+    },
+    "multi-doc": {
+      docs: [
+        {
+          path: "/prefetch-rules.json",
+          rules: { prefetch: [{ source: "list", urls: ["/", "/pricing"] }] },
+        },
+        {
+          path: "/prerender-rules.json",
+          rules: { prerender: [{ where: { href_matches: "/checkout/*" }, eagerness: "moderate" }] },
+        },
+      ],
+    },
   };
+  const presetSelect = document.getElementById("preset");
+  const editor = document.getElementById("json");
+
+  function editorValueForPreset(preset) {
+    if (preset.docs.length === 1) return preset.docs[0].rules;
+    return Object.fromEntries(preset.docs.map(doc => [doc.path, doc.rules]));
+  }
+
+  function docsFromEditor() {
+    const preset = PRESETS[presetSelect.value];
+    const parsed = JSON.parse(editor.value);
+    if (preset.docs.length === 1) {
+      return [{ path: preset.docs[0].path, rules: parsed }];
+    }
+    return Object.entries(parsed)
+      .filter(([path]) => path.startsWith("/"))
+      .map(([path, rules]) => ({ path, rules }));
+  }
+
+  function headerValue(docs) {
+    return docs.map(doc => JSON.stringify(doc.path)).join(", ");
+  }
+
+  function formatDocuments(docs) {
+    return docs
+      .map(doc => `# ${doc.path} (served from same origin)\n${JSON.stringify(doc.rules, null, 2)}`)
+      .join("\n\n");
+  }
+
   function build() {
-    const text = document.getElementById("json").value;
+    let docs;
+    try {
+      docs = docsFromEditor();
+      if (!docs.length) throw new Error("No rule document paths were found.");
+    } catch (error) {
+      document.getElementById("response").textContent = `Cannot build header: ${error.message}`;
+      document.getElementById("handler").textContent = "Fix the JSON document before generating server code.";
+      return;
+    }
+    const specRulesHeader = headerValue(docs);
+    const routeHandlers = docs.map(doc => `app.get("${doc.path}", (req, res) => {
+  res.type("application/speculationrules+json");
+  res.send(${JSON.stringify(doc.rules, null, 2)});
+});`).join("\n\n");
     document.getElementById("response").textContent = `HTTP/1.1 200 OK
 Content-Type: text/html
-Speculation-Rules: "/rules.json"
+Speculation-Rules: ${specRulesHeader}
 
 <!doctype html>...
 
-# /rules.json (served from same origin)
-${text}`;
+# rule documents
+${formatDocuments(docs)}`;
     document.getElementById("handler").textContent = `app.get("/", (req, res) => {
-  res.set("Speculation-Rules", '"/rules.json"');
+  res.set("Speculation-Rules", ${JSON.stringify(specRulesHeader)});
   res.send(html);
 });
 
-app.get("/rules.json", (req, res) => {
-  res.type("application/speculationrules+json");
-  res.send(${text});
-});`;
+${routeHandlers}`;
   }
-  document.getElementById("json").addEventListener("input", build);
-  document.getElementById("preset").addEventListener("change", () => {
-    document.getElementById("json").value = JSON.stringify(PRESETS[document.getElementById("preset").value], null, 2);
+  editor.addEventListener("input", build);
+  presetSelect.addEventListener("change", () => {
+    editor.value = JSON.stringify(editorValueForPreset(PRESETS[presetSelect.value]), null, 2);
     build();
   });
   document.getElementById("build").addEventListener("click", build);
-  document.getElementById("json").value = JSON.stringify(PRESETS.prerender, null, 2);
+  editor.value = JSON.stringify(editorValueForPreset(PRESETS.prerender), null, 2);
   build();
 </script>
 </body>

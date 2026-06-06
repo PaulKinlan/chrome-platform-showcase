@@ -41,6 +41,11 @@
     .verdict.allow { color: var(--accent-emerald); }
     .verdict.deny { color: var(--accent-rose); }
     pre.headers { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+    .probe-status { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
+    .probe-status.ok { border-color: var(--accent-emerald); }
+    .probe-status.warn { border-color: var(--accent-amber); }
+    .probe-status.bad { border-color: var(--accent-rose); }
+    .probe-link { font-family: var(--font-mono); font-size: 0.82rem; }
   </style>
 </head>
 <body>
@@ -50,7 +55,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v131</p>
     <h1>Speculation-Rules header exempt from CSP</h1>
-    <p class="lede">Until 131 a strict <code>script-src</code> CSP would refuse to honour a server-sent <code>Speculation-Rules</code> header. This simulator lets you set a CSP and a header URL and shows the pre/post-131 outcome side by side.</p>
+    <p class="lede">Until 131 a strict <code>script-src</code> CSP would refuse to honour a server-sent <code>Speculation-Rules</code> header. This probe lets you set a CSP and header value, then asks the local server to emit the real headers so Chrome can fetch the referenced rules document.</p>
   </header>
 
   <div class="toolbar">
@@ -63,7 +68,7 @@
       <input id="rules" type="text" value="&quot;/rules.json&quot;">
     </div>
     <div class="field" style="display: flex; align-items: flex-end;">
-      <button id="simulate" style="width: 100%;">simulate</button>
+      <button id="simulate" style="width: 100%;">run top-level probe</button>
     </div>
   </div>
 
@@ -80,8 +85,10 @@
     </div>
   </div>
 
-  <h2>simulated response</h2>
+  <h2>server response and live probe</h2>
+  <div class="probe-status warn" id="probe-status">waiting for probe...</div>
 <pre class="headers" id="sim"></pre>
+  <p class="probe-link"><a id="probe-link" href="#" target="_blank" rel="noopener">open probe document</a></p>
 
   <section>
     <h2>the api</h2>
@@ -104,14 +111,59 @@ Content-Security-Policy: script-src 'self'
 </main>
 
 <script>
-  function run() {
+  let runId = 0;
+  let inputTimer = 0;
+
+  function makeToken() {
+    if (crypto.randomUUID) return crypto.randomUUID().replace(/-/g, "");
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  }
+
+  function parseHeaderDocs(raw) {
+    const docs = [];
+    const pattern = /"((?:\\.|[^"\\])*)"/g;
+    let match;
+    while ((match = pattern.exec(raw)) && docs.length < 4) {
+      const value = match[1].replace(/\\(["\\])/g, "$1");
+      if (value.startsWith("/")) docs.push(value);
+    }
+    return docs.length ? docs : ["/rules.json"];
+  }
+
+  async function pollProbeStatus(token, expectedCount) {
+    const statusUrl = new URL("probe-status", location.href);
+    statusUrl.searchParams.set("token", token);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const response = await fetch(statusUrl, { cache: "no-store" });
+      const result = await response.json();
+      if (result.ruleRequests.length >= expectedCount) return result;
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    const finalResponse = await fetch(statusUrl, { cache: "no-store" });
+    return await finalResponse.json();
+  }
+
+  function openTopLevelProbe(url) {
+    return window.open(url.href, "speculation_rules_header_probe", "popup,width=520,height=300");
+  }
+
+  async function run(options = {}) {
+    const currentRun = ++runId;
+    const openTopLevel = options.openTopLevel === true;
     const csp = document.getElementById("csp").value.trim();
     const rules = document.getElementById("rules").value.trim();
-    document.getElementById("sim").textContent =
-      "HTTP/1.1 200 OK\n" +
-      "Content-Type: text/html\n" +
-      "Content-Security-Policy: " + csp + "\n" +
-      "Speculation-Rules: " + rules + "\n";
+    const probeStatus = document.getElementById("probe-status");
+    const sim = document.getElementById("sim");
+    const expectedDocs = parseHeaderDocs(rules);
+    const token = makeToken();
+    const probeUrl = new URL("header-probe", location.href);
+    probeUrl.searchParams.set("token", token);
+    probeUrl.searchParams.set("csp", csp);
+    probeUrl.searchParams.set("rules", rules);
+    probeUrl.searchParams.set("mode", "echo");
+    probeStatus.className = "probe-status warn";
+    probeStatus.textContent = "calling local header route...";
+    sim.textContent = "waiting for server response...";
 
     // Pre-131: allowed only if CSP doesn't constrain script-src or allows 'unsafe-inline'
     const restricted = /script-src\b/.test(csp) && !/'unsafe-inline'/.test(csp);
@@ -121,10 +173,63 @@ Content-Security-Policy: script-src 'self'
     oldV.className = "verdict " + (restricted ? "deny" : "allow");
     document.getElementById("old-card").classList.toggle("fail", restricted);
     document.getElementById("old-card").classList.toggle("ok", !restricted);
+
+    try {
+      const echo = await fetch(probeUrl, { cache: "no-store" });
+      const emittedSpecRules = echo.headers.get("Speculation-Rules") ||
+        echo.headers.get("X-Demo-Speculation-Rules") ||
+        "(not exposed)";
+      const emittedCsp = echo.headers.get("Content-Security-Policy") || "(none)";
+      if (currentRun !== runId) return;
+      sim.textContent =
+        "HTTP/1.1 200 OK\n" +
+        "Content-Type: text/html\n" +
+        "Content-Security-Policy: " + emittedCsp + "\n" +
+        "Speculation-Rules: " + emittedSpecRules + "\n";
+
+      probeUrl.searchParams.set("mode", "document");
+      document.getElementById("probe-link").href = probeUrl.href;
+      if (!openTopLevel) {
+        probeStatus.textContent =
+          "Server headers verified. Click run top-level probe to open a document response and observe Chrome's rules-document request.";
+        return;
+      }
+      probeStatus.textContent = "opening the header-bearing document as a top-level probe...";
+      const probeWindow = openTopLevelProbe(probeUrl);
+      if (!probeWindow) {
+        probeStatus.className = "probe-status bad";
+        probeStatus.textContent =
+          "The top-level probe window was blocked. Use the probe document link, then rerun the status check.";
+        return;
+      }
+      const observed = await pollProbeStatus(token, expectedDocs.length);
+      if (currentRun !== runId) {
+        probeWindow.close();
+        return;
+      }
+      if (observed.ruleRequests.length >= expectedDocs.length) {
+        probeStatus.className = "probe-status ok";
+        probeStatus.textContent =
+          `Chrome fetched ${observed.ruleRequests.length}/${expectedDocs.length} rules document(s) from the Speculation-Rules header under this CSP: ${observed.ruleRequests.join(", ")}`;
+        probeWindow.close();
+      } else {
+        probeStatus.className = "probe-status bad";
+        probeStatus.textContent =
+          `The header route loaded, but Chrome fetched ${observed.ruleRequests.length}/${expectedDocs.length} rules document(s). Check browser support, flags, or console diagnostics.`;
+      }
+    } catch (error) {
+      probeStatus.className = "probe-status bad";
+      probeStatus.textContent = `Probe failed: ${error.message}`;
+      sim.textContent = "The local header route did not return a readable response.";
+    }
   }
-  document.getElementById("simulate").addEventListener("click", run);
-  document.getElementById("csp").addEventListener("input", run);
-  document.getElementById("rules").addEventListener("input", run);
+  function scheduleRun() {
+    clearTimeout(inputTimer);
+    inputTimer = setTimeout(() => run(), 250);
+  }
+  document.getElementById("simulate").addEventListener("click", () => run({ openTopLevel: true }));
+  document.getElementById("csp").addEventListener("input", scheduleRun);
+  document.getElementById("rules").addEventListener("input", scheduleRun);
   run();
 </script>
 </body>

@@ -15,6 +15,11 @@
     .verdict.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
     .verdict.bad { background: var(--accent-rose); color: var(--bg-ivory); }
     .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; align-items: center; font-family: var(--font-mono); font-size: 0.85rem; }
+    .probe-status { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; margin: var(--space-3) 0; }
+    .probe-status.ok { border-color: var(--accent-emerald); }
+    .probe-status.warn { border-color: var(--accent-amber); }
+    .probe-status.bad { border-color: var(--accent-rose); }
+    .probe-link { font-family: var(--font-mono); font-size: 0.82rem; }
   </style>
 </head>
 <body>
@@ -28,13 +33,14 @@
   </header>
 
   <div class="toolbar">
-    <label>CSP</label>
+    <label for="csp">CSP</label>
     <select id="csp" style="font-family: var(--font-mono); font-size: 0.85rem; padding: 0.4rem; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black);">
       <option value="none">no CSP (default)</option>
       <option value="self" selected>script-src 'self'</option>
       <option value="strict">script-src 'strict-dynamic' 'nonce-abc'</option>
       <option value="locked">script-src 'none'</option>
     </select>
+    <button id="run-probe">run top-level probe</button>
   </div>
 
   <div class="grid">
@@ -61,6 +67,13 @@ Speculation-Rules: "/rules.json"
   </div>
 
   <section>
+    <h2>live header route</h2>
+    <div class="probe-status warn" id="probe-status">waiting for CSP selection...</div>
+    <pre class="h" id="live-headers"></pre>
+    <p class="probe-link"><a id="probe-link" href="#" target="_blank" rel="noopener">open probe document</a></p>
+  </section>
+
+  <section>
     <h2>why exempt the header</h2>
     <p>CSP's script-src directive exists to prevent injected <code>&lt;script&gt;</code> tags. A response header isn't injectable from page content; it's set by the server that already controls the bytes of the response. Applying script-src to it conflated two separate threat models. v131 fixes that.</p>
   </section>
@@ -80,17 +93,131 @@ Speculation-Rules: "/rules.json"
 
 <script>
   const sel = document.getElementById("csp");
-  function apply() {
+  const CSP_HEADERS = {
+    none: "",
+    self: "script-src 'self'; object-src 'none'; base-uri 'none'",
+    strict: "script-src 'strict-dynamic' 'nonce-abc'; object-src 'none'; base-uri 'none'",
+    locked: "script-src 'none'; object-src 'none'; base-uri 'none'",
+  };
+  const CSP_LABELS = {
+    none: "no CSP",
+    self: "script-src 'self'",
+    strict: "script-src 'strict-dynamic' 'nonce-abc'",
+    locked: "script-src 'none'",
+  };
+  let runId = 0;
+
+  function makeToken() {
+    if (crypto.randomUUID) return crypto.randomUUID().replace(/-/g, "");
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  }
+
+  function probeUrl(token, csp, mode) {
+    const url = new URL("../spec-rules-csp/header-probe", location.href);
+    url.searchParams.set("token", token);
+    url.searchParams.set("preset", csp);
+    url.searchParams.set("rules", '"/rules.json"');
+    url.searchParams.set("mode", mode);
+    return url;
+  }
+
+  async function pollProbeStatus(token) {
+    const statusUrl = new URL("../spec-rules-csp/probe-status", location.href);
+    statusUrl.searchParams.set("token", token);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const response = await fetch(statusUrl, { cache: "no-store" });
+      const result = await response.json();
+      if (result.ruleRequests.includes("/rules.json")) return result;
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    const finalResponse = await fetch(statusUrl, { cache: "no-store" });
+    return await finalResponse.json();
+  }
+
+  function openTopLevelProbe(url) {
+    return window.open(url.href, "speculation_rules_csp_probe", "popup,width=520,height=300");
+  }
+
+  async function apply(options = {}) {
+    const openTopLevel = options.openTopLevel === true;
+    const currentRun = ++runId;
     const csp = sel.value;
     const scriptOk = csp === "none";
     const scriptEl = document.getElementById("v-script");
     scriptEl.className = "verdict " + (scriptOk ? "ok" : "bad");
-    scriptEl.textContent = scriptOk ? "allowed (no CSP)" : "blocked by " + csp;
+    scriptEl.textContent = scriptOk ? "allowed (no CSP)" : "blocked by " + CSP_LABELS[csp];
     const headerEl = document.getElementById("v-header");
-    headerEl.className = "verdict ok";
-    headerEl.textContent = "allowed (v131 exempts header from script-src)";
+    const probeStatus = document.getElementById("probe-status");
+    const liveHeaders = document.getElementById("live-headers");
+    const token = makeToken();
+
+    headerEl.className = "verdict";
+    headerEl.textContent = "checking header route...";
+    probeStatus.className = "probe-status warn";
+    probeStatus.textContent = "fetching the server response headers...";
+    liveHeaders.textContent = "waiting for response...";
+
+    try {
+      const echo = await fetch(probeUrl(token, csp, "echo"), { cache: "no-store" });
+      const emittedCsp = echo.headers.get("Content-Security-Policy") || "(none)";
+      const emittedRules = echo.headers.get("Speculation-Rules") ||
+        echo.headers.get("X-Demo-Speculation-Rules") ||
+        "(not exposed)";
+      if (currentRun !== runId) return;
+      liveHeaders.textContent =
+        "HTTP/1.1 200 OK\n" +
+        "Content-Security-Policy: " + emittedCsp + "\n" +
+        "Speculation-Rules: " + emittedRules + "\n\n" +
+        "Expected CSP preset: " + (CSP_HEADERS[csp] || "(none)") + "\n";
+      const documentProbeUrl = probeUrl(token, csp, "document");
+      document.getElementById("probe-link").href = documentProbeUrl.href;
+      if (!openTopLevel) {
+        headerEl.className = "verdict";
+        headerEl.textContent = "header route ready; run top-level probe to observe Chrome";
+        probeStatus.textContent =
+          "Server headers verified. Click run top-level probe to observe Chrome's rules-document request.";
+        return;
+      }
+      probeStatus.textContent = "opening a top-level document with those headers...";
+      const probeWindow = openTopLevelProbe(documentProbeUrl);
+      if (!probeWindow) {
+        headerEl.className = "verdict bad";
+        headerEl.textContent = "top-level probe blocked";
+        probeStatus.className = "probe-status bad";
+        probeStatus.textContent =
+          "The top-level probe window was blocked. Use the probe document link to open the same response.";
+        return;
+      }
+      const observed = await pollProbeStatus(token);
+      if (currentRun !== runId) {
+        probeWindow.close();
+        return;
+      }
+      if (observed.ruleRequests.includes("/rules.json")) {
+        headerEl.className = "verdict ok";
+        headerEl.textContent = "allowed; Chrome fetched /rules.json from the header";
+        probeStatus.className = "probe-status ok";
+        probeStatus.textContent =
+          `Chrome requested ${observed.ruleRequests.join(", ")} while the document carried ${emittedCsp}.`;
+        probeWindow.close();
+      } else {
+        headerEl.className = "verdict bad";
+        headerEl.textContent = "not observed in this browser";
+        probeStatus.className = "probe-status bad";
+        probeStatus.textContent =
+          "The header route loaded, but Chrome did not request /rules.json before the probe timed out.";
+      }
+    } catch (error) {
+      if (currentRun !== runId) return;
+      headerEl.className = "verdict bad";
+      headerEl.textContent = "probe failed";
+      probeStatus.className = "probe-status bad";
+      probeStatus.textContent = `Probe failed: ${error.message}`;
+      liveHeaders.textContent = "The local header route did not return a readable response.";
+    }
   }
-  sel.addEventListener("change", apply);
+  sel.addEventListener("change", () => apply());
+  document.getElementById("run-probe").addEventListener("click", () => apply({ openTopLevel: true }));
   apply();
 </script>
 </body>
