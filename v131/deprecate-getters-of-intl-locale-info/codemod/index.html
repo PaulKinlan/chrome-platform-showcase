@@ -23,6 +23,8 @@
     .stats .num { font-size: 1.4rem; font-family: var(--font-display); display: inline-block; margin-right: var(--space-2); color: var(--accent-blue); }
     .deprecated { color: var(--accent-rose); font-weight: 600; }
     .modern { color: var(--accent-emerald); font-weight: 600; }
+    .skipped { color: var(--accent-amber); font-weight: 600; }
+    .review { color: var(--accent-amber); font-weight: 600; }
     .legend { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); margin: var(--space-2) 0 0; }
   </style>
 </head>
@@ -33,7 +35,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v131</p>
     <h1>Codemod the deprecated getters</h1>
-    <p class="lede">The deprecation is across nine getters that all return arrays. Paste a chunk of TypeScript / JavaScript on the left, and the demo rewrites every <code>loc.calendars</code> into <code>loc.getCalendars()</code> while reporting the call sites it touched.</p>
+    <p class="lede">The deprecation covers seven method-form replacements in the Intl.Locale info proposal, plus legacy getters that still have no method form. Paste a chunk of TypeScript / JavaScript on the left, and the demo rewrites confirmed <code>Intl.Locale</code> call sites while reporting skipped and review-only matches.</p>
   </header>
 
   <div class="grid">
@@ -42,8 +44,10 @@
       <h3>your code</h3>
       <textarea id="src">// before
 const loc = new Intl.Locale("en-US");
+const prefs = { calendars: ["custom"] };
 
 console.log(loc.calendars);
+console.log(prefs.calendars);
 const tz = loc.timeZones?.[0];
 const ts = loc.textInfo;
 const week = loc.weekInfo;
@@ -68,11 +72,11 @@ const wi = loc.weekInfo;
   </div>
 
   <div class="stats" id="stats"></div>
-  <p class="legend">The codemod is a regex pass over <code>(\.)(calendars|timeZones|textInfo|weekInfo|currencies|numberingSystems|hourCycles|collations)(?!\()</code>. Good enough for a one-shot fix; production migrations should run jscodeshift or ts-morph.</p>
+  <p class="legend">The codemod detects variables initialized with <code>new Intl.Locale(...)</code>, rewrites <code>(\.)(calendars|timeZones|textInfo|weekInfo|numberingSystems|hourCycles|collations)(?!\s*\()</code>, tracks <code>.currencies</code> as a skipped getter, and leaves other object matches for review. Production migrations should run jscodeshift or ts-morph.</p>
 
   <section>
-    <h2>the nine getters</h2>
-<pre><code>// deprecated property access            // replacement
+    <h2>method replacements and skips</h2>
+<pre><code>// deprecated property access            // codemod action
 loc.calendars            // ->  loc.getCalendars()
 loc.collations           // ->  loc.getCollations()
 loc.hourCycles           // ->  loc.getHourCycles()
@@ -103,7 +107,7 @@ loc.currencies           // (no method form yet — still a getter)
 </main>
 
 <script>
-  const map = {
+  const replacements = {
     calendars: "getCalendars",
     collations: "getCollations",
     hourCycles: "getHourCycles",
@@ -113,17 +117,62 @@ loc.currencies           // (no method form yet — still a getter)
     weekInfo: "getWeekInfo"
   };
 
-  const re = new RegExp("\\.(" + Object.keys(map).join("|") + ")(?!\\()", "g");
+  const skipped = {
+    currencies: "No getCurrencies() method is defined in the Intl.Locale info proposal."
+  };
+
+  const rewriteProps = Object.keys(replacements);
+  const trackedProps = rewriteProps.concat(Object.keys(skipped));
+  const callSiteRe = new RegExp("\\b([A-Za-z_$][\\w$]*)\\.(" + trackedProps.join("|") + ")(?!\\s*\\()", "g");
+
+  function escapeHTML(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "\"": "&quot;",
+      "'": "&#39;"
+    })[char]);
+  }
+
+  function plural(count, singular, pluralForm = singular + "s") {
+    return count === 1 ? singular : pluralForm;
+  }
+
+  function localeBindings(src) {
+    const names = new Set();
+    const declarationRe = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+Intl\.Locale\s*\(/g;
+    for (const match of src.matchAll(declarationRe)) {
+      names.add(match[1]);
+    }
+    return names;
+  }
 
   function migrate(src) {
-    let count = 0;
+    let rewritten = 0;
+    let skippedCount = 0;
+    let reviewCount = 0;
     const hits = {};
-    const out = src.replace(re, (_m, prop) => {
-      count++;
+    const skippedHits = {};
+    const reviewHits = [];
+    const localeNames = localeBindings(src);
+    const out = src.replace(callSiteRe, (match, objectName, prop) => {
+      const site = `${objectName}.${prop}`;
+      if (skipped[prop]) {
+        skippedCount++;
+        skippedHits[prop] = (skippedHits[prop] || 0) + 1;
+        return match;
+      }
+      if (!localeNames.has(objectName)) {
+        reviewCount++;
+        reviewHits.push(site);
+        return match;
+      }
+      rewritten++;
       hits[prop] = (hits[prop] || 0) + 1;
-      return "." + map[prop] + "()";
+      return `${objectName}.${replacements[prop]}()`;
     });
-    return { out, count, hits };
+    return { out, rewritten, hits, skippedCount, skippedHits, reviewCount, reviewHits };
   }
 
   const srcEl = document.getElementById("src");
@@ -131,14 +180,28 @@ loc.currencies           // (no method form yet — still a getter)
   const statsEl = document.getElementById("stats");
 
   function run() {
-    const { out, count, hits } = migrate(srcEl.value);
+    const { out, rewritten, hits, skippedCount, skippedHits, reviewCount, reviewHits } = migrate(srcEl.value);
     outEl.value = out;
-    if (count === 0) {
-      statsEl.innerHTML = "<span class='num'>0</span>no deprecated call sites found";
-      return;
+    const lines = [
+      `<span class="num">${rewritten}</span>${plural(rewritten, "confirmed call site", "confirmed call sites")} rewritten`
+    ];
+    if (Object.keys(hits).length > 0) {
+      const breakdown = Object.entries(hits).map(([prop, count]) => `<span class="deprecated">.${escapeHTML(prop)}</span> &rarr; <span class="modern">.${escapeHTML(replacements[prop])}()</span> &times;${count}`).join("<br>");
+      lines.push(breakdown);
     }
-    const breakdown = Object.entries(hits).map(([k, v]) => `<span class="deprecated">.${k}</span> &rarr; <span class="modern">.${map[k]}()</span> &times;${v}`).join("<br>");
-    statsEl.innerHTML = `<span class="num">${count}</span>call sites rewritten<br><br>${breakdown}`;
+    if (skippedCount > 0) {
+      lines.push(`<span class="num">${skippedCount}</span><span class="skipped">${plural(skippedCount, "getter", "getters")} skipped</span> because no method form exists`);
+      const skippedBreakdown = Object.entries(skippedHits).map(([prop, count]) => `<span class="skipped">.${escapeHTML(prop)}</span> unchanged &times;${count} — ${escapeHTML(skipped[prop])}`).join("<br>");
+      lines.push(skippedBreakdown);
+    }
+    if (reviewCount > 0) {
+      lines.push(`<span class="num">${reviewCount}</span><span class="review">${plural(reviewCount, "match", "matches")} left for review</span> because the object was not initialized with <code>new Intl.Locale(...)</code> in this snippet`);
+      lines.push(reviewHits.map((site) => `<span class="review">${escapeHTML(site)}</span> unchanged`).join("<br>"));
+    }
+    if (rewritten === 0 && skippedCount === 0 && reviewCount === 0) {
+      lines[0] = "<span class='num'>0</span>no tracked Intl.Locale getter call sites found";
+    }
+    statsEl.innerHTML = lines.join("<br><br>");
   }
 
   document.getElementById("run").addEventListener("click", run);
