@@ -13,12 +13,16 @@
 
     .controls { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; margin: 1rem 0; }
     button { padding: 0.4rem 0.85rem; font-size: 0.82rem; cursor: pointer; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
-    button:hover { background: var(--bg-stone); }
+    button:hover { background: var(--bg-stone); color: var(--text-black); }
     button.primary { background: var(--text-black); color: var(--bg-ivory); }
     button.primary:hover { opacity: 0.85; }
     .toggle-btn { background: var(--bg-stone); color: var(--text-charcoal); border: 2px solid var(--border-black); }
     .toggle-btn.on { background: var(--accent-emerald); color: var(--bg-ivory); border-color: var(--accent-emerald); }
     .toggle-btn:hover:not(.on) { background: var(--bg-paper); color: var(--text-black); }
+    .control-field { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.76rem; color: var(--text-muted); }
+    .control-field select,
+    .control-field input[type="range"] { border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: 0.25rem 0.35rem; }
+    .control-field input[type="checkbox"] { accent-color: var(--accent-blue); }
 
     .meter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1rem 0; }
     @media (max-width: 640px) { .meter-grid { grid-template-columns: 1fr; } }
@@ -89,6 +93,17 @@
   <div class="controls">
     <button class="primary" id="btn-simulate" onclick="runSimulation()">Simulate page load</button>
     <button id="btn-cv-toggle" class="toggle-btn" onclick="toggleCV()">content-visibility: auto ON</button>
+    <label class="control-field" for="profile-select">content profile
+      <select id="profile-select" onchange="resetAll()">
+        <option value="article" selected>Article sections</option>
+        <option value="dashboard">Dashboard widgets</option>
+        <option value="media">Media-heavy page</option>
+      </select>
+    </label>
+    <label class="control-field" for="delay-scale">delay scale <span id="delay-scale-val">1.0x</span>
+      <input id="delay-scale" type="range" min="0.6" max="1.6" step="0.1" value="1" oninput="updateDelayScale()">
+    </label>
+    <label class="control-field"><span><input type="checkbox" id="ignore-ad-unit"> ignore lazy ad subtree</span></label>
     <button onclick="resetAll()">Reset</button>
   </div>
 
@@ -105,6 +120,8 @@
         <div class="summary-kv"><span class="k">Slowest section</span><span class="v" id="sum-slowest">—</span></div>
         <div class="summary-kv"><span class="k">Time to fully interactive</span><span class="v" id="sum-ttfi">—</span></div>
         <div class="summary-kv"><span class="k">content-visibility mode</span><span class="v" id="sum-cv-mode">auto</span></div>
+        <div class="summary-kv"><span class="k">API mode</span><span class="v" id="sum-api-mode">checking</span></div>
+        <div class="summary-kv"><span class="k">ignored subtrees</span><span class="v" id="sum-ignored">0</span></div>
       </div>
     </div>
 
@@ -123,6 +140,7 @@
     <div class="controls">
       <button onclick="injectSection()">Inject next section</button>
       <button onclick="injectAll()">Inject all remaining</button>
+      <button onclick="updateExistingContent()">Update existing text only</button>
     </div>
     <div id="injected-sections"><em style="font-size:0.8rem;color:var(--text-muted);">No sections injected yet.</em></div>
   </div>
@@ -150,13 +168,15 @@ po.observe({ type: 'container', buffered: true });</pre>
     <h2>references</h2>
     <ul>
       <li><a href="https://chromestatus.com/feature/5110962817073152" target="_blank" rel="noopener">ChromeStatus entry</a></li>
-      <li><a href="https://developer.chrome.com/release-notes/148" target="_blank" rel="noopener">Chrome 148 release notes</a></li>
+      <li><a href="https://developer.chrome.com/blog/container-timing-origin-trial" target="_blank" rel="noopener">Container Timing origin trial explainer</a></li>
+      <li><a href="https://wicg.github.io/container-timing/" target="_blank" rel="noopener">Container Timing API draft</a></li>
       <li><a href="https://wicg.github.io/element-timing/" target="_blank" rel="noopener">Element Timing spec (related)</a></li>
     </ul>
   </section>
 </main>
 <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 
+<script src="../container-timing-probe.js"></script>
 <script>
   const sections = [
     { id: 'hero', label: 'Hero Banner', baseDelay: 80, lines: 3 },
@@ -172,29 +192,18 @@ po.observe({ type: 'container', buffered: true });</pre>
   let simulationRunning = false;
   let injectedCount = 0;
   let lazyLabels = ['Related Articles', 'Recommendations', 'Ad Unit', 'Social Embed', 'Newsletter CTA'];
+  let nativeHandle;
 
   // API probe
   (function() {
     const el = document.getElementById('probe-result');
-    try {
-      if ('PerformanceObserver' in window) {
-        const supported = PerformanceObserver.supportedEntryTypes || [];
-        const hasContainer = supported.includes('container');
-        if (hasContainer) {
-          el.textContent = '✓ PerformanceObserver for "container" entries is available.';
-          el.className = 'probe-ok';
-        } else {
-          el.textContent = '✗ PerformanceObserver available but "container" type not supported — demo uses simulation.';
-          el.className = 'probe-no';
-        }
-      } else {
-        el.textContent = '✗ PerformanceObserver not available — demo uses simulation.';
-        el.className = 'probe-no';
-      }
-    } catch(e) {
-      el.textContent = 'Could not probe API — ' + e.message;
-      el.className = 'probe-no';
-    }
+    nativeHandle = ContainerTimingProbe.observeNative(entries => {
+      entries.forEach(entry => renderContainerEntry(entry, 'native'));
+    });
+    const state = nativeHandle.state;
+    el.textContent = `${state.hasConstructor ? '✓' : '✗'} ${state.message}`;
+    el.className = state.hasConstructor ? 'probe-ok' : 'probe-no';
+    document.getElementById('sum-api-mode').textContent = state.mode;
   })();
 
   // Build initial UI
@@ -248,10 +257,46 @@ po.observe({ type: 'container', buffered: true });</pre>
     log.scrollTop = log.scrollHeight;
   }
 
+  function updateDelayScale() {
+    document.getElementById('delay-scale-val').textContent =
+      `${Number(document.getElementById('delay-scale').value).toFixed(1)}x`;
+  }
+
   function getSectionDelay(s) {
     // With content-visibility:auto, off-screen sections take slightly longer
     const cvFactor = cvEnabled ? 1.0 : 0.85;
-    return Math.round(s.baseDelay * cvFactor + Math.random() * 60);
+    const profile = document.getElementById('profile-select').value;
+    const profileFactor = { article: 1, dashboard: 0.75, media: 1.35 }[profile];
+    const delayScale = Number(document.getElementById('delay-scale').value);
+    return Math.round(s.baseDelay * cvFactor * profileFactor * delayScale + Math.random() * 60);
+  }
+
+  function renderContainerEntry(entry, source) {
+    const id = entry.identifier;
+    const elapsed = Math.round(ContainerTimingProbe.entryTime(entry));
+    timings[id] = elapsed;
+    const section = sections.find(s => s.id === id);
+    if (!section) return;
+
+    const container = document.getElementById('content-' + id);
+    if (container) {
+      container.querySelectorAll('.content-line').forEach((el, i) => {
+        setTimeout(() => el.classList.add('loaded'), i * 30);
+      });
+    }
+
+    const maxMs = 1000;
+    const pct = Math.min(100, (elapsed / maxMs) * 100);
+    const fill = document.getElementById('fill-' + id);
+    fill.style.width = pct + '%';
+    fill.className = 'gauge-fill ' + (elapsed < 200 ? 'fast' : elapsed < 500 ? 'mid' : 'slow');
+    document.getElementById('val-' + id).textContent = elapsed + 'ms';
+    document.getElementById('status-' + id).textContent = 'painted';
+    document.getElementById('status-' + id).className = 'gauge-status painted';
+    document.getElementById('badge-' + id).textContent = elapsed + 'ms';
+    document.getElementById('badge-' + id).className = 'ct-badge timed';
+
+    appendLog(source === 'native' ? 'ct' : 'ct', `container entry (${source}): identifier="${id}" renderTime=${elapsed}ms size=${entry.size}`);
   }
 
   function runSimulation() {
@@ -274,38 +319,23 @@ po.observe({ type: 'container', buffered: true });</pre>
       if (container) container.querySelectorAll('.content-line').forEach(el => el.classList.remove('loaded'));
     });
 
-    appendLog('info', `Starting simulation (content-visibility: ${cvEnabled ? 'auto' : 'visible'})…`);
+    appendLog('info', `Starting simulation (content-visibility: ${cvEnabled ? 'auto' : 'visible'}, profile: ${document.getElementById('profile-select').value}, delay: ${document.getElementById('delay-scale').value}x)…`);
     document.getElementById('sum-fastest').textContent = '—';
     document.getElementById('sum-slowest').textContent = '—';
     document.getElementById('sum-ttfi').textContent = '—';
+    document.getElementById('sum-api-mode').textContent = nativeHandle.state.mode;
+    document.getElementById('sum-ignored').textContent = '0';
 
     sections.forEach(s => {
       const delay = getSectionDelay(s);
       setTimeout(() => {
         const elapsed = Math.round(performance.now() - startTime);
-        timings[s.id] = elapsed;
-
-        // Paint content lines
-        const container = document.getElementById('content-' + s.id);
-        if (container) {
-          container.querySelectorAll('.content-line').forEach((el, i) => {
-            setTimeout(() => el.classList.add('loaded'), i * 30);
-          });
-        }
-
-        // Update gauge
-        const maxMs = 1000;
-        const pct = Math.min(100, (elapsed / maxMs) * 100);
-        const fill = document.getElementById('fill-' + s.id);
-        fill.style.width = pct + '%';
-        fill.className = 'gauge-fill ' + (elapsed < 200 ? 'fast' : elapsed < 500 ? 'mid' : 'slow');
-        document.getElementById('val-' + s.id).textContent = elapsed + 'ms';
-        document.getElementById('status-' + s.id).textContent = 'painted';
-        document.getElementById('status-' + s.id).className = 'gauge-status painted';
-        document.getElementById('badge-' + s.id).textContent = elapsed + 'ms';
-        document.getElementById('badge-' + s.id).className = 'ct-badge timed';
-
-        appendLog('ct', `container entry: identifier="${s.id}" startTime=${elapsed}ms`);
+        const root = document.getElementById('demo-' + s.id);
+        renderContainerEntry(ContainerTimingProbe.makeEntry(s.id, elapsed, {
+          rootElement: root,
+          width: root?.clientWidth || 320,
+          height: root?.clientHeight || 160,
+        }), 'simulated');
 
         // Update summary when all done
         if (Object.keys(timings).length === sections.length) {
@@ -326,6 +356,7 @@ po.observe({ type: 'container', buffered: true });</pre>
     document.getElementById('sum-slowest').textContent = `${slowest[0]} (${slowest[1]}ms)`;
     document.getElementById('sum-ttfi').textContent = `${ttfi}ms`;
     document.getElementById('sum-cv-mode').textContent = cvEnabled ? 'auto' : 'visible';
+    document.getElementById('sum-api-mode').textContent = nativeHandle.state.mode;
     appendLog('info', `All ${sections.length} sections painted. TTFI: ${ttfi}ms`);
   }
 
@@ -342,6 +373,7 @@ po.observe({ type: 'container', buffered: true });</pre>
         else el.removeAttribute('data-cv');
       }
     });
+    document.getElementById('sum-cv-mode').textContent = cvEnabled ? 'auto' : 'visible';
     appendLog('info', `content-visibility toggled to: ${cvEnabled ? 'auto' : 'visible'}. Re-run simulation to see timing difference.`);
   }
 
@@ -354,8 +386,11 @@ po.observe({ type: 'container', buffered: true });</pre>
     document.getElementById('sum-slowest').textContent = '—';
     document.getElementById('sum-ttfi').textContent = '—';
     document.getElementById('sum-cv-mode').textContent = cvEnabled ? 'auto' : 'visible';
+    document.getElementById('sum-api-mode').textContent = nativeHandle.state.mode;
+    document.getElementById('sum-ignored').textContent = '0';
     document.getElementById('observer-log').innerHTML = '<div class="log-entry info"><span class="ts">--:--:--</span>PerformanceObserver watching for "container" entries (Container Timing)…</div>';
     document.getElementById('injected-sections').innerHTML = '<em style="font-size:0.8rem;color:var(--text-muted);">No sections injected yet.</em>';
+    injectQueue = [...lazyLabels];
   }
 
   let injectQueue = [...lazyLabels];
@@ -365,6 +400,7 @@ po.observe({ type: 'container', buffered: true });</pre>
       return;
     }
     const label = injectQueue.shift();
+    const ignored = label === 'Ad Unit' && document.getElementById('ignore-ad-unit').checked;
     const injected = document.getElementById('injected-sections');
     if (injected.querySelector('em')) injected.innerHTML = '';
 
@@ -373,19 +409,35 @@ po.observe({ type: 'container', buffered: true });</pre>
       const elapsed = Math.round(performance.now() - startT);
       const div = document.createElement('div');
       div.className = 'injected-item';
+      div.setAttribute('containertiming', `lazy-${label.toLowerCase().replace(/\s/g,'-')}`);
+      if (ignored) div.setAttribute('containertiming-ignore', '');
       div.innerHTML = `
         <span><strong>${escHtml(label)}</strong> injected</span>
         <span class="inject-time">${new Date().toLocaleTimeString()}</span>
-        <span class="inject-timing">ct: ${elapsed + 20}ms</span>
+        <span class="inject-timing">${ignored ? 'ignored' : `ct: ${elapsed + 20}ms`}</span>
       `;
       injected.appendChild(div);
-      appendLog('ct', `container entry: identifier="lazy-${label.toLowerCase().replace(/\s/g,'-')}" startTime=${elapsed+20}ms`);
+      if (ignored) {
+        document.getElementById('sum-ignored').textContent =
+          String(Number(document.getElementById('sum-ignored').textContent) + 1);
+        appendLog('info', 'containertiming-ignore suppressed the lazy ad subtree from ancestor container timing.');
+      } else {
+        appendLog('ct', `container entry (simulated): identifier="lazy-${label.toLowerCase().replace(/\s/g,'-')}" renderTime=${elapsed+20}ms`);
+      }
     }, 80 + Math.random()*200);
   }
 
   function injectAll() {
     const remaining = [...injectQueue];
     remaining.forEach((_, i) => setTimeout(injectSection, i * 120));
+  }
+
+  function updateExistingContent() {
+    const target = document.querySelector('#content-article .content-line');
+    if (target) {
+      target.classList.toggle('loaded');
+      appendLog('info', 'Updated an already-painted line in article. Per Container Timing, updating existing content does not create a new container entry.');
+    }
   }
 
   // Init

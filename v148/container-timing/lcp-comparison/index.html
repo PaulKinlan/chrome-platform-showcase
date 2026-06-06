@@ -33,9 +33,14 @@
     .timing-bar-val { font-family: monospace; color: var(--text-muted); font-size: 0.75rem; }
     .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
     button { padding: 0.4rem 0.85rem; font-size: 0.82rem; cursor: pointer; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
-    button:hover { background: var(--bg-stone); }
+    button:hover { background: var(--bg-stone); color: var(--text-black); }
     button.primary { background: var(--text-black); color: var(--bg-ivory); }
     button.primary:hover { opacity: 0.85; }
+    .control-field { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.76rem; color: var(--text-muted); }
+    .control-field select,
+    .control-field input[type="range"] { border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: 0.25rem 0.35rem; }
+    .control-field input[type="checkbox"] { accent-color: var(--accent-blue); }
+    .status-box { background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.55rem 0.75rem; font-size: 0.78rem; color: var(--text-charcoal); margin: 0.75rem 0; }
     .legend { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.78rem; margin: 0.5rem 0; }
     .legend-item { display: flex; gap: 0.35rem; align-items: center; }
     .legend-dot { width: 12px; height: 12px; flex-shrink: 0; }
@@ -54,9 +59,22 @@
   </header>
 
   <section>
+    <div class="status-box" id="support-status">Checking Container Timing support…</div>
     <div class="controls">
       <button class="primary" id="btn-simulate">Simulate page load</button>
       <button id="btn-reset">Reset</button>
+      <label class="control-field" for="scenario-select">scenario
+        <select id="scenario-select">
+          <option value="standard" selected>Hero wins LCP</option>
+          <option value="article-late">Article body is slow</option>
+          <option value="dashboard">Dashboard widgets</option>
+        </select>
+      </label>
+      <label class="control-field" for="sidebar-delay">sidebar delay <span id="sidebar-delay-val">1.0x</span>
+        <input id="sidebar-delay" type="range" min="0.5" max="2" step="0.1" value="1">
+      </label>
+      <label class="control-field"><span><input type="checkbox" id="ignore-sidebar-ad"> mark ad child with <code>containertiming-ignore</code></span></label>
+      <button id="btn-late-text">Add late article text</button>
     </div>
 
     <div class="legend">
@@ -99,6 +117,7 @@
           <div class="section-label">Sidebar <code>[containertiming="sidebar"]</code></div>
           <div class="content-line" id="s1" style="width:75%"></div>
           <div class="content-line" id="s2" style="width:60%"></div>
+          <div class="content-line" id="ad-child" style="width:90%;height:20px;"></div>
         </div>
       </div>
     </div>
@@ -128,6 +147,8 @@ new PerformanceObserver(list => {
     <h2>references</h2>
     <ul>
       <li><a href="https://chromestatus.com/feature/5110962817073152" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.chrome.com/blog/container-timing-origin-trial" target="_blank" rel="noopener">Container Timing origin trial explainer</a></li>
+      <li><a href="https://wicg.github.io/container-timing/" target="_blank" rel="noopener">Container Timing API draft</a></li>
       <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/PerformanceObserver" target="_blank" rel="noopener">MDN — PerformanceObserver</a></li>
       <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/LargestContentfulPaint" target="_blank" rel="noopener">MDN — LargestContentfulPaint</a></li>
     </ul>
@@ -135,8 +156,10 @@ new PerformanceObserver(list => {
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script src="../container-timing-probe.js"></script>
 <script>
   let simRunning = false;
+  let nativeHandle;
 
   function addTimelineBar(label, ms, type) {
     const timeline = document.getElementById('timeline');
@@ -157,79 +180,134 @@ new PerformanceObserver(list => {
     if (el) el.classList.toggle('loaded', loaded);
   }
 
-  function addCTEntry(identifier, ms) {
+  function addCTEntry(entry) {
     const el = document.getElementById('ct-entries');
     if (el.textContent === 'No entries yet.') el.textContent = '';
     const row = document.createElement('div');
+    const ms = ContainerTimingProbe.entryTime(entry);
     row.style.cssText = 'margin:0.3rem 0;font-family:monospace;font-size:0.8rem;';
-    row.innerHTML = `<strong style="color:var(--accent-emerald);">${identifier}</strong> fired at ${ms.toFixed(0)} ms`;
+    row.innerHTML = `<strong style="color:var(--accent-emerald);">${entry.identifier}</strong> ${entry.source || 'simulated'} fired at ${ms.toFixed(0)} ms · size ${entry.size}`;
     el.appendChild(row);
   }
 
-  async function simulate() {
-    if (simRunning) return;
-    simRunning = true;
-    document.getElementById('btn-simulate').disabled = true;
-
-    // Reset
-    ['hero-img','a1','a2','a3','s1','s2'].forEach(id => setLine(id, false));
-    document.getElementById('lcp-val').innerHTML = '—';
-    document.getElementById('lcp-scope').textContent = 'element: not yet fired';
-    document.getElementById('ct-entries').textContent = 'No entries yet.';
-    document.getElementById('timeline').innerHTML = '';
-
-    const t0 = performance.now();
-
-    await delay(250);
-    setLine('hero-img', true);
-    const heroEl = document.getElementById('hero-section');
-    heroEl.querySelector('.section-label').insertAdjacentHTML('afterbegin', '<span class="lcp-marker">LCP</span>');
-    const lcpMs = performance.now() - t0;
-    document.getElementById('lcp-val').innerHTML = `${lcpMs.toFixed(0)}<span class="metric-unit"> ms</span>`;
-    document.getElementById('lcp-scope').textContent = `element: .hero-section (largest)`;
-    addTimelineBar('LCP', lcpMs, 'lcp');
-
-    await delay(180);
-    setLine('a1', true);
-    await delay(120);
-    setLine('a2', true);
-    await delay(90);
-    setLine('a3', true);
-    const articleMs = performance.now() - t0;
-    const articleEl = document.getElementById('article-section');
-    articleEl.insertAdjacentHTML('beforeend', '<span class="ct-marker">CT</span>');
-    addCTEntry('article', articleMs);
-    addTimelineBar('ContainerTiming: article', articleMs, 'ct');
-
-    await delay(200);
-    setLine('s1', true);
-    await delay(150);
-    setLine('s2', true);
-    const sidebarMs = performance.now() - t0;
-    const sidebarEl = document.getElementById('sidebar-section');
-    sidebarEl.insertAdjacentHTML('beforeend', '<span class="ct-marker">CT</span>');
-    addCTEntry('sidebar', sidebarMs);
-    addTimelineBar('ContainerTiming: sidebar', sidebarMs, 'ct');
-
-    simRunning = false;
-    document.getElementById('btn-simulate').disabled = false;
+  function scenarioConfig() {
+    const scenario = document.getElementById('scenario-select').value;
+    const sidebarFactor = Number(document.getElementById('sidebar-delay').value);
+    const configs = {
+      standard: { hero: 250, article: 640, sidebar: 900 },
+      'article-late': { hero: 210, article: 1050, sidebar: 760 },
+      dashboard: { hero: 180, article: 430, sidebar: 520 },
+    };
+    return {
+      ...configs[scenario],
+      sidebar: Math.round(configs[scenario].sidebar * sidebarFactor),
+    };
   }
 
-  function resetSim() {
-    ['hero-img','a1','a2','a3','s1','s2'].forEach(id => setLine(id, false));
+  function resetVisuals() {
+    ['hero-img','a1','a2','a3','s1','s2','ad-child'].forEach(id => setLine(id, false));
+    document.getElementById('article-section').querySelectorAll('.late-line').forEach(el => el.remove());
     document.getElementById('lcp-val').innerHTML = '—';
     document.getElementById('lcp-scope').textContent = 'element: not yet fired';
     document.getElementById('ct-entries').textContent = 'No entries yet.';
     document.getElementById('timeline').innerHTML = '';
     document.querySelectorAll('.lcp-marker, .ct-marker').forEach(el => el.remove());
+  }
+
+  function simulate() {
+    if (simRunning) return;
+    simRunning = true;
+    document.getElementById('btn-simulate').disabled = true;
+
+    resetVisuals();
+    const config = scenarioConfig();
+    const ignoreAd = document.getElementById('ignore-sidebar-ad').checked;
+    document.getElementById('ad-child').toggleAttribute('containertiming-ignore', ignoreAd);
+
+    const t0 = performance.now();
+
+    setTimeout(() => {
+      setLine('hero-img', true);
+      const heroEl = document.getElementById('hero-section');
+      heroEl.querySelector('.section-label').insertAdjacentHTML('afterbegin', '<span class="lcp-marker">LCP</span>');
+      const lcpMs = performance.now() - t0;
+      document.getElementById('lcp-val').innerHTML = `${lcpMs.toFixed(0)}<span class="metric-unit"> ms</span>`;
+      document.getElementById('lcp-scope').textContent = `element: .hero-section (largest)`;
+      addTimelineBar('LCP', lcpMs, 'lcp');
+    }, config.hero);
+
+    setTimeout(() => {
+      ['a1','a2','a3'].forEach(id => setLine(id, true));
+      const articleMs = performance.now() - t0;
+      const articleEl = document.getElementById('article-section');
+      articleEl.insertAdjacentHTML('beforeend', '<span class="ct-marker">CT</span>');
+      const entry = ContainerTimingProbe.makeEntry('article', articleMs, {
+        rootElement: articleEl,
+        width: articleEl.clientWidth,
+        height: articleEl.clientHeight,
+      });
+      addCTEntry(entry);
+      addTimelineBar('ContainerTiming: article', articleMs, 'ct');
+    }, config.article);
+
+    setTimeout(() => {
+      ['s1','s2','ad-child'].forEach(id => setLine(id, true));
+      const sidebarMs = performance.now() - t0;
+      const sidebarEl = document.getElementById('sidebar-section');
+      sidebarEl.insertAdjacentHTML('beforeend', '<span class="ct-marker">CT</span>');
+      const entry = ContainerTimingProbe.makeEntry('sidebar', sidebarMs, {
+        rootElement: sidebarEl,
+        width: sidebarEl.clientWidth,
+        height: sidebarEl.clientHeight,
+        size: ignoreAd ? Math.round(sidebarEl.clientWidth * 64) : undefined,
+      });
+      addCTEntry(entry);
+      addTimelineBar(ignoreAd ? 'ContainerTiming: sidebar (ad ignored)' : 'ContainerTiming: sidebar', sidebarMs, 'ct');
+    }, config.sidebar);
+
+    setTimeout(() => {
+      simRunning = false;
+      document.getElementById('btn-simulate').disabled = false;
+    }, Math.max(config.hero, config.article, config.sidebar) + 80);
+  }
+
+  function resetSim() {
+    resetVisuals();
     simRunning = false;
     document.getElementById('btn-simulate').disabled = false;
   }
 
-  function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+  function addLateArticleText() {
+    const article = document.getElementById('article-section');
+    const line = document.createElement('div');
+    line.className = 'content-line late-line loaded';
+    line.style.width = '70%';
+    article.appendChild(line);
+    const ms = performance.now() % 2000;
+    const entry = ContainerTimingProbe.makeEntry('article', ms, {
+      rootElement: article,
+      width: article.clientWidth,
+      height: article.clientHeight,
+    });
+    addCTEntry(entry);
+    addTimelineBar('ContainerTiming: article new text', ms, 'ct');
+  }
 
   document.getElementById('btn-simulate').addEventListener('click', simulate);
   document.getElementById('btn-reset').addEventListener('click', resetSim);
+  document.getElementById('btn-late-text').addEventListener('click', addLateArticleText);
+  document.getElementById('sidebar-delay').addEventListener('input', () => {
+    document.getElementById('sidebar-delay-val').textContent =
+      `${Number(document.getElementById('sidebar-delay').value).toFixed(1)}x`;
+  });
+
+  nativeHandle = ContainerTimingProbe.observeNative(entries => {
+    entries.forEach(entry => {
+      addCTEntry(entry);
+      addTimelineBar(`Native container: ${entry.identifier}`, ContainerTimingProbe.entryTime(entry), 'ct');
+    });
+  });
+  document.getElementById('support-status').textContent = nativeHandle.state.message;
 </script>
 </body>
 </html>
