@@ -16,6 +16,13 @@
     .log .row.success { color: var(--accent-emerald); }
     .log .row.abort { color: var(--accent-rose); }
     .stat { font-family: var(--font-mono); font-size: 0.75rem; padding: 0.4rem 0.55rem; background: var(--bg-stone); border: 2px solid var(--border-black); display: inline-block; margin-right: var(--space-2); }
+    .stats { margin-top: var(--space-3); display: flex; gap: var(--space-2); flex-wrap: wrap; }
+    .timelines { display: flex; flex-direction: column; gap: 0.5rem; min-height: 200px; }
+    .timeline-row { border: 1px solid var(--border-black); height: 16px; position: relative; background: var(--bg-stone); }
+    .timeline-fill { position: absolute; left: 0; top: 0; height: 100%; background: var(--accent-blue); width: 0%; transition: width 50ms linear; }
+    .timeline-fill.success { background: var(--accent-emerald); }
+    .timeline-fill.abort { background: var(--accent-rose); }
+    .timeline-label { position: absolute; top: 50%; left: 6px; transform: translateY(-50%); font-family: var(--font-mono); font-size: 0.7rem; color: var(--bg-paper); mix-blend-mode: difference; }
   </style>
 </head>
 <body>
@@ -31,6 +38,7 @@
   <div class="toolbar">
     <button id="start">start scope (1 fetch + 1 stream)</button>
     <button id="end-scope" disabled>end scope (auto-aborts)</button>
+    <button id="pre-aborted">start already-aborted scope</button>
     <button id="reset">reset</button>
   </div>
 
@@ -38,15 +46,16 @@
     <div class="panel">
       <h4>scope log</h4>
       <div class="log" id="log"></div>
-      <div style="margin-top: var(--space-3);">
+      <div class="stats">
         <span class="stat" id="open-stat">in-flight: 0</span>
         <span class="stat" id="abort-stat">aborts: 0</span>
         <span class="stat" id="done-stat">completed: 0</span>
+        <span class="stat" id="reason-stat">last reason: none</span>
       </div>
     </div>
     <div class="panel">
       <h4>request timelines</h4>
-      <div id="timelines" style="display: flex; flex-direction: column; gap: 0.5rem; min-height: 200px;"></div>
+      <div id="timelines" class="timelines"></div>
     </div>
   </div>
 
@@ -80,7 +89,7 @@ async function run() {
 </main>
 
 <script>
-  let openCount = 0, abortCount = 0, doneCount = 0;
+  let openCount = 0, abortCount = 0, doneCount = 0, lastReason = "none";
   function rec(cls, msg) {
     const log = document.getElementById("log");
     const row = document.createElement("div");
@@ -92,21 +101,37 @@ async function run() {
     document.getElementById("open-stat").textContent = "in-flight: " + openCount;
     document.getElementById("abort-stat").textContent = "aborts: " + abortCount;
     document.getElementById("done-stat").textContent = "completed: " + doneCount;
+    document.getElementById("reason-stat").textContent = "last reason: " + lastReason;
+  }
+  function reasonText(reason) {
+    if (reason?.message) return reason.message;
+    return String(reason ?? "no reason");
   }
   function addTimeline(name) {
     const row = document.createElement("div");
-    row.style.cssText = "border: 1px solid #000; height: 16px; position: relative; background: #f4f3ee;";
-    row.innerHTML = `<div style="position: absolute; left: 0; top: 0; height: 100%; background: var(--accent-blue); width: 0%; transition: width 50ms linear;"></div><span style="position: absolute; top: 50%; left: 6px; transform: translateY(-50%); font-family: monospace; font-size: 0.7rem; color: var(--bg-paper); mix-blend-mode: difference;">${name}</span>`;
+    row.className = "timeline-row";
+    const fill = document.createElement("div");
+    fill.className = "timeline-fill";
+    const label = document.createElement("span");
+    label.className = "timeline-label";
+    label.textContent = name;
+    row.append(fill, label);
     document.getElementById("timelines").appendChild(row);
-    return row.querySelector("div");
+    return fill;
   }
   let scope = null;
-  function startScope() {
+  function startScope(options = {}) {
     if (scope) return;
     const ctrl = new AbortController();
     scope = ctrl;
-    rec("acquire", "scope opened");
-    document.getElementById("end-scope").disabled = false;
+    if (options.preAborted) {
+      ctrl.abort("scope entered already aborted");
+      lastReason = reasonText(ctrl.signal.reason);
+      rec("abort", "scope opened with signal.reason: " + lastReason);
+    } else {
+      rec("acquire", "scope opened");
+      document.getElementById("end-scope").disabled = false;
+    }
     // sim 2 requests
     ["/api/users", "/api/feed"].forEach(url => {
       openCount++;
@@ -114,39 +139,53 @@ async function run() {
       const bar = addTimeline(url);
       const total = 3000 + Math.random() * 2000;
       const start = performance.now();
+      let settled = false;
+      function handleAbort() {
+        if (settled) return;
+        settled = true;
+        clearInterval(tick); clearTimeout(finishTimer);
+        if (openCount > 0) openCount--;
+        abortCount++;
+        lastReason = reasonText(ctrl.signal.reason);
+        updateStats();
+        rec("abort", url + " aborted: " + lastReason);
+        bar.className = "timeline-fill abort";
+      }
       const tick = setInterval(() => {
         const elapsed = performance.now() - start;
         bar.style.width = Math.min(100, elapsed / total * 100) + "%";
       }, 60);
       const finishTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         clearInterval(tick);
         openCount--; doneCount++; updateStats();
         rec("success", url + " ok");
-        bar.style.background = "#0a8f5c";
+        bar.className = "timeline-fill success";
         bar.style.width = "100%";
       }, total);
-      ctrl.signal.addEventListener("abort", () => {
-        clearInterval(tick); clearTimeout(finishTimer);
-        if (openCount > 0) openCount--;
-        abortCount++;
-        updateStats();
-        rec("abort", url + " aborted: " + ctrl.signal.reason);
-        bar.style.background = "#d11a2a";
-      }, { once: true });
+      if (ctrl.signal.aborted) handleAbort();
+      else ctrl.signal.addEventListener("abort", handleAbort, { once: true });
     });
+    if (options.preAborted) {
+      scope = null;
+      document.getElementById("end-scope").disabled = true;
+    }
   }
   function endScope() {
     if (!scope) return;
     rec("acquire", "scope[Symbol.asyncDispose]() called");
-    scope.abort("scope ended");
+    scope.abort("scope ended by async disposer");
     scope = null;
     document.getElementById("end-scope").disabled = true;
   }
   document.getElementById("start").addEventListener("click", startScope);
   document.getElementById("end-scope").addEventListener("click", endScope);
+  document.getElementById("pre-aborted").addEventListener("click", () => startScope({ preAborted: true }));
   document.getElementById("reset").addEventListener("click", () => {
     if (scope) { scope.abort("reset"); scope = null; }
     openCount = abortCount = doneCount = 0;
+    lastReason = "none";
     updateStats();
     document.getElementById("log").innerHTML = "";
     document.getElementById("timelines").innerHTML = "";

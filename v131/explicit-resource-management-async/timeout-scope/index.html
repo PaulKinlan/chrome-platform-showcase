@@ -75,6 +75,7 @@
     .sc-status.ok { color: var(--accent-emerald); }
     .sc-status.err { color: var(--accent-rose); }
     .controls { display: flex; gap: var(--space-2); margin: var(--space-3) 0; align-items: center; flex-wrap: wrap; }
+    .secondary-button { background: var(--bg-ivory); color: var(--text-black); border: 2px solid var(--border-black); }
     .param-row {
       display: flex;
       gap: var(--space-3);
@@ -107,6 +108,12 @@
     .log-ts { color: var(--text-muted); margin-right: 0.4rem; }
     .log-ok { color: var(--accent-emerald); }
     .log-err { color: var(--accent-rose); }
+    .compose-panel {
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-ivory);
+      margin: var(--space-3) 0;
+    }
+    .compose-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-2); }
   </style>
 </head>
 <body>
@@ -154,9 +161,23 @@
       </div>
     </div>
 
+    <div class="compose-panel">
+      <div class="sc-header">AbortSignal.any(): timeout or user cancel</div>
+      <div class="sc-body">
+        <div class="sc-label">composed signal state</div>
+        <div class="sc-value" id="compose-status">ready</div>
+        <div class="progress-bar"><div class="progress-fill" id="compose-bar"></div></div>
+        <div class="sc-status" id="compose-detail">click run, then either wait for timeout or cancel manually</div>
+        <div class="compose-actions">
+          <button id="compose-run">Run composed scope</button>
+          <button id="compose-cancel" disabled>Cancel composed scope</button>
+        </div>
+      </div>
+    </div>
+
     <div class="controls">
       <button id="run-btn">Run both scenarios</button>
-      <button id="reset-btn" style="background: var(--bg-ivory); color: var(--text-black); border: 2px solid var(--border-black);">Reset</button>
+      <button id="reset-btn" class="secondary-button">Reset</button>
     </div>
 
     <div class="event-log" id="log">
@@ -209,6 +230,7 @@ try {
 <script>
   const log = document.getElementById("log");
   let running = false;
+  let composedRun = null;
 
   function addLog(msg, cls) {
     const ts = new Date().toLocaleTimeString("en", { hour12: false });
@@ -238,6 +260,12 @@ try {
       st.className = "sc-status";
       st.textContent = "ready";
     });
+    document.getElementById("compose-status").textContent = "ready";
+    document.getElementById("compose-detail").className = "sc-status";
+    document.getElementById("compose-detail").textContent = "click run, then either wait for timeout or cancel manually";
+    const composeBar = document.getElementById("compose-bar");
+    composeBar.style.width = "0%";
+    composeBar.className = "progress-fill";
   }
 
   document.getElementById("reset-btn").addEventListener("click", () => { resetUI(); });
@@ -305,6 +333,94 @@ try {
     });
   }
 
+  function abortableDelay(ms, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason || new DOMException("aborted", "AbortError"));
+        return;
+      }
+      const timer = setTimeout(resolve, ms);
+      signal.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(signal.reason || new DOMException("aborted", "AbortError"));
+      }, { once: true });
+    });
+  }
+
+  function reasonLabel(reason) {
+    if (reason?.name === "TimeoutError") return "timeout signal";
+    if (reason === "user cancel") return "user cancel";
+    if (reason?.message) return reason.message;
+    return String(reason || "abort");
+  }
+
+  async function runComposedScope() {
+    if (composedRun) return;
+    if (typeof AbortSignal.any !== "function") {
+      document.getElementById("compose-detail").className = "sc-status err";
+      document.getElementById("compose-detail").textContent = "AbortSignal.any() is not available in this browser";
+      addLog("[any] AbortSignal.any() unavailable", "log-err");
+      return;
+    }
+
+    const timeoutMs = parseFloat(timeoutSlider.value) * 1000;
+    const requestMs = timeoutMs * 1.5;
+    const userController = new AbortController();
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const combinedSignal = AbortSignal.any([userController.signal, timeoutSignal]);
+    const status = document.getElementById("compose-status");
+    const detail = document.getElementById("compose-detail");
+    const bar = document.getElementById("compose-bar");
+    const cancelBtn = document.getElementById("compose-cancel");
+    const start = Date.now();
+    let cleanupCalled = false;
+    let rafId;
+
+    composedRun = { userController };
+    cancelBtn.disabled = false;
+    status.textContent = "running";
+    detail.className = "sc-status";
+    detail.textContent = `request ${requestMs | 0}ms, timeout ${timeoutMs | 0}ms`;
+    bar.className = "progress-fill";
+    addLog(`[any] composed AbortSignal.any([user cancel, ${timeoutMs | 0}ms timeout])`, "");
+
+    function animate() {
+      const elapsed = Date.now() - start;
+      bar.style.width = Math.min(100, elapsed / requestMs * 100) + "%";
+      if (elapsed < requestMs + 100 && !cleanupCalled) rafId = requestAnimationFrame(animate);
+    }
+
+    function cleanup(reason) {
+      if (cleanupCalled) return;
+      cleanupCalled = true;
+      cancelAnimationFrame(rafId);
+      if (!userController.signal.aborted) userController.abort("scope disposed");
+      addLog(`[any] stack.disposeAsync() ran after ${reason}`, "");
+    }
+
+    rafId = requestAnimationFrame(animate);
+    try {
+      await abortableDelay(requestMs, combinedSignal);
+      status.textContent = "completed";
+      detail.className = "sc-status ok";
+      detail.textContent = "request completed before either abort signal";
+      bar.className = "progress-fill done";
+      addLog("[any] request completed before timeout/cancel", "log-ok");
+      cleanup("normal completion");
+    } catch (reason) {
+      const label = reasonLabel(reason);
+      status.textContent = "aborted";
+      detail.className = "sc-status err";
+      detail.textContent = `winner: ${label}; composed signal aborted`;
+      bar.className = "progress-fill timeout";
+      addLog(`[any] ${label} won the race`, "log-err");
+      cleanup(label);
+    } finally {
+      cancelBtn.disabled = true;
+      composedRun = null;
+    }
+  }
+
   document.getElementById("run-btn").addEventListener("click", async () => {
     if (running) return;
     running = true;
@@ -312,15 +428,22 @@ try {
     const latency = parseFloat(latencySlider.value) * 1000;
     const timeout = parseFloat(timeoutSlider.value) * 1000;
 
-    addLog(`starting: latency=${latency}ms, timeout=${timeout}ms`, "");
-    addLog(`left scenario: latency ${latency * 0.6 | 0}ms (completes before ${timeout}ms timeout)`, "");
-    addLog(`right scenario: latency ${latency * 1.4 | 0}ms (exceeds ${timeout}ms timeout)`, "");
+    const fastLatency = Math.min(latency * 0.6, timeout * 0.75) | 0;
+    const slowLatency = Math.max(latency * 1.4, timeout * 1.25) | 0;
+
+    addLog(`starting: requested latency=${latency}ms, timeout=${timeout}ms`, "");
+    addLog(`left scenario: latency ${fastLatency}ms (completes before ${timeout}ms timeout)`, "");
+    addLog(`right scenario: latency ${slowLatency}ms (exceeds ${timeout}ms timeout)`, "");
 
     await Promise.all([
-      runScenario("ok", latency * 0.6 | 0, timeout, false),
-      runScenario("err", latency * 1.4 | 0, timeout, true),
+      runScenario("ok", fastLatency, timeout, false),
+      runScenario("err", slowLatency, timeout, true),
     ]);
     running = false;
+  });
+  document.getElementById("compose-run").addEventListener("click", runComposedScope);
+  document.getElementById("compose-cancel").addEventListener("click", () => {
+    if (composedRun) composedRun.userController.abort("user cancel");
   });
 </script>
 </body>

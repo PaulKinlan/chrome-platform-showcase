@@ -16,7 +16,7 @@
       padding: var(--space-4);
     }
     .card h3 { font-family: var(--font-mono); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); border-bottom: 1px solid var(--border-black); padding-bottom: 0.3rem; margin-bottom: var(--space-3); }
-    .log { font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); min-height: 110px; }
+    .log { font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); min-height: 160px; }
     .log p { margin: 0.1rem 0; }
     .log .alloc { color: var(--accent-blue); }
     .log .work { color: var(--text-charcoal); }
@@ -32,7 +32,7 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v131</p>
     <h1>await using - async resource disposal</h1>
-    <p class="lede"><code>await using</code> binds a resource and guarantees its async <code>[Symbol.asyncDispose]</code> runs at scope exit, even on a thrown error. Run the two scenarios and watch the log: the async disposer always fires.</p>
+    <p class="lede"><code>await using</code> binds a resource and guarantees its async <code>[Symbol.asyncDispose]</code> runs at scope exit, even on a thrown error. Run the scenarios and watch the log: the async disposer always fires, multiple disposers unwind in LIFO order, and body-plus-disposer failures surface as <code>SuppressedError</code>.</p>
   </header>
 
   <div class="support" id="support"></div>
@@ -40,6 +40,8 @@
   <div class="toolbar">
     <button id="happy">happy path</button>
     <button id="throw">throws midway</button>
+    <button id="suppressed">body + dispose throw</button>
+    <button id="lifo">nested LIFO order</button>
     <button id="clear">clear logs</button>
   </div>
 
@@ -60,7 +62,15 @@
 async function run() {
   await using db = openDb();   // disposes at scope exit
   const rows = await db.query();
-}</code></pre>
+}
+
+// Multiple resources dispose newest-first.
+await using first = openResource("first");
+await using second = openResource("second");
+
+// If the body and disposer both fail, the result is SuppressedError.
+await using failing = openResource("dispose also fails");
+throw new Error("body failed");</code></pre>
   </section>
 
   <section>
@@ -91,12 +101,23 @@ async function run() {
     ? "supported: Symbol.asyncDispose available"
     : "Symbol.asyncDispose missing - 'await using' will not work";
 
-  function makeDb(target) {
-    log(target, "alloc", "open db connection");
+  function makeDb(target, options = {}) {
+    log(target, "alloc", "open " + (options.name || "db") + " connection");
     return {
       query: async () => { log(target, "work", "running query"); await new Promise(r => setTimeout(r, 80)); return [1,2,3]; },
-      [Symbol.asyncDispose]: async () => { log(target, "dispose", "asyncDispose: closing db"); await new Promise(r => setTimeout(r, 40)); }
+      [Symbol.asyncDispose]: async () => {
+        log(target, "dispose", "asyncDispose: closing " + (options.name || "db"));
+        await new Promise(r => setTimeout(r, 40));
+        if (options.disposeThrows) throw new Error("dispose failure from " + (options.name || "db"));
+      }
     };
+  }
+
+  function describeError(target, e) {
+    log(target, "err", "error name: " + e.name);
+    log(target, "err", "message: " + e.message);
+    if ("error" in e) log(target, "err", "error property: " + (e.error?.message || e.error));
+    if ("suppressed" in e) log(target, "err", "suppressed property: " + (e.suppressed?.message || e.suppressed));
   }
 
   async function runManual(throwIt) {
@@ -129,12 +150,90 @@ async function run() {
     }
   }
 
+  async function runSuppressedManual() {
+    const db = makeDb(old, { name: "manual failing db", disposeThrows: true });
+    let bodyError;
+    try {
+      await db.query();
+      throw new Error("body failure before scope exit");
+    } catch (e) {
+      bodyError = e;
+      log(old, "err", "body threw: " + e.message);
+    } finally {
+      try {
+        await db[Symbol.asyncDispose]();
+      } catch (disposeError) {
+        log(old, "err", "manual finally saw separate dispose error: " + disposeError.message);
+        if (bodyError) log(old, "err", "manual code must preserve both errors itself");
+      }
+    }
+  }
+
+  async function runSuppressedUsing() {
+    try {
+      const fn = new Function("makeDb", "nu", `
+        return (async () => {
+          await using db = makeDb(nu, { name: "native failing db", disposeThrows: true });
+          await db.query();
+          throw new Error("body failure before scope exit");
+        })();
+      `);
+      await fn(makeDb, nu);
+    } catch (e) {
+      describeError(nu, e);
+    }
+  }
+
+  async function runLifoManual() {
+    const first = makeDb(old, { name: "first" });
+    const second = makeDb(old, { name: "second" });
+    try {
+      log(old, "work", "manual body uses first then second");
+    } finally {
+      await second[Symbol.asyncDispose]();
+      log(old, "dispose", "manual finally disposed second");
+      await first[Symbol.asyncDispose]();
+      log(old, "dispose", "manual finally disposed first");
+    }
+  }
+
+  async function runLifoUsing() {
+    try {
+      const fn = new Function("makeDb", "nu", `
+        return (async () => {
+          await using first = makeDb(nu, { name: "first" });
+          await using second = makeDb(nu, { name: "second" });
+          const p = document.createElement("p");
+          p.className = "work";
+          p.textContent = "body complete; scope exit starts";
+          nu.appendChild(p);
+        })();
+      `);
+      await fn(makeDb, nu);
+      log(nu, "dispose", "observed order: second closed before first");
+    } catch (e) {
+      describeError(nu, e);
+    }
+  }
+
+  async function runSuppressedScenario() {
+    clear();
+    await Promise.all([runSuppressedManual(), runSuppressedUsing()]);
+  }
+
+  async function runLifoScenario() {
+    clear();
+    await Promise.all([runLifoManual(), runLifoUsing()]);
+  }
+
   async function go(throwIt) {
     clear();
     await Promise.all([ runManual(throwIt), runUsing(throwIt) ]);
   }
   document.getElementById("happy").addEventListener("click", () => go(false));
   document.getElementById("throw").addEventListener("click", () => go(true));
+  document.getElementById("suppressed").addEventListener("click", runSuppressedScenario);
+  document.getElementById("lifo").addEventListener("click", runLifoScenario);
   document.getElementById("clear").addEventListener("click", clear);
 </script>
 </body>
