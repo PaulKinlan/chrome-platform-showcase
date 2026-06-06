@@ -106,7 +106,7 @@
   <header class="lede-block">
     <p class="eyebrow">v151 · CSS · accessibility · i18n</p>
     <h1>Accessibility &amp; i18n Audit</h1>
-    <p class="lede">Paste HTML containing <code>&lt;ruby&gt;</code> elements. The auditor checks for: missing <code>&lt;rp&gt;</code> fallback brackets (accessibility), empty or missing <code>&lt;rt&gt;</code> annotations, disproportionately long annotations that warrant <code>ruby-overhang: none</code>, missing <code>lang</code> attributes, and suggests the best <code>ruby-overhang</code> value per block.</p>
+    <p class="lede">Paste HTML containing <code>&lt;ruby&gt;</code> elements. The auditor checks for: missing <code>&lt;rp&gt;</code> fallback brackets (accessibility), empty or missing <code>&lt;rt&gt;</code> annotations, disproportionately long annotations that warrant constrained <code>ruby-overhang: spaces</code>, missing <code>lang</code> attributes, and suggests the best <code>ruby-overhang</code> value per block.</p>
   </header>
 
   <div class="audit-controls">
@@ -122,7 +122,7 @@
       </div>
       <textarea id="html-input" rows="10" placeholder="Paste HTML with &lt;ruby&gt; elements here…"></textarea>
       <button class="audit-btn" onclick="runAudit()">Run audit</button>
-      <button class="load-btn" onclick="document.getElementById('html-input').value='';document.getElementById('results').innerHTML='<li class=empty-state>…</li>';document.querySelector('.summary-bar').style.display=\'none\';">Clear</button>
+      <button class="load-btn" onclick="clearAudit()">Clear</button>
     </div>
   </div>
 
@@ -136,6 +136,15 @@
   <ul class="issue-list" id="results">
     <li class="empty-state">Audit results will appear here after you click "Run audit".</li>
   </ul>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">CSS ruby-overhang property</a> — feature index</li>
+      <li><a href="https://chromestatus.com/feature/6560118298771456" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://drafts.csswg.org/css-ruby/#ruby-overhang" target="_blank" rel="noopener">CSS Ruby Layout — ruby-overhang spec</a></li>
+    </ul>
+  </section>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
@@ -184,12 +193,57 @@
   }
 
   function hasAncestorLang(el) {
+    return Boolean(nearestLang(el));
+  }
+
+  function nearestLang(el) {
     let cur = el;
     while (cur) {
-      if (cur.getAttribute && cur.getAttribute('lang')) return true;
+      if (cur.getAttribute && cur.getAttribute('lang')) return cur.getAttribute('lang').toLowerCase();
       cur = cur.parentElement;
     }
-    return false;
+    return '';
+  }
+
+  function nearestWritingMode(el) {
+    let cur = el;
+    while (cur) {
+      if (cur.getAttribute) {
+        const style = cur.getAttribute('style') || '';
+        const match = style.match(/writing-mode\s*:\s*([^;]+)/i);
+        if (match) return match[1].trim().toLowerCase();
+      }
+      cur = cur.parentElement;
+    }
+    return '';
+  }
+
+  function scriptProfile(text) {
+    if (/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(text)) return 'cjk';
+    if (/[A-Za-z]/.test(text)) return 'latin';
+    return 'mixed';
+  }
+
+  function chooseOverhang(avgRatio, langSet, writingModes, rtProfile) {
+    const hasCjkLang = [...langSet].some(lang => /^(ja|zh|ko)/.test(lang));
+    const hasVertical = [...writingModes].some(mode => mode.startsWith('vertical'));
+    const longAnnotations = avgRatio > 3;
+    if (hasVertical || (hasCjkLang && rtProfile !== 'latin' && longAnnotations)) {
+      return {
+        value: 'spaces',
+        reason: 'CJK or vertical ruby with long annotations benefits from the current spaces behavior: overhang may use whitespace and CJK punctuation without forcing a fully loose line.',
+      };
+    }
+    if (rtProfile === 'latin' && avgRatio > 2) {
+      return {
+        value: 'spaces',
+        reason: 'Latin transliteration over short CJK bases is wide enough that containing overhang to adjacent spaces is safer than general auto overhang.',
+      };
+    }
+    return {
+      value: 'auto',
+      reason: 'The annotations are short or prose-like enough for the default UA overhang behavior.',
+    };
   }
 
   window.runAudit = function () {
@@ -211,6 +265,8 @@
       const rps = Array.from(ruby.querySelectorAll('rp'));
       const baseText = ruby.childNodes[0]?.textContent?.trim() || '';
       const rtText = rts.map(rt => rt.textContent).join('');
+      const lang = nearestLang(ruby);
+      const writingMode = nearestWritingMode(ruby);
       const idx = i + 1;
 
       // Check 1: missing rp fallback
@@ -254,15 +310,15 @@
         issues.push({
           sev: 'warn',
           title: `ruby[${idx}]: annotation (${rtLen} chars) is ${Math.round(rtLen/baseLen)}× the base (${baseLen} chars)`,
-          detail: `Very long annotations over short bases cause significant overhang. Consider ruby-overhang: none on this element to contain it, or split into multiple ruby elements.`,
-          fix: `ruby { ruby-overhang: none; } /* or on the parent paragraph */`
+          detail: `Very long annotations over short bases cause significant overhang. ${lang ? 'Detected lang=' + lang + '. ' : ''}${writingMode ? 'Detected writing-mode=' + writingMode + '. ' : ''}Consider ruby-overhang: spaces on this element to contain it to whitespace and punctuation, or split it into multiple ruby elements.`,
+          fix: `ruby { ruby-overhang: spaces; } /* none is a legacy alias */`
         });
       } else if (baseLen > 0 && rtLen > baseLen * 2) {
         warns++;
         issues.push({
           sev: 'warn',
           title: `ruby[${idx}]: annotation (${rtLen} chars) wider than typical for base (${baseLen} chars)`,
-          detail: `Annotation is more than 2× the base width. With ruby-overhang: auto, this will overhang into adjacent content. This may be intentional — verify the layout.`,
+          detail: `Annotation is more than 2× the base width. With ruby-overhang: auto, this will overhang into adjacent content. This may be intentional — verify the ${lang || 'unknown'} ${writingMode || 'horizontal'} layout.`,
           fix: null
         });
       } else if (rtLen > 0 && baseLen > 0) {
@@ -286,14 +342,15 @@
       : 0;
 
     if (rubies.length > 0) {
-      const suggestion = avgRatio > 3 ? 'none (annotations are very long relative to bases)' :
-                         avgRatio > 1.5 ? 'auto (moderate overhang expected — consider layout context)' :
-                         'auto (typical ratio — default behavior is appropriate)';
+      const langSet = new Set(rubies.map(nearestLang).filter(Boolean));
+      const writingModes = new Set(rubies.map(nearestWritingMode).filter(Boolean));
+      const rtProfile = scriptProfile(rubies.map(r => r.querySelector('rt')?.textContent || '').join(''));
+      const suggestion = chooseOverhang(avgRatio, langSet, writingModes, rtProfile);
       issues.push({
         sev: 'info',
-        title: `Suggested ruby-overhang: ${suggestion.split(' ')[0]}`,
-        detail: `Average annotation-to-base ratio: ${avgRatio.toFixed(1)}:1. ${suggestion}`,
-        fix: `p { ruby-overhang: ${suggestion.split(' ')[0]}; }`
+        title: `Suggested ruby-overhang: ${suggestion.value}`,
+        detail: `Average annotation-to-base ratio: ${avgRatio.toFixed(1)}:1. Languages: ${[...langSet].join(', ') || 'none detected'}. Writing modes: ${[...writingModes].join(', ') || 'horizontal/default'}. Annotation script: ${rtProfile}. ${suggestion.reason}`,
+        fix: `p { ruby-overhang: ${suggestion.value}; }`
       });
     }
 
@@ -319,6 +376,12 @@
     document.getElementById('sb-warn').textContent = warns + ' warning' + (warns !== 1 ? 's' : '');
     document.getElementById('sb-ok').textContent = oks + ' ok';
     document.getElementById('sb-ruby').textContent = rubies.length + ' ruby element' + (rubies.length !== 1 ? 's' : '');
+  };
+
+  window.clearAudit = function () {
+    document.getElementById('html-input').value = '';
+    document.getElementById('results').innerHTML = '<li class="empty-state">Audit results will appear here after you click "Run audit".</li>';
+    document.getElementById('summary-bar').style.display = 'none';
   };
 
   // Load well-formed example by default
