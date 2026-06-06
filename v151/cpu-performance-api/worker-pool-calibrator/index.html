@@ -46,6 +46,7 @@
     <div class="stat-card"><div class="stat-label">hardwareConcurrency</div><div class="stat-val" id="stat-hc">—</div></div>
     <div class="stat-card"><div class="stat-label">deviceMemory (GB)</div><div class="stat-val" id="stat-dm">—</div></div>
     <div class="stat-card"><div class="stat-label">Recommended pool</div><div class="stat-val" id="stat-rec">—</div></div>
+    <div class="stat-card"><div class="stat-label">Thermal drift</div><div class="stat-val" id="stat-thermal">—</div></div>
   </div>
 
   <div class="controls">
@@ -78,6 +79,15 @@
     </div>
   </div>
 
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">CPU Performance API</a> — feature index</li>
+      <li><a href="https://chromestatus.com/feature/5189864286978048" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://wicg.github.io/cpu-performance/" target="_blank" rel="noopener">CPU Performance API draft</a></li>
+    </ul>
+  </section>
+
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 <script>
@@ -99,13 +109,9 @@
   document.getElementById('stat-dm').textContent = dm !== null ? dm : 'n/a';
 
   async function readTier() {
-    if (navigator.cpu && typeof navigator.cpu.performance === 'function') {
-      try {
-        tier = await navigator.cpu.performance();
-        document.getElementById('stat-tier').textContent = tier;
-      } catch (_) {
-        document.getElementById('stat-tier').textContent = 'error';
-      }
+    if (typeof navigator.cpuPerformance === 'number' && Number.isFinite(navigator.cpuPerformance)) {
+      tier = Math.max(0, Math.floor(navigator.cpuPerformance));
+      document.getElementById('stat-tier').textContent = tier;
     } else {
       document.getElementById('stat-tier').textContent = 'n/a';
     }
@@ -224,31 +230,38 @@
       if (t === minTime) bar.classList.add('best');
     }
 
-    status.textContent = `Best: ${bestPool} workers at ${minTime.toFixed(0)} ms. Recommended tier-aware pool: ${recommendedPool(derivedTier())}.`;
+    status.textContent = 'Retesting best pool to measure sustained-load drift…';
+    await new Promise(r => setTimeout(r, 150));
+    const retestElapsed = await runPoolSize(bestPool, taskCount, itersPerTask);
+    const driftPct = ((retestElapsed - minTime) / minTime) * 100;
+    const thermalLimited = driftPct > 20;
 
     const recPool = recommendedPool(derivedTier());
+    const measuredPool = Math.min(recPool, bestPool);
+    const thermalPool = thermalLimited ? Math.max(1, Math.min(measuredPool, bestPool - 1)) : measuredPool;
     const t = derivedTier();
+    document.getElementById('stat-thermal').textContent = (driftPct >= 0 ? '+' : '') + driftPct.toFixed(0) + '%';
+    document.getElementById('stat-rec').textContent = thermalPool;
+    status.textContent = `Best: ${bestPool} workers at ${minTime.toFixed(0)} ms. Sustained retest: ${retestElapsed.toFixed(0)} ms (${driftPct >= 0 ? '+' : ''}${driftPct.toFixed(0)}%). Recommended pool: ${thermalPool}.`;
     const recText = `Device tier:          ${tier !== null ? tier : t + ' (estimated)'}
 hardwareConcurrency:  ${hc}
 Measured best pool:   ${bestPool} workers (${minTime.toFixed(0)} ms for ${taskCount} tasks)
-Tier-aware pool:      ${recPool} workers
+Sustained retest:     ${retestElapsed.toFixed(0)} ms (${driftPct >= 0 ? '+' : ''}${driftPct.toFixed(0)}% drift)
+Tier-aware cap:       ${recPool} workers
+Measured+tier pool:   ${measuredPool} workers
+Thermal-aware pool:   ${thermalPool} workers
 
-Rationale: tier ${t} devices ${t >= 3 ? 'have sufficient CPU headroom to run up to ' + recPool + ' parallel workers' : 'may throttle under heavy parallel load; ' + recPool + ' workers balances throughput and thermal headroom'}.`;
+Rationale: tier ${t} devices ${t >= 3 ? 'usually have enough CPU headroom for up to ' + recPool + ' parallel workers' : 'may throttle under heavy parallel load; ' + recPool + ' workers is the tier cap'}.${thermalLimited ? ' The retest slowed by more than 20%, so the final recommendation backs off one step.' : ' The retest stayed within the drift budget, so the measured+tier recommendation stands.'}`;
 
     document.getElementById('rec-body').textContent = recText;
 
     const codeBlock = document.getElementById('rec-code');
     codeBlock.childNodes.forEach(n => { if (n.nodeType === 3) n.remove(); });
 
-    const cpuCheck = tier !== null
-      ? `const tier = await navigator.cpu.performance(); // ${tier}`
-      : `const tier = navigator.hardwareConcurrency >= 8 ? 3 : navigator.hardwareConcurrency >= 4 ? 2 : 1; // estimated`;
-
     const codeText = `async function getWorkerPoolSize() {
   let tier = 2; // safe default
-  if (navigator.cpu?.performance) {
-    try { tier = await navigator.cpu.performance(); }
-    catch (_) {}
+  if (typeof navigator.cpuPerformance === "number") {
+    tier = navigator.cpuPerformance;
   }
 
   const hc = navigator.hardwareConcurrency || 2;

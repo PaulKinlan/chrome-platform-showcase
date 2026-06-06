@@ -134,6 +134,39 @@
     }
     .ai-decision.local { background: var(--accent-emerald); border-color: var(--accent-emerald); }
     .ai-decision.server { background: var(--accent-amber); border-color: var(--accent-amber); }
+    .pressure-panel {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-3) var(--space-4);
+      margin: var(--space-4) 0 var(--space-5);
+    }
+    .pressure-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+      align-items: center;
+    }
+    .pressure-btn {
+      background: var(--bg-paper);
+      color: var(--text-black);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: 0.35rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+    .pressure-btn[aria-pressed=true] {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+    }
+    .pressure-status {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      margin: var(--space-3) 0 0;
+    }
   </style>
 </head>
 <body>
@@ -147,7 +180,7 @@
   </header>
 
   <div class="warn-block">
-    <strong>Origin trial:</strong> <code>navigator.cpu.performance()</code> is behind the
+    <strong>Origin trial:</strong> <code>navigator.cpuPerformance</code> is behind the
     <code>CpuPerformance</code> origin trial in Chrome 151. Without a token the page reads the
     tier as <code>n/a</code> and falls back to the manual tier selector below.
   </div>
@@ -166,6 +199,18 @@
       <button class="tier-btn" data-tier="3" aria-pressed="true">3 · high</button>
       <button class="tier-btn" data-tier="4" aria-pressed="false">4 · top</button>
     </div>
+  </section>
+
+  <section class="pressure-panel">
+    <h2>thermal pressure override</h2>
+    <div class="pressure-row" id="pressure-row" role="radiogroup" aria-label="Compute Pressure state">
+      <button class="pressure-btn" data-pressure="nominal" aria-pressed="true">nominal</button>
+      <button class="pressure-btn" data-pressure="fair" aria-pressed="false">fair</button>
+      <button class="pressure-btn" data-pressure="serious" aria-pressed="false">serious</button>
+      <button class="pressure-btn" data-pressure="critical" aria-pressed="false">critical</button>
+      <button class="pressure-btn" id="observe-pressure" type="button">observe live</button>
+    </div>
+    <p class="pressure-status" id="pressure-status">Compute Pressure simulation: nominal · effective tier 3</p>
   </section>
 
   <section>
@@ -205,8 +250,27 @@
 
   <section>
     <h2>how it maps</h2>
-    <pre><code>const tier = await navigator.cpu.performance();
+    <pre><code>const baseTier = typeof navigator.cpuPerformance === "number"
+  ? navigator.cpuPerformance
+  : 2;
 // 0 unknown · 1 low · 2 mid · 3 high · 4 top
+
+let pressureState = "nominal";
+if ("PressureObserver" in globalThis) {
+  const observer = new PressureObserver(records =&gt; {
+    pressureState = records.at(-1)?.state ?? "nominal";
+    // Recompute the effective tier and update the call UI.
+  });
+  await observer.observe("cpu");
+}
+
+const tier = pressureState === "critical"
+  ? Math.min(baseTier, 2)
+  : pressureState === "serious"
+    ? Math.min(baseTier, 2)
+    : pressureState === "fair"
+      ? Math.min(baseTier, 3)
+      : baseTier;
 
 const profile = {
   resolution: tier &gt;= 3 ? 1080 : tier &gt;= 2 ? 720 : 480,
@@ -249,8 +313,28 @@ const summary = runAiLocally
   const effects = document.querySelectorAll(".effect");
   const aiDec   = document.getElementById("ai-decision");
   const aiReas  = document.getElementById("ai-reason");
+  const pressureRow = document.getElementById("pressure-row");
+  const pressureStatus = document.getElementById("pressure-status");
+  const observePressure = document.getElementById("observe-pressure");
+  let selectedTier = 3;
+  let pressureState = "nominal";
+  let pressureObserver = null;
 
-  function apply(tier) {
+  function readCpuPerformanceTier() {
+    return typeof navigator.cpuPerformance === "number" && Number.isFinite(navigator.cpuPerformance)
+      ? Math.max(0, Math.floor(navigator.cpuPerformance))
+      : null;
+  }
+
+  function effectiveTierForPressure(tier) {
+    if (pressureState === "critical") return Math.min(tier, 2);
+    if (pressureState === "serious") return Math.min(tier, 2);
+    if (pressureState === "fair") return Math.min(tier, 3);
+    return tier;
+  }
+
+  function apply(baseTier) {
+    const tier = effectiveTierForPressure(baseTier);
     const profile = {
       res: tier >= 3 ? 1080 : tier >= 2 ? 720 : tier >= 1 ? 480 : 360,
       fps: tier >= 3 ? 30   : tier >= 2 ? 24  : tier >= 1 ? 15  : 12,
@@ -279,6 +363,10 @@ const summary = runAiLocally
     aiReas.textContent = local
       ? "Tier " + tier + ": confident the device can run the on-device summariser without dropping frames in the video pipeline."
       : "Tier " + tier + ": local model would compete with the call's encoder. Sending the transcript to the server.";
+    if (tier !== baseTier) {
+      aiReas.textContent += " Compute Pressure is " + pressureState + ", so the effective tier was downgraded from " + baseTier + ".";
+    }
+    pressureStatus.textContent = "Compute Pressure " + pressureState + " · base tier " + baseTier + " · effective tier " + tier;
   }
   function setPill(el, label, on) {
     el.textContent = label;
@@ -291,27 +379,58 @@ const summary = runAiLocally
     if (!btn) return;
     for (const b of bar.querySelectorAll("button")) b.setAttribute("aria-pressed", "false");
     btn.setAttribute("aria-pressed", "true");
-    apply(parseInt(btn.dataset.tier, 10));
+    selectedTier = parseInt(btn.dataset.tier, 10);
+    apply(selectedTier);
+  });
+
+  pressureRow.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-pressure]");
+    if (!btn) return;
+    for (const b of pressureRow.querySelectorAll("button[data-pressure]")) b.setAttribute("aria-pressed", "false");
+    btn.setAttribute("aria-pressed", "true");
+    pressureState = btn.dataset.pressure;
+    apply(selectedTier);
+  });
+
+  observePressure.addEventListener("click", async () => {
+    if (!("PressureObserver" in globalThis)) {
+      pressureStatus.textContent = "PressureObserver unavailable; use the simulated states above.";
+      return;
+    }
+    try {
+      if (pressureObserver) pressureObserver.disconnect();
+      pressureObserver = new PressureObserver((records) => {
+        const latest = records.at(-1);
+        if (!latest?.state) return;
+        pressureState = latest.state;
+        const btn = pressureRow.querySelector(`button[data-pressure="${pressureState}"]`);
+        if (btn) {
+          for (const b of pressureRow.querySelectorAll("button[data-pressure]")) b.setAttribute("aria-pressed", "false");
+          btn.setAttribute("aria-pressed", "true");
+        }
+        apply(selectedTier);
+      });
+      await pressureObserver.observe("cpu");
+      pressureStatus.textContent = "PressureObserver active; waiting for CPU pressure samples.";
+    } catch (err) {
+      pressureStatus.textContent = "PressureObserver could not start: " + err.message;
+    }
   });
 
   // Read live, but never block the demo on it.
   (async () => {
-    if (navigator.cpu && typeof navigator.cpu.performance === "function") {
-      try {
-        const t = await navigator.cpu.performance();
-        readout.textContent = "navigator.cpu.performance() = " + t;
-        const live = bar.querySelector(`button[data-tier="${t}"]`);
-        if (live) live.click();
-      } catch (err) {
-        readout.textContent = "throws: " + err.message;
-      }
+    const t = readCpuPerformanceTier();
+    if (t !== null) {
+      readout.textContent = "navigator.cpuPerformance = " + t;
+      const live = bar.querySelector(`button[data-tier="${t}"]`);
+      if (live) live.click();
     } else {
       readout.textContent = "n/a (origin trial not enabled)";
     }
   })();
 
   // initial paint — tier 3
-  apply(3);
+  apply(selectedTier);
 </script>
 </body>
 </html>

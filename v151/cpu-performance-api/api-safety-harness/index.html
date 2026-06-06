@@ -29,6 +29,10 @@
     .test-detail { display: none; background: var(--bg-paper); border-top: 1.5px solid var(--border-black); padding: 0.4rem 0.55rem; font-family: var(--font-mono); font-size: 0.6rem; line-height: 1.55; white-space: pre-wrap; color: var(--text-charcoal); }
     .test-item.open .test-detail { display: block; }
     .log-panel { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-stone); font-family: var(--font-mono); font-size: 0.6rem; padding: 0.55rem 0.65rem; line-height: 1.6; min-height: 5rem; max-height: 14rem; overflow-y: auto; white-space: pre-wrap; margin-top: 0.75rem; }
+    .entropy-panel { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: 0.65rem 0.8rem; margin: 0 0 0.9rem; }
+    .entropy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.5rem; margin-top: 0.5rem; }
+    .entropy-item { border: 1px solid var(--border-black); background: var(--bg-stone); padding: 0.45rem 0.55rem; font-family: var(--font-mono); font-size: 0.6rem; }
+    .entropy-item strong { display: block; font-size: 0.85rem; color: var(--text-black); margin-top: 0.2rem; }
   </style>
 </head>
 <body>
@@ -37,7 +41,7 @@
   <header class="lede-block">
     <p class="eyebrow">v151 · capabilities · performance</p>
     <h1>API Safety Harness</h1>
-    <p class="lede">12 edge-case tests covering API availability, return value shape, repeated calls, companion APIs (hardwareConcurrency, deviceMemory), integration with prefers-reduced-motion, graceful fallback patterns, and tier-gated feature-flag logic. All tests run in-page — no server required.</p>
+    <p class="lede">12 edge-case tests covering API availability, value shape, repeated reads, companion APIs (hardwareConcurrency, deviceMemory), integration with prefers-reduced-motion, graceful fallback patterns, and tier-gated feature-flag logic. All tests run in-page — no server required.</p>
   </header>
 
   <div class="harness-controls">
@@ -52,58 +56,109 @@
     <div class="sb-item sb-fail" id="sb-fail">0 fail</div>
   </div>
 
+  <section class="entropy-panel" aria-labelledby="entropy-heading">
+    <h2 id="entropy-heading">fingerprinting budget</h2>
+    <p class="test-desc">Compare the coarse CPU tier with companion hints a site may already see. The API should add a small bucketed signal, not a device-model fingerprint.</p>
+    <div class="entropy-grid" id="entropy-grid"></div>
+  </section>
+
   <ol class="test-list" id="test-list"></ol>
   <div class="log-panel" id="log-panel">// test log will appear here</div>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5189864286978048" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://wicg.github.io/cpu-performance/" target="_blank" rel="noopener">CPU Performance API draft</a></li>
+    </ul>
+  </section>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 <script>
 (function () {
+  function readCpuPerformance() {
+    return typeof navigator.cpuPerformance === 'number' && Number.isFinite(navigator.cpuPerformance)
+      ? Math.max(0, Math.floor(navigator.cpuPerformance))
+      : null;
+  }
+
+  function estimateTier() {
+    const exact = readCpuPerformance();
+    if (exact !== null) return exact;
+    const hc = navigator.hardwareConcurrency || 1;
+    const dm = navigator.deviceMemory || 0;
+    if (hc >= 8 && dm >= 8) return 3;
+    if (hc >= 4 && dm >= 4) return 2;
+    if (hc >= 2) return 1;
+    return 0;
+  }
+
+  function bitsForBuckets(count) {
+    return Math.log2(Math.max(1, count));
+  }
+
+  function renderEntropy() {
+    const cpuTier = readCpuPerformance();
+    const hc = navigator.hardwareConcurrency;
+    const dm = navigator.deviceMemory;
+    const cpuBuckets = 5;
+    const hcBuckets = typeof hc === 'number' ? 8 : 1;
+    const dmBuckets = typeof dm === 'number' ? 6 : 1;
+    const cpuBits = bitsForBuckets(cpuBuckets);
+    const hcBits = bitsForBuckets(hcBuckets);
+    const dmBits = bitsForBuckets(dmBuckets);
+    const total = cpuBits + hcBits + dmBits;
+    const rows = [
+      ['CPU tier', cpuTier === null ? 'absent' : String(cpuTier), cpuBits],
+      ['hardwareConcurrency', typeof hc === 'number' ? String(hc) : 'absent', hcBits],
+      ['deviceMemory', typeof dm === 'number' ? dm + ' GB' : 'absent', dmBits],
+      ['combined upper bound', 'bucketed', total],
+    ];
+    document.getElementById('entropy-grid').innerHTML = rows.map(([label, value, bits]) =>
+      `<div class="entropy-item">${label}<strong>${value}</strong>${bits.toFixed(2)} bits</div>`
+    ).join('');
+  }
+
   const TESTS = [
     {
       id: 'api-present',
-      name: 'navigator.cpu API present',
-      desc: 'Is navigator.cpu an object?',
+      name: 'navigator.cpuPerformance attribute present',
+      desc: 'Is the readonly attribute exposed?',
       run: async () => {
-        const ok = 'cpu' in navigator && typeof navigator.cpu === 'object' && navigator.cpu !== null;
+        const ok = 'cpuPerformance' in navigator;
         return {
           status: ok ? 'pass' : 'warn',
-          detail: 'navigator.cpu: ' + JSON.stringify(navigator.cpu) + '\n' +
-            (ok ? 'API available. Chrome 151+ required.' : 'navigator.cpu absent — not available in this browser. Tier inference from hardwareConcurrency can be used as fallback.')
+          detail: 'navigator.cpuPerformance: ' + navigator.cpuPerformance + '\n' +
+            (ok ? 'Attribute exposed. Chrome 151+ required.' : 'Attribute absent — not available in this browser. Tier inference from hardwareConcurrency can be used as fallback.')
         };
       }
     },
     {
-      id: 'perf-fn',
-      name: 'navigator.cpu.performance is a function',
-      desc: 'The performance property must be callable',
+      id: 'value-shape',
+      name: 'navigator.cpuPerformance is numeric',
+      desc: 'The attribute value must be a number',
       run: async () => {
-        if (!navigator.cpu) return { status: 'warn', detail: 'navigator.cpu absent — skipped.' };
-        const ok = typeof navigator.cpu.performance === 'function';
+        const ok = typeof navigator.cpuPerformance === 'number';
         return {
           status: ok ? 'pass' : 'warn',
-          detail: 'typeof navigator.cpu.performance: ' + typeof navigator.cpu.performance + '\n' +
-            (ok ? 'Callable function found.' : 'Property is not a function — API may have changed shape in this build.')
+          detail: 'typeof navigator.cpuPerformance: ' + typeof navigator.cpuPerformance + '\n' +
+            (ok ? 'Numeric tier found.' : 'No numeric value in this browser; fallback paths should run.')
         };
       }
     },
     {
       id: 'return-value',
-      name: 'Return value is a number',
-      desc: 'navigator.cpu.performance() should resolve with a numeric tier',
+      name: 'Synchronous read returns a tier',
+      desc: 'navigator.cpuPerformance should synchronously expose a numeric tier',
       run: async () => {
-        if (!navigator.cpu?.performance) return { status: 'warn', detail: 'navigator.cpu.performance absent — skipped.' };
-        try {
-          const v = await navigator.cpu.performance();
-          const ok = typeof v === 'number' && isFinite(v);
-          return {
-            status: ok ? 'pass' : 'warn',
-            detail: 'Resolved value: ' + v + ' (type: ' + typeof v + ')\n' +
-              (ok ? 'Numeric tier received.' : 'Unexpected return type — check API spec.')
-          };
-        } catch (e) {
-          return { status: 'warn', detail: 'Threw: ' + e.message };
-        }
+        const v = navigator.cpuPerformance;
+        const ok = typeof v === 'number' && isFinite(v);
+        return {
+          status: ok ? 'pass' : 'warn',
+          detail: 'Read value: ' + v + ' (type: ' + typeof v + ')\n' +
+            (ok ? 'Numeric tier received without a promise or method call.' : 'Attribute unavailable; no async call is expected.')
+        };
       }
     },
     {
@@ -111,38 +166,30 @@
       name: 'Tier value in expected range 0–4',
       desc: 'The returned tier should be a small non-negative integer',
       run: async () => {
-        if (!navigator.cpu?.performance) return { status: 'warn', detail: 'navigator.cpu.performance absent — skipped.' };
-        try {
-          const v = await navigator.cpu.performance();
-          const ok = typeof v === 'number' && v >= 0 && v <= 10;
-          const expected = v >= 0 && v <= 4;
-          return {
-            status: ok ? (expected ? 'pass' : 'warn') : 'fail',
-            detail: 'Tier: ' + v + '\n' +
-              (expected ? 'Value is in the well-known 0–4 range.' : ok ? 'Value is non-negative but outside 0–4. Spec may allow higher values.' : 'Value out of range.')
-          };
-        } catch (e) {
-          return { status: 'warn', detail: 'Threw: ' + e.message };
-        }
+        const v = navigator.cpuPerformance;
+        if (typeof v !== 'number') return { status: 'warn', detail: 'navigator.cpuPerformance absent — skipped.' };
+        const ok = Number.isInteger(v) && v >= 0 && v <= 16;
+        const expected = v >= 0 && v <= 4;
+        return {
+          status: ok ? (expected ? 'pass' : 'warn') : 'fail',
+          detail: 'Tier: ' + v + '\n' +
+            (expected ? 'Value is in the well-known 0–4 range.' : ok ? 'Value is non-negative but outside 0–4. Future specs may allow higher values.' : 'Value out of range.')
+        };
       }
     },
     {
       id: 'stable-calls',
       name: 'Stable across repeated calls',
-      desc: 'Two consecutive calls should return the same tier',
+      desc: 'Two consecutive reads should return the same tier',
       run: async () => {
-        if (!navigator.cpu?.performance) return { status: 'warn', detail: 'navigator.cpu.performance absent — skipped.' };
-        try {
-          const a = await navigator.cpu.performance();
-          const b = await navigator.cpu.performance();
-          const ok = a === b;
-          return {
-            status: ok ? 'pass' : 'warn',
-            detail: 'Call 1: ' + a + '\nCall 2: ' + b + '\n' + (ok ? 'Stable — both calls agree.' : 'Values differ — API may be non-deterministic or asynchronous state changed.')
-          };
-        } catch (e) {
-          return { status: 'warn', detail: 'Threw: ' + e.message };
-        }
+        const a = navigator.cpuPerformance;
+        const b = navigator.cpuPerformance;
+        if (typeof a !== 'number') return { status: 'warn', detail: 'navigator.cpuPerformance absent — skipped.' };
+        const ok = a === b;
+        return {
+          status: ok ? 'pass' : 'warn',
+          detail: 'Read 1: ' + a + '\nRead 2: ' + b + '\n' + (ok ? 'Stable — both reads agree.' : 'Values differ — static tier should normally be stable.')
+        };
       }
     },
     {
@@ -179,10 +226,7 @@
       desc: 'Tier 0/1 devices should also apply prefers-reduced-motion override',
       run: async () => {
         const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        let tier = 2;
-        if (navigator.cpu?.performance) {
-          try { tier = await navigator.cpu.performance(); } catch (_) {}
-        }
+        const tier = estimateTier();
         const shouldSimplify = reduced || tier <= 1;
         return {
           status: 'pass',
@@ -196,7 +240,7 @@
       desc: 'Feature-detect and derive a usable tier estimate',
       run: async () => {
         function estimateTier() {
-          if (navigator.cpu?.performance) return null; // will use real API
+          if (readCpuPerformance() !== null) return null; // will use real API
           const hc = navigator.hardwareConcurrency || 1;
           const dm = navigator.deviceMemory || 0;
           if (hc >= 8 && dm >= 8) return 3;
@@ -219,9 +263,7 @@
       desc: 'AI inference routing: local (tier 3+) vs server (tier 0–2)',
       run: async () => {
         let tier = 2;
-        if (navigator.cpu?.performance) {
-          try { tier = await navigator.cpu.performance(); } catch (_) {}
-        }
+        tier = estimateTier();
         const useLocal = tier >= 3;
         return {
           status: 'pass',
@@ -232,13 +274,13 @@
     {
       id: 'secure-context',
       name: 'Secure context required',
-      desc: 'navigator.cpu requires HTTPS or localhost',
+      desc: 'navigator.cpuPerformance requires HTTPS or localhost',
       run: async () => {
         const sec = window.isSecureContext;
         return {
           status: sec ? 'pass' : 'warn',
           detail: 'isSecureContext: ' + sec + '\n' +
-            (sec ? 'Running on secure origin. CPU Performance API will be accessible.' : 'Not secure — navigator.cpu will be undefined on insecure origins.')
+            (sec ? 'Running on secure origin. CPU Performance API can be exposed.' : 'Not secure — navigator.cpuPerformance is not expected on insecure origins.')
         };
       }
     },
@@ -320,6 +362,7 @@
   };
 
   const listEl = document.getElementById('test-list');
+  renderEntropy();
   TESTS.forEach((t, i) => {
     const li = document.createElement('li');
     li.className = 'test-item';
