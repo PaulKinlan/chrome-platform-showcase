@@ -18,7 +18,7 @@
       font-size: 0.8rem;
       font-weight: 500;
       text-transform: uppercase;
-      letter-spacing: 0.07em;
+      letter-spacing: 0;
       color: var(--text-muted);
     }
     .mode-toggle {
@@ -32,7 +32,7 @@
       font-size: 0.78rem;
       font-weight: 500;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
+      letter-spacing: 0;
       padding: var(--space-2) var(--space-4);
       background: var(--bg-ivory);
       color: var(--text-black);
@@ -121,6 +121,10 @@
       color: var(--bg-ivory);
       border-color: var(--text-black);
     }
+    .thumb[data-disabled="true"] {
+      opacity: 0.62;
+      cursor: wait;
+    }
 
     .interruption-banner {
       display: none;
@@ -156,6 +160,55 @@
     }
     .status-dot.both { background: var(--accent-emerald); }
     .status-dot.one  { background: var(--accent-rose); }
+
+    .action-row {
+      display: flex;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+      margin: 0 0 var(--space-3);
+    }
+    .action-row .secondary {
+      background: var(--bg-paper);
+      color: var(--text-black);
+      box-shadow: var(--thin-shadow);
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-3);
+      margin: 0 0 var(--space-5);
+    }
+    @media (max-width: 680px) {
+      .metrics { grid-template-columns: 1fr; }
+    }
+    .metric {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-3);
+      min-height: 8rem;
+    }
+    .metric[data-state="running"] { border-color: var(--accent-blue); }
+    .metric[data-state="pass"] { border-color: var(--accent-emerald); }
+    .metric[data-state="warn"] { border-color: var(--accent-rose); }
+    .metric h3 {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0;
+      color: var(--text-muted);
+      margin: 0 0 var(--space-2);
+    }
+    .metric strong {
+      display: block;
+      font-family: var(--font-mono);
+      margin-bottom: var(--space-2);
+    }
+    .metric p {
+      margin: 0;
+      color: var(--text-charcoal);
+    }
   </style>
 </head>
 <body>
@@ -190,6 +243,24 @@
     <span id="status-text">Click a thumbnail to begin.</span>
   </div>
 
+  <div class="action-row">
+    <button id="btn-rapid">Run rapid-click test</button>
+    <button class="secondary" id="btn-reset">Reset gallery</button>
+  </div>
+
+  <section class="metrics" aria-live="polite" aria-label="scroll behavior measurements">
+    <div class="metric" id="concurrent-card" data-state="idle">
+      <h3>independent containers</h3>
+      <strong>not run yet</strong>
+      <p>Click a thumbnail to measure the main scroller and thumbnail strip moving in the same timed window.</p>
+    </div>
+    <div class="metric" id="rapid-card" data-state="idle">
+      <h3>same-container rapid click</h3>
+      <strong>not run yet</strong>
+      <p>Runs two thumbnail selections 160ms apart to show that a later call still aborts an earlier smooth scroll in the same scroll box.</p>
+    </div>
+  </section>
+
   <section>
     <h2>the code</h2>
     <p>In Chrome 130 mode, both calls are issued in the same synchronous block — the browser animates them at the same time:</p>
@@ -203,6 +274,10 @@ setTimeout(() =&gt; {
   // In pre-130 browsers this cancels the in-progress thumb strip animation.
   mainEl.scrollIntoView({ behavior: &apos;smooth&apos;, block: &apos;start&apos; });
 }, 20);</code></pre>
+    <p>Rapid-click boundary: two calls targeting the same scroll container still cancel the earlier animation; the newest thumbnail wins.</p>
+<pre><code>firstTarget.scrollIntoView({ behavior: &apos;smooth&apos;, block: &apos;start&apos; });
+await new Promise((resolve) =&gt; setTimeout(resolve, 160));
+secondTarget.scrollIntoView({ behavior: &apos;smooth&apos;, block: &apos;start&apos; });</code></pre>
   </section>
 
   <section>
@@ -236,9 +311,17 @@ setTimeout(() =&gt; {
   const statusText = document.getElementById('status-text');
   const statusDot = document.getElementById('status-dot');
   const interruptionBanner = document.getElementById('interruption-banner');
+  const concurrentCard = document.getElementById('concurrent-card');
+  const rapidCard = document.getElementById('rapid-card');
+  const btnChrome130 = document.getElementById('btn-chrome130');
+  const btnPre130 = document.getElementById('btn-pre130');
+  const btnRapid = document.getElementById('btn-rapid');
+  const btnReset = document.getElementById('btn-reset');
 
   let mode = 'chrome130';
   let activeIndex = -1;
+  let selectionRunId = 0;
+  let controlsLocked = false;
 
   // Build main view items.
   const mainItems = IMAGES.map((img, i) => {
@@ -278,7 +361,96 @@ setTimeout(() =&gt; {
     statusText.textContent = msg;
   }
 
-  function selectImage(index) {
+  function setCard(card, state, value, detail) {
+    card.dataset.state = state;
+    card.querySelector('strong').textContent = value;
+    card.querySelector('p').textContent = detail;
+  }
+
+  function snapshot() {
+    return {
+      mainTop: Math.round(mainView.scrollTop),
+      thumbLeft: Math.round(thumbStrip.scrollLeft),
+    };
+  }
+
+  function moved(start, end) {
+    return {
+      main: Math.abs(end.mainTop - start.mainTop),
+      thumb: Math.abs(end.thumbLeft - start.thumbLeft),
+    };
+  }
+
+  function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function targetScrollTop(index) {
+    return Math.round(mainItems[index].offsetTop - mainItems[0].offsetTop);
+  }
+
+  function modeInstruction() {
+    return mode === 'chrome130'
+      ? 'Chrome 130 mode — click a thumbnail to see concurrent smooth scrolls.'
+      : 'Pre-130 simulation — click a thumbnail to see the second call interrupt the first.';
+  }
+
+  function resetCards() {
+    setCard(
+      concurrentCard,
+      'idle',
+      'not run yet',
+      'Click a thumbnail to measure the main scroller and thumbnail strip moving in the same timed window.',
+    );
+    setCard(
+      rapidCard,
+      'idle',
+      'not run yet',
+      'Runs two thumbnail selections 160ms apart to show that a later call still aborts an earlier smooth scroll in the same scroll box.',
+    );
+  }
+
+  function setControlsLocked(isLocked) {
+    controlsLocked = isLocked;
+    [btnChrome130, btnPre130, btnRapid, btnReset].forEach(button => {
+      button.disabled = isLocked;
+    });
+    thumbEls.forEach(thumb => {
+      thumb.dataset.disabled = String(isLocked);
+      thumb.setAttribute('aria-disabled', String(isLocked));
+    });
+  }
+
+  function jumpToOrigin(resetRunId) {
+    mainView.style.scrollBehavior = 'auto';
+    thumbStrip.style.scrollBehavior = 'auto';
+    mainView.scrollTop = 0;
+    thumbStrip.scrollLeft = 0;
+    mainView.getBoundingClientRect();
+    thumbStrip.getBoundingClientRect();
+    requestAnimationFrame(() => {
+      if (resetRunId !== selectionRunId) return;
+      mainView.scrollTop = 0;
+      thumbStrip.scrollLeft = 0;
+    });
+  }
+
+  function resetGallery(message = modeInstruction(), { clearCards = true } = {}) {
+    selectionRunId++;
+    jumpToOrigin(selectionRunId);
+    thumbEls.forEach(thumb => thumb.classList.remove('active'));
+    mainItems.forEach(item => item.classList.remove('active-item'));
+    activeIndex = -1;
+    if (clearCards) resetCards();
+    setStatus('', message);
+  }
+
+  function selectImage(index, options = {}) {
+    const { force = false, trackConcurrent = true } = options;
+    if (controlsLocked && !force) return;
+    const runId = ++selectionRunId;
+    const start = snapshot();
+
     thumbEls.forEach((t, i) => t.classList.toggle('active', i === index));
     mainItems.forEach((m, i) => m.classList.toggle('active-item', i === index));
 
@@ -290,58 +462,138 @@ setTimeout(() =&gt; {
       // Chrome 130: both calls in the same synchronous block — concurrent smooth scrolls.
       thumbEl.scrollIntoView({ behavior: 'smooth', inline: 'center' });
       mainEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (trackConcurrent) {
+        setCard(
+          concurrentCard,
+          'running',
+          'measuring both scrollers',
+          'Both scrollIntoView() calls were issued in the same synchronous block.',
+        );
+      }
       setStatus('', 'Selecting "' + img.label + '" — both scrollers animating concurrently…');
       setTimeout(() => {
+        if (runId !== selectionRunId) return;
+        const end = snapshot();
+        const delta = moved(start, end);
+        if (trackConcurrent) {
+          const bothMoved = delta.main > 2 && (delta.thumb > 2 || thumbEl === thumbEls[0]);
+          setCard(
+            concurrentCard,
+            bothMoved ? 'pass' : 'warn',
+            'main ' + delta.main + 'px, thumbs ' + delta.thumb + 'px',
+            bothMoved
+              ? 'The main view and thumbnail strip both changed during the same timed window.'
+              : 'The selected thumbnail was already visible or one scroll box did not move enough to measure.',
+          );
+        }
         setStatus('both', '"' + img.label + '" selected — both scrollers animated together in Chrome 130. ✓');
-      }, 700);
+      }, 760);
     } else {
       // Pre-130 simulation: a 20ms gap lets the first animation start before the second call fires.
       const thumbScrollBefore = thumbStrip.scrollLeft;
       thumbEl.scrollIntoView({ behavior: 'smooth', inline: 'center' });
+      if (trackConcurrent) {
+        setCard(
+          concurrentCard,
+          'running',
+          'delayed second call',
+          'This mode intentionally waits 20ms before scrolling the main view.',
+        );
+      }
       setStatus('', 'Pre-130: thumbnail strip scrolling… main view scroll fires in 20ms.');
 
       setTimeout(() => {
+        if (runId !== selectionRunId) return;
         // By now the thumb strip animation is mid-flight.
         // In pre-130 engines a second smooth scroll on the same scroll-port chain
         // would abort the first. We simulate by firing the second call late.
         mainEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
         setTimeout(() => {
+          if (runId !== selectionRunId) return;
           const thumbMoved = Math.abs(thumbStrip.scrollLeft - thumbScrollBefore) > 2;
+          if (trackConcurrent) {
+            setCard(
+              concurrentCard,
+              'warn',
+              'thumbnail moved: ' + (thumbMoved ? 'yes' : 'no'),
+              thumbMoved
+                ? 'These are independent containers, so current Chrome lets the strip keep moving even with a delayed second call.'
+                : 'The thumbnail strip did not move enough to measure before the second scroll started.',
+            );
+          }
           if (thumbMoved) {
             setStatus('both', 'Pre-130 simulation: thumb strip still moved because these are unrelated containers. In a real pre-130 browser, a single-container second call would have snapped the first.');
           } else {
             setStatus('one', 'Pre-130: thumbnail strip scroll was interrupted by the second call — only the main view animated.');
           }
-        }, 700);
+        }, 760);
       }, 20);
     }
 
     activeIndex = index;
   }
 
-  const btnChrome130 = document.getElementById('btn-chrome130');
-  const btnPre130 = document.getElementById('btn-pre130');
+  async function runRapidClickTest() {
+    if (controlsLocked) return;
+    setMode('chrome130', { clearCards: false });
+    setControlsLocked(true);
 
-  function setMode(newMode) {
+    const first = 9;
+    const second = 3;
+    const firstTop = targetScrollTop(first);
+    const secondTop = targetScrollTop(second);
+
+    setCard(
+      rapidCard,
+      'running',
+      'Night Sky, then Sunset',
+      'The second selection fires 160ms after the first, targeting the same main scroll box.',
+    );
+    setStatus('', 'Rapid-click test: starting Night Sky, then Sunset 160ms later.');
+
+    selectImage(first, { force: true, trackConcurrent: false });
+    await wait(160);
+    const mid = snapshot();
+    selectImage(second, { force: true, trackConcurrent: false });
+    await wait(960);
+
+    const end = snapshot();
+    const firstMiss = Math.abs(end.mainTop - firstTop);
+    const secondMiss = Math.abs(end.mainTop - secondTop);
+    const tolerance = Math.max(24, Math.round(mainView.clientHeight * 0.08));
+    const latestWon = secondMiss <= tolerance && firstMiss > Math.round(mainView.clientHeight * 0.5);
+
+    setCard(
+      rapidCard,
+      latestWon ? 'pass' : 'warn',
+      latestWon ? 'latest target won' : 'latest target unclear',
+      'Night Sky was interrupted at ' + mid.mainTop + 'px; Sunset ended ' + secondMiss + 'px from its target and ' + firstMiss + 'px from the first target.',
+    );
+    setStatus(
+      latestWon ? 'one' : '',
+      latestWon
+        ? 'Rapid-click test passed: the second target won inside the same scroll container.'
+        : 'Rapid-click test finished, but the final scroll position was not clearly closer to the second target.',
+    );
+    setControlsLocked(false);
+  }
+
+  function setMode(newMode, { clearCards = true } = {}) {
     mode = newMode;
     btnChrome130.classList.toggle('active', mode === 'chrome130');
     btnPre130.classList.toggle('active', mode === 'pre130');
     btnChrome130.setAttribute('aria-pressed', String(mode === 'chrome130'));
     btnPre130.setAttribute('aria-pressed', String(mode === 'pre130'));
     interruptionBanner.classList.toggle('visible', mode === 'pre130');
-    mainView.scrollTop = 0;
-    thumbStrip.scrollLeft = 0;
-    thumbEls.forEach(t => t.classList.remove('active'));
-    mainItems.forEach(m => m.classList.remove('active-item'));
-    activeIndex = -1;
-    setStatus('', mode === 'chrome130'
-      ? 'Chrome 130 mode — click a thumbnail to see concurrent smooth scrolls.'
-      : 'Pre-130 simulation — click a thumbnail to see the second call interrupt the first.');
+    resetGallery(modeInstruction(), { clearCards });
   }
 
   btnChrome130.addEventListener('click', () => setMode('chrome130'));
   btnPre130.addEventListener('click', () => setMode('pre130'));
+  btnRapid.addEventListener('click', runRapidClickTest);
+  btnReset.addEventListener('click', () => resetGallery());
+  resetGallery('Click a thumbnail to begin.');
 </script>
 </body>
 </html>
