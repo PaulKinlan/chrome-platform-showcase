@@ -105,6 +105,18 @@
     .render-box .render-label { font-size: 0.72rem; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.5rem; letter-spacing: 0.05em; }
     .render-box .render-result { min-height: 4rem; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 0.4rem; font-size: 0.78rem; color: var(--text-charcoal); }
     .render-box img { max-width: 100%; max-height: 6rem; border: 1px solid var(--border-black); }
+    .render-box iframe { width: 100%; height: 5rem; border: 1px solid var(--border-black); background: var(--bg-paper); }
+    .render-box .decode-preview {
+      width: 100%;
+      text-align: left;
+      background: var(--bg-paper);
+      border: 1px solid var(--border-black);
+      padding: 0.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      line-height: 1.5;
+      word-break: break-word;
+    }
     .before-after-block { padding: 0.75rem; margin-bottom: 0.5rem; border: 1px solid var(--border-black); }
     .before-after-block.before-block { background: color-mix(in srgb, var(--accent-rose) 6%, var(--bg-ivory)); }
     .before-after-block.after-block { background: color-mix(in srgb, var(--accent-emerald) 6%, var(--bg-ivory)); }
@@ -112,6 +124,15 @@
     .before-block .block-label { color: var(--accent-rose); }
     .after-block .block-label { color: var(--accent-emerald); }
     .hidden { display: none; }
+    .suggestion-row {
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: 0.75rem;
+      margin-top: 0.75rem;
+      font-size: 0.82rem;
+      color: var(--text-charcoal);
+    }
+    .suggestion-row code { font-family: var(--font-mono); color: var(--accent-blue); }
     .info-row { display: flex; gap: 0.5rem; align-items: baseline; margin-bottom: 0.35rem; font-size: 0.82rem; }
     .info-key { color: var(--text-muted); font-family: var(--font-mono); font-size: 0.75rem; min-width: 8rem; }
     .info-val { color: var(--text-charcoal); font-family: var(--font-mono); font-size: 0.8rem; word-break: break-all; }
@@ -145,6 +166,7 @@
       <thead><tr><th>Parameter</th><th>Value</th><th>Preserved in v146?</th></tr></thead>
       <tbody id="params-body"></tbody>
     </table>
+    <div id="param-suggestion" class="suggestion-row hidden"></div>
   </div>
 
   <!-- Before / After Toggle -->
@@ -166,6 +188,13 @@
         <div class="mono-block" id="ba-before-url"></div>
       </div>
     </div>
+  </div>
+
+  <!-- Corruption Check -->
+  <div class="panel" id="corruption-panel" style="display:none">
+    <h3>Charset Corruption Check</h3>
+    <p style="font-size:0.82rem;color:var(--text-muted);margin:0 0 1rem;">Text bytes with non-ASCII characters need the charset parameter. The stripped URL shows the UTF-8 fallback; the preserved URL decodes the same bytes with the declared charset.</p>
+    <div class="render-grid" id="corruption-grid"></div>
   </div>
 
   <!-- Presets -->
@@ -198,99 +227,124 @@
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 
   <script>
+    const TINY_JPEG = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAT8AVf/Z';
+    const LATIN1_CSV = 'name,city,menu\nJosé,Málaga,crème brûlée\nZoë,Zürich,jalapeño';
+    let currentSuggestion = null;
+
     const PRESETS = [
       {
         label: 'PDF Document',
         mime: 'application/pdf; version=1.4',
         description: 'PDF with explicit version parameter',
         content: '%PDF-1.4 (simulated)',
-        base64: btoa('%PDF-1.4 simulated content for demo'),
+        base64: base64FromString('%PDF-1.4 simulated content for demo'),
       },
       {
         label: 'CSV Data',
         mime: 'text/csv; charset=utf-8; header=present',
-        description: 'CSV with charset and header presence',
+        description: 'CSV with UTF-8 charset and header presence',
         content: 'name,age\nAlice,30\nBob,25',
-        base64: btoa('name,age\nAlice,30\nBob,25'),
+        base64: base64FromString('name,age\nAlice,30\nBob,25'),
+      },
+      {
+        label: 'Latin-1 CSV',
+        mime: 'text/csv; charset=iso-8859-1; header=present',
+        description: 'ISO-8859-1 CSV where stripped charset produces mojibake',
+        content: LATIN1_CSV,
+        base64: base64FromLatin1(LATIN1_CSV),
       },
       {
         label: 'JPEG Image',
         mime: 'image/jpeg; quality=80',
         description: 'JPEG with quality parameter',
         content: null,
-        base64: null, // will use a real tiny JPEG
+        base64: TINY_JPEG,
       },
     ];
 
-    // Minimal 1x1 white JPEG base64
-    const TINY_JPEG = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAT8AVf/Z';
+    function escapeHTML(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function base64FromString(value) {
+      return base64FromBytes(new TextEncoder().encode(value));
+    }
+
+    function base64FromLatin1(value) {
+      const bytes = [];
+      for (const char of value) {
+        const code = char.charCodeAt(0);
+        bytes.push(code <= 0xff ? code : 0x3f);
+      }
+      return base64FromBytes(new Uint8Array(bytes));
+    }
+
+    function base64FromBytes(bytes) {
+      let binary = '';
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary);
+    }
+
+    function bytesFromBase64(b64) {
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
+
+    function decodeBytes(bytes, label) {
+      try {
+        return new TextDecoder(label, { fatal: false }).decode(bytes);
+      } catch (err) {
+        return 'unsupported charset label: ' + err.message;
+      }
+    }
 
     function parseMimeParams(mimeStr) {
       const parts = mimeStr.split(';').map(s => s.trim());
-      const type = parts[0];
+      const type = parts[0] || 'application/octet-stream';
       const params = {};
       for (let i = 1; i < parts.length; i++) {
-        const [k, v] = parts[i].split('=').map(s => s.trim());
-        if (k) params[k] = v || '';
+        const [k, ...rest] = parts[i].split('=');
+        if (k) params[k.trim()] = rest.join('=').trim();
       }
       return { type, params };
     }
 
     function stripParams(mimeStr) {
-      return mimeStr.split(';')[0].trim();
+      return mimeStr.split(';')[0].trim() || 'application/octet-stream';
     }
 
     function buildDataUrl(mime, b64) {
       return `data:${mime};base64,${b64}`;
     }
 
-    // File upload
-    document.getElementById('file-input').addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
+    function summarizeUrl(url) {
+      return url.substring(0, 200) + (url.length > 200 ? '…' : '');
+    }
 
-      document.getElementById('fi-name').textContent = file.name;
-      document.getElementById('fi-type').textContent = file.type || '(unknown)';
-      document.getElementById('fi-size').textContent = (file.size / 1024).toFixed(2) + ' KB';
-
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const dataUrl = ev.target.result;
-        const comma = dataUrl.indexOf(',');
-        const prefix = dataUrl.substring(0, comma);
-        document.getElementById('fi-prefix').textContent = prefix;
-        document.getElementById('file-output').classList.remove('hidden');
-
-        const mimeStr = file.type || 'application/octet-stream';
-        const { type, params } = parseMimeParams(mimeStr);
-
-        // Params table
-        const tbody = document.getElementById('params-body');
-        tbody.innerHTML = '';
-        const hasParams = Object.keys(params).length > 0;
-        if (!hasParams) {
-          tbody.innerHTML = '<tr><td colspan="3" style="color:var(--text-muted); text-align:center; padding:0.75rem;">No MIME parameters in this file type. Try a preset below.</td></tr>';
-        } else {
-          for (const [k, v] of Object.entries(params)) {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `<td>${k}</td><td>${v}</td><td><span class="badge badge-ok">Yes — v146</span></td>`;
-            tbody.appendChild(tr);
-          }
-        }
-        document.getElementById('params-panel').style.display = '';
-
-        // Before / after
-        const b64 = dataUrl.substring(comma + 1);
-        const afterUrl = buildDataUrl(mimeStr, b64);
-        const beforeUrl = buildDataUrl(stripParams(mimeStr), b64);
-        document.getElementById('ba-after-url').textContent = afterUrl.substring(0, 200) + (afterUrl.length > 200 ? '…' : '');
-        document.getElementById('ba-before-url').textContent = beforeUrl.substring(0, 200) + (beforeUrl.length > 200 ? '…' : '');
-        document.getElementById('ba-panel').style.display = '';
-
-        renderEmbeds(dataUrl, mimeStr);
-      };
-      reader.readAsDataURL(file);
-    });
+    function suggestMimeWithParams(mimeStr, fileName = '') {
+      const base = stripParams(mimeStr || '').toLowerCase();
+      const lowerName = fileName.toLowerCase();
+      if (base === 'text/csv' || lowerName.endsWith('.csv')) {
+        return 'text/csv; charset=utf-8; header=present';
+      }
+      if (base.startsWith('text/')) {
+        return `${base}; charset=utf-8`;
+      }
+      if (base === 'application/pdf' || lowerName.endsWith('.pdf')) {
+        return 'application/pdf; version=1.7';
+      }
+      if (base === 'image/jpeg' || lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) {
+        return 'image/jpeg; quality=90';
+      }
+      return null;
+    }
 
     function showVersion(v) {
       document.getElementById('view-after').classList.toggle('hidden', v !== 'after');
@@ -299,73 +353,179 @@
       document.getElementById('btn-before').classList.toggle('active', v === 'before');
     }
 
+    function renderParams(params) {
+      const tbody = document.getElementById('params-body');
+      tbody.innerHTML = '';
+      const entries = Object.entries(params);
+      if (!entries.length) {
+        tbody.innerHTML = '<tr><td colspan="3" style="color:var(--text-muted); text-align:center; padding:0.75rem;">No MIME parameters in this file type.</td></tr>';
+        return;
+      }
+      for (const [k, v] of entries) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${escapeHTML(k)}</td><td>${escapeHTML(v)}</td><td><span class="badge badge-ok">Yes — v146</span></td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function renderSuggestion(source, params) {
+      const el = document.getElementById('param-suggestion');
+      el.classList.add('hidden');
+      el.innerHTML = '';
+      currentSuggestion = null;
+      if (Object.keys(params).length > 0) return;
+
+      const suggestedMime = suggestMimeWithParams(source.mime, source.name);
+      if (!suggestedMime) return;
+
+      currentSuggestion = { ...source, mime: suggestedMime, name: source.name + ' + suggested params' };
+      el.classList.remove('hidden');
+      el.innerHTML =
+        'Most OS file pickers expose only <code>' + escapeHTML(stripParams(source.mime)) + '</code>. ' +
+        'Inject an example MIME string for this file: <code>' + escapeHTML(suggestedMime) + '</code> ' +
+        '<button class="action-btn secondary" onclick="applySuggestedParams()">Inject example parameters</button>';
+    }
+
     function renderEmbeds(dataUrl, mime) {
       const grid = document.getElementById('render-grid');
       grid.innerHTML = '';
       const isImage = mime.startsWith('image/');
 
-      const tests = [
-        {
-          label: '<img> embed',
-          render: (url) => {
-            const box = document.createElement('div');
-            box.className = 'render-box';
-            box.innerHTML = `<div class="render-label">&lt;img&gt; embed</div><div class="render-result"></div>`;
-            const res = box.querySelector('.render-result');
-            if (isImage) {
-              const img = document.createElement('img');
-              img.src = url;
-              img.alt = 'data URL image';
-              res.appendChild(img);
-            } else {
-              res.textContent = '(only works for images)';
-              res.style.color = 'var(--text-muted)';
-            }
-            return box;
-          }
-        },
-        {
-          label: '<a download> link',
-          render: (url) => {
-            const box = document.createElement('div');
-            box.className = 'render-box';
-            const ext = mime.split('/')[1]?.split(';')[0] || 'bin';
-            box.innerHTML = `<div class="render-label">&lt;a download&gt; link</div><div class="render-result"><a href="${url}" download="download.${ext}" style="color:var(--accent-blue); font-size:0.8rem;">Download file</a><div style="font-size:0.72rem; color:var(--text-muted); margin-top:0.3rem;">MIME preserved in URL</div></div>`;
-            return box;
-          }
-        },
-        {
-          label: '<iframe> embed',
-          render: (url) => {
-            const box = document.createElement('div');
-            box.className = 'render-box';
-            box.innerHTML = `<div class="render-label">&lt;iframe&gt; embed</div><div class="render-result"></div>`;
-            const res = box.querySelector('.render-result');
-            const iframe = document.createElement('iframe');
-            iframe.src = url;
-            iframe.style.cssText = 'width:100%; height:5rem; border:1px solid var(--border-black);';
-            iframe.sandbox = 'allow-scripts allow-same-origin';
-            iframe.title = 'data URL iframe';
-            res.appendChild(iframe);
-            return box;
-          }
-        }
-      ];
-
-      for (const t of tests) {
-        grid.appendChild(t.render(dataUrl));
+      const imageBox = document.createElement('div');
+      imageBox.className = 'render-box';
+      imageBox.innerHTML = '<div class="render-label">&lt;img&gt; embed</div><div class="render-result"></div>';
+      const imageResult = imageBox.querySelector('.render-result');
+      if (isImage) {
+        const img = document.createElement('img');
+        img.src = dataUrl;
+        img.alt = 'data URL image';
+        imageResult.appendChild(img);
+      } else {
+        imageResult.textContent = '(only works for images)';
+        imageResult.style.color = 'var(--text-muted)';
       }
+      grid.appendChild(imageBox);
+
+      const downloadBox = document.createElement('div');
+      downloadBox.className = 'render-box';
+      const ext = mime.split('/')[1]?.split(';')[0] || 'bin';
+      downloadBox.innerHTML = `<div class="render-label">&lt;a download&gt; link</div><div class="render-result"><a href="${dataUrl}" download="download.${ext}" style="color:var(--accent-blue); font-size:0.8rem;">Download file</a><div style="font-size:0.72rem; color:var(--text-muted); margin-top:0.3rem;">MIME preserved in URL</div></div>`;
+      grid.appendChild(downloadBox);
+
+      const iframeBox = document.createElement('div');
+      iframeBox.className = 'render-box';
+      iframeBox.innerHTML = '<div class="render-label">&lt;iframe&gt; embed</div><div class="render-result"></div>';
+      const iframe = document.createElement('iframe');
+      iframe.src = dataUrl;
+      iframe.sandbox = 'allow-scripts allow-same-origin allow-downloads';
+      iframe.title = 'data URL iframe';
+      iframeBox.querySelector('.render-result').appendChild(iframe);
+      grid.appendChild(iframeBox);
+
       document.getElementById('render-panel').style.display = '';
     }
 
-    // Presets
+    function renderCorruption(source, afterUrl, beforeUrl) {
+      const { params } = parseMimeParams(source.mime);
+      const charsetEntry = Object.entries(params).find(([k]) => k.toLowerCase() === 'charset');
+      const panel = document.getElementById('corruption-panel');
+      const grid = document.getElementById('corruption-grid');
+      grid.innerHTML = '';
+      if (!charsetEntry) {
+        panel.style.display = 'none';
+        return;
+      }
+
+      const charset = charsetEntry[1].replace(/^"|"$/g, '');
+      const bytes = source.bytes || bytesFromBase64(source.base64);
+      const fallback = decodeBytes(bytes, 'utf-8');
+      const declared = decodeBytes(bytes, charset);
+
+      const beforeBox = document.createElement('div');
+      beforeBox.className = 'render-box';
+      beforeBox.innerHTML = '<div class="render-label">pre-v146 stripped iframe</div><div class="render-result"></div>';
+      const beforeFrame = document.createElement('iframe');
+      beforeFrame.src = beforeUrl;
+      beforeFrame.sandbox = 'allow-scripts allow-same-origin allow-downloads';
+      beforeFrame.title = 'pre-v146 stripped data URL';
+      beforeBox.querySelector('.render-result').appendChild(beforeFrame);
+      const beforePreview = document.createElement('div');
+      beforePreview.className = 'decode-preview';
+      beforePreview.innerHTML = '<strong>UTF-8 fallback</strong><br>' + escapeHTML(fallback);
+      beforeBox.querySelector('.render-result').appendChild(beforePreview);
+      grid.appendChild(beforeBox);
+
+      const afterBox = document.createElement('div');
+      afterBox.className = 'render-box';
+      afterBox.innerHTML = '<div class="render-label">Chrome 146+ preserved iframe</div><div class="render-result"></div>';
+      const afterFrame = document.createElement('iframe');
+      afterFrame.src = afterUrl;
+      afterFrame.sandbox = 'allow-scripts allow-same-origin allow-downloads';
+      afterFrame.title = 'Chrome 146 preserved data URL';
+      afterBox.querySelector('.render-result').appendChild(afterFrame);
+      const afterPreview = document.createElement('div');
+      afterPreview.className = 'decode-preview';
+      afterPreview.innerHTML = '<strong>Decoded as ' + escapeHTML(charset) + '</strong><br>' + escapeHTML(declared);
+      afterBox.querySelector('.render-result').appendChild(afterPreview);
+      grid.appendChild(afterBox);
+
+      panel.style.display = '';
+    }
+
+    function renderSource(source) {
+      const mime = source.mime || 'application/octet-stream';
+      const b64 = source.base64;
+      const dataUrl = buildDataUrl(mime, b64);
+      const beforeUrl = buildDataUrl(stripParams(mime), b64);
+      const { params } = parseMimeParams(mime);
+
+      document.getElementById('fi-name').textContent = source.name;
+      document.getElementById('fi-type').textContent = mime;
+      document.getElementById('fi-size').textContent = source.size || '—';
+      document.getElementById('fi-prefix').textContent = `data:${mime};base64`;
+      document.getElementById('file-output').classList.remove('hidden');
+
+      renderParams(params);
+      renderSuggestion(source, params);
+      document.getElementById('params-panel').style.display = '';
+
+      document.getElementById('ba-after-url').textContent = summarizeUrl(dataUrl);
+      document.getElementById('ba-before-url').textContent = summarizeUrl(beforeUrl);
+      document.getElementById('ba-panel').style.display = '';
+      showVersion('after');
+
+      renderEmbeds(dataUrl, mime);
+      renderCorruption(source, dataUrl, beforeUrl);
+    }
+
+    document.getElementById('file-input').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const dataUrl = ev.target.result;
+        const comma = dataUrl.indexOf(',');
+        renderSource({
+          name: file.name,
+          mime: file.type || 'application/octet-stream',
+          size: (file.size / 1024).toFixed(2) + ' KB',
+          base64: dataUrl.substring(comma + 1),
+        });
+      };
+      reader.readAsDataURL(file);
+    });
+
+    function applySuggestedParams() {
+      if (!currentSuggestion) return;
+      renderSource(currentSuggestion);
+      document.getElementById('params-panel').scrollIntoView({ behavior: 'smooth' });
+    }
+
     const presetsEl = document.getElementById('preset-cards');
     PRESETS.forEach((p, i) => {
-      const b64 = p.base64 || TINY_JPEG;
-      const { type, params } = parseMimeParams(p.mime);
+      const { params } = parseMimeParams(p.mime);
       const strippedMime = stripParams(p.mime);
-      const afterUrl = `data:${p.mime};base64,${b64}`;
-      const beforeUrl = `data:${strippedMime};base64,${b64}`;
       const paramsText = Object.keys(params).length
         ? Object.entries(params).map(([k, v]) => `${k}=${v}`).join(', ')
         : 'none';
@@ -373,15 +533,15 @@
       const card = document.createElement('div');
       card.className = 'preset-card';
       card.innerHTML = `
-        <h4>${p.label} <span class="badge badge-new">Preset</span></h4>
-        <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.4rem;">${p.description}</div>
-        <div class="mime-orig">Original MIME: ${p.mime}</div>
-        <div style="margin:0.5rem 0;font-size:0.75rem;color:var(--text-charcoal);">Parameters: <span style="font-family:var(--font-mono);color:var(--accent-blue);">${paramsText}</span></div>
+        <h4>${escapeHTML(p.label)} <span class="badge badge-new">Preset</span></h4>
+        <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.4rem;">${escapeHTML(p.description)}</div>
+        <div class="mime-orig">Original MIME: ${escapeHTML(p.mime)}</div>
+        <div style="margin:0.5rem 0;font-size:0.75rem;color:var(--text-charcoal);">Parameters: <span style="font-family:var(--font-mono);color:var(--accent-blue);">${escapeHTML(paramsText)}</span></div>
         <div style="margin-bottom:0.35rem;">
           <span class="badge badge-ok">v146: params preserved</span>
         </div>
-        <div style="font-size:0.72rem;font-family:var(--font-mono);word-break:break-all;color:var(--text-muted);">data:${p.mime};base64,…</div>
-        <div style="margin-top:0.35rem;font-size:0.72rem;color:var(--accent-rose);">pre-v146: dropped to <span style="font-family:var(--font-mono);">data:${strippedMime};base64,…</span></div>
+        <div style="font-size:0.72rem;font-family:var(--font-mono);word-break:break-all;color:var(--text-muted);">data:${escapeHTML(p.mime)};base64,…</div>
+        <div style="margin-top:0.35rem;font-size:0.72rem;color:var(--accent-rose);">pre-v146: dropped to <span style="font-family:var(--font-mono);">data:${escapeHTML(strippedMime)};base64,…</span></div>
         <button class="action-btn secondary" style="margin-top:0.75rem;font-size:0.75rem;" onclick="loadPreset(${i})">Load this preset</button>
       `;
       presetsEl.appendChild(card);
@@ -389,33 +549,13 @@
 
     function loadPreset(i) {
       const p = PRESETS[i];
-      const b64 = p.base64 || TINY_JPEG;
-      const dataUrl = `data:${p.mime};base64,${b64}`;
-      const { type, params } = parseMimeParams(p.mime);
-
-      document.getElementById('fi-name').textContent = '(preset)';
-      document.getElementById('fi-type').textContent = p.mime;
-      document.getElementById('fi-size').textContent = '—';
-      document.getElementById('fi-prefix').textContent = `data:${p.mime};base64`;
-      document.getElementById('file-output').classList.remove('hidden');
-
-      const tbody = document.getElementById('params-body');
-      tbody.innerHTML = '';
-      for (const [k, v] of Object.entries(params)) {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${k}</td><td>${v}</td><td><span class="badge badge-ok">Yes — v146</span></td>`;
-        tbody.appendChild(tr);
-      }
-      document.getElementById('params-panel').style.display = '';
-
-      const afterUrl = `data:${p.mime};base64,${b64}`;
-      const beforeUrl = `data:${stripParams(p.mime)};base64,${b64}`;
-      document.getElementById('ba-after-url').textContent = afterUrl.substring(0, 200) + (afterUrl.length > 200 ? '…' : '');
-      document.getElementById('ba-before-url').textContent = beforeUrl.substring(0, 200) + (beforeUrl.length > 200 ? '…' : '');
-      document.getElementById('ba-panel').style.display = '';
-      showVersion('after');
-
-      renderEmbeds(dataUrl, p.mime);
+      renderSource({
+        name: '(preset) ' + p.label,
+        mime: p.mime,
+        size: '—',
+        base64: p.base64,
+        bytes: p.mime.toLowerCase().includes('iso-8859-1') ? bytesFromBase64(p.base64) : undefined,
+      });
       document.getElementById('params-panel').scrollIntoView({ behavior: 'smooth' });
     }
   </script>

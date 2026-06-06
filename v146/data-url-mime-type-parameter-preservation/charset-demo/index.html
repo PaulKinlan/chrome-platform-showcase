@@ -38,6 +38,31 @@
       border: 1px solid var(--border-black);
       background: white;
     }
+    .result-iframe.tall { height: 110px; }
+    .decode-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+      margin: 0.75rem 0 1rem;
+    }
+    @media (max-width: 600px) { .decode-grid { grid-template-columns: 1fr; } }
+    .decode-card {
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: 0.75rem;
+      font-family: monospace;
+      font-size: 0.76rem;
+      color: var(--text-charcoal);
+      line-height: 1.55;
+    }
+    .decode-card strong {
+      display: block;
+      font-family: var(--font-display);
+      font-size: 0.85rem;
+      margin-bottom: 0.4rem;
+    }
+    .decode-card.before { border-left: 3px solid var(--accent-rose); }
+    .decode-card.after { border-left: 3px solid var(--accent-emerald); }
 
     .test-area {
       border: 1px solid var(--border-black);
@@ -118,16 +143,17 @@
     <h2>built-in examples</h2>
     <div class="compare-grid">
       <div class="compare-col">
-        <h3>data:text/html (no charset)</h3>
+        <h3>pre-v146: data:text/html (charset stripped)</h3>
         <div class="url-display" id="url-no-charset">—</div>
-        <iframe class="result-iframe" id="frame-no-charset" title="no charset"></iframe>
+        <iframe class="result-iframe tall" id="frame-no-charset" title="no charset"></iframe>
       </div>
       <div class="compare-col">
-        <h3>data:text/html;charset=utf-8</h3>
+        <h3>Chrome 146+: data:text/html;charset=iso-8859-1</h3>
         <div class="url-display" id="url-with-charset">—</div>
-        <iframe class="result-iframe" id="frame-with-charset" title="with charset"></iframe>
+        <iframe class="result-iframe tall" id="frame-with-charset" title="with charset"></iframe>
       </div>
     </div>
+    <div class="decode-grid" id="iso-decode-readout"></div>
     <button id="btn-load-examples" style="padding:0.4rem 0.85rem;font-size:0.8rem;cursor:pointer;margin-bottom:1rem;">Load examples</button>
   </section>
 
@@ -151,11 +177,19 @@
         <label>Content:</label>
         <input type="text" id="content-input" value="&lt;p&gt;Héllo wörld!&lt;/p&gt;" placeholder="HTML or text content">
       </div>
+      <div class="field-row">
+        <label>Encoding:</label>
+        <label style="min-width:auto;"><input type="checkbox" id="base64-input"> base64 payload</label>
+      </div>
       <div class="btn-row">
+        <button id="btn-iso-preset">ISO-8859-1 preset</button>
+        <button id="btn-base64-preset">base64 + charset preset</button>
+        <button id="btn-unknown-preset">unknown charset preset</button>
         <button id="btn-build">Build &amp; fetch URL</button>
       </div>
     </div>
     <div class="output-box" id="output-box">Build a URL above to see results…</div>
+    <iframe class="result-iframe tall" id="frame-custom" title="custom data URL preview" style="margin-top:0.75rem;"></iframe>
   </section>
 
   <section>
@@ -171,46 +205,138 @@
 </main>
 
 <script>
-  const HTML_NO_CHARSET = '<html><body style="font-family:sans-serif;font-size:14px;padding:8px;"><p>Héllo wörld — no charset parameter</p></body></html>';
-  const HTML_WITH_CHARSET = '<html><body style="font-family:sans-serif;font-size:14px;padding:8px;"><p>Héllo wörld — charset=utf-8</p></body></html>';
+  const ISO_HTML = '<!doctype html><html><body style="font-family:sans-serif;font-size:14px;padding:8px;"><p>Café déjà vu; jalapeño; señor; München</p><p>bytes: e9 e0 f1 fc</p></body></html>';
 
-  document.getElementById('btn-load-examples').addEventListener('click', () => {
-    const urlNo = 'data:text/html,' + encodeURIComponent(HTML_NO_CHARSET);
-    const urlWith = 'data:text/html;charset=utf-8,' + encodeURIComponent(HTML_WITH_CHARSET);
+  function bytesForCharset(input, charset) {
+    const normalized = charset.trim().toLowerCase();
+    if (normalized === 'iso-8859-1' || normalized === 'latin1' || normalized === 'windows-1252') {
+      const bytes = [];
+      for (const char of input) {
+        const code = char.charCodeAt(0);
+        bytes.push(code <= 0xff ? code : 0x3f);
+      }
+      return new Uint8Array(bytes);
+    }
+    return new TextEncoder().encode(input);
+  }
+
+  function escapeHTML(value) {
+    return String(value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
+  }
+
+  function percentEncodeBytes(bytes) {
+    return Array.from(bytes, (byte) => '%' + byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  function base64EncodeBytes(bytes) {
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  }
+
+  function decodeBytes(bytes, label) {
+    try {
+      return new TextDecoder(label, { fatal: false }).decode(bytes);
+    } catch (err) {
+      return 'unsupported charset label: ' + err.message;
+    }
+  }
+
+  function buildDataUrl(mime, charset, content, useBase64) {
+    const bytes = bytesForCharset(content, charset);
+    const mimeWithParams = charset ? mime + ';charset=' + charset : mime;
+    const payload = useBase64
+      ? ';base64,' + base64EncodeBytes(bytes)
+      : ',' + percentEncodeBytes(bytes);
+    return { url: 'data:' + mimeWithParams + payload, bytes, mimeWithParams };
+  }
+
+  function renderDecodeReadout(container, bytes, beforeType, afterType) {
+    const utf8 = decodeBytes(bytes, 'utf-8');
+    const latin1 = decodeBytes(bytes, 'iso-8859-1');
+    container.innerHTML =
+      '<div class="decode-card before"><strong>Decoded as UTF-8 fallback</strong>' +
+      '<div>' + escapeHTML(utf8) + '</div>' +
+      '<div>content-type: ' + escapeHTML(beforeType) + '</div></div>' +
+      '<div class="decode-card after"><strong>Decoded as ISO-8859-1</strong>' +
+      '<div>' + escapeHTML(latin1) + '</div>' +
+      '<div>content-type: ' + escapeHTML(afterType) + '</div></div>';
+  }
+
+  document.getElementById('btn-load-examples').addEventListener('click', async () => {
+    const bytes = bytesForCharset(ISO_HTML, 'iso-8859-1');
+    const encoded = percentEncodeBytes(bytes);
+    const urlNo = 'data:text/html,' + encoded;
+    const urlWith = 'data:text/html;charset=iso-8859-1,' + encoded;
 
     document.getElementById('url-no-charset').textContent = urlNo.slice(0, 80) + '…';
     document.getElementById('url-with-charset').textContent = urlWith.slice(0, 80) + '…';
     document.getElementById('frame-no-charset').src = urlNo;
     document.getElementById('frame-with-charset').src = urlWith;
+
+    const beforeType = (await fetch(urlNo)).headers.get('content-type') || '(none)';
+    const afterType = (await fetch(urlWith)).headers.get('content-type') || '(none)';
+    renderDecodeReadout(document.getElementById('iso-decode-readout'), bytes, beforeType, afterType);
+  });
+
+  document.getElementById('btn-iso-preset').addEventListener('click', () => {
+    document.getElementById('mime-select').value = 'text/html';
+    document.getElementById('charset-input').value = 'iso-8859-1';
+    document.getElementById('content-input').value = ISO_HTML;
+    document.getElementById('base64-input').checked = false;
+  });
+
+  document.getElementById('btn-base64-preset').addEventListener('click', () => {
+    document.getElementById('mime-select').value = 'text/html';
+    document.getElementById('charset-input').value = 'utf-8';
+    document.getElementById('content-input').value = '<p>Base64 keeps charset=utf-8: Héllo wörld!</p>';
+    document.getElementById('base64-input').checked = true;
+  });
+
+  document.getElementById('btn-unknown-preset').addEventListener('click', () => {
+    document.getElementById('mime-select').value = 'text/plain';
+    document.getElementById('charset-input').value = 'Klingon';
+    document.getElementById('content-input').value = 'Unknown charset labels preserve the header but cannot be decoded by TextDecoder.';
+    document.getElementById('base64-input').checked = false;
   });
 
   document.getElementById('btn-build').addEventListener('click', async () => {
     const mime = document.getElementById('mime-select').value;
     const charset = document.getElementById('charset-input').value.trim();
     const content = document.getElementById('content-input').value;
+    const useBase64 = document.getElementById('base64-input').checked;
     const output = document.getElementById('output-box');
 
-    const mimeWithParams = charset ? mime + ';charset=' + charset : mime;
-    const url = 'data:' + mimeWithParams + ',' + encodeURIComponent(content);
+    const { url, bytes } = buildDataUrl(mime, charset, content, useBase64);
 
     output.textContent = 'URL: ' + url.slice(0, 120) + (url.length > 120 ? '…' : '') + '\n';
+    document.getElementById('frame-custom').src = url;
 
     try {
       const response = await fetch(url);
       const contentType = response.headers.get('content-type') || '(none)';
-      const body = await response.text();
+      await response.text();
 
-      const hasParam = charset && contentType.includes(charset);
+      const hasParam = charset && contentType.toLowerCase().includes(charset.toLowerCase());
+      const decoded = charset ? decodeBytes(bytes, charset) : decodeBytes(bytes, 'utf-8');
+      const fallback = decodeBytes(bytes, 'utf-8');
 
       output.innerHTML =
-        'URL:          ' + url.slice(0, 100) + (url.length > 100 ? '…' : '') + '\n' +
-        'content-type: <span class="' + (hasParam ? 'ok' : 'warn') + '">' + contentType + '</span>\n' +
+        'URL:          ' + escapeHTML(url.slice(0, 100) + (url.length > 100 ? '…' : '')) + '\n' +
+        'content-type: <span class="' + (hasParam ? 'ok' : 'warn') + '">' + escapeHTML(contentType) + '</span>\n' +
         (hasParam
           ? '<span class="ok">✓ charset parameter preserved (Chrome 146+)</span>'
           : '<span class="warn">✗ charset parameter not present — may be stripped (pre-Chrome 146)</span>') + '\n' +
-        'body:         ' + body.slice(0, 100) + (body.length > 100 ? '…' : '');
+        'payload:      ' + (useBase64 ? 'base64 body' : 'percent-encoded bytes') + '\n' +
+        'decoded as declared: ' + escapeHTML(decoded.slice(0, 100) + (decoded.length > 100 ? '…' : '')) + '\n' +
+        'decoded as UTF-8 fallback: ' + escapeHTML(fallback.slice(0, 100) + (fallback.length > 100 ? '…' : ''));
     } catch (e) {
-      output.innerHTML = 'fetch error: ' + e.message;
+      output.innerHTML = 'fetch error: ' + escapeHTML(e.message);
     }
   });
 </script>
