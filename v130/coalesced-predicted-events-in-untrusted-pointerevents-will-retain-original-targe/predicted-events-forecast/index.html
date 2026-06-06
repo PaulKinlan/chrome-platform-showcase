@@ -71,6 +71,58 @@
       border: 1.5px solid var(--border-black);
       display: inline-block;
     }
+    .probe-panel {
+      border-top: 1px solid var(--border-black);
+      margin-top: var(--space-3);
+      padding-top: var(--space-3);
+    }
+    .probe-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-3);
+      flex-wrap: wrap;
+    }
+    .probe-copy {
+      margin: 0;
+      max-width: 46rem;
+      color: var(--text-charcoal);
+      font-size: 0.9rem;
+    }
+    .probe-table-wrap {
+      overflow-x: auto;
+      margin-top: var(--space-3);
+    }
+    .probe-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      min-width: 38rem;
+    }
+    .probe-table th,
+    .probe-table td {
+      border: 1px solid var(--border-black);
+      padding: 0.45rem 0.55rem;
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+    .probe-table th {
+      background: var(--bg-stone);
+      color: var(--text-black);
+    }
+    .probe-table .status-pass {
+      color: var(--accent-emerald);
+      font-weight: 700;
+    }
+    .probe-table .status-fail {
+      color: var(--accent-rose);
+      font-weight: 700;
+    }
+    .probe-summary {
+      margin-bottom: 0;
+    }
   </style>
 </head>
 <body>
@@ -110,6 +162,35 @@
     </div>
 
     <div class="meta" id="meta">draw on the left pad — coalesced and predicted counts will show here</div>
+
+    <div class="probe-panel" id="offset-probe">
+      <div class="probe-heading">
+        <div>
+          <div class="pad-label">offsetX/Y preservation probe</div>
+          <p class="probe-copy">Compares the coordinates supplied to JS-constructed sub-events with the values returned after untrusted dispatch.</p>
+        </div>
+        <button id="runProbe" type="button">run deterministic probe</button>
+      </div>
+      <div class="probe-table-wrap">
+        <table class="probe-table">
+          <thead>
+            <tr>
+              <th>list</th>
+              <th>#</th>
+              <th>recorded offsetX/Y</th>
+              <th>replayed offsetX/Y</th>
+              <th>status</th>
+            </tr>
+          </thead>
+          <tbody id="probeRows">
+            <tr>
+              <td colspan="5">No offset comparison has run yet.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="meta probe-summary" id="probeSummary">Replay a drawing or run the deterministic probe to compare offsets.</div>
+    </div>
   </div>
 
   <section>
@@ -164,6 +245,14 @@ for (const sample of recorded) {
   const replay = document.getElementById("replay");
   const meta = document.getElementById("meta");
   const showPred = document.getElementById("show-predicted");
+  const probeRows = document.getElementById("probeRows");
+  const probeSummary = document.getElementById("probeSummary");
+  const rootStyles = getComputedStyle(document.documentElement);
+  const ink = {
+    actual: rootStyles.getPropertyValue("--text-black").trim() || "black",
+    predicted: rootStyles.getPropertyValue("--accent-blue").trim() || "blue",
+    coalesced: rootStyles.getPropertyValue("--accent-emerald").trim() || "green",
+  };
 
   function fit(c) {
     const r = c.getBoundingClientRect();
@@ -202,13 +291,13 @@ for (const sample of recorded) {
     // Draw coalesced sub-events as green dots, then the actual final position in black.
     for (const ce of coalesced) {
       const ox = ce.offsetX, oy = ce.offsetY;
-      dot(c, ox, oy, "#0a8f5c", 1.5);
+      dot(c, ox, oy, ink.coalesced, 1.5);
     }
-    dot(c, ev.offsetX, ev.offsetY, "#000", 2.5);
+    dot(c, ev.offsetX, ev.offsetY, ink.actual, 2.5);
 
     if (showPred.checked) {
       for (const pe of predicted) {
-        dot(c, pe.offsetX, pe.offsetY, "#0022ff", 2);
+        dot(c, pe.offsetX, pe.offsetY, ink.predicted, 2);
       }
     }
 
@@ -231,6 +320,167 @@ for (const sample of recorded) {
     ctx(replay).clearRect(0, 0, replay.width, replay.height);
     recorded.length = 0;
     meta.textContent = "cleared. draw on the left pad.";
+    renderOffsetRows([], "cleared");
+  });
+
+  function formatCoord(value) {
+    return Number.isFinite(value) ? value.toFixed(1) : "missing";
+  }
+
+  function formatPair(x, y) {
+    return `${formatCoord(x)}, ${formatCoord(y)}`;
+  }
+
+  function sameCoord(expected, observed) {
+    return Number.isFinite(expected) && Number.isFinite(observed) &&
+      Math.abs(expected - observed) < 0.001;
+  }
+
+  function renderOffsetRows(rows, source) {
+    probeRows.replaceChildren();
+
+    if (!rows.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 5;
+      td.textContent = source === "cleared"
+        ? "No offset comparison has run yet."
+        : "No coalesced or predicted sub-events were available to compare.";
+      tr.append(td);
+      probeRows.append(tr);
+      probeSummary.textContent = source === "cleared"
+        ? "Replay a drawing or run the deterministic probe to compare offsets."
+        : `${source}: no sub-event offsets returned for comparison.`;
+      return;
+    }
+
+    const passed = rows.filter((row) => row.pass).length;
+    for (const row of rows) {
+      const tr = document.createElement("tr");
+      for (const value of [
+        row.list,
+        String(row.index + 1),
+        formatPair(row.expectedX, row.expectedY),
+        formatPair(row.observedX, row.observedY),
+      ]) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        tr.append(td);
+      }
+      const status = document.createElement("td");
+      status.textContent = row.pass ? "pass" : "fail";
+      status.className = row.pass ? "status-pass" : "status-fail";
+      tr.append(status);
+      probeRows.append(tr);
+    }
+    probeSummary.textContent =
+      `${source}: ${passed}/${rows.length} coordinate pairs preserved after untrusted dispatch.`;
+  }
+
+  function makeSubEvent(point) {
+    const ev = new PointerEvent("pointermove", {
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+      clientX: point.clientX ?? point.offsetX,
+      clientY: point.clientY ?? point.offsetY,
+    });
+    try {
+      Object.defineProperty(ev, "offsetX", { value: point.offsetX, configurable: true });
+      Object.defineProperty(ev, "offsetY", { value: point.offsetY, configurable: true });
+    } catch (_) {
+      // If a browser refuses the own-property override, the comparison row will fail.
+    }
+    return ev;
+  }
+
+  function compareList(list, points, observed) {
+    return points.map((point, index) => {
+      const got = observed[index];
+      const observedX = got?.offsetX;
+      const observedY = got?.offsetY;
+      return {
+        list,
+        index,
+        expectedX: point.offsetX,
+        expectedY: point.offsetY,
+        observedX,
+        observedY,
+        pass: sameCoord(point.offsetX, observedX) && sameCoord(point.offsetY, observedY),
+      };
+    });
+  }
+
+  function dispatchUntrustedSample(sample, sampleIndex) {
+    const coalescedPoints = sample.coalesced.length
+      ? sample.coalesced
+      : [{ offsetX: sample.offsetX, offsetY: sample.offsetY }];
+    const predictedPoints = sample.predicted;
+    const coalSubs = coalescedPoints.map(makeSubEvent);
+    const predSubs = predictedPoints.map(makeSubEvent);
+    let observedCoalesced = [];
+    let observedPredicted = [];
+
+    replay.addEventListener("pointermove", (ev) => {
+      if (!ev.isTrusted) {
+        observedCoalesced = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [];
+        observedPredicted = ev.getPredictedEvents ? ev.getPredictedEvents() : [];
+      }
+    }, { once: true });
+
+    const parent = new PointerEvent("pointermove", {
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+      bubbles: true,
+      clientX: sample.offsetX,
+      clientY: sample.offsetY,
+      coalescedEvents: coalSubs,
+      predictedEvents: predSubs,
+    });
+    replay.dispatchEvent(parent);
+
+    return [
+      ...compareList(`coalesced sample ${sampleIndex + 1}`, coalescedPoints, observedCoalesced),
+      ...compareList(`predicted sample ${sampleIndex + 1}`, predictedPoints, observedPredicted),
+    ];
+  }
+
+  function paintReplaySample(c, sample) {
+    const coalescedPoints = sample.coalesced.length
+      ? sample.coalesced
+      : [{ offsetX: sample.offsetX, offsetY: sample.offsetY }];
+    for (const p of coalescedPoints) dot(c, p.offsetX, p.offsetY, ink.coalesced, 1.5);
+    dot(c, sample.offsetX, sample.offsetY, ink.actual, 2.5);
+    if (showPred.checked) {
+      for (const p of sample.predicted) dot(c, p.offsetX, p.offsetY, ink.predicted, 2);
+    }
+  }
+
+  document.getElementById("runProbe").addEventListener("click", () => {
+    const sample = {
+      offsetX: 84,
+      offsetY: 128,
+      coalesced: [
+        { offsetX: 36, offsetY: 58, clientX: 4, clientY: 9 },
+        { offsetX: 62, offsetY: 83, clientX: 7, clientY: 13 },
+      ],
+      predicted: [
+        { offsetX: 112, offsetY: 146, clientX: 11, clientY: 17 },
+        { offsetX: 138, offsetY: 171, clientX: 15, clientY: 21 },
+      ],
+    };
+    const c = ctx(replay);
+    c.clearRect(0, 0, replay.width, replay.height);
+    try {
+      const rows = dispatchUntrustedSample(sample, 0);
+      paintReplaySample(c, sample);
+      renderOffsetRows(rows, "deterministic probe");
+      meta.textContent = "deterministic untrusted PointerEvent probe dispatched.";
+    } catch (e) {
+      meta.textContent = "probe error: " + e.message;
+      renderOffsetRows([], "deterministic probe");
+    }
   });
 
   document.getElementById("replayBtn").addEventListener("click", () => {
@@ -238,52 +488,24 @@ for (const sample of recorded) {
     const c = ctx(replay);
     c.clearRect(0, 0, replay.width, replay.height);
 
-    let retainedOffsets = 0, mutatedOffsets = 0;
-    replay.addEventListener("pointermove", function probe(ev) {
-      if (!ev.isTrusted && ev.getCoalescedEvents) {
-        for (const sub of ev.getCoalescedEvents()) {
-          // After Chrome 130, sub.offsetX should equal what we set.
-          // The probe is best-effort: PointerEvent constructor's
-          // coalescedEvents init option is what reads our values.
-          if (typeof sub.offsetX === "number") retainedOffsets++;
-          else mutatedOffsets++;
-        }
-      }
-    }, { once: false });
-
+    const rows = [];
     let i = 0;
     function step() {
       if (i >= recorded.length) {
-        meta.textContent = `replay finished. retained offsets: ${retainedOffsets} | recomputed: ${mutatedOffsets}.\nIn Chrome 130+ all sub-event offsets should be retained.`;
+        renderOffsetRows(rows, "recorded replay");
+        meta.textContent =
+          `replay finished. ${rows.filter((row) => row.pass).length}/${rows.length} coordinate pairs preserved.\n` +
+          "In Chrome 130+ all sub-event offsets should match the recorded values.";
         return;
       }
-      const s = recorded[i++];
+      const sample = recorded[i++];
       try {
-        // Construct sub-events. PointerEventInit supports coalescedEvents/predictedEvents in Chrome.
-        const coalSubs = s.coalesced.map((p) =>
-          new PointerEvent("pointermove", { pointerId: 1, clientX: p.offsetX, clientY: p.offsetY })
-        );
-        const predSubs = s.predicted.map((p) =>
-          new PointerEvent("pointermove", { pointerId: 1, clientX: p.offsetX, clientY: p.offsetY })
-        );
-        const parent = new PointerEvent("pointermove", {
-          pointerId: 1,
-          bubbles: true,
-          clientX: s.offsetX, clientY: s.offsetY,
-          coalescedEvents: coalSubs,
-          predictedEvents: predSubs,
-        });
-        replay.dispatchEvent(parent);
+        rows.push(...dispatchUntrustedSample(sample, i - 1));
       } catch (e) {
         meta.textContent = "replay error: " + e.message;
         return;
       }
-      // Also paint locally so the right pad shows the trail.
-      for (const p of s.coalesced) dot(c, p.offsetX, p.offsetY, "#0a8f5c", 1.5);
-      dot(c, s.offsetX, s.offsetY, "#000", 2.5);
-      if (showPred.checked) {
-        for (const p of s.predicted) dot(c, p.offsetX, p.offsetY, "#0022ff", 2);
-      }
+      paintReplaySample(c, sample);
       requestAnimationFrame(step);
     }
     step();
