@@ -507,10 +507,10 @@ async function renderCompressionDictionaryMeasureRoute(
   }
 
   const actualHash = await sha256Base64(dictionaryBytes);
-  const advertisedHash = typeof body.availableDictionary === "string"
-    ? body.availableDictionary
-    : actualHash;
-  const dictionaryMatches = advertisedHash === actualHash;
+  const hasAdvertisedDictionary = typeof body.availableDictionary === "string" &&
+    body.availableDictionary.length > 0;
+  const advertisedHash = hasAdvertisedDictionary ? body.availableDictionary as string : "";
+  const dictionaryMatches = hasAdvertisedDictionary && advertisedHash === actualHash;
 
   try {
     const { brotliCompressSync, constants, gzipSync } = await import("node:zlib");
@@ -544,12 +544,15 @@ async function renderCompressionDictionaryMeasureRoute(
       selectedEncoding,
       selectedBytes,
       dictionaryMatches,
+      hasAdvertisedDictionary,
       actualHash,
       advertisedHash,
       dictionaryId: "cart-v42",
       note: dictionaryMatches
         ? "The server accepted the advertised dictionary hash. The dcb byte count uses RFC 9842's 36-byte dcb header plus a real zlib dictionary-compressed payload as a local stand-in for Shared Brotli."
-        : "The advertised hash did not match the dictionary bytes, so the server ignored dcb/dcz and fell back to regular Brotli.",
+        : hasAdvertisedDictionary
+        ? "The advertised hash did not match the dictionary bytes, so the server ignored dcb/dcz and fell back to regular Brotli."
+        : "No Available-Dictionary hash was advertised, so the server used the regular Brotli fallback.",
     });
   } catch (err) {
     return jsonResponse({ error: `Compression route failed: ${(err as Error).message}` }, {
