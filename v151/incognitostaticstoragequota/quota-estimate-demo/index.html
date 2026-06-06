@@ -31,6 +31,10 @@
     }
     .btn-row { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
     .btn-row button { padding: 0.45rem 1.1rem; font-size: 0.8rem; cursor: pointer; }
+    .btn-row button.secondary {
+      background: var(--bg-paper);
+      color: var(--text-black);
+    }
     .mode-badge {
       display: inline-block;
       font-size: 0.78rem;
@@ -84,6 +88,8 @@
     <h2>live estimate</h2>
     <div class="btn-row">
       <button id="btn-estimate">Run navigator.storage.estimate()</button>
+      <button id="btn-allocate" class="secondary">Write 5 MiB Cache sample</button>
+      <button id="btn-clear" class="secondary">Clear sample storage</button>
     </div>
 
     <div class="estimate-card" id="estimate-card" style="display:none">
@@ -97,6 +103,10 @@
       <div class="estimate-row">
         <span class="label">usage (bytes currently used)</span>
         <span class="value" id="val-usage">—</span>
+      </div>
+      <div class="estimate-row">
+        <span class="label">usage delta from previous read</span>
+        <span class="value" id="val-delta">—</span>
       </div>
       <div class="estimate-row">
         <span class="label">usageDetails</span>
@@ -116,11 +126,18 @@
 
   <section>
     <h2>code</h2>
-    <pre><code>const estimate = await navigator.storage.estimate();
+    <pre><code>const before = await navigator.storage.estimate();
+
+const cache = await caches.open('quota-estimate-demo-v151');
+const fiveMiBBlob = new Blob([new Uint8Array(5 * 1024 ** 2)]);
+await cache.put('/sample.bin?run=' + Date.now(), new Response(fiveMiBBlob));
+
+const estimate = await navigator.storage.estimate();
 
 console.log({
   quota:  estimate.quota,   // bytes
   usage:  estimate.usage,   // bytes currently in use
+  delta:  estimate.usage - before.usage,
   quotaGiB: (estimate.quota / 1024 ** 3).toFixed(2)
 });
 
@@ -141,18 +158,37 @@ console.log({
 </main>
 
 <script>
-  document.getElementById('btn-estimate').addEventListener('click', async () => {
+  const DEMO_CACHE_NAME = 'quota-estimate-demo-v151';
+  const SAMPLE_BYTES = 5 * 1024 * 1024;
+  let previousEstimate = null;
+
+  function formatBytes(bytes) {
+    if (!Number.isFinite(bytes)) return '—';
+    if (bytes < 0) return '-' + formatBytes(Math.abs(bytes));
+    if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(3) + ' GiB';
+    if (bytes >= 1024 ** 2) return (bytes / 1024 ** 2).toFixed(2) + ' MiB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KiB';
+    return Math.round(bytes) + ' bytes';
+  }
+
+  async function renderEstimate(message = '') {
     const status = document.getElementById('estimate-status');
     const card = document.getElementById('estimate-card');
     status.textContent = 'Running estimate()…';
     try {
+      if (!navigator.storage?.estimate) {
+        throw new Error('StorageManager.estimate() is not available in this browser.');
+      }
       const est = await navigator.storage.estimate();
       const quotaGiB = (est.quota / 1024 ** 3).toFixed(3);
-      const usageMiB = (est.usage / 1024 ** 2).toFixed(2);
       const suspicious = est.quota < 500 * 1024 * 1024; // < 500 MB
+      const delta = previousEstimate ? (est.usage || 0) - (previousEstimate.usage || 0) : 0;
 
       document.getElementById('val-quota').textContent = est.quota.toLocaleString() + ' bytes';
-      document.getElementById('val-usage').textContent = usageMiB + ' MiB';
+      document.getElementById('val-usage').textContent = formatBytes(est.usage || 0);
+      document.getElementById('val-delta').textContent = previousEstimate
+        ? `${delta >= 0 ? '+' : ''}${formatBytes(delta)}`
+        : 'first read';
       document.getElementById('val-gib').textContent = quotaGiB + ' GiB';
       document.getElementById('val-suspicious').textContent = suspicious
         ? '⚠ YES — quota < 500 MB suggests Incognito on Chrome < 151'
@@ -167,11 +203,53 @@ console.log({
       document.getElementById('bar-quota').style.width = pct + '%';
 
       card.style.display = '';
-      status.textContent = '';
+      status.textContent = message;
+      previousEstimate = est;
     } catch (err) {
       status.textContent = 'Error: ' + err.message;
     }
-  });
+  }
+
+  async function writeSampleStorage() {
+    const status = document.getElementById('estimate-status');
+    status.textContent = 'Writing a 5 MiB response into Cache Storage…';
+    try {
+      if (!navigator.storage?.estimate) {
+        throw new Error('StorageManager.estimate() is not available in this browser.');
+      }
+      if (!window.caches) {
+        throw new Error('Cache API is not available in this browser.');
+      }
+
+      const before = await navigator.storage.estimate();
+      const payload = new Uint8Array(SAMPLE_BYTES);
+      crypto.getRandomValues(payload.subarray(0, Math.min(payload.length, 65536)));
+      const cache = await caches.open(DEMO_CACHE_NAME);
+      const request = new Request(`/v151/incognitostaticstoragequota/quota-estimate-demo/sample-${Date.now()}.bin`);
+      await cache.put(request, new Response(new Blob([payload], { type: 'application/octet-stream' })));
+      previousEstimate = before;
+      await renderEstimate('Wrote 5 MiB into Cache Storage; usage should increase while the quota remains bucketed.');
+    } catch (err) {
+      status.textContent = 'Error: ' + err.message;
+    }
+  }
+
+  async function clearSampleStorage() {
+    const status = document.getElementById('estimate-status');
+    status.textContent = 'Clearing demo Cache Storage…';
+    try {
+      const before = navigator.storage?.estimate ? await navigator.storage.estimate() : null;
+      if (window.caches) await caches.delete(DEMO_CACHE_NAME);
+      previousEstimate = before;
+      await renderEstimate('Cleared the demo cache; usage should fall after the browser accounts for deletion.');
+    } catch (err) {
+      status.textContent = 'Error: ' + err.message;
+    }
+  }
+
+  document.getElementById('btn-estimate').addEventListener('click', () => renderEstimate());
+  document.getElementById('btn-allocate').addEventListener('click', writeSampleStorage);
+  document.getElementById('btn-clear').addEventListener('click', clearSampleStorage);
 </script>
 </body>
 </html>

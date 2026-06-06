@@ -123,11 +123,75 @@
     .slider-row input { width: 140px; }
     .slider-val { font-size: 0.72rem; font-family: monospace; color: var(--text-charcoal); }
 
+    .comparison-tools {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      align-items: center;
+      margin-top: 0.9rem;
+      font-family: monospace;
+      font-size: 0.72rem;
+      color: var(--text-charcoal);
+    }
+    .comparison-tools input,
+    .comparison-tools textarea {
+      border: 1px solid var(--border-black);
+      background: var(--bg-ivory);
+      color: var(--text-black);
+      font-family: monospace;
+      font-size: 0.72rem;
+      padding: 0.35rem 0.45rem;
+    }
+    .comparison-tools textarea {
+      width: min(100%, 42rem);
+      min-height: 3rem;
+      resize: vertical;
+    }
+    .transfer-label {
+      flex-basis: 100%;
+      font-weight: 700;
+    }
+    .comparison-tools button {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-black);
+      padding: 0.3rem 0.75rem;
+      font-family: monospace;
+      font-size: 0.72rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .comparison-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 0.85rem;
+      font-family: monospace;
+      font-size: 0.72rem;
+    }
+    .comparison-table th,
+    .comparison-table td {
+      border: 1px solid var(--border-black);
+      padding: 0.45rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    .comparison-table th {
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+    }
+    .comparison-status {
+      margin-top: 0.55rem;
+      font-family: monospace;
+      font-size: 0.7rem;
+      color: var(--text-muted);
+    }
+
     pre code { font-size: 0.8125rem; line-height: 1.6; }
 
     @media (max-width: 520px) {
       .quota-grid { grid-template-columns: 1fr; }
       .sim-grid { grid-template-columns: 1fr; }
+      .comparison-table { display: block; overflow-x: auto; }
     }
   </style>
 </head>
@@ -170,11 +234,40 @@
     <button style="margin-top:0.75rem;padding:0.3rem 0.9rem;font-size:0.78rem;font-family:monospace;font-weight:600;border:2px solid var(--border-black);background:var(--bg-paper);color:var(--text-charcoal);cursor:pointer;" id="refresh-btn">Refresh estimate</button>
   </div>
 
+  <div class="quota-card">
+    <div class="quota-title">persisted cross-tab readings</div>
+    <div class="comparison-tools">
+      <label for="tab-label">Tab label</label>
+      <input id="tab-label" value="current tab">
+      <button id="copy-reading">Copy reading</button>
+      <button id="import-reading">Import reading</button>
+    </div>
+    <div class="comparison-tools">
+      <label class="transfer-label" for="sample-transfer">Transfer reading</label>
+      <textarea id="sample-transfer"></textarea>
+    </div>
+    <table class="comparison-table">
+      <thead>
+        <tr>
+          <th>tab</th>
+          <th>quota</th>
+          <th>usage</th>
+          <th>available</th>
+          <th>age</th>
+        </tr>
+      </thead>
+      <tbody id="comparison-body">
+        <tr><td colspan="5">Waiting for a storage estimate.</td></tr>
+      </tbody>
+    </table>
+    <div class="comparison-status" id="comparison-status">Same-profile tabs update through BroadcastChannel and storage events. Normal and Incognito windows are isolated, so use copy/import for that comparison.</div>
+  </div>
+
   <!-- Simulation of old vs new behavior -->
   <div class="sim-section">
     <div class="sim-title">simulation: the old Incognito quota leak (pre-Chrome 151)</div>
     <div class="slider-row">
-      <label>Simulated device RAM:</label>
+      <label for="ram-slider">Simulated device RAM:</label>
       <input type="range" id="ram-slider" min="2" max="64" value="16" step="2">
       <span class="slider-val" id="ram-val">16 GB</span>
     </div>
@@ -235,12 +328,119 @@ const isLikelyIncognito = quota &lt; INCOGNITO_THRESHOLD;
 </main>
 
 <script>
+  const CHANNEL_NAME = 'incognito-static-storage-quota';
+  const STORAGE_KEY = 'incognito-static-storage-quota:samples';
+  const tabId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+  const samples = new Map();
+  let lastSample = null;
+  let channel = null;
+
   function formatBytes(bytes) {
     if (bytes >= 1e12) return (bytes / 1e12).toFixed(2) + ' TB';
     if (bytes >= 1e9)  return (bytes / 1e9).toFixed(2) + ' GB';
     if (bytes >= 1e6)  return (bytes / 1e6).toFixed(1) + ' MB';
     if (bytes >= 1e3)  return (bytes / 1e3).toFixed(1) + ' KB';
     return bytes + ' B';
+  }
+
+  function escapeHTML(value) {
+    return String(value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
+  }
+
+  function sampleAge(ts) {
+    const seconds = Math.max(0, Math.round((Date.now() - ts) / 1000));
+    if (seconds < 60) return seconds + 's';
+    return Math.round(seconds / 60) + 'm';
+  }
+
+  function sanitizeSample(sample) {
+    if (!sample || typeof sample !== 'object') return null;
+    const quota = Number(sample.quota);
+    const usage = Number(sample.usage);
+    const available = Number(sample.available);
+    if (![quota, usage, available].every(Number.isFinite)) return null;
+    return {
+      id: String(sample.id || crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`),
+      label: String(sample.label || 'imported tab').slice(0, 48),
+      timestamp: Number(sample.timestamp) || Date.now(),
+      quota,
+      usage,
+      available,
+    };
+  }
+
+  function readStoredSamples() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      return Array.isArray(parsed) ? parsed.map(sanitizeSample).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function persistSamples() {
+    const recent = [...samples.values()]
+      .filter((sample) => Date.now() - sample.timestamp < 60 * 60 * 1000)
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, 12);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(recent));
+    } catch {
+      document.getElementById('comparison-status').textContent = 'Storage-event persistence is unavailable in this profile; BroadcastChannel and copy/import are still active.';
+    }
+  }
+
+  function renderComparison() {
+    const rows = [...samples.values()]
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .map((sample) => `
+        <tr>
+          <td>${escapeHTML(sample.label)}${sample.id === tabId ? ' (this tab)' : ''}</td>
+          <td>${formatBytes(sample.quota)}<br>${sample.quota.toLocaleString()} bytes</td>
+          <td>${formatBytes(sample.usage)}</td>
+          <td>${formatBytes(sample.available)}</td>
+          <td>${sampleAge(sample.timestamp)}</td>
+        </tr>`);
+
+    document.getElementById('comparison-body').innerHTML = rows.length
+      ? rows.join('')
+      : '<tr><td colspan="5">Waiting for a storage estimate.</td></tr>';
+
+    document.getElementById('comparison-status').textContent = rows.length > 1
+      ? 'Received peer readings. Matching large quotas across rows means the old Incognito quota signal is not present.'
+      : 'Same-profile tabs update through BroadcastChannel and storage events. Normal and Incognito windows are isolated, so use copy/import for that comparison.';
+  }
+
+  function mergeSample(rawSample, shouldPersist = true) {
+    const sample = sanitizeSample(rawSample);
+    if (!sample) return;
+    const existing = samples.get(sample.id);
+    if (!existing || sample.timestamp >= existing.timestamp) {
+      samples.set(sample.id, sample);
+    }
+    renderComparison();
+    if (shouldPersist) persistSamples();
+  }
+
+  function publishSample(sample) {
+    mergeSample(sample);
+    channel?.postMessage({ type: 'quota-sample', sample });
+  }
+
+  function sampleFromEstimate(quota, usage, available) {
+    return {
+      id: tabId,
+      label: document.getElementById('tab-label').value.trim() || 'current tab',
+      timestamp: Date.now(),
+      quota,
+      usage,
+      available,
+    };
   }
 
   async function fetchEstimate() {
@@ -264,12 +464,52 @@ const isLikelyIncognito = quota &lt; INCOGNITO_THRESHOLD;
       } else {
         detect.innerHTML = `<span style="color:var(--accent-emerald)">✓ Quota (${formatBytes(quota)}) is above 500 MB — not detectable as Incognito by the old technique.</span>`;
       }
+
+      lastSample = sampleFromEstimate(quota, usage, avail);
+      publishSample(lastSample);
+      return lastSample;
     } catch (err) {
       document.getElementById('live-quota').textContent = 'unavailable';
+      document.getElementById('comparison-status').textContent = 'Storage estimate failed: ' + err.message;
+      return null;
     }
   }
 
   document.getElementById('refresh-btn').addEventListener('click', fetchEstimate);
+  document.getElementById('tab-label').addEventListener('change', () => {
+    if (lastSample) {
+      lastSample = { ...lastSample, label: document.getElementById('tab-label').value.trim() || 'current tab', timestamp: Date.now() };
+      publishSample(lastSample);
+    }
+  });
+  document.getElementById('copy-reading').addEventListener('click', async () => {
+    const sample = lastSample || await fetchEstimate();
+    if (!sample) return;
+    document.getElementById('sample-transfer').value = JSON.stringify(sample);
+  });
+  document.getElementById('import-reading').addEventListener('click', () => {
+    try {
+      const sample = JSON.parse(document.getElementById('sample-transfer').value);
+      mergeSample(sample);
+      document.getElementById('comparison-status').textContent = 'Imported a copied reading into the comparison table.';
+    } catch (err) {
+      document.getElementById('comparison-status').textContent = 'Import failed: ' + err.message;
+    }
+  });
+
+  readStoredSamples().forEach((sample) => mergeSample(sample, false));
+  renderComparison();
+  if ('BroadcastChannel' in window) {
+    channel = new BroadcastChannel(CHANNEL_NAME);
+    channel.addEventListener('message', (event) => {
+      if (event.data?.type === 'quota-sample') mergeSample(event.data.sample);
+    });
+  }
+  window.addEventListener('storage', (event) => {
+    if (event.key === STORAGE_KEY) {
+      readStoredSamples().forEach((sample) => mergeSample(sample, false));
+    }
+  });
   fetchEstimate();
 
   // Simulation
@@ -282,12 +522,11 @@ const isLikelyIncognito = quota &lt; INCOGNITO_THRESHOLD;
     const ramGB = parseInt(ramSlider.value);
     ramVal.textContent = ramGB + ' GB';
 
-    // Old normal mode: disk-based, assume disk ≈ 256 GB → bucketed to 10 GiB floor
-    const diskGB = 256;
-    const normalOld = Math.max(GB(10), Math.ceil(diskGB) * GB(1));
+    // Old normal mode: predictable quota returned the large 10 GiB bucket.
+    const normalOld = GB(10);
     document.getElementById('sim-normal').textContent = formatBytes(normalOld);
     document.getElementById('sim-normal-derivation').textContent =
-      `max(10 GiB, ceil(${diskGB} GB)) = ${formatBytes(normalOld)}\ndisk-based → safely large`;
+      `maximal predictable bucket = ${formatBytes(normalOld)}\ndisk-based → safely large`;
 
     // Old Incognito: RAM / 20 capped at certain values
     const incognitoOldBytes = Math.floor(GB(ramGB) / 20);
@@ -302,13 +541,13 @@ const isLikelyIncognito = quota &lt; INCOGNITO_THRESHOLD;
         : `quota ≥ 500 MB → borderline (RAM > 10 GB)`;
 
     // New behavior: same bucketed formula in both modes
-    const newQuota = normalOld; // same formula applied in Incognito too
+    const newQuota = GB(10);
     document.getElementById('sim-normal-new').textContent = formatBytes(newQuota);
     document.getElementById('sim-normal-new-derivation').textContent =
-      `max(10 GiB, ceil(disk GB)) = ${formatBytes(newQuota)}`;
+      `predictable bucket = ${formatBytes(newQuota)}`;
     document.getElementById('sim-incognito-new').textContent = formatBytes(newQuota);
     document.getElementById('sim-incognito-new-derivation').textContent =
-      `Chrome 151: same formula applied\n= ${formatBytes(newQuota)} (indistinguishable)`;
+      `Chrome 151: usage + 10 GiB\n= ${formatBytes(newQuota)} before usage (indistinguishable by quota)`;
   }
 
   ramSlider.addEventListener('input', updateSimulation);
