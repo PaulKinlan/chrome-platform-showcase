@@ -14,9 +14,10 @@
     .bad { color: var(--accent-rose); font-weight: 600; }
     .controls { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; margin: var(--space-3) 0; }
     .controls label { font-family: var(--font-mono); font-size: 0.85rem; display: flex; align-items: center; gap: 0.4rem; }
-    input[type="checkbox"] { width: 1.1rem; height: 1.1rem; accent-color: var(--text-black); }
+    input[type="checkbox"], input[type="radio"] { width: 1.1rem; height: 1.1rem; accent-color: var(--text-black); }
     .field-row { display: flex; flex-direction: column; gap: 0.3rem; }
     .field-row .lbl { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); }
+    .mode-list { display: flex; flex-direction: column; gap: 0.35rem; }
     .compare { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-4) 0; }
     @media (max-width: 640px) { .compare { grid-template-columns: 1fr; } }
     .col { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); }
@@ -24,11 +25,12 @@
     .bar { height: 1rem; background: var(--accent-blue); margin: 0.2rem 0; }
     .bar.drop { background: var(--accent-rose); opacity: 0.35; }
     .num { font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-charcoal); }
+    .header-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
 <main>
-  <p class="crumbs"><a href="../">&larr; Attribution Reporting Feature: Remove Aggregatable report limit when trigger context ID is non-null</a></p>
+  <p class="crumbs"><a href="../">&larr; Attribution Reporting Feature: Remove Aggregatable report limit when trigger context ID is non-empty</a></p>
 
   <header class="lede-block">
     <p class="eyebrow">demo · v134</p>
@@ -53,8 +55,17 @@
         <input type="range" id="conv" min="1" max="100" value="42">
         <span class="num" id="conv-val">42</span>
       </div>
-      <label><input type="checkbox" id="hasCtx" checked> sets trigger_context_id</label>
+      <div class="field-row">
+        <span class="lbl">trigger_context_id mode</span>
+        <div class="mode-list">
+          <label><input type="radio" name="ctxMode" value="present" checked> non-empty string</label>
+          <label><input type="radio" name="ctxMode" value="empty"> empty string</label>
+          <label><input type="radio" name="ctxMode" value="unset"> field omitted</label>
+        </div>
+      </div>
     </div>
+
+    <div class="probe" id="backend-status">waiting for backend route…</div>
 
     <div class="compare">
       <div class="col">
@@ -68,14 +79,19 @@
         <p class="num" id="post-out"></p>
       </div>
     </div>
+
+    <h3>backend-emitted header</h3>
+    <pre class="header-preview"><code id="header-echo">waiting for fetch…</code></pre>
   </div>
+
+  <p>The cap lift is not a looser privacy budget. Setting <code>trigger_context_id</code> changes how many aggregatable reports may be generated from one source; contribution budgeting, aggregation, and noise still govern what can be learned from those reports.</p>
 
   <h2>The code</h2>
 <pre><code>// reporting origin sends, on a trigger pixel:
 Attribution-Reporting-Register-Trigger: {
   "aggregatable_trigger_data": [...],
   "aggregatable_values": {"key": 1},
-  "trigger_context_id": "conv_42"   // <-- non-null lifts the cap
+  "trigger_context_id": "conv_42"   // <-- non-empty string lifts the cap
 }</code></pre>
 
   <section>
@@ -99,12 +115,17 @@ Attribution-Reporting-Register-Trigger: {
 
   const conv = document.getElementById('conv');
   const convVal = document.getElementById('conv-val');
-  const hasCtx = document.getElementById('hasCtx');
   const preBars = document.getElementById('pre-bars');
   const postBars = document.getElementById('post-bars');
   const preOut = document.getElementById('pre-out');
   const postOut = document.getElementById('post-out');
+  const backendStatus = document.getElementById('backend-status');
+  const headerEcho = document.getElementById('header-echo');
   let updateSeq = 0;
+
+  function currentMode() {
+    return document.querySelector('input[name="ctxMode"]:checked').value;
+  }
 
   function render(targetEl, count, total) {
     targetEl.innerHTML = '';
@@ -118,6 +139,7 @@ Attribution-Reporting-Register-Trigger: {
 
   async function update() {
     const n = +conv.value;
+    const mode = currentMode();
     const seq = ++updateSeq;
     convVal.textContent = n;
     const cap = 20;
@@ -127,9 +149,13 @@ Attribution-Reporting-Register-Trigger: {
       aggregatable_values: { cart: 1 },
       trigger_data: 1,
     };
-    if (hasCtx.checked) registration.trigger_context_id = `conversion-batch-${n}`;
-    let postCount = hasCtx.checked ? n : Math.min(n, cap);
+    if (mode === 'present') registration.trigger_context_id = `conversion-batch-${n}`;
+    if (mode === 'empty') registration.trigger_context_id = '';
+    let postCount = mode === 'present' ? n : Math.min(n, cap);
     let postDropped = n - postCount;
+    let source = 'synthetic fallback';
+    backendStatus.innerHTML = 'calling backend route…';
+    headerEcho.textContent = 'waiting for fetch…';
     try {
       const response = await fetch('../trigger-context-id-builder/register-trigger', {
         method: 'POST',
@@ -138,18 +164,34 @@ Attribution-Reporting-Register-Trigger: {
       });
       const result = await response.json();
       if (seq !== updateSeq) return;
-      if (response.ok) {
-        postCount = result.acceptedReports;
-        postDropped = result.droppedReports;
+      if (!response.ok) {
+        throw new Error(result.error || `HTTP ${response.status}`);
       }
-    } catch {}
+      postCount = result.acceptedReports;
+      postDropped = result.droppedReports;
+      source = 'backend route';
+      const actualHeader = response.headers.get(result.headerName) || result.headerValue;
+      backendStatus.innerHTML =
+        '<span class="ok">backend route used</span> — response header and JSON agree';
+      headerEcho.textContent =
+        `${result.responsePreview}\n\n` +
+        `// response.headers.get(...): ${actualHeader}\n` +
+        `// trigger_context_id mode: ${mode}; accepted ${result.acceptedReports}/${result.conversionCount}, dropped ${result.droppedReports}`;
+    } catch (error) {
+      if (seq !== updateSeq) return;
+      backendStatus.innerHTML =
+        `<span class="bad">backend unreachable — using synthetic cap of ${cap}</span>`;
+      backendStatus.append(` (${error.message})`);
+      headerEcho.textContent =
+        `Synthetic fallback only. The route did not return a readable Attribution-Reporting-Register-Trigger header.\nMode: ${mode}`;
+    }
     render(preBars, preCount, n);
     render(postBars, postCount, n);
     preOut.textContent = `${preCount} reports eligible, ${n - preCount} dropped`;
-    postOut.textContent = `${postCount} reports eligible, ${postDropped} dropped`;
+    postOut.textContent = `${postCount} reports eligible, ${postDropped} dropped (${source}; mode = ${mode})`;
   }
   conv.addEventListener('input', update);
-  hasCtx.addEventListener('change', update);
+  document.querySelectorAll('input[name="ctxMode"]').forEach(input => input.addEventListener('change', update));
   update();
 </script>
 </body>

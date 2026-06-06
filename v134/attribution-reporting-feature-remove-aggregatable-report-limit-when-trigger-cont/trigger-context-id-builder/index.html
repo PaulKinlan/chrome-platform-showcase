@@ -36,6 +36,11 @@
     .probe { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border-black); font-size: 0.8rem; }
     .probe.warn { background: var(--accent-amber); color: var(--bg-ivory); }
     .probe.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .validation-line { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); }
+    .badge { display: inline-block; border: 1px solid var(--border-black); padding: 2px 8px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .badge.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .badge.bad { background: var(--accent-rose); color: var(--bg-ivory); }
+    .badge.warn { background: var(--accent-amber); color: var(--bg-ivory); }
     .info-box { background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); font-size: 0.82rem; color: var(--text-charcoal); margin-bottom: var(--space-3); }
     .output-block {
       background: var(--bg-stone);
@@ -48,6 +53,7 @@
       line-height: 1.5;
       margin-bottom: var(--space-3);
     }
+    .output-block.error { border-color: var(--accent-rose); background: var(--bg-paper); }
     button.primary {
       background: var(--text-black);
       color: var(--bg-ivory);
@@ -130,7 +136,7 @@
     </div>
 
     <div class="info-box">
-      Before Chrome 134: every source could generate at most 20 aggregatable reports regardless of trigger volume. If you sent 50 conversions for the same source, 30 were silently dropped. Chrome 134 lifts that cap <strong>when <code>trigger_context_id</code> is set</strong> on the trigger registration, enabling unlimited aggregatable reports per source for high-volume flows.
+      Before Chrome 134: every source could generate at most 20 aggregatable reports regardless of trigger volume. If you sent 50 conversions for the same source, 30 were silently dropped. Chrome 134 lifts that cap <strong>when <code>trigger_context_id</code> is a non-empty string</strong> on the trigger registration, enabling unlimited aggregatable reports per source for high-volume flows.
     </div>
 
     <p class="section-title">Trigger registration</p>
@@ -138,15 +144,15 @@
       <div class="panel">
         <h3>Source settings</h3>
         <div class="field-group">
-          <label>Source ID (e.g. campaign or creative)</label>
+          <label for="sourceId">Source ID (e.g. campaign or creative)</label>
           <input type="text" id="sourceId" value="campaign_summer_2024">
         </div>
         <div class="field-group">
-          <label>Source event ID</label>
+          <label for="sourceEventId">Source event ID</label>
           <input type="text" id="sourceEventId" value="1234567890">
         </div>
         <div class="field-group">
-          <label>Total conversions to register</label>
+          <label for="convCount">Total conversions to register</label>
           <input type="number" id="convCount" min="1" max="200" value="50">
         </div>
       </div>
@@ -155,21 +161,29 @@
         <div class="field-group">
           <label>trigger_context_id</label>
           <div class="filter-row" style="margin-bottom:0">
-            <button class="active" id="ctxOn">Set (Chrome 134 — uncapped)</button>
-            <button id="ctxOff">Unset (pre-v134 — capped at 20)</button>
+            <button class="active" id="ctxOn">Include field</button>
+            <button id="ctxOff">Omit field</button>
           </div>
         </div>
         <div class="field-group" id="ctxIdGroup">
-          <label>Context ID value</label>
-          <input type="text" id="ctxIdVal" value="order-flow-v2">
+          <label for="ctxIdVal">Context ID value</label>
+          <input type="text" id="ctxIdVal" value="order-flow-v2" maxlength="64" pattern="[\x20-\x7E]*" title="0-64 printable ASCII characters for this header-backed demo">
+          <div class="validation-line">
+            <span class="badge" id="ctxBadge">checking</span>
+            <span id="ctxLength">0 / 64 code points</span>
+          </div>
         </div>
         <div class="field-group">
-          <label>Trigger data (0–7)</label>
+          <label for="trigData">Trigger data (0–7)</label>
           <input type="number" id="trigData" min="0" max="7" value="2">
         </div>
         <div class="field-group">
-          <label>Key piece (hex)</label>
-          <input type="text" id="keyPiece" value="0x000000000001">
+          <label for="keyPiece">Key piece (hex)</label>
+          <input type="text" id="keyPiece" value="0x000000000001" pattern="0[xX][0-9a-fA-F]{1,32}" title="0x or 0X followed by 1-32 ASCII hex digits">
+          <div class="validation-line">
+            <span class="badge" id="keyBadge">checking</span>
+            <span id="keyHelp">spec format: 0x + ASCII hex digits</span>
+          </div>
         </div>
       </div>
     </div>
@@ -199,6 +213,8 @@
 <script>
 (function () {
   const MAX_LEGACY = 20;
+  const keyPiecePattern = /^0[xX][0-9a-fA-F]{1,32}$/;
+  const headerSafeAsciiPattern = /^[\x20-\x7E]*$/;
   let useCtx = true;
   let updateSeq = 0;
 
@@ -218,16 +234,86 @@
   });
 
   ['sourceId','sourceEventId','convCount','ctxIdVal','trigData','keyPiece'].forEach(id => {
-    document.getElementById(id).addEventListener('input', update);
+    const input = document.getElementById(id);
+    ['input', 'change', 'keyup'].forEach(type => input.addEventListener(type, update));
   });
+
+  function codePointLength(value) {
+    return Array.from(value).length;
+  }
+
+  function setBadge(id, state, text) {
+    const el = document.getElementById(id);
+    el.className = `badge ${state}`;
+    el.textContent = text;
+  }
+
+  function validateInputs(sourceId, ctxIdVal, keyPiece) {
+    const errors = [];
+    const keyValid = keyPiecePattern.test(keyPiece);
+    const ctxLength = codePointLength(ctxIdVal);
+    const ctxHeaderSafe = headerSafeAsciiPattern.test(ctxIdVal);
+    const sourceHeaderSafe = headerSafeAsciiPattern.test(sourceId);
+
+    setBadge('keyBadge', keyValid ? 'ok' : 'bad', keyValid ? 'spec-valid key_piece' : 'invalid key_piece');
+    document.getElementById('keyHelp').textContent = keyValid
+      ? '0x/0X prefix and hex digits are ready for the header'
+      : 'use 0x or 0X followed by 1-32 ASCII hex digits';
+
+    document.getElementById('ctxLength').textContent = `${ctxLength} / 64 code points`;
+    if (!useCtx) {
+      setBadge('ctxBadge', 'warn', 'field omitted');
+    } else if (ctxLength > 64) {
+      setBadge('ctxBadge', 'bad', 'too long');
+    } else if (!ctxHeaderSafe) {
+      setBadge('ctxBadge', 'bad', 'not header-safe');
+    } else if (ctxLength === 0) {
+      setBadge('ctxBadge', 'warn', 'empty string');
+    } else {
+      setBadge('ctxBadge', 'ok', 'header-safe');
+    }
+
+    if (!keyValid) errors.push('key_piece must be 0x/0X followed by 1-32 ASCII hex digits.');
+    if (useCtx && ctxLength > 64) errors.push('trigger_context_id must be 64 code points or fewer.');
+    if (useCtx && !ctxHeaderSafe) errors.push('trigger_context_id must be printable ASCII for this header-backed demo.');
+    if (!sourceHeaderSafe) errors.push('source key must be printable ASCII for this header-backed demo.');
+    return errors;
+  }
+
+  function renderComparison(convCount, currentAccepted, currentDropped, currentLabel, source) {
+    const sentLegacy = Math.min(convCount, MAX_LEGACY);
+    const droppedLegacy = convCount - sentLegacy;
+    const legacyPct = convCount > 0 ? (sentLegacy / convCount * 100).toFixed(0) : 0;
+    const currentPct = convCount > 0 ? (currentAccepted / convCount * 100).toFixed(0) : 0;
+    const compareRow = document.getElementById('compareRow');
+
+    compareRow.innerHTML = `
+      <div class="compare-box">
+        <h4>Without trigger_context_id</h4>
+        <div class="bar-track"><div class="bar-fill sent" style="width:${legacyPct}%"></div></div>
+        <div class="bar-label">Accepted: <strong>${sentLegacy}</strong> / ${convCount} (capped at ${MAX_LEGACY})</div>
+        <div class="bar-track"><div class="bar-fill dropped" style="width:${100 - legacyPct}%"></div></div>
+        <div class="bar-label">Dropped: <strong>${droppedLegacy}</strong></div>
+        <span class="verdict ${droppedLegacy > 0 ? 'bad' : 'good'}">${droppedLegacy > 0 ? droppedLegacy + ' reports blocked by cap' : 'no drops'}</span>
+      </div>
+      <div class="compare-box">
+        <h4>Current trigger registration</h4>
+        <div class="bar-track"><div class="bar-fill sent" style="width:${currentPct}%"></div></div>
+        <div class="bar-label">Accepted: <strong>${currentAccepted}</strong> / ${convCount} (${currentLabel})</div>
+        <div class="bar-track"><div class="bar-fill dropped" style="width:${100 - currentPct}%"></div></div>
+        <div class="bar-label">Dropped: <strong>${currentDropped}</strong></div>
+        <span class="verdict ${currentDropped > 0 ? 'bad' : 'good'}">${source}</span>
+      </div>
+    `;
+  }
 
   async function update() {
     const sourceId = document.getElementById('sourceId').value || 'campaign_id';
     const sourceEventId = document.getElementById('sourceEventId').value || '0';
     const convCount = Math.max(1, Math.min(200, parseInt(document.getElementById('convCount').value) || 50));
-    const ctxIdVal = document.getElementById('ctxIdVal').value || 'ctx-001';
+    const ctxIdVal = document.getElementById('ctxIdVal').value;
     const trigData = Math.max(0, Math.min(7, parseInt(document.getElementById('trigData').value) || 0));
-    const keyPiece = document.getElementById('keyPiece').value || '0x1';
+    const keyPiece = document.getElementById('keyPiece').value;
 
     const registration = {
       aggregatable_trigger_data: [
@@ -248,7 +334,26 @@
     document.getElementById('jsonOutput').textContent = JSON.stringify(registration, null, 2);
 
     const seq = ++updateSeq;
-    document.getElementById('headerOutput').textContent = 'Calling backend header endpoint…';
+    const errors = validateInputs(sourceId, ctxIdVal, keyPiece);
+    const hasNonEmptyContext = useCtx && ctxIdVal.length > 0;
+    const localAccepted = hasNonEmptyContext ? convCount : Math.min(convCount, MAX_LEGACY);
+    const localDropped = convCount - localAccepted;
+    const currentLabel = hasNonEmptyContext
+      ? 'non-empty trigger_context_id'
+      : useCtx
+        ? 'empty trigger_context_id; cap still applies'
+        : 'trigger_context_id omitted; cap applies';
+    renderComparison(convCount, localAccepted, localDropped, currentLabel, errors.length ? 'not sent' : 'pending backend');
+
+    const headerOutput = document.getElementById('headerOutput');
+    headerOutput.classList.toggle('error', errors.length > 0);
+    if (errors.length > 0) {
+      headerOutput.textContent =
+        'Fix local validation before sending the registration:\n- ' + errors.join('\n- ');
+      return;
+    }
+
+    headerOutput.textContent = 'Calling backend header endpoint…';
 
     try {
       const response = await fetch('./register-trigger', {
@@ -258,40 +363,34 @@
       });
       const result = await response.json();
       if (seq !== updateSeq) return;
-      if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      headerOutput.classList.toggle('error', !response.ok);
+      if (!response.ok) {
+        const detail = Array.isArray(result.validationErrors)
+          ? result.validationErrors.join('\n- ')
+          : result.error || `HTTP ${response.status}`;
+        renderComparison(convCount, localAccepted, localDropped, currentLabel, 'backend rejected');
+        headerOutput.textContent = `Backend validation failed:\n- ${detail}`;
+        return;
+      }
 
-      const sentLegacy = Math.min(convCount, MAX_LEGACY);
-      const droppedLegacy = convCount - sentLegacy;
-      const sentCtx = convCount;
-      const legacyPct = convCount > 0 ? (sentLegacy / convCount * 100).toFixed(0) : 0;
-      const compareRow = document.getElementById('compareRow');
+      renderComparison(
+        convCount,
+        result.acceptedReports,
+        result.droppedReports,
+        currentLabel,
+        result.triggerContextIdPresent ? 'uncapped by backend route' : 'capped by backend route',
+      );
 
-      compareRow.innerHTML = `
-        <div class="compare-box">
-          <h4>Without trigger_context_id (pre-v134)</h4>
-          <div class="bar-track"><div class="bar-fill sent" style="width:${legacyPct}%"></div></div>
-          <div class="bar-label">Accepted: <strong>${sentLegacy}</strong> / ${convCount} (capped at ${MAX_LEGACY})</div>
-          <div class="bar-track"><div class="bar-fill dropped" style="width:${100 - legacyPct}%"></div></div>
-          <div class="bar-label">Dropped: <strong>${droppedLegacy}</strong></div>
-          <span class="verdict ${droppedLegacy > 0 ? 'bad' : 'good'}">${droppedLegacy > 0 ? droppedLegacy + ' reports blocked by cap' : 'no drops'}</span>
-        </div>
-        <div class="compare-box">
-          <h4>With trigger_context_id (Chrome 134+)</h4>
-          <div class="bar-track"><div class="bar-fill sent" style="width:100%"></div></div>
-          <div class="bar-label">Accepted: <strong>${sentCtx}</strong> / ${convCount} (uncapped)</div>
-          <div class="bar-track"><div class="bar-fill dropped" style="width:0%"></div></div>
-          <div class="bar-label">Dropped: <strong>0</strong></div>
-          <span class="verdict good">all reports eligible</span>
-        </div>
-      `;
-
-      document.getElementById('headerOutput').textContent =
+      const actualHeader = response.headers.get(result.headerName) || result.headerValue;
+      headerOutput.textContent =
         `${result.responsePreview}\n\n` +
         `// Backend emitted ${result.headerName} for source event ${sourceEventId}.\n` +
+        `// response.headers.get(...): ${actualHeader}\n` +
         `// Current registration: ${result.acceptedReports}/${result.conversionCount} accepted, ${result.droppedReports} dropped by the report cap.`;
     } catch (e) {
       if (seq !== updateSeq) return;
-      document.getElementById('headerOutput').textContent = `Backend validation failed: ${e.message}`;
+      headerOutput.classList.add('error');
+      headerOutput.textContent = `Backend unreachable: ${e.message}`;
     }
   }
 

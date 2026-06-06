@@ -14,6 +14,11 @@
     .controls { display: flex; gap: var(--space-3); margin: var(--space-3) 0; flex-wrap: wrap; align-items: baseline; }
     .field { display: flex; flex-direction: column; gap: 0.3rem; font-family: var(--font-mono); font-size: 0.85rem; }
     input[type="range"] { width: 200px; accent-color: var(--text-black); }
+    input[type="text"] { width: 18rem; max-width: 100%; font: inherit; padding: 0.35rem 0.55rem; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .validation-line { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); }
+    .badge { display: inline-block; border: 1px solid var(--border-black); padding: 2px 8px; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .badge.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .badge.bad { background: var(--accent-rose); color: var(--bg-ivory); }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); margin: var(--space-3) 0; }
     @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
     .col { border: 2px solid var(--border-black); padding: var(--space-4); background: var(--bg-paper); }
@@ -23,6 +28,7 @@
     .pill.warn { background: var(--accent-amber); color: var(--bg-ivory); }
     .pill.drop { background: var(--accent-rose); color: var(--bg-ivory); }
     .summary { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3) var(--space-4); font-family: var(--font-mono); font-size: 0.88rem; margin: var(--space-4) 0; }
+    .header-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -47,6 +53,14 @@
         <input type="range" id="conv-count" min="1" max="60" value="35">
         <span id="cc-val">35</span>
       </div>
+      <div class="field">
+        <label for="ctx-id">trigger_context_id value</label>
+        <input type="text" id="ctx-id" value="cart-line-stream" maxlength="64" pattern="[\x20-\x7E]*">
+        <div class="validation-line">
+          <span class="badge" id="ctx-badge">checking</span>
+          <span id="ctx-length">0 / 64 code points</span>
+        </div>
+      </div>
       <button id="run">re-run with these settings</button>
     </div>
 
@@ -54,19 +68,12 @@
       <div class="col">
         <h3>without trigger_context_id</h3>
         <div id="without"></div>
-        <pre><code>Attribution-Reporting-Register-Trigger:
-{
-  "aggregatable_trigger_data": [...]
-}</code></pre>
+        <pre class="header-preview"><code id="without-header">waiting for backend…</code></pre>
       </div>
       <div class="col">
         <h3>with trigger_context_id</h3>
         <div id="with"></div>
-        <pre><code>Attribution-Reporting-Register-Trigger:
-{
-  "aggregatable_trigger_data": [...],
-  "trigger_context_id": "cart-line-N"
-}</code></pre>
+        <pre class="header-preview"><code id="with-header">waiting for backend…</code></pre>
       </div>
     </div>
 
@@ -88,26 +95,115 @@
 
 <script>
   const probe = document.getElementById('probe');
-  const supported = 'attributionReporting' in document.featurePolicy || ('attributionReporting' in document);
-  probe.innerHTML = supported
-    ? '<span class="ok">Attribution Reporting available</span> — the policy is exposed; backend header probe is used below'
-    : '<span class="bad">Attribution Reporting feature policy not detected</span> — backend header probe is used below';
+  const attributionSrcIDL =
+    ('attributionSrc' in HTMLAnchorElement.prototype) ||
+    ('attributionSrc' in HTMLImageElement.prototype);
+  const featurePolicyList = document.featurePolicy?.features?.() || [];
+  const policyListed = featurePolicyList.includes('attribution-reporting');
+  probe.innerHTML = attributionSrcIDL
+    ? `<span class="ok">attributionsrc IDL exposed</span> — policy listed: ${policyListed ? 'yes' : 'no'}; backend header probe is used below`
+    : `<span class="bad">attributionsrc IDL not exposed</span> — backend header probe is still available`;
 
   const PRE_CAP = 20; // Pre-134 aggregatable report cap per source
+  const ctxInput = document.getElementById('ctx-id');
+  const ctxBadge = document.getElementById('ctx-badge');
+  const ctxLength = document.getElementById('ctx-length');
+  const headerSafeAsciiPattern = /^[\x20-\x7E]*$/;
 
-  async function registerTrigger(hasContext, conversionCount) {
+  function codePointLength(value) {
+    return Array.from(value).length;
+  }
+
+  function validateContextId() {
+    const value = ctxInput.value;
+    const length = codePointLength(value);
+    const ok = length > 0 && length <= 64 && headerSafeAsciiPattern.test(value);
+    ctxLength.textContent = `${length} / 64 code points`;
+    ctxBadge.className = `badge ${ok ? 'ok' : 'bad'}`;
+    ctxBadge.textContent = ok ? 'header-safe ctx_id' : 'invalid ctx_id';
+    return {
+      ok,
+      value,
+      message: length === 0
+        ? 'trigger_context_id must be non-empty for the uncapped stream.'
+        : length > 64
+          ? 'trigger_context_id must be 64 code points or fewer.'
+          : 'trigger_context_id must be printable ASCII for this header-backed demo.',
+    };
+  }
+
+  async function registerTrigger(hasContext, conversionCount, contextValidation) {
     const registration = {
       aggregatable_trigger_data: [{ key_piece: '0x1', source_keys: ['cart'] }],
       aggregatable_values: { cart: 1 },
       trigger_data: 1,
     };
-    if (hasContext) registration.trigger_context_id = 'cart-line-stream';
-    const response = await fetch('../trigger-context-id-builder/register-trigger', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ registration, conversionCount }),
-    });
-    return await response.json();
+    if (hasContext) {
+      if (!contextValidation.ok) {
+        return {
+          acceptedReports: 0,
+          droppedReports: conversionCount,
+          conversionCount,
+          source: 'local validation',
+          responsePreview: `Not sent: ${contextValidation.message}`,
+          validationBlocked: true,
+        };
+      }
+      registration.trigger_context_id = contextValidation.value;
+    }
+
+    try {
+      const response = await fetch('../trigger-context-id-builder/register-trigger', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ registration, conversionCount }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        const detail = Array.isArray(result.validationErrors)
+          ? result.validationErrors.join('; ')
+          : result.error || `HTTP ${response.status}`;
+        throw new Error(detail);
+      }
+      const actualHeader = response.headers.get(result.headerName) || result.headerValue;
+      return { ...result, source: 'backend', actualHeader };
+    } catch (error) {
+      const acceptedReports = hasContext ? conversionCount : Math.min(conversionCount, PRE_CAP);
+      return {
+        acceptedReports,
+        droppedReports: conversionCount - acceptedReports,
+        conversionCount,
+        source: 'synthetic fallback',
+        responsePreview:
+          `Backend unreachable — using simulated cap of ${PRE_CAP}.\n${error.message}`,
+      };
+    }
+  }
+
+  function renderRows(container, n, result, hasContext) {
+    container.innerHTML = '';
+    for (let i = 1; i <= n; i++) {
+      const cartLine = `cart-line-${i.toString().padStart(2,'0')}`;
+      const row = document.createElement('div');
+      row.className = 'report-row';
+      if (result.validationBlocked) {
+        row.innerHTML = `<span>conversion #${i} — ${cartLine}</span><span class="pill warn">not sent</span>`;
+      } else if (i <= result.acceptedReports) {
+        row.innerHTML = `<span>conversion #${i} — ${cartLine}</span><span class="pill">reported${hasContext ? ' (ctx_id)' : ''}</span>`;
+      } else {
+        row.innerHTML = `<span>conversion #${i} — ${cartLine}</span><span class="pill drop">dropped: source cap</span>`;
+      }
+      container.appendChild(row);
+    }
+  }
+
+  function renderHeader(targetId, result, label) {
+    const target = document.getElementById(targetId);
+    target.textContent =
+      `${result.responsePreview}\n\n` +
+      `// ${label}: ${result.acceptedReports}/${result.conversionCount} eligible, ${result.droppedReports} dropped.\n` +
+      `// source: ${result.source}` +
+      (result.actualHeader ? `\n// response.headers.get(...): ${result.actualHeader}` : '');
   }
 
   async function run() {
@@ -117,34 +213,27 @@
     const withC = document.getElementById('with');
     without.innerHTML = '';
     withC.innerHTML = '';
+    document.getElementById('without-header').textContent = 'calling backend…';
+    document.getElementById('with-header').textContent = 'calling backend…';
 
-    const withoutResult = await registerTrigger(false, n);
-    const withResult = await registerTrigger(true, n);
-    let droppedW = 0;
-    for (let i = 1; i <= n; i++) {
-      const cartLine = `cart-line-${i.toString().padStart(2,'0')}`;
-      const w = document.createElement('div');
-      w.className = 'report-row';
-      if (i <= PRE_CAP) {
-        w.innerHTML = `<span>conversion #${i} — ${cartLine}</span><span class="pill">reported</span>`;
-      } else {
-        w.innerHTML = `<span>conversion #${i} — ${cartLine}</span><span class="pill drop">dropped: source cap</span>`;
-        droppedW++;
-      }
-      without.appendChild(w);
+    const contextValidation = validateContextId();
+    const [withoutResult, withResult] = await Promise.all([
+      registerTrigger(false, n, contextValidation),
+      registerTrigger(true, n, contextValidation),
+    ]);
 
-      const c = document.createElement('div');
-      c.className = 'report-row';
-      c.innerHTML = `<span>conversion #${i} — ${cartLine}</span><span class="pill">reported (ctx_id)</span>`;
-      withC.appendChild(c);
-    }
+    renderRows(without, n, withoutResult, false);
+    renderRows(withC, n, withResult, true);
+    renderHeader('without-header', withoutResult, 'without trigger_context_id');
+    renderHeader('with-header', withResult, 'with trigger_context_id');
 
     document.getElementById('summary').textContent =
-      `Backend header endpoint returned: without trigger_context_id ${withoutResult.acceptedReports}/${n} eligible and ${withoutResult.droppedReports} dropped (cap = ${PRE_CAP}); with trigger_context_id ${withResult.acceptedReports}/${n} eligible and ${withResult.droppedReports} dropped.`;
+      `Header endpoint returned: without trigger_context_id ${withoutResult.acceptedReports}/${n} eligible and ${withoutResult.droppedReports} dropped (${withoutResult.source}); with trigger_context_id ${withResult.acceptedReports}/${n} eligible and ${withResult.droppedReports} dropped (${withResult.source}).`;
   }
 
   document.getElementById('run').addEventListener('click', run);
   document.getElementById('conv-count').addEventListener('input', run);
+  ['input', 'change', 'keyup'].forEach(type => ctxInput.addEventListener(type, run));
   run();
 </script>
 </body>
