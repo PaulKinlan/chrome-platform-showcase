@@ -40,7 +40,8 @@
       font-size: 0.7rem;
       color: var(--text-charcoal);
     }
-    .field-row input {
+    .field-row input,
+    .field-row select {
       padding: 0.3rem 0.5rem;
       border: 2px solid var(--border-black);
       background: var(--bg-ivory);
@@ -148,7 +149,7 @@
   <header class="lede-block">
     <p class="eyebrow">v150 · PWA · Manifest</p>
     <h1>Verification Checker</h1>
-    <p class="lede">Chrome 150 checks several conditions before accepting a PWA origin migration. Enter your old and new origins to walk through every verification step — scope match, <code>scope_extensions</code>, <code>related_applications</code>, and the <code>web-app-origin-association</code> file the old origin must serve.</p>
+    <p class="lede">Chrome 150 checks several conditions before accepting a PWA origin migration. Enter your old and new origins to walk through every verification step — HTTPS, same-site boundaries, destination <code>id</code>, <code>migrate_from</code>, <code>allow_migration</code>, migration behavior, and old-origin reachability.</p>
   </header>
 
   <div class="checker-form">
@@ -157,27 +158,38 @@
       <div class="input-grid">
         <div class="field-row">
           <label for="oldOrigin">Old origin (where users have the PWA installed)</label>
-          <input type="text" id="oldOrigin" value="https://app.old-company.com" placeholder="https://app.old-company.com">
+          <input type="text" id="oldOrigin" value="https://www.example.com" placeholder="https://www.example.com">
         </div>
         <div class="field-row">
           <label for="newOrigin">New origin (where you're migrating to)</label>
-          <input type="text" id="newOrigin" value="https://app.new-company.com" placeholder="https://app.new-company.com">
+          <input type="text" id="newOrigin" value="https://app.example.com" placeholder="https://app.example.com">
         </div>
         <div class="field-row">
-          <label for="oldScope">Old PWA scope</label>
+          <label for="oldScope">Old PWA scope path</label>
           <input type="text" id="oldScope" value="/app/" placeholder="/app/">
         </div>
         <div class="field-row">
-          <label for="newScope">New PWA scope</label>
+          <label for="newScope">Destination PWA scope path</label>
           <input type="text" id="newScope" value="/app/" placeholder="/app/">
         </div>
         <div class="field-row">
-          <label for="appId">App ID (typically new start_url)</label>
-          <input type="text" id="appId" value="https://app.new-company.com/app/" placeholder="https://…">
+          <label for="appId">Destination app ID</label>
+          <input type="text" id="appId" value="https://app.example.com/app/" placeholder="https://…">
         </div>
         <div class="field-row">
-          <label for="appPlatform">Platform identifier</label>
-          <input type="text" id="appPlatform" value="chrome" placeholder="chrome / webapp">
+          <label for="oldAppId">Old installed app ID</label>
+          <input type="text" id="oldAppId" value="https://www.example.com/app/" placeholder="https://…">
+        </div>
+        <div class="field-row">
+          <label for="migrationBehavior">Migration behavior</label>
+          <select id="migrationBehavior">
+            <option value="suggest">suggest</option>
+            <option value="force">force</option>
+          </select>
+        </div>
+        <div class="field-row">
+          <label for="installUrl">Install URL for redirect cases (optional)</label>
+          <input type="text" id="installUrl" value="" placeholder="https://old.example.com/install">
         </div>
       </div>
       <button class="check-btn" onclick="runChecks()">Run verification checklist</button>
@@ -204,6 +216,10 @@
         <div class="gen-file-title">old origin — /.well-known/web-app-origin-association</div>
         <div class="gen-file" id="genAssociation"></div>
       </div>
+      <div>
+        <div class="gen-file-title">old origin — optional manifest migrate_to</div>
+        <div class="gen-file" id="genOldManifest"></div>
+      </div>
     </div>
   </div>
 
@@ -211,6 +227,7 @@
     <h2>see also</h2>
     <ul>
       <li><a href="https://chromestatus.com/feature/5123349239955456" target="_blank" rel="noopener">ChromeStatus feature #5123349239955456</a></li>
+      <li><a href="https://developer.chrome.com/blog/seamless-pwa-origin-migration" target="_blank" rel="noopener">Chrome Developers — Seamless PWA origin migration</a></li>
       <li><a href="../manifest-builder/">Manifest Builder</a> — generate both files</li>
       <li><a href="../manifest-config/">Manifest Configuration</a> — field reference</li>
       <li><a href="../migration-demo/">Migration Demo</a> — install context inspection</li>
@@ -246,7 +263,9 @@
     const oldScope     = document.getElementById('oldScope').value.trim() || '/';
     const newScope     = document.getElementById('newScope').value.trim() || '/';
     const appId        = document.getElementById('appId').value.trim();
-    const platform     = document.getElementById('appPlatform').value.trim() || 'webapp';
+    const oldAppId     = document.getElementById('oldAppId').value.trim();
+    const behavior     = document.getElementById('migrationBehavior').value;
+    const installUrl   = document.getElementById('installUrl').value.trim();
 
     const oldOrigin = parseOrigin(oldOriginRaw) || oldOriginRaw;
     const newOrigin = parseOrigin(newOriginRaw) || newOriginRaw;
@@ -255,6 +274,28 @@
     const isValidNew = /^https:\/\//.test(newOrigin);
     const scopesMatch = oldScope === newScope;
     const differentOrigins = oldOrigin !== newOrigin;
+    const appIdValid = /^https:\/\//.test(appId) && appId.startsWith(newOrigin);
+    const oldAppIdValid = /^https:\/\//.test(oldAppId) && oldAppId.startsWith(oldOrigin);
+    const installUrlValid = !installUrl || /^https:\/\//.test(installUrl);
+    const behaviorValid = behavior === 'suggest' || behavior === 'force';
+
+    function registrableDomain(origin) {
+      try {
+        const host = new URL(origin).hostname.toLowerCase();
+        const parts = host.split('.');
+        if (parts.length <= 2) return host;
+        const twoPartSuffixes = new Set(['co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'co.jp']);
+        const tail = parts.slice(-2).join('.');
+        if (twoPartSuffixes.has(tail) && parts.length >= 3) return parts.slice(-3).join('.');
+        return tail;
+      } catch (e) {
+        return '';
+      }
+    }
+
+    const oldSite = registrableDomain(oldOrigin);
+    const newSite = registrableDomain(newOrigin);
+    const sameSite = !!oldSite && oldSite === newSite;
 
     const checks = [
       check(isValidNew,
@@ -272,35 +313,54 @@
         `The migration is only meaningful if "${oldOrigin}" ≠ "${newOrigin}". Migrating to the same origin is a no-op.`,
         `// Old: ${oldOrigin}\n// New: ${newOrigin}`),
 
-      check(!!appId && appId.startsWith(newOrigin),
-        'App ID is set and scoped to new origin',
-        `The manifest's "id" field must be set and must begin with the new origin. This becomes the stable app identifier post-migration. Current value: "${appId}"`,
+      check(sameSite,
+        'Old and new origins are same-site',
+        `Chrome 150 limits PWA origin migration to same-site moves. This checker approximates the site boundary as "${oldSite}" → "${newSite}".`,
+        `// Same-site examples: www.example.com → app.example.com`),
+
+      check(appIdValid,
+        'Destination manifest has a stable id',
+        `The destination manifest's "id" field must be set and scoped to the new origin. Current value: "${appId || '(empty)'}"`,
         `{\n  "id": "${appId || newOrigin + newScope}"\n}`),
 
-      check(true,
-        'New manifest contains scope_extensions',
-        `The new origin's manifest must declare the old origin in "scope_extensions". This tells Chrome that the new app covers the old origin's scope.`,
-        `{\n  "scope_extensions": [\n    { "origin": "${oldOrigin}" }\n  ]\n}`),
+      check(oldAppIdValid,
+        'Old installed app id is known',
+        `The destination manifest's migrate_from entry must name the installed app ID on the old origin. Current value: "${oldAppId || '(empty)'}"`,
+        `{\n  "migrate_from": [{ "id": "${oldAppId || oldOrigin + oldScope}" }]\n}`),
 
       check(true,
-        'New manifest contains related_applications entry for old origin',
-        `The new manifest must include a "related_applications" entry pointing back to the old PWA. This creates the bidirectional link Chrome verifies.`,
-        `{\n  "related_applications": [\n    {\n      "platform": "${platform}",\n      "url": "${oldOrigin + oldScope}",\n      "id": "${appId || newOrigin + newScope}"\n    }\n  ]\n}`),
+        'Destination manifest contains migrate_from',
+        `The new origin's manifest must declare the old installed app in "migrate_from". This is the required destination-side half of the handshake.`,
+        `{\n  "migrate_from": [\n    { "id": "${oldAppId || oldOrigin + oldScope}", "behavior": "${behavior}" }\n  ]\n}`),
+
+      check(behaviorValid,
+        'Migration behavior is valid',
+        `"suggest" presents a passive update path; "force" blocks launch until the user migrates or uninstalls. Current value: "${behavior}".`,
+        `{\n  "behavior": "${behavior}"\n}`),
 
       check(true,
-        'Old origin serves /.well-known/web-app-origin-association',
-        `The old origin must serve a JSON file at /.well-known/web-app-origin-association that authorises the migration. Without this, Chrome cannot verify both sides of the association.`,
-        `// GET ${oldOrigin}/.well-known/web-app-origin-association\n// Content-Type: application/json`),
+        'Old origin serves allow_migration in /.well-known/web-app-origin-association',
+        `The old origin must authorize the destination app ID in a JSON file at /.well-known/web-app-origin-association. Without this, the new site cannot claim the old install.`,
+        `{\n  "${appId || newOrigin + newScope}": {\n    "allow_migration": true\n  }\n}`),
 
       check(scopesMatch,
-        'Scope paths match between old and new origins',
+        'Scope paths match unless the app intentionally changes scope',
         `Old scope: "${oldOrigin + oldScope}", New scope: "${newOrigin + newScope}". ` +
-        (scopesMatch ? 'Scopes match — valid migration.' : 'Scope mismatch — the scope path must be the same on both origins for Chrome to accept the migration.'),
-        `// Both manifests must have the same "scope" path: "${oldScope}"`),
+        (scopesMatch ? 'Scopes match — simplest migration.' : 'Scope changed — verify this is intended and covered by the destination app ID.'),
+        `// Common case: both manifests use scope "${oldScope}"`),
+
+      check(installUrlValid,
+        'Install URL is valid when provided',
+        installUrl
+          ? `Chrome can use "${installUrl}" to fetch an old-manifest-attached URL before redirects make discovery harder.`
+          : 'No install_url provided. That is acceptable if the old manifest remains discoverable during the migration window.',
+        installUrl
+          ? `{\n  "install_url": "${installUrl}"\n}`
+          : `// Optional: add install_url when old app URLs redirect before migration completes`),
 
       check(true,
         'Old origin continues to serve HTTPS responses (redirect or 200)',
-        `During the migration window, the old origin must remain reachable. Chrome fetches the association file and checks the manifest. The old origin can redirect to the new one once Chrome has processed the migration for an install.`,
+        `During the migration window, the old origin must remain reachable so Chrome can fetch the association file and any needed manifest update hints.`,
         `// Redirect pattern:\n// ${oldOrigin}/ → 301 → ${newOrigin}/`),
     ];
 
@@ -332,29 +392,40 @@
     document.getElementById('checklist').style.display = '';
 
     // Generate files
+    const migrateFrom = {
+      "id": oldAppId || oldOrigin + oldScope,
+      "behavior": behavior
+    };
+    if (installUrl) migrateFrom.install_url = installUrl;
+
     const manifest = JSON.stringify({
       "name": "My App",
       "id": appId || newOrigin + newScope,
+      "start_url": newScope,
       "scope": newScope,
-      "scope_extensions": [{ "origin": oldOrigin }],
-      "related_applications": [{
-        "platform": platform,
-        "url": oldOrigin + oldScope,
-        "id": appId || newOrigin + newScope
-      }]
+      "display": "standalone",
+      "migrate_from": [migrateFrom]
     }, null, 2);
 
-    const association = JSON.stringify({
-      "web_apps": [{
-        "manifest_id": appId || newOrigin + newScope,
-        "details": {
-          "paths": [oldScope + "*"]
-        }
-      }]
+    const associationObj = {};
+    associationObj[appId || newOrigin + newScope] = { "allow_migration": true };
+    const association = JSON.stringify(associationObj, null, 2);
+
+    const oldManifest = JSON.stringify({
+      "name": "My App (old)",
+      "id": oldAppId || oldOrigin + oldScope,
+      "start_url": oldScope,
+      "scope": oldScope,
+      "display": "standalone",
+      "migrate_to": {
+        "id": appId || newOrigin + newScope,
+        "install_url": newOrigin + newScope
+      }
     }, null, 2);
 
     document.getElementById('genManifest').textContent = manifest;
     document.getElementById('genAssociation').textContent = association;
+    document.getElementById('genOldManifest').textContent = oldManifest;
     document.getElementById('generatedSection').style.display = '';
   };
 })();
