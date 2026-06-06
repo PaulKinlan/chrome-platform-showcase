@@ -14,7 +14,18 @@
       box-shadow: var(--thin-shadow);
     }
     .warn-block strong { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.75rem; color: var(--accent-amber); display: block; margin-bottom: 0.4rem; }
-    .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; }
+    .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; align-items: center; }
+    .toolbar .secondary {
+      background: var(--bg-paper);
+      color: var(--text-black);
+      box-shadow: var(--thin-shadow);
+      padding: 0.45rem 0.7rem;
+    }
+    .toolbar .simulation {
+      background: var(--bg-stone);
+      color: var(--text-black);
+      box-shadow: var(--thin-shadow);
+    }
     .probe {
       background: var(--bg-stone);
       border: 2px solid var(--border-black);
@@ -38,9 +49,33 @@
       padding: var(--space-3);
       font-family: var(--font-mono);
       font-size: 0.78rem;
+      display: grid;
+      gap: var(--space-2);
     }
+    .screen.ended { background: var(--bg-stone); color: var(--text-muted); }
     .screen .label { font-weight: 600; }
     .screen video { width: 100%; height: auto; background: var(--text-black); border: 1px solid var(--border-black); margin-top: var(--space-2); }
+    .screen dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.25rem var(--space-2); margin: 0; }
+    .screen dt { color: var(--text-muted); }
+    .screen dd { margin: 0; min-width: 0; word-break: break-word; }
+    .screen .track-status { border: 1px solid var(--border-black); background: var(--bg-stone); color: var(--text-black); padding: 0.25rem 0.4rem; }
+    .screen.ended .track-status { border-color: var(--accent-rose); color: var(--accent-rose); }
+    .screen .stop-track {
+      background: var(--bg-paper);
+      color: var(--text-black);
+      box-shadow: var(--thin-shadow);
+      padding: 0.35rem 0.6rem;
+      justify-self: start;
+    }
+    .status-line {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      padding: 0.5rem 0.7rem;
+      margin: var(--space-3) 0;
+    }
     .log { font-family: var(--font-mono); font-size: 0.8rem; background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); margin-top: var(--space-3); max-height: 160px; overflow-y: auto; }
     .log p { margin: 0; }
   </style>
@@ -64,9 +99,12 @@
 
   <div class="toolbar">
     <button id="run">call navigator.mediaDevices.getAllScreensMedia()</button>
-    <button id="single">fallback: getDisplayMedia()</button>
+    <button class="secondary" id="single">fallback: getDisplayMedia()</button>
+    <button class="simulation" id="simulate">demo streams</button>
+    <button class="secondary" id="stop-all" disabled>stop all tracks</button>
   </div>
 
+  <div class="status-line" id="status" aria-live="polite">No active streams yet.</div>
   <div class="results" id="screens"></div>
   <div class="log" id="log"></div>
 
@@ -74,7 +112,12 @@
     <h2>the api</h2>
 <pre><code>// Returns one MediaStream per attached screen, in a single call.
 const streams = await navigator.mediaDevices.getAllScreensMedia();
-for (const s of streams) videoEl.srcObject = s;</code></pre>
+for (const stream of streams) {
+  const [track] = stream.getVideoTracks();
+  const settings = track.getSettings();
+  track.onended = () => showDisconnected(settings.deviceId);
+  videoEl.srcObject = new MediaStream([track]);
+}</code></pre>
   </section>
 
   <section>
@@ -82,7 +125,7 @@ for (const s of streams) videoEl.srcObject = s;</code></pre>
     <ul>
       <li><a href="../">Feature index</a></li>
       <li><a href="https://chromestatus.com/feature/6284029979525120" target="_blank" rel="noopener">ChromeStatus entry</a></li>
-      <li><a href="https://wicg.github.io/capture-all-screens/" target="_blank" rel="noopener">Spec: Capture-All-Screens</a></li>
+      <li><a href="https://screen-share.github.io/capture-all-screens/" target="_blank" rel="noopener">Spec: Capture-All-Screens</a></li>
     </ul>
   </section>
 
@@ -93,6 +136,11 @@ for (const s of streams) videoEl.srcObject = s;</code></pre>
   const probe = document.getElementById("probe");
   const screens = document.getElementById("screens");
   const logEl = document.getElementById("log");
+  const statusEl = document.getElementById("status");
+  const stopAllButton = document.getElementById("stop-all");
+  let activeStreams = [];
+  let demoCanvases = [];
+
   function log(s) { const p = document.createElement("p"); p.textContent = new Date().toLocaleTimeString() + " — " + s; logEl.prepend(p); }
 
   const hasIt = !!(navigator.mediaDevices && typeof navigator.mediaDevices.getAllScreensMedia === "function");
@@ -100,22 +148,152 @@ for (const s of streams) videoEl.srcObject = s;</code></pre>
     ? "<span class='ok'>navigator.mediaDevices.getAllScreensMedia is defined</span>"
     : "<span class='bad'>navigator.mediaDevices.getAllScreensMedia not in this browser</span>";
 
+  function settingsRows(track) {
+    const settings = typeof track.getSettings === "function" ? track.getSettings() : {};
+    return [
+      ["readyState", track.readyState],
+      ["displaySurface", settings.displaySurface || "not exposed"],
+      ["resolution", `${settings.width || "?"} × ${settings.height || "?"}`],
+      ["frameRate", settings.frameRate ? String(settings.frameRate) : "not exposed"],
+      ["deviceId", settings.deviceId || "not exposed"],
+      ["label", track.label || "(blank until permission grants a label)"],
+    ];
+  }
+
+  function addSettings(card, track) {
+    const dl = document.createElement("dl");
+    settingsRows(track).forEach(([label, value]) => {
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      dd.dataset.setting = label;
+      dl.append(dt, dd);
+    });
+    card.appendChild(dl);
+  }
+
+  function markEnded(card, track, label, reason) {
+    card.classList.add("ended");
+    const status = card.querySelector(".track-status");
+    status.textContent = "ended: " + reason;
+    const readyState = card.querySelector('[data-setting="readyState"]');
+    if (readyState) readyState.textContent = track.readyState;
+    log(label + " ended via " + reason);
+    const stopButton = card.querySelector(".stop-track");
+    if (stopButton) stopButton.disabled = true;
+    statusEl.textContent = "Track ended: " + label + ". Remaining live tracks: " + countLiveTracks() + ".";
+  }
+
+  function bindTrackLifecycle(card, track, label) {
+    let seenEnded = false;
+    track.onended = () => {
+      if (seenEnded) return;
+      seenEnded = true;
+      markEnded(card, track, label, "track.onended");
+    };
+    const stopButton = document.createElement("button");
+    stopButton.type = "button";
+    stopButton.className = "stop-track";
+    stopButton.textContent = "simulate unplug";
+    stopButton.addEventListener("click", () => {
+      if (track.readyState !== "ended") track.stop();
+      if (typeof track.dispatchEvent === "function") {
+        track.dispatchEvent(new Event("ended"));
+      } else if (typeof track.onended === "function") {
+        track.onended();
+      }
+      if (!seenEnded) {
+        seenEnded = true;
+        markEnded(card, track, label, "manual stop");
+      }
+    });
+    card.appendChild(stopButton);
+  }
+
+  function countLiveTracks() {
+    return activeStreams.flatMap((stream) => stream.getVideoTracks()).filter((track) => track.readyState !== "ended").length;
+  }
+
+  function stopActiveStreams({ clear = false } = {}) {
+    activeStreams.forEach((stream) => {
+      stream.getTracks().forEach((track) => {
+        if (track.readyState !== "ended") track.stop();
+      });
+    });
+    activeStreams = [];
+    demoCanvases = [];
+    stopAllButton.disabled = true;
+    if (clear) {
+      screens.innerHTML = "";
+      statusEl.textContent = "All tracks stopped.";
+    }
+  }
+
+  function renderStreams(streams, source) {
+    stopActiveStreams();
+    activeStreams = streams;
+    screens.innerHTML = "";
+    let trackCount = 0;
+
+    streams.forEach((stream, streamIndex) => {
+      stream.getVideoTracks().forEach((track, trackIndex) => {
+        trackCount++;
+        const label = `${source} stream ${streamIndex + 1}, track ${trackIndex + 1}`;
+        const card = document.createElement("div");
+        card.className = "screen";
+        const heading = document.createElement("div");
+        heading.className = "label";
+        heading.textContent = label;
+        const status = document.createElement("div");
+        status.className = "track-status";
+        status.textContent = "live: waiting for track.onended";
+        const video = document.createElement("video");
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = true;
+        video.srcObject = new MediaStream([track]);
+        card.append(heading, status, video);
+        addSettings(card, track);
+        bindTrackLifecycle(card, track, label);
+        screens.appendChild(card);
+      });
+    });
+
+    stopAllButton.disabled = trackCount === 0;
+    statusEl.textContent = `Showing ${streams.length} ${source} stream${streams.length === 1 ? "" : "s"} with ${trackCount} video track${trackCount === 1 ? "" : "s"}.`;
+  }
+
+  function streamFromDemoCanvas(label, colorProperty, index) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 640;
+    canvas.height = 360;
+    const ctx = canvas.getContext("2d");
+    const styles = getComputedStyle(document.documentElement);
+    const bg = styles.getPropertyValue("--bg-stone").trim();
+    const accent = styles.getPropertyValue(colorProperty).trim();
+    const text = styles.getPropertyValue("--text-black").trim();
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = accent;
+    ctx.fillRect(24, 24, canvas.width - 48, canvas.height - 48);
+    ctx.fillStyle = text;
+    ctx.font = "28px monospace";
+    ctx.fillText(label, 52, 92);
+    ctx.font = "18px monospace";
+    ctx.fillText("simulated monitor stream " + index, 52, 132);
+    const stream = canvas.captureStream(1);
+    demoCanvases.push(canvas);
+    return stream;
+  }
+
   document.getElementById("run").addEventListener("click", async () => {
     log("calling getAllScreensMedia()");
     try {
       if (!hasIt) throw new Error("API missing");
       const streams = await navigator.mediaDevices.getAllScreensMedia();
       log("got " + streams.length + " stream(s)");
-      screens.innerHTML = "";
-      streams.forEach((s, i) => {
-        const card = document.createElement("div");
-        card.className = "screen";
-        card.innerHTML = `<div class="label">screen ${i + 1}</div>`;
-        const v = document.createElement("video");
-        v.autoplay = true; v.playsInline = true; v.muted = true; v.srcObject = s;
-        card.appendChild(v);
-        screens.appendChild(card);
-      });
+      renderStreams(streams, "getAllScreensMedia");
     } catch (e) { log("rejected: " + e.name + " — " + e.message); }
   });
 
@@ -124,15 +302,22 @@ for (const s of streams) videoEl.srcObject = s;</code></pre>
     try {
       const s = await navigator.mediaDevices.getDisplayMedia({ video: true });
       log("got 1 stream");
-      screens.innerHTML = "";
-      const card = document.createElement("div");
-      card.className = "screen";
-      card.innerHTML = `<div class="label">display</div>`;
-      const v = document.createElement("video");
-      v.autoplay = true; v.playsInline = true; v.muted = true; v.srcObject = s;
-      card.appendChild(v);
-      screens.appendChild(card);
+      renderStreams([s], "getDisplayMedia fallback");
     } catch (e) { log("rejected: " + e.name + " — " + e.message); }
+  });
+
+  document.getElementById("simulate").addEventListener("click", () => {
+    log("rendering demo streams for track lifecycle");
+    const streams = [
+      streamFromDemoCanvas("screen 1", "--accent-blue", 1),
+      streamFromDemoCanvas("screen 2", "--accent-emerald", 2),
+    ];
+    renderStreams(streams, "demo");
+  });
+
+  stopAllButton.addEventListener("click", () => {
+    log("stopping all active tracks");
+    stopActiveStreams({ clear: true });
   });
 </script>
 </body>
