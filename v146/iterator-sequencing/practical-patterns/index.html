@@ -54,7 +54,7 @@
   <header class="lede-block">
     <p class="eyebrow">v146 · JavaScript · Practical Patterns</p>
     <h1>Practical Patterns</h1>
-    <p class="lede">Three real-world patterns where <code>Iterator.concat()</code> shines: merging search results from multiple sources, processing heterogeneous data collections, and building lazy pipelines that stop early when enough results are found.</p>
+    <p class="lede">Four real-world patterns around <code>Iterator.concat()</code> and iterator helpers: merging search results from multiple sources, processing heterogeneous data collections, building lazy pipelines that stop early when enough results are found, and interleaving timestamp-sorted log streams with a small merge helper.</p>
   </header>
 
   <div class="note" id="support-note">
@@ -133,16 +133,61 @@ const report = allNames
   return true;
 }
 
-// Three source ranges — Iterator.concat stops when take() is satisfied
-const rangeA = Array.from({ length: 50 }, (_, i) =&gt; i + 1);
-const rangeB = Array.from({ length: 50 }, (_, i) =&gt; i + 51);
-const rangeC = Array.from({ length: 50 }, (_, i) =&gt; i + 101);
+// Three source ranges with pull counters
+const counts = { rangeA: 0, rangeB: 0, rangeC: 0 };
+function* trackedRange(name, start, length) {
+  for (let i = 0; i &lt; length; i++) {
+    counts[name]++;
+    yield start + i;
+  }
+}
 
 // Takes only what it needs from the concatenated sequence
-const firstEight = Iterator.concat(rangeA, rangeB, rangeC)
+const firstEight = Iterator.concat(
+  trackedRange('rangeA', 1, 50),
+  trackedRange('rangeB', 51, 50),
+  trackedRange('rangeC', 101, 50)
+)
   .filter(isPrime)
   .take(8)
-  .toArray();</code></pre>
+  .toArray();
+// Pull counts: rangeA 19/50, rangeB 0/50, rangeC 0/50</code></pre>
+  </section>
+
+  <section>
+    <h2>pattern 4: merge sorted log streams</h2>
+    <div class="pattern-block">
+      <h3>Interleave timestamp-sorted sources</h3>
+      <p>Each source is already sorted by timestamp. A merge helper keeps one lookahead value from each iterator and yields the next earliest log, so the output is chronological instead of "all edge, then all auth, then all worker".</p>
+      <div class="btn-row">
+        <button id="btn-logs">Merge log streams</button>
+      </div>
+      <div class="output-area" id="logs-out">—</div>
+    </div>
+    <pre><code>function* mergeSortedLogs(...sources) {
+  const cursors = sources.map((source) =&gt; {
+    const iterator = source[Symbol.iterator]();
+    const first = iterator.next();
+    return { iterator, current: first.done ? null : first.value };
+  });
+
+  while (true) {
+    let winner = null;
+    for (const cursor of cursors) {
+      if (!cursor.current) continue;
+      if (!winner || cursor.current.time &lt; winner.current.time) {
+        winner = cursor;
+      }
+    }
+    if (!winner) return;
+    yield winner.current;
+    const next = winner.iterator.next();
+    winner.current = next.done ? null : next.value;
+  }
+}
+
+const merged = [...mergeSortedLogs(edgeLogs, authLogs, workerLogs)];
+// Output interleaves edge/auth/worker by timestamp, not source order.</code></pre>
   </section>
 
   <section>
@@ -182,13 +227,15 @@ const firstEight = Iterator.concat(rangeA, rangeB, rangeC)
       _src: iter,
       filter(pred) { return iteratorHelpers((function*(src){ for(const x of src) if(pred(x)) yield x; })(this._src)); },
       map(fn) { return iteratorHelpers((function*(src){ for(const x of src) yield fn(x); })(this._src)); },
-      take(n) { return iteratorHelpers((function*(src){ let i=0; for(const x of src){ if(i++>=n) break; yield x; } })(this._src)); },
+      take(n) { return iteratorHelpers((function*(src){ const iterator = src[Symbol.iterator](); let i=0; while(i<n){ const next = iterator.next(); if(next.done) return; i++; yield next.value; } })(this._src)); },
       toArray() { return [...this._src]; },
       [Symbol.iterator]() { return this._src; }
     };
   }
 
-  const concat = supportsConcat ? Iterator.concat.bind(Iterator) : iteratorConcat;
+  function concat(...iterables) {
+    return supportsConcat ? Iterator.concat(...iterables) : iteratorConcat(...iterables);
+  }
 
   function wrap(iter) {
     if (supportsHelpers) return iter;
@@ -238,12 +285,87 @@ const firstEight = Iterator.concat(rangeA, rangeB, rangeC)
       for (let i = 2; i <= Math.sqrt(n); i++) if (n % i === 0) return false;
       return true;
     }
-    const rangeA = Array.from({ length: 50 }, (_, i) => i + 1);
-    const rangeB = Array.from({ length: 50 }, (_, i) => i + 51);
-    const rangeC = Array.from({ length: 50 }, (_, i) => i + 101);
+    const counts = { rangeA: 0, rangeB: 0, rangeC: 0 };
+    function* trackedRange(name, start, length) {
+      for (let i = 0; i < length; i++) {
+        counts[name]++;
+        yield start + i;
+      }
+    }
+    const rangeA = trackedRange('rangeA', 1, 50);
+    const rangeB = trackedRange('rangeB', 51, 50);
+    const rangeC = trackedRange('rangeC', 101, 50);
     const seq = concat(rangeA, rangeB, rangeC);
     const primes = wrap(seq).filter(isPrime).take(8).toArray();
-    display('primes-out', ['// First 8 primes across 3 ranges:', '  [' + primes.join(', ') + ']']);
+    display('primes-out', [
+      '// First 8 primes across 3 ranges:',
+      '  [' + primes.join(', ') + ']',
+      '// Pull counts prove early exit:',
+      '  rangeA pulled ' + counts.rangeA + '/50',
+      '  rangeB pulled ' + counts.rangeB + '/50',
+      '  rangeC pulled ' + counts.rangeC + '/50',
+    ]);
+  });
+
+  // Pattern 4: Timestamp-sorted log streams
+  document.getElementById('btn-logs').addEventListener('click', () => {
+    const pulls = { edge: 0, auth: 0, worker: 0 };
+    const edgeLogs = [
+      { time: '09:00:01', message: 'GET /feed 200' },
+      { time: '09:00:05', message: 'GET /settings 304' },
+      { time: '09:00:10', message: 'POST /publish 202' },
+    ];
+    const authLogs = [
+      { time: '09:00:02', message: 'session refreshed' },
+      { time: '09:00:07', message: 'permission check passed' },
+      { time: '09:00:11', message: 'token rotated' },
+    ];
+    const workerLogs = [
+      { time: '09:00:03', message: 'image queued' },
+      { time: '09:00:08', message: 'thumbnail ready' },
+    ];
+
+    function* namedSource(name, entries) {
+      for (const entry of entries) {
+        pulls[name]++;
+        yield { source: name, ...entry };
+      }
+    }
+
+    function* mergeSortedLogs(...sources) {
+      const cursors = sources.map((source) => {
+        const iterator = source[Symbol.iterator]();
+        const first = iterator.next();
+        return { iterator, current: first.done ? null : first.value };
+      });
+
+      while (true) {
+        let winner = null;
+        for (const cursor of cursors) {
+          if (!cursor.current) continue;
+          if (!winner || cursor.current.time < winner.current.time) {
+            winner = cursor;
+          }
+        }
+        if (!winner) return;
+        yield winner.current;
+        const next = winner.iterator.next();
+        winner.current = next.done ? null : next.value;
+      }
+    }
+
+    const merged = [...mergeSortedLogs(
+      namedSource('edge', edgeLogs),
+      namedSource('auth', authLogs),
+      namedSource('worker', workerLogs),
+    )];
+
+    display('logs-out', [
+      '// Chronological merge, not source concatenation:',
+      ...merged.map((entry) => '  ' + entry.time + ' ' + entry.source.padEnd(6) + ' ' + entry.message),
+      '// Source order: ' + merged.map((entry) => entry.source).join(' -> '),
+      '// Pull counts: edge ' + pulls.edge + ', auth ' + pulls.auth + ', worker ' + pulls.worker,
+    ]);
   });
 </script>
 </body>

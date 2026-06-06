@@ -90,10 +90,10 @@
 
     .output {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(3, 1fr);
       gap: var(--space-3);
     }
-    @media (max-width: 600px) { .output { grid-template-columns: 1fr; } }
+    @media (max-width: 820px) { .output { grid-template-columns: 1fr; } }
     .out-pane {
       border: 2px solid var(--border-black);
       background: var(--bg-paper);
@@ -131,7 +131,8 @@
     <p class="lede">Build a pipeline by selecting source iterables (array, generator, Set, Map, an infinite Fibonacci), choosing iterator helpers (<code>map</code>, <code>filter</code>, <code>take</code>, <code>drop</code>), and toggling the strategy: <code>Iterator.concat()</code> or eager spread. The runner reports the produced values, the number of pulls each source served, and the peak intermediate-array size.</p>
   </header>
 
-  <p>The interesting test is putting an infinite source <em>after</em> a finite one. <code>Iterator.concat()</code> pulls lazily, so a final <code>.take(5)</code> will never touch the infinite source if the finite one already produced enough. The eager spread, on the other hand, hangs forever.</p>
+  <p>The interesting test is putting an infinite source <em>after</em> a finite one. <code>Iterator.concat()</code> pulls lazily, so a final <code>.take(5)</code> will never touch later sources once enough values have been produced. If the active source is a generator, early stop calls its <code>.return()</code> hook so <code>finally</code> blocks can clean up.</p>
+  <p><code>Iterator.concat()</code> is sync-only: it composes sources with <code>Symbol.iterator</code>. <code>ReadableStream</code>, event, and network feeds are async pull patterns; use <code>for await</code>, async iterator utilities, or Streams APIs instead of passing them to this synchronous pipeline.</p>
 
   <div class="stage">
     <h3 style="margin-top:0">Sources</h3>
@@ -172,8 +173,8 @@
     <div class="pipeline-controls" id="picks">
       <button class="opt on" data-src="nums">nums</button>
       <button class="opt" data-src="tags">tags</button>
-      <button class="opt" data-src="counter">counter</button>
-      <button class="opt on" data-src="scores">scores</button>
+      <button class="opt on" data-src="counter">counter</button>
+      <button class="opt" data-src="scores">scores</button>
       <button class="opt" data-src="banner">banner</button>
       <button class="opt on" data-src="fib">fib&infin;</button>
     </div>
@@ -188,8 +189,13 @@
 
     <h3>strategy</h3>
     <div class="pipeline-controls" id="strats">
-      <button class="opt on" data-strat="lazy">Iterator.concat — lazy</button>
+      <button class="opt on" data-strat="lazy">Iterator.concat — sync lazy</button>
       <button class="opt" data-strat="eager">[...spread] — eager</button>
+    </div>
+
+    <h3>diagnostics</h3>
+    <div class="pipeline-controls" id="diagnostics">
+      <button class="opt on" data-diag="cleanup">show generator cleanup</button>
     </div>
 
     <div class="composed" id="composed"></div>
@@ -209,6 +215,11 @@
         <h4>pull counts per source</h4>
         <div id="pulls"></div>
         <div class="stats" id="stats-pulls"></div>
+      </div>
+      <div class="out-pane">
+        <h4>cleanup log</h4>
+        <div id="cleanup"></div>
+        <div class="stats" id="stats-cleanup"></div>
       </div>
     </div>
   </div>
@@ -230,28 +241,48 @@
 
 <script>
   // ---- Source factories. Each returns { iter, counter } where counter is a ref.
-  function makeSources() {
+  function makeSources(recordCleanup) {
     const counters = { nums: 0, tags: 0, counter: 0, scores: 0, banner: 0, fib: 0 };
-    function trap(name, base) {
+    const cleanups = [];
+    function trap(name, base, cleanup = false) {
       return function* () {
-        for (const x of base()) { counters[name]++; yield x; }
+        let pulled = 0;
+        let completed = false;
+        try {
+          for (const x of base()) {
+            counters[name]++;
+            pulled++;
+            yield x;
+          }
+          completed = true;
+        } finally {
+          if (recordCleanup && cleanup && pulled > 0) {
+            cleanups.push(name + (completed
+              ? " finished naturally; finally ran after " + pulled + " pull(s)"
+              : " closed by .return(); finally ran after " + pulled + " pull(s)"));
+          }
+        }
       };
     }
     return {
       counters,
+      cleanups,
       builders: {
         nums: trap("nums", function* () { yield* [10, 20, 30]; }),
         tags: trap("tags", function* () { yield* new Set(["a", "b"]); }),
-        counter: trap("counter", function* () { let i = 100; while (true) yield i++; }),
+        counter: trap("counter", function* () { let i = 100; while (true) yield i++; }, true),
         scores: trap("scores", function* () { yield* new Map([["ada", 95], ["kai", 82]]).entries(); }),
         banner: trap("banner", function* () { yield* "hi!"; }),
-        fib: trap("fib", function* () { let a = 1, b = 1; while (true) { yield a; [a, b] = [b, a + b]; } }),
+        fib: trap("fib", function* () { let a = 1, b = 1; while (true) { yield a; [a, b] = [b, a + b]; } }, true),
       },
     };
   }
 
-  const pickState = { nums: true, tags: false, counter: false, scores: true, banner: false, fib: true };
-  const helperState = { "filter-num": false, "map-double": false, "drop-1": false, "take-5": true };
+  const defaultPickState = { nums: true, tags: false, counter: true, scores: false, banner: false, fib: true };
+  const defaultHelperState = { "filter-num": false, "map-double": false, "drop-1": false, "take-5": true };
+  const pickState = { ...defaultPickState };
+  const helperState = { ...defaultHelperState };
+  const diagState = { cleanup: true };
   let strat = "lazy";
 
   function wire(id, target, prefix) {
@@ -266,6 +297,7 @@
   }
   wire("picks", pickState, "src");
   wire("helpers", helperState, "h");
+  wire("diagnostics", diagState, "diag");
   document.getElementById("strats").addEventListener("click", (e) => {
     const t = e.target.closest("[data-strat]");
     if (!t) return;
@@ -294,6 +326,9 @@
       code += "<span class='frag-emerald'>" + helperMap[h] + "</span>";
     }
     code += ".toArray()";
+    if (diagState.cleanup) {
+      code += "\n<span class='frag-rose'>// counter/fib generators log finally when take() closes them with .return()</span>";
+    }
     document.getElementById("composed").innerHTML = code;
   }
   render();
@@ -309,11 +344,13 @@
 
   document.getElementById("run").addEventListener("click", run);
   document.getElementById("reset").addEventListener("click", () => {
-    for (const k of Object.keys(pickState)) pickState[k] = false;
-    for (const k of Object.keys(helperState)) helperState[k] = false;
-    pickState.nums = true; helperState["take-5"] = true; strat = "lazy";
+    Object.assign(pickState, defaultPickState);
+    Object.assign(helperState, defaultHelperState);
+    diagState.cleanup = true;
+    strat = "lazy";
     [...document.querySelectorAll("#picks .opt")].forEach((b) => b.classList.toggle("on", !!pickState[b.dataset.src]));
     [...document.querySelectorAll("#helpers .opt")].forEach((b) => b.classList.toggle("on", !!helperState[b.dataset.h]));
+    [...document.querySelectorAll("#diagnostics .opt")].forEach((b) => b.classList.toggle("on", !!diagState[b.dataset.diag]));
     [...document.querySelectorAll("#strats .opt")].forEach((b) => b.classList.toggle("on", b.dataset.strat === strat));
     render();
   });
@@ -321,21 +358,26 @@
   function run() {
     const picks = Object.entries(pickState).filter(([, v]) => v).map(([k]) => k);
     const helpers = Object.entries(helperState).filter(([, v]) => v).map(([k]) => k);
-    const { counters, builders } = makeSources();
+    const { counters, builders, cleanups } = makeSources(diagState.cleanup);
     const valsEl = document.getElementById("vals");
     const pullsEl = document.getElementById("pulls");
+    const cleanupEl = document.getElementById("cleanup");
     const statsV = document.getElementById("stats-vals");
     const statsP = document.getElementById("stats-pulls");
+    const statsC = document.getElementById("stats-cleanup");
     valsEl.innerHTML = "";
     pullsEl.innerHTML = "";
+    cleanupEl.innerHTML = "";
     statsV.textContent = "";
     statsP.textContent = "";
+    statsC.textContent = "";
 
     let out, peakIntermediate = 0;
     if (strat === "eager") {
       if (picks.includes("counter") || picks.includes("fib")) {
         const guard = picks.includes("fib") ? "fib" : "counter";
         statsV.innerHTML = "<b>BLOCKED</b> — eager spread on infinite source <code>" + guard + "</code> would hang the page. (Demo aborts.)";
+        statsC.textContent = "No sources were pulled, so no generator cleanup hooks ran.";
         return;
       }
       const merged = [];
@@ -368,6 +410,19 @@
       statsP.innerHTML = "intermediate array allocated: <b>" + peakIntermediate + "</b> entries";
     } else {
       statsP.innerHTML = "intermediate array allocated: <b>0</b> — pure lazy chain";
+    }
+    if (diagState.cleanup) {
+      for (const entry of cleanups) {
+        const r = document.createElement("div");
+        r.className = "row";
+        r.textContent = entry;
+        cleanupEl.appendChild(r);
+      }
+      statsC.textContent = cleanups.length
+        ? cleanups.length + " cleanup event(s) recorded"
+        : "No cleanup-enabled generator was pulled and closed in this run.";
+    } else {
+      statsC.textContent = "Cleanup diagnostics hidden.";
     }
   }
 </script>

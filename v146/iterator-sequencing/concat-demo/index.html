@@ -102,6 +102,9 @@
   <div class="note" id="support-note">
     <strong>Chrome 146 required</strong> for <code>Iterator.concat()</code>. Older browsers will show a fallback polyfill implementation that demonstrates the same concept using a generator function.
   </div>
+  <div class="note">
+    <strong>Sync-only contract.</strong> <code>Iterator.concat()</code> consumes synchronous iterables with <code>Symbol.iterator</code>. Async iterables, <code>for await</code> sources, and <code>ReadableStream</code> pipelines need async iteration or stream APIs instead.
+  </div>
 
   <section>
     <h2>basic examples</h2>
@@ -110,8 +113,9 @@
       <button id="btn-arrays">Arrays</button>
       <button id="btn-sets">Set + Map entries</button>
       <button id="btn-generator">Generator + array</button>
-      <button id="btn-string">String characters</button>
+      <button id="btn-string">String object characters</button>
       <button id="btn-helpers">With iterator helpers</button>
+      <button id="btn-throw">Thrown error stops sequence</button>
     </div>
 
     <div class="output-area" id="output-area">Click a button to run an example…</div>
@@ -173,7 +177,10 @@ Iterator.concat(range(3), range(3))
 Iterator.concat(bigArray1, bigArray2)
   .filter(x =&gt; x &gt; 100)
   .take(5)          // stops after 5 matches — bigArray2 may never be read
-  .toArray();</code></pre>
+  .toArray();
+
+// Sync-only: use Symbol.iterator sources here.
+// Async iterables and ReadableStream bodies belong in async/stream pipelines.</code></pre>
   </section>
 
   <section>
@@ -190,6 +197,7 @@ Iterator.concat(bigArray1, bigArray2)
 
 <script>
   const supportsConcat = typeof Iterator !== 'undefined' && typeof Iterator.concat === 'function';
+  const supportsHelpers = typeof Iterator !== 'undefined' && Iterator.prototype && typeof Iterator.prototype.filter === 'function';
 
   if (supportsConcat) {
     document.getElementById('support-note').innerHTML =
@@ -206,7 +214,9 @@ Iterator.concat(bigArray1, bigArray2)
     })();
   }
 
-  const concat = supportsConcat ? Iterator.concat.bind(Iterator) : iteratorConcat;
+  function concat(...iterables) {
+    return supportsConcat ? Iterator.concat(...iterables) : iteratorConcat(...iterables);
+  }
 
   const output = document.getElementById('output-area');
 
@@ -252,25 +262,63 @@ Iterator.concat(bigArray1, bigArray2)
 
   document.getElementById('btn-string').addEventListener('click', () => {
     clearOutput();
-    log('// Strings are iterable — yields Unicode code points', 'info');
-    const seq = concat('ABC', ['-'], '123');
+    log('// String objects are iterable — yields Unicode code points', 'info');
+    log('// Iterator.concat() expects object inputs, so primitives are wrapped first', 'info');
+    const seq = concat(Object('ABC'), ['-'], Object('123'));
     log('Result: [' + [...seq].map(c => JSON.stringify(c)).join(', ') + ']', 'ok');
   });
 
   document.getElementById('btn-helpers').addEventListener('click', () => {
     clearOutput();
-    if (!supportsConcat) {
+    if (!supportsHelpers) {
       log('Iterator helpers (.map, .filter, .take) require Chrome 122+', 'err');
       return;
     }
     log('// Iterator.concat + .filter + .map + .take', 'info');
-    const result = Iterator.concat([1, -2, 3], [-4, 5, -6], [7, 8])
+    const result = concat([1, -2, 3], [-4, 5, -6], [7, 8])
       .filter(x => x > 0)
       .map(x => x * 10)
       .take(4)
       .toArray();
     log('filter(x > 0) → map(*10) → take(4)', 'info');
     log('Result: [' + result.join(', ') + ']', 'ok');
+  });
+
+  document.getElementById('btn-throw').addEventListener('click', () => {
+    clearOutput();
+    log('// Middle source throws; concat propagates and stops', 'info');
+    const pulls = { first: 0, middle: 0, later: 0 };
+
+    function* first() {
+      pulls.first++;
+      yield 'cache:ready';
+      pulls.first++;
+      yield 'cache:warm';
+    }
+    function* middle() {
+      pulls.middle++;
+      yield 'primary:one';
+      pulls.middle++;
+      throw new Error('primary source failed');
+    }
+    function* later() {
+      pulls.later++;
+      yield 'fallback:should-not-run';
+    }
+
+    const seq = concat(first(), middle(), later());
+    const values = [];
+    try {
+      for (const value of seq) {
+        values.push(value);
+        log('yielded: ' + value, 'ok');
+      }
+    } catch (err) {
+      log('caught: ' + err.message, 'err');
+    }
+    log('values before error: [' + values.map((v) => JSON.stringify(v)).join(', ') + ']', 'info');
+    log('pull counts: first=' + pulls.first + ', middle=' + pulls.middle + ', later=' + pulls.later, pulls.later === 0 ? 'ok' : 'err');
+    log('later source was never pulled after the throw', pulls.later === 0 ? 'ok' : 'err');
   });
 
   // Eager vs lazy comparison
