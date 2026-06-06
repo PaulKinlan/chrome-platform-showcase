@@ -137,6 +137,14 @@
       font-size: 0.55rem;
       color: var(--text-muted);
     }
+    .workflow-note {
+      display: inline-flex;
+      align-items: center;
+      min-height: 1.4rem;
+      font-family: var(--font-mono);
+      font-size: 0.62rem;
+      color: var(--text-muted);
+    }
     .ticket-status {
       font-family: var(--font-mono);
       font-size: 0.6rem;
@@ -225,6 +233,7 @@
         <button class="sample-pill" onclick="fillSample('ja')">日本語</button>
         <button class="sample-pill" onclick="fillSample('ar')">العربية</button>
         <button class="sample-pill" onclick="fillSample('pt')">Português</button>
+        <span class="workflow-note" id="workflowStatus">Ready to route locally.</span>
       </div>
     </div>
   </div>
@@ -243,7 +252,7 @@
   </div>
 
   <div class="code-block"><span class="cc">// Triage pattern: detect → route</span>
-<span class="ck">const</span> ROUTES = {
+  <span class="ck">const</span> ROUTES = {
   fr: <span class="cv">'France/Belgium team'</span>,
   de: <span class="cv">'DACH team'</span>,
   es: <span class="cv">'Latin America/Spain team'</span>,
@@ -255,7 +264,9 @@
 };
 
 <span class="ck">async function</span> <span class="cv">triageTicket</span>(text) {
-  <span class="ck">const</span> detector = <span class="ck">await</span> self.ai.languageDetector.<span class="cv">create</span>();
+  <span class="ck">const</span> detector = <span class="ck">await</span> LanguageDetector.<span class="cv">create</span>({
+    expectedInputLanguages: Object.<span class="cv">keys</span>(ROUTES)
+  });
   <span class="ck">const</span> [top] = <span class="ck">await</span> detector.<span class="cv">detect</span>(text);
   <span class="ck">const</span> lang = top.<span class="cv">detectedLanguage</span>;
   <span class="ck">const</span> team = ROUTES[lang] ?? <span class="cv">'General support'</span>;
@@ -278,11 +289,13 @@
     <h2>references</h2>
     <ul>
       <li><a href="https://chromestatus.com/feature/6494349985841152">ChromeStatus: Language Detector API</a></li>
+      <li><a href="https://webmachinelearning.github.io/translation-api/#language-detector-api">Translator and Language Detector APIs spec</a></li>
     </ul>
   </section>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script src="../language-detector-shared.js"></script>
 <script>
 (function () {
   const SAMPLES = {
@@ -329,21 +342,9 @@
 
   let tickets = [];
   let nextId = 5;
-  let detector = null;
-
-  async function getDetector() {
-    if (detector) return detector;
-    if (window.ai?.languageDetector) {
-      try {
-        const cap = await window.ai.languageDetector.capabilities?.();
-        if (!cap || cap.available === 'readily' || cap.available === 'after-download') {
-          detector = await window.ai.languageDetector.create();
-          return detector;
-        }
-      } catch {}
-    }
-    return null;
-  }
+  const detectorOptions = {
+    expectedInputLanguages: Object.keys(ROUTES)
+  };
 
   function heuristicDetect(text) {
     const lower = text.toLowerCase();
@@ -372,14 +373,15 @@
   }
 
   async function detectLang(text) {
-    const det = await getDetector();
-    if (det) {
-      try {
-        const results = await det.detect(text);
-        return results[0];
-      } catch {}
-    }
-    return heuristicDetect(text);
+    const outcome = await LDShowcase.detect(text, detectorOptions, { minLength: 2 });
+    const top = outcome.source === 'api' ? outcome.results[0] : heuristicDetect(text);
+    return {
+      ...top,
+      source: outcome.source,
+      usage: outcome.inputUsage,
+      quota: outcome.inputQuota,
+      error: outcome.error
+    };
   }
 
   function getLangName(code) {
@@ -401,7 +403,7 @@
         <div class="ticket-meta">
           ${ticket.lang ? `<span class="lang-tag">${getLangName(ticket.lang)}</span>` : ''}
           ${ticket.team ? `<span class="team-tag">${ticket.team}</span>` : ''}
-          ${ticket.confidence ? `<span class="conf-text">${Math.round(ticket.confidence * 100)}% confidence</span>` : ''}
+          ${ticket.confidence ? `<span class="conf-text">${Math.round(ticket.confidence * 100)}% confidence · ${ticket.source || 'pending'}</span>` : ''}
           ${!ticket.lang && !ticket.detecting ? '<span class="conf-text">—</span>' : ''}
         </div>
       </div>
@@ -443,21 +445,33 @@
     ticket.detecting = false;
     ticket.lang = result.detectedLanguage;
     ticket.confidence = result.confidence;
+    ticket.source = result.source;
     ticket.team = getTeam(result.detectedLanguage);
     routeCounts[ticket.lang] = (routeCounts[ticket.lang] || 0) + 1;
     renderInbox();
     renderRoutingTable();
+    return result;
   }
 
   window.submitTicket = async function () {
     const ta = document.getElementById('newTicket');
+    const status = document.getElementById('workflowStatus');
     const text = ta.value.trim();
-    if (!text) return;
+    if (!text) {
+      status.textContent = 'Enter a support ticket to route.';
+      return;
+    }
+    if (text.length < 2) {
+      status.textContent = 'Language detection needs at least 2 characters before routing.';
+      return;
+    }
     const ticket = { id: nextId++, text };
     tickets.unshift(ticket);
     ta.value = '';
+    status.textContent = 'Detecting language locally…';
     renderInbox();
-    await processTicket(ticket);
+    const result = await processTicket(ticket);
+    status.textContent = `Routed to ${ticket.team} as ${getLangName(ticket.lang)} (${Math.round(result.confidence * 100)}% confidence · ${result.source}).`;
   };
 
   window.fillSample = function (lang) {

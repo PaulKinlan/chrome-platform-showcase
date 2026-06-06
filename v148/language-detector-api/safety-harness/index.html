@@ -195,12 +195,12 @@
   <div class="code-block"><span class="cc">// Always feature-detect before using the API</span>
 <span class="ck">async function</span> <span class="cv">safeDetect</span>(text) {
   <span class="cc">// 1. Check API availability</span>
-  <span class="ck">if</span> (!window.ai?.languageDetector) {
+  <span class="ck">if</span> (!(<span class="cv">'LanguageDetector'</span> <span class="ck">in</span> globalThis)) {
     <span class="ck">return</span> { error: <span class="cv">'API not supported'</span>, fallback: heuristicDetect(text) };
   }
   <span class="cc">// 2. Check model readiness</span>
-  <span class="ck">const</span> cap = <span class="ck">await</span> self.ai.languageDetector.<span class="cv">capabilities</span>();
-  <span class="ck">if</span> (cap.available === <span class="cv">'no'</span>) {
+  <span class="ck">const</span> availability = <span class="ck">await</span> LanguageDetector.<span class="cv">availability</span>();
+  <span class="ck">if</span> (availability === <span class="cv">'unavailable'</span>) {
     <span class="ck">return</span> { error: <span class="cv">'Model unavailable'</span>, fallback: heuristicDetect(text) };
   }
   <span class="cc">// 3. Guard empty / too-short text</span>
@@ -209,7 +209,7 @@
   }
   <span class="cc">// 4. Detect with error boundary</span>
   <span class="ck">try</span> {
-    <span class="ck">const</span> detector = <span class="ck">await</span> self.ai.languageDetector.<span class="cv">create</span>();
+    <span class="ck">const</span> detector = <span class="ck">await</span> LanguageDetector.<span class="cv">create</span>();
     <span class="ck">const</span> [top] = <span class="ck">await</span> detector.<span class="cv">detect</span>(text);
     <span class="ck">return</span> { result: top };
   } <span class="ck">catch</span> (e) {
@@ -231,11 +231,13 @@
     <h2>references</h2>
     <ul>
       <li><a href="https://chromestatus.com/feature/6494349985841152">ChromeStatus: Language Detector API</a></li>
+      <li><a href="https://webmachinelearning.github.io/translation-api/#language-detector-api">Translator and Language Detector APIs spec</a></li>
     </ul>
   </section>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script src="../language-detector-shared.js"></script>
 <script>
 (function () {
   const TESTS = [
@@ -243,14 +245,14 @@
       name: 'API availability',
       input: '(none)',
       inputValue: null,
-      description: 'window.ai.languageDetector exists and capabilities() returns available',
+      description: 'globalThis.LanguageDetector exists and availability() returns a current state',
       run: async () => {
-        if (!window.ai?.languageDetector) return { status: 'warn', msg: 'API absent — heuristic fallback only' };
-        try {
-          const cap = await window.ai.languageDetector.capabilities?.();
-          if (cap?.available === 'no') return { status: 'warn', msg: 'Model not available on this device' };
-          return { status: 'pass', msg: `Available: ${cap?.available || 'unknown'}` };
-        } catch (e) { return { status: 'warn', msg: 'capabilities() threw: ' + e.message }; }
+        const availability = await LDShowcase.getAvailability(detectorOptions);
+        if (!availability.supported) return { status: 'warn', msg: 'API absent — heuristic fallback only' };
+        const state = LDShowcase.normalizeAvailability(availability.availability);
+        return state === 'unavailable' || state === 'error'
+          ? { status: 'warn', msg: availability.message }
+          : { status: 'pass', msg: `availability(): ${availability.availability}` };
       },
     },
     {
@@ -412,33 +414,20 @@
     },
   ];
 
-  let detector = null;
   let results = new Array(TESTS.length).fill(null);
-
-  async function getDetector() {
-    if (detector) return detector;
-    if (window.ai?.languageDetector) {
-      try {
-        const cap = await window.ai.languageDetector.capabilities?.();
-        if (!cap || cap.available !== 'no') {
-          detector = await window.ai.languageDetector.create();
-          return detector;
-        }
-      } catch {}
-    }
-    return null;
-  }
+  const detectorOptions = {
+    expectedInputLanguages: ['en', 'fr', 'de', 'es', 'pt', 'ja', 'zh', 'ar', 'ru', 'ko']
+  };
 
   async function safeDetect(text) {
     if (!text || text.trim().length < 2) return { error: 'Text too short', result: null };
-    const det = await getDetector();
-    if (det) {
-      try {
-        const res = await det.detect(text);
-        return { result: res[0] };
-      } catch (e) { return { error: e.message, fallback: heuristicDetect(text)[0] }; }
-    }
-    return { error: 'API not available', fallback: heuristicDetect(text)[0] };
+    const outcome = await LDShowcase.detect(text, detectorOptions, { minLength: 2 });
+    const result = outcome.source === 'api' ? outcome.results[0] : heuristicDetect(text)[0];
+    return {
+      result,
+      source: outcome.source,
+      error: outcome.source === 'api' ? null : outcome.error
+    };
   }
 
   window.safeDetect = safeDetect;
@@ -549,23 +538,19 @@
 
   async function checkApiStatus() {
     const el = document.getElementById('apiStatus');
-    if (!window.ai?.languageDetector) {
+    const availability = await LDShowcase.getAvailability(detectorOptions);
+    const state = LDShowcase.normalizeAvailability(availability.availability);
+    if (!availability.supported) {
       el.className = 'api-status status-fallback';
       el.textContent = 'Language Detector API not available in this browser. Tests use heuristic fallback.';
       return;
     }
-    try {
-      const cap = await window.ai.languageDetector.capabilities?.();
-      if (cap?.available === 'no') {
-        el.className = 'api-status status-fallback';
-        el.textContent = 'Language Detector API present but model not available on this device.';
-      } else {
-        el.className = 'api-status status-live';
-        el.textContent = `Language Detector API available (${cap?.available || 'unknown'}). Tests will use real on-device inference.`;
-      }
-    } catch {
+    if (state === 'unavailable' || state === 'error') {
       el.className = 'api-status status-fallback';
-      el.textContent = 'Language Detector API capabilities() failed. Tests use fallback.';
+      el.textContent = `${availability.message} Tests use fallback.`;
+    } else {
+      el.className = 'api-status status-live';
+      el.textContent = `LanguageDetector.availability() returned "${availability.availability}". Tests will try real inference and fall back on errors.`;
     }
   }
 
