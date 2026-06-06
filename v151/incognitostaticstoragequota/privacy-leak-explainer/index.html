@@ -60,6 +60,76 @@
     .compare-col h4 { font-size: 0.85rem; margin: 0 0 0.4rem; }
     .compare-col .value { font-family: monospace; font-size: 1rem; font-weight: 700; color: var(--text-black); }
     .compare-col p { font-size: 0.78rem; color: var(--text-charcoal); margin: 0.3rem 0 0; }
+    .estimate-panel {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      margin: 1rem 0 1.5rem;
+    }
+    .estimate-head {
+      background: var(--bg-stone);
+      border-bottom: 2px solid var(--border-black);
+      padding: 0.55rem 0.75rem;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+    .estimate-body {
+      padding: 0.75rem;
+    }
+    .estimate-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.6rem;
+      margin: 0.75rem 0;
+    }
+    @media (max-width: 680px) { .estimate-grid { grid-template-columns: 1fr; } }
+    .estimate-stat {
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: 0.55rem;
+    }
+    .estimate-stat strong {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: 0.58rem;
+      color: var(--text-muted);
+      margin-bottom: 0.25rem;
+    }
+    .estimate-stat span {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: var(--text-black);
+      word-break: break-word;
+    }
+    .estimate-verdict {
+      border: 1px solid var(--border-black);
+      padding: 0.6rem;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--text-charcoal);
+      background: var(--bg-stone);
+      white-space: pre-wrap;
+    }
+    .estimate-verdict.ok {
+      border-color: var(--accent-emerald);
+    }
+    .estimate-verdict.warn {
+      border-color: var(--accent-rose);
+    }
+    .estimate-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      align-items: center;
+      margin: 0.75rem 0 0;
+    }
+    .estimate-note {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      color: var(--text-muted);
+    }
     .note {
       background: var(--bg-stone);
       border-left: 3px solid var(--border-black);
@@ -100,6 +170,32 @@
     </div>
 
     <p style="font-size:0.875rem;color:var(--text-charcoal);margin-top:1rem;">Any script could call <code>navigator.storage.estimate()</code> and check if the quota was below 500 MB — with near certainty, that indicated Incognito mode.</p>
+
+    <div class="estimate-panel" id="live-estimate-panel">
+      <div class="estimate-head">Live StorageManager.estimate() readout</div>
+      <div class="estimate-body">
+        <p style="font-size:0.875rem;color:var(--text-charcoal);margin:0;">This reads the same API surface the old detector used and compares the returned quota with the old fingerprint threshold and the 10 GiB floor Chrome 151 applies in both browsing modes.</p>
+        <div class="estimate-grid">
+          <div class="estimate-stat">
+            <strong>quota</strong>
+            <span id="estimate-quota">not run</span>
+          </div>
+          <div class="estimate-stat">
+            <strong>usage</strong>
+            <span id="estimate-usage">not run</span>
+          </div>
+          <div class="estimate-stat">
+            <strong>available</strong>
+            <span id="estimate-available">not run</span>
+          </div>
+        </div>
+        <div id="estimate-verdict" class="estimate-verdict">Click “Run live estimate” to call navigator.storage.estimate().</div>
+        <div class="estimate-actions">
+          <button onclick="runStorageEstimateProbe()">Run live estimate</button>
+          <span id="estimate-timestamp" class="estimate-note">Waiting for API call.</span>
+        </div>
+      </div>
+    </div>
 
     <pre><code>// Detection script (worked on Chrome &lt; 151)
 const { quota } = await navigator.storage.estimate();
@@ -156,5 +252,70 @@ BUT: bug caused raw 120 MB to be returned instead</div>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script>
+(function () {
+    const OLD_INCOGNITO_THRESHOLD = 500 * 1024 * 1024;
+    const TEN_GIB = 10 * 1024 * 1024 * 1024;
+
+    function formatBytes(bytes) {
+      if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return 'unavailable';
+      const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+      let value = bytes;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+      }
+      return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+    }
+
+    function setText(id, value) {
+      document.getElementById(id).textContent = value;
+    }
+
+    window.runStorageEstimateProbe = async function () {
+      const verdict = document.getElementById('estimate-verdict');
+      verdict.className = 'estimate-verdict';
+      verdict.textContent = 'Calling navigator.storage.estimate()…';
+
+      if (!navigator.storage || typeof navigator.storage.estimate !== 'function') {
+        setText('estimate-quota', 'unsupported');
+        setText('estimate-usage', 'unsupported');
+        setText('estimate-available', 'unsupported');
+        setText('estimate-timestamp', 'StorageManager.estimate() is not exposed in this browser.');
+        verdict.classList.add('warn');
+        verdict.textContent = 'StorageManager.estimate() is unavailable, so this page cannot run the live quota probe.';
+        return;
+      }
+
+      try {
+        const estimate = await navigator.storage.estimate();
+        const quota = estimate.quota ?? 0;
+        const usage = estimate.usage ?? 0;
+        const available = Math.max(0, quota - usage);
+        const tripsOldDetector = quota > 0 && quota < OLD_INCOGNITO_THRESHOLD;
+        const meetsFloor = quota >= TEN_GIB;
+
+        setText('estimate-quota', `${formatBytes(quota)} (${quota.toLocaleString()} bytes)`);
+        setText('estimate-usage', `${formatBytes(usage)} (${usage.toLocaleString()} bytes)`);
+        setText('estimate-available', `${formatBytes(available)} (${available.toLocaleString()} bytes)`);
+        setText('estimate-timestamp', `Last run: ${new Date().toLocaleTimeString()}`);
+
+        verdict.classList.add(tripsOldDetector || !meetsFloor ? 'warn' : 'ok');
+        verdict.textContent = [
+          `Old <500 MB detector: ${tripsOldDetector ? 'would flag this value' : 'does not flag this value'}.`,
+          `10 GiB floor check: ${meetsFloor ? 'quota is at or above the floor' : 'quota is below the Chrome 151 target floor'}.`,
+          `This is a live read of this browser context; compare Normal and Incognito windows to validate the privacy fix.`
+        ].join('\n');
+      } catch (error) {
+        setText('estimate-timestamp', 'The estimate() promise rejected.');
+        verdict.classList.add('warn');
+        verdict.textContent = `estimate() failed: ${error.message}`;
+      }
+    };
+
+    runStorageEstimateProbe();
+})();
+</script>
 </body>
 </html>
