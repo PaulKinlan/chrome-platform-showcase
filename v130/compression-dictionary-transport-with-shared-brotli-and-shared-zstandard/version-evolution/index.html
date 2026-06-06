@@ -132,6 +132,75 @@
       overflow-x: auto;
       margin: var(--space-3) 0;
     }
+    .scenario-control {
+      border: 1.5px solid var(--border-black);
+      background: var(--bg-ivory);
+      padding: var(--space-3);
+      margin: var(--space-4) 0;
+    }
+    .scenario-control h3 {
+      margin-top: 0;
+      font-size: 1rem;
+    }
+    .scenario-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+      margin: var(--space-2) 0;
+    }
+    .scenario {
+      background: var(--bg-paper);
+      color: var(--text-black);
+      border: 1.5px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+    }
+    .scenario.active {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+    }
+    .dict-note {
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2);
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-charcoal);
+      margin: var(--space-2) 0 0;
+    }
+    .pair-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: var(--space-3) 0 var(--space-4);
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+    }
+    .pair-table th,
+    .pair-table td {
+      border: 1px solid var(--border-black);
+      padding: 0.45rem;
+      text-align: right;
+      background: var(--bg-paper);
+    }
+    .pair-table th {
+      background: var(--bg-stone);
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .pair-table td:first-child,
+    .pair-table th:first-child {
+      text-align: left;
+    }
+    .pair-table .win {
+      color: var(--accent-emerald);
+      font-weight: 700;
+    }
+    .pair-table .fallback {
+      color: var(--accent-rose);
+      font-weight: 700;
+    }
   </style>
 </head>
 <body>
@@ -148,12 +217,21 @@
     <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted);margin-bottom:0.4rem">pick a version to fetch (cursor: the previous version is the dictionary)</p>
     <div class="timeline" id="vers"></div>
 
-    <p style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted);margin-top:1.2rem">app.v?.js — diff vs previous version highlighted</p>
+    <div class="scenario-control">
+      <h3>dictionary cache scenario</h3>
+      <div class="scenario-options" id="scenarios"></div>
+      <div class="dict-note" id="dict-note"></div>
+    </div>
+
+    <p id="source-label" style="font-family:var(--font-mono);font-size:0.78rem;color:var(--text-muted);margin-top:1.2rem">app.v?.js — diff vs advertised dictionary highlighted</p>
     <pre class="source-view" id="src"></pre>
 
     <div class="metrics-grid" id="metrics"></div>
 
     <div class="bars" id="bars"></div>
+
+    <h2>compressed byte savings by version pair</h2>
+    <div id="pair-matrix"></div>
   </div>
 
   <h2>what the wire looks like</h2>
@@ -329,9 +407,13 @@ export { cart, Cart, fmt, fmtIn, slug, setGiftWrap, setCurrency };
   for (const v of VERSIONS) v.source = COMMON + "\n\n" + v.tail + "\n";
 
   const versEl = document.getElementById("vers");
+  const scenariosEl = document.getElementById("scenarios");
+  const dictNoteEl = document.getElementById("dict-note");
+  const sourceLabelEl = document.getElementById("source-label");
   const srcEl = document.getElementById("src");
   const metricsEl = document.getElementById("metrics");
   const barsEl = document.getElementById("bars");
+  const pairMatrixEl = document.getElementById("pair-matrix");
   const wireEl = document.getElementById("wire");
 
   // Build version cards.
@@ -400,36 +482,148 @@ export { cart, Cart, fmt, fmtIn, slug, setGiftWrap, setCurrency };
     return out.join("\n");
   }
 
+  const SCENARIOS = [
+    {
+      id: "adjacent",
+      label: "normal: previous version cached",
+      pickDictIndex(target) {
+        return target > 0 ? target - 1 : null;
+      },
+      canEncodeSkipped: true,
+      note(target, dictIndex) {
+        if (dictIndex === null) return "First visit has no advertised dictionary, so the server sends regular Brotli and registers this response for future updates.";
+        return `The browser advertises ${VERSIONS[dictIndex].label}; the server encodes ${VERSIONS[target].label} as a small adjacent delta.`;
+      },
+    },
+    {
+      id: "skip-retained",
+      label: "skip: v1 dictionary retained",
+      pickDictIndex(target) {
+        return target > 0 ? 0 : null;
+      },
+      canEncodeSkipped: true,
+      note(target, dictIndex) {
+        if (dictIndex === null) return "The initial v1 response is still a plain Brotli download.";
+        return `The user jumped straight from ${VERSIONS[dictIndex].label} to ${VERSIONS[target].label}; CDT still helps if the server can generate a delta against that older dictionary.`;
+      },
+    },
+    {
+      id: "skip-missing",
+      label: "skip: server only has adjacent deltas",
+      pickDictIndex(target) {
+        return target > 1 ? 0 : target > 0 ? target - 1 : null;
+      },
+      canEncodeSkipped: false,
+      note(target, dictIndex) {
+        if (dictIndex === null) return "No dictionary is available on the first fetch.";
+        if (dictIndex === target - 1) return `The advertised ${VERSIONS[dictIndex].label} dictionary matches the adjacent delta the server can produce.`;
+        return `The browser only advertises ${VERSIONS[dictIndex].label}, but the server kept only adjacent deltas, so it falls back to regular Brotli for ${VERSIONS[target].label}.`;
+      },
+    },
+  ];
+
+  let scenarioId = "adjacent";
+
+  function scenarioFor(id) {
+    return SCENARIOS.find((s) => s.id === id) || SCENARIOS[0];
+  }
+
+  function transferFor(targetIndex, scenario = scenarioFor(scenarioId)) {
+    const target = VERSIONS[targetIndex];
+    const dictIndex = scenario.pickDictIndex(targetIndex);
+    const br = brEstimate(target.source);
+    if (dictIndex === null) {
+      return { dictIndex, encoding: "br", bytes: br, fallback: true, br };
+    }
+    const skipped = dictIndex !== targetIndex - 1;
+    if (skipped && !scenario.canEncodeSkipped) {
+      return { dictIndex, encoding: "br", bytes: br, fallback: true, br };
+    }
+    const dcb = diffSize(VERSIONS[dictIndex].source, target.source);
+    return { dictIndex, encoding: "dcb", bytes: dcb, fallback: false, br };
+  }
+
+  function renderScenarios() {
+    scenariosEl.innerHTML = SCENARIOS.map((scenario) =>
+      `<button class="scenario ${scenario.id === scenarioId ? "active" : ""}" data-scenario="${scenario.id}">${scenario.label}</button>`
+    ).join("");
+  }
+
+  function renderPairMatrix() {
+    const rows = [];
+    for (let target = 1; target < VERSIONS.length; target++) {
+      const adjacentBytes = diffSize(VERSIONS[target - 1].source, VERSIONS[target].source);
+      const retainedBytes = diffSize(VERSIONS[0].source, VERSIONS[target].source);
+      const br = brEstimate(VERSIONS[target].source);
+      const missingCell = target === 1
+        ? `<span class="win">${adjacentBytes.toLocaleString()} dcb</span>`
+        : `<span class="fallback">${br.toLocaleString()} br fallback</span>`;
+      rows.push(`<tr>
+        <td>${VERSIONS[target].label}</td>
+        <td>${br.toLocaleString()} br</td>
+        <td class="win">${adjacentBytes.toLocaleString()} dcb</td>
+        <td class="win">${retainedBytes.toLocaleString()} dcb</td>
+        <td>${missingCell}</td>
+      </tr>`);
+    }
+    pairMatrixEl.innerHTML = `<table class="pair-table">
+      <thead>
+        <tr>
+          <th>target version</th>
+          <th>plain Brotli</th>
+          <th>previous version cached</th>
+          <th>v1.0.0 dictionary retained</th>
+          <th>v1.0.0 advertised, server missing delta</th>
+        </tr>
+      </thead>
+      <tbody>${rows.join("")}</tbody>
+    </table>`;
+  }
+
   function render() {
     const v = VERSIONS[active];
     const prev = active > 0 ? VERSIONS[active - 1] : null;
-
-    // Source view with diff highlight against prev.
-    srcEl.innerHTML = prev ? htmlDiff(prev.source, v.source) : v.source.replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+    const scenario = scenarioFor(scenarioId);
+    const transfer = transferFor(active, scenario);
+    const dict = transfer.dictIndex === null ? null : VERSIONS[transfer.dictIndex];
 
     const raw = v.source.length;
     const br = brEstimate(v.source);
     const gz = gzEstimate(v.source);
-    const dcb = prev ? diffSize(prev.source, v.source) : br;
+    const dcb = transfer.bytes;
+    const dcbLabel = transfer.encoding === "dcb"
+      ? "shared brotli (dcb)"
+      : "shared brotli fallback";
+
+    // Source view with diff highlight against the dictionary advertised by the current scenario.
+    const diffBase = dict || prev;
+    sourceLabelEl.textContent = diffBase
+      ? `app.${v.id}.js — diff vs advertised ${diffBase.label} dictionary highlighted`
+      : `app.${v.id}.js — full source, no dictionary advertised yet`;
+    srcEl.innerHTML = diffBase ? htmlDiff(diffBase.source, v.source) : v.source.replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
 
     metricsEl.innerHTML =
       metric("raw transfer", raw, "bytes", false) +
       metric("gzip", gz, "bytes (-" + pct(raw, gz) + "%)", false) +
       metric("brotli", br, "bytes (-" + pct(raw, br) + "%)", false) +
-      metric("shared brotli (dcb)", dcb, prev ? "bytes (-" + pct(raw, dcb) + "%)" : "n/a (no dictionary)", prev !== null);
+      metric(dcbLabel, dcb, transfer.encoding === "dcb" ? "bytes (-" + pct(raw, dcb) + "%)" : "bytes (no usable dictionary)", transfer.encoding === "dcb");
 
     const maxBar = Math.max(raw, gz, br, dcb);
     barsEl.innerHTML =
       bar("raw transfer", "raw", raw, maxBar) +
       bar("gzip", "gz", gz, maxBar) +
       bar("brotli", "gz", br, maxBar) +
-      bar("shared brotli (dcb)", "cdt", dcb, maxBar);
+      bar(dcbLabel, transfer.encoding === "dcb" ? "cdt" : "gz", dcb, maxBar);
 
-    wireEl.textContent = prev
-      ? `# request — browser knows about ${prev.label}, advertises it as a dictionary
+    dictNoteEl.textContent = scenario.note(active, transfer.dictIndex);
+    renderScenarios();
+    renderPairMatrix();
+
+    wireEl.textContent = dict && transfer.encoding === "dcb"
+      ? `# request — browser knows about ${dict.label}, advertises it as a dictionary
 GET /static/cart.${v.id}.js HTTP/1.1
 Accept-Encoding: dcb, br, gzip, zstd
-Sec-Available-Dictionary: :<sha-256 of ${prev.label}>:
+Sec-Available-Dictionary: :<sha-256 of ${dict.label}>:
 
 # response — server hands back the delta encoded against the dictionary
 HTTP/1.1 200 OK
@@ -438,8 +632,24 @@ Content-Encoding: dcb
 Content-Length: ${dcb}
 Vary: Accept-Encoding, Available-Dictionary
 
-# the browser's compressed cache stores ${prev.label} so the next bump
-# (${VERSIONS[Math.min(active + 1, VERSIONS.length - 1)].label}) can use ${v.label} as the dictionary`
+# the browser's compressed cache stores ${dict.label}; this still works
+# for skipped versions when the server can encode against that exact dictionary`
+      : dict
+      ? `# request — browser advertises only ${dict.label}
+GET /static/cart.${v.id}.js HTTP/1.1
+Accept-Encoding: dcb, br, gzip, zstd
+Sec-Available-Dictionary: :<sha-256 of ${dict.label}>:
+
+# response — server cannot produce a dcb stream for that older dictionary
+HTTP/1.1 200 OK
+Content-Type: application/javascript
+Content-Encoding: br
+Use-As-Dictionary: match="/static/cart.*.js", id="${v.id}"
+Content-Length: ${br}
+Vary: Accept-Encoding, Available-Dictionary
+
+# CDT is opportunistic: a skipped version only helps when the server can
+# produce a delta for the dictionary hash the browser actually advertised`
       : `# first fetch — no dictionary available yet
 GET /static/cart.${v.id}.js HTTP/1.1
 Accept-Encoding: dcb, br, gzip, zstd
@@ -470,6 +680,12 @@ Content-Length: ${br}
     active = +el.dataset.idx;
     for (const c of versEl.children) c.classList.remove("active");
     el.classList.add("active");
+    render();
+  });
+  scenariosEl.addEventListener("click", (e) => {
+    const el = e.target.closest(".scenario");
+    if (!el) return;
+    scenarioId = el.dataset.scenario;
     render();
   });
   render();

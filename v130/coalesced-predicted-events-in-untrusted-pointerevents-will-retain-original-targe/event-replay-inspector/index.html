@@ -116,6 +116,22 @@
     .log-type.coal      { color: var(--accent-amber); }
     .log-type.pred      { color: var(--accent-rose); }
     .log-msg { flex: 1; color: var(--text-charcoal); }
+    .replay-verdict {
+      margin-top: var(--space-3);
+      padding: var(--space-3);
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-charcoal);
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      line-height: 1.5;
+    }
+    .replay-verdict.pass {
+      border-color: var(--accent-emerald);
+    }
+    .replay-verdict.fail {
+      border-color: var(--accent-rose);
+    }
 
     /* Info table */
     .info-grid {
@@ -182,6 +198,7 @@
         <div class="log-entry"><span class="log-ts">—</span><span class="log-msg" style="color:var(--text-muted)">Waiting for events…</span></div>
       </div>
     </div>
+    <div class="replay-verdict" id="replayVerdict">Replay verdict: draw a gesture, then replay it to compare recorded and synthetic event offsets.</div>
   </div>
 
   <h3 style="font-family:var(--font-mono);font-size:0.85rem;text-transform:uppercase;letter-spacing:0.08em;margin:var(--space-5) 0 var(--space-2)">Chrome 130 behaviour</h3>
@@ -245,6 +262,10 @@ mainEvent.getCoalescedEvents().forEach(e => {
   const rCtx  = recordCanvas.getContext('2d');
   const rpCtx = replayCanvas.getContext('2d');
   const logBody = document.getElementById('logBody');
+  const replayVerdict = document.getElementById('replayVerdict');
+  const replayStroke = getComputedStyle(document.documentElement)
+    .getPropertyValue('--accent-blue')
+    .trim();
 
   let isDrawing = false;
   let recordedEvents = [];
@@ -316,26 +337,47 @@ mainEvent.getCoalescedEvents().forEach(e => {
     }
 
     rpCtx.clearRect(0, 0, replayCanvas.width, replayCanvas.height);
-    rpCtx.strokeStyle = '#3b82f6';
+    rpCtx.strokeStyle = replayStroke;
     rpCtx.lineWidth   = 2;
     rpCtx.beginPath();
 
     addLog('untrusted', `Starting replay of ${recordedEvents.length} untrusted PointerEvents…`, 'untrusted');
+    const comparisons = [];
 
     for (const [i, ev] of recordedEvents.entries()) {
+      const rect = replayCanvas.getBoundingClientRect();
+      const scaleX = replayCanvas.width / rect.width;
+      const scaleY = replayCanvas.height / rect.height;
+      let observed = null;
+      replayCanvas.addEventListener('pointermove', (synthetic) => {
+        observed = {
+          x: synthetic.offsetX * scaleX,
+          y: synthetic.offsetY * scaleY,
+          targetMatches: synthetic.target === replayCanvas,
+          trusted: synthetic.isTrusted,
+        };
+      }, { once: true });
+
       // Construct untrusted PointerEvent
       const pev = new PointerEvent('pointermove', {
-        bubbles:  false,
-        clientX:  ev.x,
-        clientY:  ev.y,
-        offsetX:  ev.x,  // Chrome 130: preserved on untrusted events
-        offsetY:  ev.y,
+        bubbles: true,
+        clientX: rect.left + ev.x / scaleX,
+        clientY: rect.top + ev.y / scaleY,
+      });
+      replayCanvas.dispatchEvent(pev);
+      const dx = observed ? Math.abs(observed.x - ev.x) : Infinity;
+      const dy = observed ? Math.abs(observed.y - ev.y) : Infinity;
+      comparisons.push({
+        index: i,
+        ok: !!observed && dx <= 1 && dy <= 1 && observed.targetMatches && observed.trusted === false,
+        dx,
+        dy,
       });
 
       // Log target and offset from the constructed event
       if (i % 8 === 0) {
         addLog('untrusted',
-          `Event #${i}: offsetX=${ev.x.toFixed(1)} offsetY=${ev.y.toFixed(1)} (Chrome 130: preserved ✓)`,
+          `Event #${i}: recorded ${ev.x.toFixed(1)},${ev.y.toFixed(1)} → observed ${observed ? observed.x.toFixed(1) + ',' + observed.y.toFixed(1) : 'none'} (isTrusted=false)`,
           'untrusted'
         );
       }
@@ -350,8 +392,16 @@ mainEvent.getCoalescedEvents().forEach(e => {
       if (i % 3 === 0) await new Promise(r => requestAnimationFrame(r));
     }
 
-    addLog('untrusted', `Replay complete — ${recordedEvents.length} events dispatched`, 'untrusted');
-    document.getElementById('replayFooter').textContent = `✓ Replayed ${recordedEvents.length} untrusted events with original coordinates`;
+    const failures = comparisons.filter(item => !item.ok);
+    const verdict = failures.length === 0
+      ? `PASS: all ${comparisons.length} untrusted replay events preserved target and offset coordinates within 1 canvas pixel.`
+      : `FAIL: ${failures.length} of ${comparisons.length} replay events differed from the recorded offsets. First mismatch #${failures[0].index}: dx=${failures[0].dx.toFixed(2)}, dy=${failures[0].dy.toFixed(2)}.`;
+    replayVerdict.textContent = `Replay verdict: ${verdict}`;
+    replayVerdict.className = 'replay-verdict ' + (failures.length === 0 ? 'pass' : 'fail');
+    addLog('untrusted', verdict, failures.length === 0 ? 'trusted' : 'pred');
+    document.getElementById('replayFooter').textContent = failures.length === 0
+      ? `✓ Replayed ${recordedEvents.length} untrusted events with matching coordinates`
+      : `⚠ Replayed ${recordedEvents.length} events; ${failures.length} coordinate mismatches`;
   });
 
   document.getElementById('clearBtn').addEventListener('click', () => {
@@ -360,6 +410,8 @@ mainEvent.getCoalescedEvents().forEach(e => {
     recordedEvents = [];
     document.getElementById('recordFooter').textContent = 'Draw to record pointer events…';
     document.getElementById('replayFooter').textContent = 'Click "Replay" to dispatch untrusted events';
+    replayVerdict.className = 'replay-verdict';
+    replayVerdict.textContent = 'Replay verdict: draw a gesture, then replay it to compare recorded and synthetic event offsets.';
     clearLog();
   });
 </script>
