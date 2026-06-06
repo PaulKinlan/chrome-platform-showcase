@@ -6,8 +6,7 @@
   <title>Payload builder - Attribution Reporting - Chrome 131 - chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); margin: var(--space-4) 0; }
-    @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+    .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-3); margin: var(--space-4) 0; }
     .panel { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); box-shadow: var(--thin-shadow); }
     .panel h4 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 0 0 var(--space-2); }
     .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; align-items: center; font-family: var(--font-mono); font-size: 0.85rem; }
@@ -16,6 +15,25 @@
     .badge { font-family: var(--font-mono); font-size: 0.78rem; padding: 0.3rem 0.55rem; border: 2px solid var(--border-black); display: inline-block; }
     .badge.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
     .badge.bad { background: var(--accent-rose); color: var(--bg-ivory); }
+    .key-list { font-family: var(--font-mono); font-size: 0.78rem; padding-left: 0; list-style: none; margin: 0; display: grid; gap: var(--space-2); }
+    .key-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(7rem, 9rem) auto; gap: var(--space-2); align-items: end; }
+    .row-field { display: grid; gap: 0.2rem; min-width: 0; color: var(--text-charcoal); }
+    .row-field span { color: var(--text-muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    .row-field input { width: 100%; box-sizing: border-box; min-height: 36px; padding: 0.35rem 0.45rem; border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); font: inherit; }
+    .row-field input[aria-invalid="true"] { border-color: var(--accent-rose); background: var(--bg-ivory); }
+    .remove-key { min-height: 36px; padding: 0.25rem 0.55rem; }
+    .budget-line { display: flex; justify-content: space-between; gap: var(--space-2); margin-block: var(--space-3); padding: 0.4rem 0.55rem; border: 2px solid var(--border-black); background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.78rem; }
+    .budget-line.ok { border-color: var(--accent-emerald); }
+    .budget-line.bad { border-color: var(--accent-rose); color: var(--accent-rose); }
+    .validation-list { margin: var(--space-2) 0 0; padding-left: var(--space-4); font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); }
+    .validation-list li { margin-block: 0.25rem; }
+    .validation-list .pass { color: var(--accent-emerald); }
+    .validation-list .fail { color: var(--accent-rose); }
+    @media (max-width: 720px) {
+      .grid { grid-template-columns: 1fr; }
+      .key-row { grid-template-columns: 1fr; }
+      .remove-key { width: 100%; }
+    }
   </style>
 </head>
 <body>
@@ -25,20 +43,27 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v131</p>
     <h1>build a trigger payload with arbitrary-length keys</h1>
-    <p class="lede">Compose a real-world trigger registration: campaign ID, geo, segment, conversion type. Pre-v131 each <code>aggregatable_trigger_data</code> key was capped at 25 characters. v131 removed that cap on triggers (sources still cap because they're persisted). Add long descriptive keys and see the JSON validate green.</p>
+    <p class="lede">Compose a real-world trigger registration: campaign ID, geo, segment, conversion type. Pre-v131 each <code>aggregatable_trigger_data</code> key was capped at 25 characters. v131 removed that cap on triggers (sources still cap because they're persisted). Add long descriptive keys while the remaining duplicate, empty-key, key-piece, and value-budget checks stay visible.</p>
   </header>
 
   <div class="toolbar">
     <button id="add">add key</button>
     <button id="big-key">add a 200-char key</button>
+    <button id="duplicate-key">add duplicate key</button>
+    <button id="over-budget">set over budget</button>
     <button id="reset">reset</button>
   </div>
 
   <div class="grid">
     <div class="panel">
-      <h4>keys (free-text)</h4>
-      <ul id="keys" style="font-family: var(--font-mono); font-size: 0.78rem; padding-left: 0; list-style: none;"></ul>
+      <h4>keys and values</h4>
+      <ul id="keys" class="key-list"></ul>
+      <div class="budget-line ok" id="budget-line">
+        <strong>L1 budget</strong>
+        <span id="budget">0 / 65,536</span>
+      </div>
       <span class="badge ok" id="verdict">valid</span>
+      <ul id="validation" class="validation-list" aria-live="polite"></ul>
     </div>
     <div class="panel">
       <h4>Attribution-Reporting-Register-Trigger</h4>
@@ -60,45 +85,246 @@
 </main>
 
 <script>
-  let keys = [
-    "campaign_id",
-    "geo_region",
-    "product_segment",
+  const CONTRIBUTION_BUDGET = 65536;
+  const UINT32_MAX = 0xffffffff;
+  const DEFAULT_ROWS = [
+    { key: "campaign_id", value: 100 },
+    { key: "geo_region", value: 200 },
+    { key: "product_segment", value: 300 },
   ];
+
+  let rows = DEFAULT_ROWS.map((row) => ({ ...row }));
+
+  const keysList = document.getElementById("keys");
+  const jsonOutput = document.getElementById("json");
+  const verdict = document.getElementById("verdict");
+  const validationList = document.getElementById("validation");
+  const budgetLine = document.getElementById("budget-line");
+  const budgetText = document.getElementById("budget");
+
+  function copyDefaultRows() {
+    return DEFAULT_ROWS.map((row) => ({ ...row }));
+  }
+
+  function nextValue() {
+    return (rows.length + 1) * 100;
+  }
+
+  function twoHundredCharKey() {
+    const prefix = "very_long_descriptive_key_";
+    return prefix + "x".repeat(Math.max(0, 200 - prefix.length));
+  }
+
+  function keyPieceFor(index) {
+    return "0x" + (index + 1).toString(16).padStart(32, "0");
+  }
+
+  function isGeneratedKeyPieceValid(index) {
+    return /^0x[0-9a-f]{32}$/i.test(keyPieceFor(index));
+  }
+
+  function buildPayload() {
+    return {
+      aggregatable_trigger_data: rows.map((row, index) => ({
+        key_piece: keyPieceFor(index),
+        source_keys: [row.key.trim()],
+      })),
+      aggregatable_values: Object.fromEntries(
+        rows.map((row) => [row.key.trim(), Number(row.value)]),
+      ),
+    };
+  }
+
+  function validateRows() {
+    const keyCounts = new Map();
+    rows.forEach((row) => {
+      const key = row.key.trim();
+      if (key) keyCounts.set(key, (keyCounts.get(key) || 0) + 1);
+    });
+
+    const messages = [];
+    const invalidKeys = new Set();
+    const invalidValues = new Set();
+    let total = 0;
+
+    rows.forEach((row, index) => {
+      const key = row.key.trim();
+      const rawValue = String(row.value).trim();
+      const value = Number(rawValue);
+      const rowLabel = "row " + (index + 1);
+
+      if (!key) {
+        invalidKeys.add(index);
+        messages.push({ type: "fail", text: rowLabel + ": source key is empty." });
+      } else if (keyCounts.get(key) > 1) {
+        invalidKeys.add(index);
+        messages.push({
+          type: "fail",
+          text: rowLabel + ': duplicate source key "' + key + '" would collapse in aggregatable_values.',
+        });
+      }
+
+      if (!rawValue || !Number.isInteger(value) || value < 0 || value > UINT32_MAX) {
+        invalidValues.add(index);
+        messages.push({
+          type: "fail",
+          text: rowLabel + ": value must be a non-negative 32-bit integer.",
+        });
+      }
+
+      if (!isGeneratedKeyPieceValid(index)) {
+        messages.push({
+          type: "fail",
+          text: rowLabel + ": generated key_piece must be 0x plus 32 hex digits.",
+        });
+      }
+
+      if (Number.isFinite(value) && value > 0) total += value;
+    });
+
+    const budgetOver = total > CONTRIBUTION_BUDGET;
+    if (budgetOver) {
+      rows.forEach((_row, index) => invalidValues.add(index));
+      messages.push({
+        type: "fail",
+        text: "aggregatable_values total " + total.toLocaleString() + " exceeds the L1 contribution budget of " + CONTRIBUTION_BUDGET.toLocaleString() + ".",
+      });
+    }
+
+    if (!messages.length) {
+      messages.push({
+        type: "pass",
+        text: "all remaining trigger validations pass; long key identifiers are allowed.",
+      });
+    }
+
+    return {
+      ok: messages.every((message) => message.type !== "fail"),
+      messages,
+      invalidKeys,
+      invalidValues,
+      total,
+      budgetOver,
+    };
+  }
+
   function render() {
-    const ul = document.getElementById("keys");
-    ul.innerHTML = "";
-    keys.forEach((k, i) => {
+    keysList.replaceChildren();
+    rows.forEach((row, index) => {
       const li = document.createElement("li");
-      const inp = document.createElement("input");
-      inp.value = k;
-      inp.style.cssText = "width: 100%; padding: 0.3rem; border: 2px solid #000; background: #fff; font-family: monospace; font-size: 0.78rem;";
-      inp.addEventListener("input", () => { keys[i] = inp.value; updateJson(); });
+      li.className = "key-row";
+
+      const keyLabel = document.createElement("label");
+      keyLabel.className = "row-field";
+      const keyCaption = document.createElement("span");
+      keyCaption.textContent = "source key " + (index + 1);
+      const keyInput = document.createElement("input");
+      const keyInputId = "source-key-" + (index + 1);
+      keyLabel.htmlFor = keyInputId;
+      keyInput.id = keyInputId;
+      keyInput.name = keyInputId;
+      keyInput.value = row.key;
+      keyInput.autocomplete = "off";
+      keyInput.spellcheck = false;
+      keyInput.dataset.row = String(index);
+      keyInput.dataset.field = "key";
+      keyInput.addEventListener("input", () => {
+        rows[index].key = keyInput.value;
+        updateJson();
+      });
+      keyLabel.append(keyCaption, keyInput);
+
+      const valueLabel = document.createElement("label");
+      valueLabel.className = "row-field";
+      const valueCaption = document.createElement("span");
+      valueCaption.textContent = "value " + (index + 1);
+      const valueInput = document.createElement("input");
+      const valueInputId = "trigger-value-" + (index + 1);
+      valueLabel.htmlFor = valueInputId;
+      valueInput.id = valueInputId;
+      valueInput.name = valueInputId;
+      valueInput.type = "number";
+      valueInput.min = "0";
+      valueInput.max = String(UINT32_MAX);
+      valueInput.step = "1";
+      valueInput.value = String(row.value);
+      valueInput.dataset.row = String(index);
+      valueInput.dataset.field = "value";
+      valueInput.addEventListener("input", () => {
+        rows[index].value = valueInput.value;
+        updateJson();
+      });
+      valueLabel.append(valueCaption, valueInput);
+
       const btn = document.createElement("button");
-      btn.textContent = "x"; btn.style.cssText = "margin-left: 0.3rem; padding: 0.2rem 0.5rem;";
-      btn.addEventListener("click", () => { keys.splice(i, 1); render(); });
-      li.style.cssText = "display: flex; gap: 0.3rem; margin: 0.3rem 0;";
-      li.appendChild(inp); li.appendChild(btn);
-      ul.appendChild(li);
+      btn.type = "button";
+      btn.className = "remove-key";
+      btn.textContent = "x";
+      btn.setAttribute("aria-label", "remove row " + (index + 1));
+      btn.addEventListener("click", () => {
+        rows.splice(index, 1);
+        render();
+      });
+
+      li.append(keyLabel, valueLabel, btn);
+      keysList.appendChild(li);
     });
     updateJson();
   }
+
   function updateJson() {
-    const payload = {
-      aggregatable_trigger_data: keys.map((k, i) => ({
-        key_piece: "0x" + (i + 1).toString(16).padStart(2, "0") + "0000000000000000000000000000000000",
-        source_keys: [k],
-      })),
-      aggregatable_values: Object.fromEntries(keys.map((k, i) => [k, (i + 1) * 100])),
-    };
-    document.getElementById("json").textContent = JSON.stringify(payload, null, 2);
-    const v = document.getElementById("verdict");
-    v.className = "badge ok";
-    v.textContent = "valid (v131 trigger: any length keys)";
+    const validation = validateRows();
+    jsonOutput.textContent = JSON.stringify(buildPayload(), null, 2);
+
+    verdict.className = "badge " + (validation.ok ? "ok" : "bad");
+    verdict.textContent = validation.ok
+      ? "valid (length cap removed; remaining checks pass)"
+      : "invalid (fix highlighted checks)";
+
+    budgetText.textContent = validation.total.toLocaleString() + " / " + CONTRIBUTION_BUDGET.toLocaleString();
+    budgetLine.className = "budget-line " + (validation.budgetOver ? "bad" : "ok");
+
+    document.querySelectorAll("[data-row][data-field]").forEach((input) => {
+      const rowIndex = Number(input.dataset.row);
+      const invalid = input.dataset.field === "key"
+        ? validation.invalidKeys.has(rowIndex)
+        : validation.invalidValues.has(rowIndex);
+      input.setAttribute("aria-invalid", invalid ? "true" : "false");
+    });
+
+    validationList.replaceChildren();
+    validation.messages.forEach((message) => {
+      const li = document.createElement("li");
+      li.className = message.type;
+      li.textContent = message.text;
+      validationList.appendChild(li);
+    });
   }
-  document.getElementById("add").addEventListener("click", () => { keys.push("new_key_" + keys.length); render(); });
-  document.getElementById("big-key").addEventListener("click", () => { keys.push("very_long_descriptive_key_that_used_to_be_rejected_at_25_chars_but_now_works_perfectly_well_for_richer_marketing_data_pipelines_" + "x".repeat(60)); render(); });
-  document.getElementById("reset").addEventListener("click", () => { keys = ["campaign_id", "geo_region", "product_segment"]; render(); });
+
+  document.getElementById("add").addEventListener("click", () => {
+    rows.push({ key: "new_key_" + (rows.length + 1), value: nextValue() });
+    render();
+  });
+  document.getElementById("big-key").addEventListener("click", () => {
+    rows.push({ key: twoHundredCharKey(), value: nextValue() });
+    render();
+  });
+  document.getElementById("duplicate-key").addEventListener("click", () => {
+    rows.push({ key: rows[0]?.key || "campaign_id", value: nextValue() });
+    render();
+  });
+  document.getElementById("over-budget").addEventListener("click", () => {
+    rows = [
+      { key: "campaign_id", value: 40000 },
+      { key: "geo_region", value: 30000 },
+      { key: "product_segment", value: 1000 },
+    ];
+    render();
+  });
+  document.getElementById("reset").addEventListener("click", () => {
+    rows = copyDefaultRows();
+    render();
+  });
   render();
 </script>
 </body>
