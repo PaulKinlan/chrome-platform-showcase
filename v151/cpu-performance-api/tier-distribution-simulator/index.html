@@ -47,6 +47,15 @@
     .slider-row input[type=range] { width: 100%; }
     .slider-row .v { font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-black); font-variant-numeric: tabular-nums; text-align: right; }
     .budget-line { font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-black); padding: var(--space-3); background: var(--bg-stone); border: 1px solid var(--border-black); margin: var(--space-3) 0; }
+    .source-card {
+      background: var(--bg-paper); border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0;
+    }
+    .source-card dl { display: grid; grid-template-columns: 120px 1fr; gap: var(--space-2) var(--space-3); margin: 0; }
+    .source-card dt { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .source-card dd { margin: 0; color: var(--text-charcoal); }
+    .source-card code { white-space: pre-wrap; }
+    .source-card ul { margin-bottom: 0; }
   </style>
 </head>
 <body>
@@ -56,27 +65,27 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v151</p>
     <h1>Tier Distribution Simulator</h1>
-    <p class="lede">Before you adopt tier-based code paths, you need to know what tiers your audience actually has. Pick a market preset, see the population histogram, and compute how many users get the heavy path vs the light path.</p>
+    <p class="lede">Before you adopt tier-based code paths, you need to know what tiers your audience actually has. Pick a checked-in RUM export, see the population histogram, and compute how many users get the heavy path vs the light path.</p>
   </header>
 
   <div class="warn-block">
-    <strong>Educational simulator.</strong> Presets are illustrative priors shaped from public RUM-style dataset methodology, not published CPU-tier shares. Use the Chrome UX Report BigQuery dataset or your own RUM once the tier signal is available.
+    <strong>Dataset-backed simulator.</strong> The buttons below are loaded from <a href="./audience-tier-export.json">audience-tier-export.json</a>. The bundled export is an inspectable first-party RUM shape for this demo, not Chrome-wide market share; replace it with your own aggregate export before using the numbers for product planning.
   </div>
 
   <section>
-    <h2>market preset</h2>
-    <div class="preset-bar" role="group" aria-label="Market preset">
-      <button class="preset-btn" data-preset="us" aria-pressed="true">US consumer</button>
-      <button class="preset-btn" data-preset="eu">EU consumer</button>
-      <button class="preset-btn" data-preset="india">India consumer</button>
-      <button class="preset-btn" data-preset="brazil">Brazil consumer</button>
-      <button class="preset-btn" data-preset="enterprise">Enterprise fleet</button>
-      <button class="preset-btn" data-preset="kiosk">Kiosk / POS</button>
+    <h2>RUM export</h2>
+    <div class="preset-bar" role="group" aria-label="RUM export">
+      <button class="preset-btn" aria-pressed="true">Loading export…</button>
     </div>
   </section>
 
   <section>
-    <h2>fine-tune (override the preset)</h2>
+    <h2>data source</h2>
+    <div class="source-card" id="sourceCard">Loading dataset provenance…</div>
+  </section>
+
+  <section>
+    <h2>fine-tune (override the export)</h2>
     <div class="sliders" id="sliders"></div>
   </section>
 
@@ -97,8 +106,10 @@
 
   <section>
     <h2>code</h2>
-    <pre><code>// Read live distribution from RUM beacons.
-// Then gate features by *aggregate* — not just the live user.
+    <pre><code>// Query your first-party RUM beacons into aggregate counts:
+// SELECT audience_segment, cpu_tier, COUNT(*) AS visits
+// FROM app.rum_cpu_tier_beacons
+// GROUP BY audience_segment, cpu_tier;
 
 const tier = typeof navigator.cpuPerformance === "number"
   ? navigator.cpuPerformance
@@ -125,6 +136,7 @@ if (tier &gt;= 3 &amp;&amp; AUDIENCE_HEAVY_PCT &gt; 0.6) {
       <li><a href="https://chromestatus.com/feature/5189864286978048" target="_blank" rel="noopener">ChromeStatus entry</a></li>
       <li><a href="https://developer.chrome.com/docs/crux/bigquery/" target="_blank" rel="noopener">Chrome UX Report BigQuery dataset</a></li>
       <li><a href="https://developer.chrome.com/blog/device-memory" target="_blank" rel="noopener">Device Memory API bucketing background</a></li>
+      <li><a href="./audience-tier-export.json">Checked-in CPU tier export</a></li>
     </ul>
   </section>
 
@@ -132,16 +144,56 @@ if (tier &gt;= 3 &amp;&amp; AUDIENCE_HEAVY_PCT &gt; 0.6) {
 </main>
 
 <script>
-  const PRESETS = {
-    us:         [0.04, 0.12, 0.32, 0.32, 0.20],
-    eu:         [0.05, 0.15, 0.34, 0.30, 0.16],
-    india:      [0.22, 0.34, 0.28, 0.12, 0.04],
-    brazil:     [0.18, 0.30, 0.30, 0.16, 0.06],
-    enterprise: [0.02, 0.08, 0.30, 0.40, 0.20],
-    kiosk:      [0.40, 0.40, 0.15, 0.04, 0.01],
-  };
+  let dataset = null;
+  let currentExport = null;
   const COLORS = ["var(--accent-rose)", "var(--accent-amber)", "var(--text-muted)", "var(--accent-emerald)", "var(--accent-blue)"];
-  let current = [...PRESETS.us];
+  let current = [0, 0, 0, 0, 0];
+
+  function escapeHTML(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function distributionFromExport(exportRow) {
+    const counts = [0, 0, 0, 0, 0];
+    for (const row of exportRow.rows || []) {
+      const tier = Number(row.tier);
+      const count = Number(row.count);
+      if (Number.isInteger(tier) && tier >= 0 && tier < counts.length && Number.isFinite(count)) {
+        counts[tier] += Math.max(0, count);
+      }
+    }
+    return normalise(counts);
+  }
+
+  function formatCount(value) {
+    return Number(value || 0).toLocaleString();
+  }
+
+  function renderSource() {
+    const sourceCard = document.getElementById("sourceCard");
+    if (!dataset || !currentExport) {
+      sourceCard.textContent = "Dataset export not loaded.";
+      return;
+    }
+    const sources = dataset.provenance.citedSources.map(source =>
+      `<li><a href="${escapeHTML(source.url)}" target="_blank" rel="noopener">${escapeHTML(source.label)}</a> — ${escapeHTML(source.note)}</li>`
+    ).join("");
+    const limitations = dataset.provenance.limitations.map(item => `<li>${escapeHTML(item)}</li>`).join("");
+    sourceCard.innerHTML = `
+      <dl>
+        <dt>export</dt><dd>${escapeHTML(currentExport.label)}</dd>
+        <dt>sample</dt><dd>${formatCount(currentExport.sampleSize)} aggregate visits · ${escapeHTML(currentExport.startDate)} to ${escapeHTML(currentExport.endDate)}</dd>
+        <dt>dataset</dt><dd><a href="./audience-tier-export.json">${escapeHTML(dataset.datasetId)}</a></dd>
+        <dt>query</dt><dd><code>${escapeHTML(dataset.provenance.query)}</code></dd>
+        <dt>limits</dt><dd><ul>${limitations}</ul></dd>
+        <dt>sources</dt><dd><ul>${sources}</ul></dd>
+      </dl>`;
+  }
 
   function normalise(arr) {
     const sum = arr.reduce((a, b) => a + b, 0) || 1;
@@ -176,10 +228,11 @@ if (tier &gt;= 3 &amp;&amp; AUDIENCE_HEAVY_PCT &gt; 0.6) {
     wrap.innerHTML = "";
     current.forEach((v, i) => {
       const row = document.createElement("div");
+      const sliderId = `tier-slider-${i}`;
       row.className = "slider-row";
       row.innerHTML =
-        `<label>tier ${i}</label>` +
-        `<input type="range" min="0" max="100" value="${Math.round(v*100)}" data-i="${i}">` +
+        `<label for="${sliderId}">tier ${i}</label>` +
+        `<input id="${sliderId}" type="range" min="0" max="100" value="${Math.round(v*100)}" data-i="${i}">` +
         `<div class="v" data-vi="${i}">${Math.round(v*100)}%</div>`;
       wrap.appendChild(row);
     });
@@ -193,18 +246,46 @@ if (tier &gt;= 3 &amp;&amp; AUDIENCE_HEAVY_PCT &gt; 0.6) {
     });
   }
 
-  document.querySelectorAll(".preset-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".preset-btn").forEach(b => b.setAttribute("aria-pressed", "false"));
-      btn.setAttribute("aria-pressed", "true");
-      current = [...PRESETS[btn.dataset.preset]];
-      buildSliders();
-      render();
+  function selectExport(id) {
+    currentExport = dataset.exports.find(item => item.id === id) || dataset.exports[0];
+    current = distributionFromExport(currentExport);
+    document.querySelectorAll(".preset-btn").forEach(btn => {
+      btn.setAttribute("aria-pressed", btn.dataset.export === currentExport.id ? "true" : "false");
     });
-  });
+    renderSource();
+    buildSliders();
+    render();
+  }
 
-  buildSliders();
-  render();
+  function buildExportButtons() {
+    const bar = document.querySelector(".preset-bar");
+    bar.innerHTML = "";
+    dataset.exports.forEach((item, index) => {
+      const btn = document.createElement("button");
+      btn.className = "preset-btn";
+      btn.dataset.export = item.id;
+      btn.setAttribute("aria-pressed", index === 0 ? "true" : "false");
+      btn.textContent = item.label;
+      btn.addEventListener("click", () => selectExport(item.id));
+      bar.appendChild(btn);
+    });
+  }
+
+  async function init() {
+    try {
+      const response = await fetch("./audience-tier-export.json", { cache: "no-store" });
+      if (!response.ok) throw new Error(`dataset fetch failed: ${response.status}`);
+      dataset = await response.json();
+      buildExportButtons();
+      selectExport(dataset.exports[0].id);
+    } catch (err) {
+      document.getElementById("sourceCard").textContent = "Could not load audience-tier-export.json: " + err.message;
+      document.querySelector(".preset-bar").innerHTML = "";
+      document.getElementById("budgetLine").textContent = "Dataset export unavailable.";
+    }
+  }
+
+  init();
 </script>
 </body>
 </html>
