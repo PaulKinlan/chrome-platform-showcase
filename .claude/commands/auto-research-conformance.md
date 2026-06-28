@@ -20,7 +20,10 @@ manual: `v140`, `v130`, `v131`, `v147`.
 For each milestone:
 
 1. Walk feature folders at `v<N>/<feature>/`.
-2. Skip any feature that already has `conformance.json`.
+2. Skip any feature that already has `conformance.json`. **Never overwrite, regenerate, or edit an
+   existing suite** — its assertions are an immutable spec contract; you only ever _create_ suites
+   for features that lack one. (If an existing assertion looks wrong, flag it for a human with its
+   id; do not change it.)
 3. Read the feature page, concepts, ChromeStatus detail, and linked spec where available.
 4. Derive 3-10 assertions covering distinct spec contracts. Use only real `css-supports`, `exists`,
    `typeof`, `script`, or `throws` checks; do not invent API names.

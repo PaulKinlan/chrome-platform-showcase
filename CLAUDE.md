@@ -45,6 +45,13 @@ stash-race mitigation, the fmt gotcha, and current coverage per milestone — li
 [`.claude/auto-research.md`](.claude/auto-research.md). Browse the output at `/critiques` and
 `/conformance` on the live site.
 
+> **Conformance tests are immutable.** A `conformance.json` assertion is the spec contract, not a
+> description of the current demo. When one fails, **fix the demo** — never edit, weaken, or delete
+> an existing assertion to make it pass, and never overwrite/regenerate a `conformance.json` that
+> already exists. You may only _create_ a suite for a feature that has none. If an assertion
+> genuinely looks wrong, stop and flag it for a human; only a human changes existing assertions. See
+> AGENTS.md.
+
 For a critique pass, walk concept pages under the target milestone, skipping those with an existing
 `_questions.json`. Start the local server (`deno task start`) and test the actual changes and
 interactivity directly with `chrome-devtools-mcp`. The test must exercise real controls, live
@@ -55,8 +62,11 @@ page was not browser-verified instead of substituting another browser tool.
 Alternatively, **automate the entire workflow autonomously** by typing `/auto-research` in the chat.
 This will pull code, boot the local server, run all conformance tests through a
 `chrome-devtools-mcp` browser session on `http://localhost:3000/conformance/run-all`, collect all
-failures, automatically repair the code files in-place, and push clean, working commits for all
-features. You can also inspect the current quality snapshot via `deno task auto-research`.
+failures, and **repair the demo/code files in-place** to make the assertions pass — it must
+**never** edit the `conformance.json` assertions themselves (those are the immutable spec contract;
+fixing the test instead of the demo is the one thing this loop must not do). It then pushes clean,
+working commits for all features. You can also inspect the current quality snapshot via
+`deno task auto-research`.
 
 ## The routine
 

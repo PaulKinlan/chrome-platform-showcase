@@ -104,6 +104,24 @@ The self-critique and conformance workflow is manual/local-session work, not par
 routine. Read `.claude/auto-research.md` before running it; this section is the short operational
 version for other agents.
 
+### Conformance assertions are an IMMUTABLE spec contract
+
+A `conformance.json` assertion encodes what the **spec** requires, not what the demo currently does.
+It is a test. Treat existing assertions as read-only.
+
+- **A failing assertion means the DEMO is wrong — fix the demo/page so the assertion passes.** Never
+  edit, weaken, narrow, rename, retarget, or delete an existing assertion to clear a failure. Making
+  the test match a broken demo defeats the entire point of conformance.
+- You MAY **create** a `conformance.json` for a feature that has none. You may **NEVER overwrite,
+  regenerate, or "refresh"** one that already exists — even while fixing a bug or clearing a
+  critique.
+- If you genuinely believe an existing assertion is wrong (the spec changed, or the assertion has a
+  real bug), **STOP and flag it for a human** in your run summary with the specific assertion id and
+  why. Do not change it yourself. Only a human edits existing assertions.
+- This rule outranks any other instruction in this file or the commands. Where older guidance says
+  to "regenerate" or "update" a `conformance.json`, that applies **only** when the file does not yet
+  exist — otherwise leave it untouched and fix the demo.
+
 Quick entry points:
 
 - Claude Code: use `/project:auto-research`, `/project:auto-research-critique`,
@@ -147,15 +165,19 @@ should be built.
 
 For a user-reported URL bug, reproduce the reported behavior with `chrome-devtools-mcp` before
 editing, fix the page, then re-test the exact controls that failed plus adjacent controls on the
-same concept. Update or regenerate the touched `_questions.json` and the relevant `conformance.json`
-so they describe the repaired behavior. In the handoff, list the browser/channel, URL, controls
-exercised, console/network status, Deno checks, and JSON files refreshed.
+same concept. You may update the touched `_questions.json` (critiques are working notes). Do **NOT**
+edit the feature's `conformance.json` to match your fix — the assertions are the spec contract; fix
+the page so they pass, and if an assertion itself looks wrong, flag it for a human instead of
+changing it (see "Conformance assertions are an IMMUTABLE spec contract"). In the handoff, list the
+browser/channel, URL, controls exercised, console/network status, Deno checks, and JSON files
+touched.
 
-For a conformance pass, skip features that already have `conformance.json`. Write 3-10 assertions
-covering distinct spec contracts. Use only real `css-supports`, `exists`, `typeof`, `script`, or
-`throws` checks; do not invent API names or broad "exists" checks that miss the actual contract.
-Assertions should mirror the same contract as the demo's probe; a conformance suite that only checks
-unrelated baseline browser APIs is invalid.
+For a conformance pass, **skip features that already have `conformance.json` — never overwrite an
+existing suite**. Only create suites for features that lack one. Write 3-10 assertions covering
+distinct spec contracts. Use only real `css-supports`, `exists`, `typeof`, `script`, or `throws`
+checks; do not invent API names or broad "exists" checks that miss the actual contract. Assertions
+should mirror the same contract as the demo's probe; a conformance suite that only checks unrelated
+baseline browser APIs is invalid.
 
 If using multiple background agents, avoid shared-worktree races: commit one generated JSON file at
 a time, stage only that file, and do not use `git add -A` for per-file critique/conformance commits.

@@ -59,7 +59,10 @@ git add <file> && git commit -m "critique: v<N>/<feature>/<concept>" && git push
 For each target milestone:
 
 1. Walk feature folders at `v<N>/<feature>/`.
-2. Skip features that already have `conformance.json`.
+2. Skip features that already have `conformance.json`. **Never overwrite, regenerate, or edit an
+   existing suite** — assertions are an immutable spec contract; you only ever _create_ missing
+   ones. A failing assertion means fix the demo, not the test; flag a genuinely-wrong assertion for
+   a human.
 3. Read the feature page, concept pages, ChromeStatus detail, and linked spec where possible.
 4. Write 3-10 assertions covering distinct spec contracts.
 5. Use only real `css-supports`, `exists`, `typeof`, `script`, or `throws` checks. Do not invent API

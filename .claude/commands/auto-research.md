@@ -38,9 +38,12 @@ Operational rules:
    `chrome-devtools-mcp` to click/type/drag every visible control, inspect console/network state,
    check the relevant `/conformance/` route, and write files matching
    `v149/css-gap-decorations/rule-builder/_questions.json`.
-5. Conformance pass: skip features that already have `conformance.json`; write files matching
+5. Conformance pass: **only create suites for features that lack one — never overwrite, regenerate,
+   or edit an existing `conformance.json`** (its assertions are the immutable spec contract; fix the
+   demo to pass, never the test). Write new files matching
    `v149/css-gap-decorations/conformance.json`, then open the suite's `/conformance/` route with
-   `chrome-devtools-mcp` to verify the assertions execute.
+   `chrome-devtools-mcp` to verify the assertions execute. When a failure is from a pre-existing
+   suite, repair the demo — do not touch the suite.
 6. Commit and push each generated JSON file on its own. Stage only that file; never use `git add -A`
    inside the fan-out.
 7. After the batch, run `deno fmt`, `deno check server.ts`, and commit/push only relevant formatting

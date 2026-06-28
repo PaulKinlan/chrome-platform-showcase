@@ -33,8 +33,10 @@ Goal-setting loop:
    another browser tool.
 7. Delete or regenerate the touched page's `_questions.json`, then re-run critique for that touched
    page or milestone so the score reflects the fix.
-8. Update or regenerate the relevant `conformance.json` whenever the browser contract, route,
-   fallback behavior, or API probe changed.
+8. Do **NOT** edit the relevant `conformance.json` — its assertions are the immutable spec contract.
+   Fix the demo so they pass; never change a test to match the demo. You may only _create_ a suite
+   for a feature that has none; if an existing assertion is genuinely wrong, flag it for a human
+   with its id instead of editing it.
 9. Run relevant checks: at minimum `deno fmt --check`, `deno check server.ts`, and a local smoke
    test when routes or shared rendering changed.
 10. Commit and push the fix and updated critique separately when practical.

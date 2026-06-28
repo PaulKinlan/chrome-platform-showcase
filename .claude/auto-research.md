@@ -212,8 +212,11 @@ The point of the critiques is to **drive the next build pass**. To turn open que
    the missing spec capability, fix the blurb).
 4. After answering, **delete or regenerate** that page's `_questions.json` and re-run the critique
    so the score reflects the fix. The loop is: build → critique → answer questions → re-critique.
-5. Re-run or update the relevant feature/concept `conformance.json` whenever the fix changes the
-   browser contract, fallback behavior, routes, or visible API probes.
+5. **Do NOT edit the feature/concept `conformance.json`.** Its assertions are the immutable spec
+   contract — fix the page so they pass, don't change the test to match the page. (You may only
+   _create_ a suite for a feature that has none; never overwrite an existing one.) If the fix
+   exposes an assertion that is genuinely wrong, stop and flag it for a human with the assertion id
+   rather than changing it.
 6. Use `chrome-devtools-mcp` to reproduce the old issue and verify the repaired page before closing
    the question. Record the exact controls and observations in the new critique summary.
 
