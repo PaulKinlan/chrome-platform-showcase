@@ -926,16 +926,24 @@ export async function renderReleasePage(
       const hasDemo = await featureHasDemo(release, f);
       const slug = slugify(f.name);
       const summary = (f.summary ?? "").slice(0, 220);
+      const demoUrl = `/${release}/${slug}/`;
+      // Title links to the demo when one exists (the thing you actually want to
+      // open); otherwise fall back to the ChromeStatus entry. ChromeStatus is
+      // always reachable via the button in the tags row.
+      const titleHref = hasDemo ? demoUrl : chromeStatusUrl(f.id);
       return `<li class="demo-card">
-        <h3><a href="${chromeStatusUrl(f.id)}" target="_blank" rel="noopener">${
+        <h3><a href="${titleHref}"${hasDemo ? "" : ' target="_blank" rel="noopener"'}>${
         escapeHTML(f.name)
       }</a></h3>
         <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
         <div class="demo-tags">
           <span class="tag">${escapeHTML(categoryTag(group.category))}</span>
+          <a class="tag tag-chromestatus" href="${
+        chromeStatusUrl(f.id)
+      }" target="_blank" rel="noopener">ChromeStatus &nearr;</a>
           ${
         hasDemo
-          ? `<a class="tag tag-live" href="/${release}/${slug}/">demo &rarr;</a>`
+          ? `<a class="tag tag-live" href="${demoUrl}">demo &rarr;</a>`
           : `<span class="tag tag-pending">demo pending</span>`
       }
         </div>
@@ -964,7 +972,7 @@ export async function renderReleasePage(
   <header class="lede-block">
     <p class="eyebrow">chrome ${milestone} · ${escapeHTML(status.toLowerCase())}</p>
     <h1>chrome ${milestone} platform demos</h1>
-    <p class="lede">${features.total} features tracked for Chrome ${milestone}. Each card links to its ChromeStatus entry; the live demos drop in as the routine builds them. A single "uber" demo per release combines several APIs into one larger experience.</p>
+    <p class="lede">${features.total} features tracked for Chrome ${milestone}. Click a feature's title to open its demo; each card also links to its ChromeStatus entry. A single "uber" demo per release combines several APIs into one larger experience.</p>
   </header>
 
   <section>
@@ -1032,12 +1040,15 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
     return `<tr data-search="${escapeHTML(search)}" data-mstone="${r.mstone}" data-status="${
       escapeHTML(cat)
     }" data-built="${r.hasDemo}">
-      <td><a href="https://chromestatus.com/feature/${r.id}" target="_blank" rel="noopener">${
-      escapeHTML(r.name)
-    }</a></td>
+      <td><a href="${
+      r.hasDemo ? `/v${r.mstone}/${slug}/` : `https://chromestatus.com/feature/${r.id}`
+    }"${r.hasDemo ? "" : ' target="_blank" rel="noopener"'}>${escapeHTML(r.name)}</a></td>
       <td><span class="release-status">v${r.mstone}</span></td>
       <td><span class="tag">${escapeHTML(cat)}</span></td>
-      <td>${demoCell}</td>
+      <td>
+        <a class="tag tag-chromestatus" href="https://chromestatus.com/feature/${r.id}" target="_blank" rel="noopener">ChromeStatus &nearr;</a>
+        ${demoCell}
+      </td>
     </tr>`;
   }).join("");
 
