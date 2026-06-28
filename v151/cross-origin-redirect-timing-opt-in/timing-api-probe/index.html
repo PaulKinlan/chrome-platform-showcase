@@ -7,12 +7,16 @@
   <link rel="stylesheet" href="/public/styles.css">
   <style>
     .btn { padding: var(--space-2) var(--space-4); border: 2px solid var(--border-black); background: var(--accent-blue); color: var(--bg-ivory); font-size: 0.85rem; cursor: pointer; margin: var(--space-3) 0; }
+    .btn.alt { background: var(--bg-paper); color: var(--text-black); }
     .timing-table { width: 100%; border-collapse: collapse; margin: var(--space-3) 0; }
     .timing-table th, .timing-table td { border: 2px solid var(--border-black); padding: var(--space-2); font-family: var(--font-mono); font-size: 0.76rem; text-align: left; }
     .timing-table th { background: var(--bg-stone); text-transform: uppercase; }
     .timing-table .zeroed { color: var(--accent-rose); }
     .timing-table .visible { color: var(--accent-emerald); }
     .note { font-size: 0.82rem; color: var(--text-muted); margin: var(--space-2) 0; }
+    .info-box { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-4); margin: var(--space-4) 0; }
+    .info-box h3 { margin-top: 0; }
+    .code-block { font-family: var(--font-mono); font-size: 0.76rem; background: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-3); margin: var(--space-3) 0; white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -20,14 +24,36 @@
   <p class="crumbs"><a href="../">&larr; Cross-origin Redirect Timing</a></p>
   <header class="lede-block">
     <p class="eyebrow">v151 · performance · timing</p>
-    <h1>Timing API Probe</h1>
-    <p class="lede">Fetch a cross-origin resource (a public image redirect). Then inspect the <code>PerformanceResourceTiming</code> entry. Cross-origin redirect timing fields are zeroed unless the redirect server sends <code>Timing-Allow-Origin</code>.</p>
+    <h1>Navigation Timing Probe</h1>
+    <p class="lede">Chrome 151 adds a Timing-Allow-Origin opt-in for <strong>navigation</strong> redirect chains. When a navigation crosses origins via redirects, the <code>PerformanceNavigationTiming</code> redirect timing fields (<code>redirectStart</code>, <code>redirectEnd</code>) are zeroed unless the destination origin opts in via <code>Timing-Allow-Origin</code>.</p>
   </header>
-  <button class="btn" id="fetch-btn">Fetch cross-origin resource</button>
+
+  <div class="info-box">
+    <h3>Navigation vs. Subresource</h3>
+    <p>The Chrome 151 change is specifically about <strong>navigation</strong> redirect timing. Previously, <code>PerformanceResourceTiming</code> for subresources (fetch, img, script) had TAO — but <code>PerformanceNavigationTiming</code> redirect fields were always zeroed for cross-origin redirects. This opt-in lets the destination server expose them.</p>
+  </div>
+
+  <button class="btn" id="sub-btn">Test subresource timing (fetch)</button>
+  <button class="btn alt" id="nav-btn">Read current navigation timing</button>
   <table class="timing-table" id="table">
     <tr><th>Field</th><th>Value</th><th>Status</th></tr>
   </table>
-  <p class="note">Zeroed fields (0) indicate the timing data is hidden due to cross-origin restrictions. The Chrome 151 opt-in allows redirect servers to expose this data.</p>
+  <p class="note">Zeroed fields (0) indicate the timing data is hidden due to cross-origin restrictions. Chrome 151 allows the destination server to expose navigation redirect timing via TAO.</p>
+
+  <section>
+    <h2>Reading PerformanceNavigationTiming redirect fields</h2>
+    <div class="code-block">// Read the current page's navigation timing
+const navEntries = performance.getEntriesByType("navigation");
+for (const entry of navEntries) {
+  console.log("redirectStart:", entry.redirectStart);
+  console.log("redirectEnd:", entry.redirectEnd);
+  // If the page was reached via a cross-origin redirect,
+  // these will be 0 unless the server sent:
+  //   Timing-Allow-Origin: * (or your origin)
+}</div>
+    <p>Chrome 151 extends the TAO opt-in to <code>PerformanceNavigationTiming</code> redirect chains, so analytics can measure redirect latency for navigations — not just subresources.</p>
+  </section>
+
   <section><h2>references</h2><ul>
     <li><a href="https://chromestatus.com/feature/5078310347472896" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     <li><a href="https://github.com/whatwg/fetch/pull/1931" target="_blank" rel="noopener">Fetch spec PR #1931</a></li>
@@ -36,30 +62,46 @@
 </main>
 <script>
 (function () {
-  document.getElementById("fetch-btn").addEventListener("click", async function () {
-    var table = document.getElementById("table");
+  var table = document.getElementById("table");
+
+  function renderEntry(entry, label) {
     table.innerHTML = '<tr><th>Field</th><th>Value</th><th>Status</th></tr>';
-    // Fetch a cross-origin resource to generate a timing entry
+    var fields = ["redirectStart", "redirectEnd", "fetchStart", "domainLookupStart", "connectStart", "responseEnd", "transferSize", "type"];
+    fields.forEach(function (f) {
+      var val = entry[f];
+      var isZero = val === 0;
+      var status = "—";
+      if (f === "type") { status = ""; }
+      else if (isZero) { status = "hidden (cross-origin or no redirect)"; }
+      else { status = "visible"; }
+      table.innerHTML += '<tr><td>' + label + '.' + f + '</td><td>' + val + '</td><td class="' + (isZero && f !== "type" ? "zeroed" : "visible") + '">' + status + "</td></tr>";
+    });
+  }
+
+  // Subresource timing test (pre-existing TAO behavior for comparison)
+  document.getElementById("sub-btn").addEventListener("click", async function () {
+    table.innerHTML = '<tr><th>Field</th><th>Value</th><th>Status</th></tr><tr><td colspan="3">Fetching cross-origin resource…</td></tr>';
     var url = "https://httpbin.org/redirect-to?url=https://example.com/image.png&status_code=302&_=" + Date.now();
-    try {
-      await fetch(url, { mode: "no-cors" });
-    } catch (e) {}
-    // Wait a tick for the entry to register
+    try { await fetch(url, { mode: "no-cors" }); } catch (e) {}
     setTimeout(function () {
       var entries = performance.getEntriesByType("resource");
       var matching = entries.filter(function (e) { return e.name.indexOf("httpbin") >= 0; });
       if (!matching.length) {
-        table.innerHTML += '<tr><td colspan="3">No matching resource timing entry found.</td></tr>';
+        table.innerHTML = '<tr><th>Field</th><th>Value</th><th>Status</th></tr><tr><td colspan="3">No matching resource timing entry found (httpbin may be unavailable).</td></tr>';
         return;
       }
-      var entry = matching[matching.length - 1];
-      var fields = ["redirectStart", "redirectEnd", "fetchStart", "domainLookupStart", "connectStart", "responseEnd", "transferSize", "encodedBodySize"];
-      fields.forEach(function (f) {
-        var val = entry[f];
-        var isZero = val === 0;
-        table.innerHTML += '<tr><td>' + f + '</td><td>' + val + '</td><td class="' + (isZero ? "zeroed" : "visible") + '">' + (isZero ? "hidden (cross-origin)" : "visible") + "</td></tr>";
-      });
+      renderEntry(matching[matching.length - 1], "resource");
     }, 500);
+  });
+
+  // Navigation timing test (the Chrome 151 feature)
+  document.getElementById("nav-btn").addEventListener("click", function () {
+    var navEntries = performance.getEntriesByType("navigation");
+    if (!navEntries.length) {
+      table.innerHTML = '<tr><th>Field</th><th>Value</th><th>Status</th></tr><tr><td colspan="3">No PerformanceNavigationTiming entries available.</td></tr>';
+      return;
+    }
+    renderEntry(navEntries[0], "navigation");
   });
 })();
 </script>
