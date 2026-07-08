@@ -81,6 +81,7 @@ static_issues: list[str] = []
 
 SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.I | re.S)
 CODE_BLOCK_RE = re.compile(r"<pre\b[^>]*>.*?</pre>", re.I | re.S)
+SRCDOC_ATTR_RE = re.compile(r"\ssrcdoc\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I | re.S)
 IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
@@ -134,17 +135,21 @@ for path in html_files:
     html = path.read_text(encoding="utf-8", errors="ignore")
     # Ignore JS payload strings and code samples. This audit targets actual DOM
     # markup in the page shell, not examples rendered as text or generated later.
-    html = CODE_BLOCK_RE.sub("", SCRIPT_BLOCK_RE.sub("", html))
+    html = SRCDOC_ATTR_RE.sub("", CODE_BLOCK_RE.sub("", SCRIPT_BLOCK_RE.sub("", html)))
 
     element_attrs = [(m.group(1).lower(), attrs_to_dict(m.group(2))) for m in TAG_RE.finditer(html)]
-    ids = {attrs["id"] for _, attrs in element_attrs if attrs.get("id")}
+    id_values = [attrs["id"] for _, attrs in element_attrs if attrs.get("id")]
+    ids = set(id_values)
+    for duplicate_id in sorted({value for value in id_values if id_values.count(value) > 1}):
+        static_issues.append(f"{rel}: duplicate id '{duplicate_id}'")
 
     for tag, attrs in element_attrs:
-        if attrs.get("aria-controls"):
-            for ref in attrs["aria-controls"].split():
-                if ref not in ids:
-                    static_issues.append(f"{rel}: aria-controls references missing id '{ref}'")
-        elif "aria-expanded" in attrs and tag != "summary":
+        for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby"):
+            if attrs.get(attr_name):
+                for ref in attrs[attr_name].split():
+                    if ref not in ids:
+                        static_issues.append(f"{rel}: {attr_name} references missing id '{ref}'")
+        if "aria-expanded" in attrs and tag != "summary" and not attrs.get("aria-controls"):
             static_issues.append(f"{rel}: expanded control missing aria-controls")
 
     for m in IMG_RE.finditer(html):
