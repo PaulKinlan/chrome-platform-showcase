@@ -22,8 +22,8 @@ future demo-building and review work ask, record, and enforce accessibility ques
 
 ## Metrics
 
-- **Primary**: `static_a11y_issues` (count, lower is better) — objective static HTML issues found
-  in demos by `.auto/measure.sh` (missing alt text, unlabeled controls, unnamed buttons, positive
+- **Primary**: `static_a11y_issues` (count, lower is better) — objective static HTML issues found in
+  demos by `.auto/measure.sh` (missing alt text, unlabeled controls, unnamed buttons, positive
   tabindex, clickable non-controls lacking roles).
 - **Secondary**:
   - `a11y_goal_gaps` — missing accessibility validation integration points across docs, routine
