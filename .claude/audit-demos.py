@@ -233,6 +233,12 @@ def static_accessibility_issue_count(html: str) -> int:
             issues += 1
         if attrs.get("aria-autocomplete") and attrs["aria-autocomplete"].lower() not in {"inline", "list", "both", "none"}:
             issues += 1
+        if attrs.get("aria-invalid") and attrs["aria-invalid"].lower() not in {"true", "false", "grammar", "spelling"}:
+            issues += 1
+        if attrs.get("aria-relevant"):
+            relevant_tokens = attrs["aria-relevant"].lower().split()
+            if not relevant_tokens or any(token not in {"additions", "removals", "text", "all"} for token in relevant_tokens) or ("all" in relevant_tokens and len(relevant_tokens) > 1):
+                issues += 1
         for attr_name in ("aria-disabled", "aria-expanded", "aria-hidden", "aria-modal", "aria-multiline", "aria-multiselectable", "aria-required", "aria-selected", "aria-busy"):
             if attrs.get(attr_name) and attrs[attr_name].lower() not in {"true", "false"}:
                 issues += 1
