@@ -26,6 +26,7 @@ CODE_BLOCK_RE = re.compile(r"<pre\b[^>]*>.*?</pre>", re.I | re.S)
 SRCDOC_ATTR_RE = re.compile(r"\ssrcdoc\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I | re.S)
 IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 IFRAME_RE = re.compile(r"<iframe\b([^>]*)>", re.I | re.S)
+MEDIA_RE = re.compile(r"<(audio|video)\b([^>]*)>", re.I | re.S)
 INDICATOR_RE = re.compile(r"<(progress|meter)\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
@@ -149,6 +150,26 @@ def has_label_for(html: str, control_id: str) -> bool:
     return bool(re.search(rf"<label\b[^>]*\bfor\s*=\s*(['\"])" + re.escape(control_id) + r"\1", html, re.I))
 
 
+def strip_srcdoc_attrs(html: str) -> str:
+    out: list[str] = []
+    last = 0
+    for match in re.finditer(r"\ssrcdoc\s*=\s*(['\"])", html, re.I):
+        quote = match.group(1)
+        index = match.end()
+        while index < len(html) and html[index] != quote:
+            index += 1
+        if index < len(html):
+            out.append(html[last:match.start()])
+            last = index + 1
+    out.append(html[last:])
+    return "".join(out)
+
+
+def is_hidden_from_page(attrs: dict[str, str]) -> bool:
+    style = attrs.get("style", "").lower().replace(" ", "")
+    return attrs.get("hidden") is not None or "display:none" in style
+
+
 def is_focusable_element(tag: str, attrs: dict[str, str]) -> bool:
     if attrs.get("disabled") is not None:
         return False
@@ -164,7 +185,7 @@ def static_accessibility_issue_count(html: str) -> int:
     """Count obvious static a11y issues. This is a safety net, not a full audit."""
     # Ignore JS payload strings and code samples. This audit targets actual DOM
     # markup in the page shell, not examples rendered as text or generated later.
-    html = SRCDOC_ATTR_RE.sub("", CODE_BLOCK_RE.sub("", SCRIPT_BLOCK_RE.sub("", html)))
+    html = CODE_BLOCK_RE.sub("", SCRIPT_BLOCK_RE.sub("", strip_srcdoc_attrs(html)))
     issues = 0
 
     element_attrs = [(match.group(1).lower(), attrs_to_dict(match.group(2))) for match in TAG_RE.finditer(html)]
@@ -195,6 +216,13 @@ def static_accessibility_issue_count(html: str) -> int:
     for match in IFRAME_RE.finditer(html):
         attrs = attrs_to_dict(match.group(1))
         if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby")):
+            issues += 1
+
+    for match in MEDIA_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(2))
+        if attrs.get("aria-hidden", "").lower() == "true" or is_hidden_from_page(attrs):
             continue
         if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby")):
             issues += 1
