@@ -238,6 +238,27 @@ def aria_token_issue_count(attrs: dict[str, str]) -> int:
     return issues
 
 
+def aria_range_issue_count(attrs: dict[str, str]) -> int:
+    issues = 0
+    values: dict[str, float] = {}
+    for attr_name in ("aria-valuemin", "aria-valuemax", "aria-valuenow"):
+        if attr_name not in attrs:
+            continue
+        try:
+            values[attr_name] = float(attrs[attr_name])
+        except ValueError:
+            issues += 1
+
+    if values.get("aria-valuemin") is not None and values.get("aria-valuemax") is not None:
+        if values["aria-valuemin"] > values["aria-valuemax"]:
+            issues += 1
+    if all(attr_name in values for attr_name in ("aria-valuemin", "aria-valuemax", "aria-valuenow")):
+        if not values["aria-valuemin"] <= values["aria-valuenow"] <= values["aria-valuemax"]:
+            issues += 1
+
+    return issues
+
+
 def static_accessibility_issue_count(html: str) -> int:
     """Count obvious static a11y issues. This is a safety net, not a full audit."""
     # Ignore JS payload strings and code samples. This audit targets actual DOM
@@ -263,6 +284,7 @@ def static_accessibility_issue_count(html: str) -> int:
             if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
                 issues += 1
         issues += aria_token_issue_count(attrs)
+        issues += aria_range_issue_count(attrs)
         for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby", "aria-activedescendant", "aria-owns"):
             if attrs.get(attr_name):
                 for ref in attrs[attr_name].split():
