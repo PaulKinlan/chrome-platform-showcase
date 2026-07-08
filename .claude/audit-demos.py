@@ -401,9 +401,20 @@ def static_accessibility_issue_count(html: str) -> int:
                 issues += 1
             if attrs.get("aria-labelledby") and attrs["aria-labelledby"] not in tab_ids:
                 issues += 1
+        if role == "combobox":
+            if not has_accessible_name(attrs, inner):
+                issues += 1
+            if attrs.get("aria-expanded") not in {"true", "false"}:
+                issues += 1
+            if attrs.get("aria-controls") and attrs["aria-controls"] not in ids:
+                issues += 1
+            if tag not in {"button", "input", "select"} and attrs.get("tabindex") not in {"0", "-1"}:
+                issues += 1
         if role in {"group", "listbox", "menu", "menubar", "radiogroup", "toolbar", "tree"}:
             if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
                 issues += 1
+        if role == "listbox" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])option\1", inner, re.I):
+            issues += 1
         if role in {"menuitem", "option", "radio", "treeitem"}:
             if not has_accessible_name(attrs, inner):
                 issues += 1
