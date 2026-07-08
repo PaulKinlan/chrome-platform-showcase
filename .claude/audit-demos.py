@@ -413,6 +413,13 @@ def static_accessibility_issue_count(html: str) -> int:
                 issues += 1
             if role == "treeitem" and tag not in {"button", "a"} and attrs.get("tabindex") not in {"0", "-1"}:
                 issues += 1
+        if role in {"meter", "progressbar", "scrollbar", "slider", "spinbutton"}:
+            if not has_accessible_name(attrs, inner):
+                issues += 1
+            if role in {"meter", "scrollbar", "slider", "spinbutton"} and not attrs.get("aria-valuenow"):
+                issues += 1
+            if role in {"scrollbar", "slider", "spinbutton"} and tag != "input" and attrs.get("tabindex") not in {"0", "-1"}:
+                issues += 1
 
     for match in STATEFUL_CONTROL_RE.finditer(html):
         tag = match.group(1).lower()
