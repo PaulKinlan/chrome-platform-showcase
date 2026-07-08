@@ -93,6 +93,7 @@ SVG_RE = re.compile(r"<svg\b([^>]*)>(.*?)</svg>|<svg\b([^>]*)/?>", re.I | re.S)
 ARIA_HIDDEN_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)\baria-hidden\s*=\s*(['\"]?)true\3([^>]*)>", re.I | re.S)
 STATEFUL_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>", re.I | re.S)
 CUSTOM_BUTTON_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>(.*?)</\1>", re.I | re.S)
+ARIA_TAB_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)>(.*?)</\1>|<([a-z][\w:-]*)\b([^>]*)/?>", re.I | re.S)
 TAG_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
 CLICKABLE_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
@@ -249,6 +250,18 @@ for path in html_files:
         if attrs.get("role", "").lower() == "button" and attrs.get("aria-hidden", "").lower() != "true":
             if not has_accessible_name(attrs, m.group(3)):
                 static_issues.append(f"{rel}: role=button missing accessible name")
+
+    for m in ARIA_TAB_RE.finditer(html):
+        tag = (m.group(1) or m.group(4) or "").lower()
+        attrs = attrs_to_dict(m.group(2) or m.group(5) or "")
+        if attrs.get("role", "").lower() != "tab" or attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if not has_accessible_name(attrs, m.group(3) or ""):
+            static_issues.append(f"{rel}: role=tab missing accessible name")
+        if attrs.get("aria-selected") not in {"true", "false"}:
+            static_issues.append(f"{rel}: role=tab missing aria-selected")
+        if tag not in {"button", "a"} and attrs.get("tabindex") not in {"0", "-1"}:
+            static_issues.append(f"{rel}: custom role=tab missing focus management")
 
     for m in STATEFUL_CONTROL_RE.finditer(html):
         tag = m.group(1).lower()
