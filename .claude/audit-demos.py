@@ -166,14 +166,14 @@ def attrs_to_dict(src: str) -> dict[str, str]:
     return attrs
 
 
+def has_explicit_accessible_name(attrs: dict[str, str]) -> bool:
+    return bool(attrs.get("aria-label", "").strip() or attrs.get("aria-labelledby", "").strip() or attrs.get("title", "").strip())
+
+
 def has_accessible_name(attrs: dict[str, str], inner: str = "") -> bool:
     if attrs.get("aria-hidden", "").lower() == "true":
         return True
-    if attrs.get("aria-label", "").strip():
-        return True
-    if attrs.get("aria-labelledby", "").strip():
-        return True
-    if attrs.get("title", "").strip():
+    if has_explicit_accessible_name(attrs):
         return True
     if re.sub(r"<[^>]+>", "", inner).strip():
         return True
@@ -299,7 +299,7 @@ def static_accessibility_issue_count(html: str) -> int:
 
     for tag, attrs in element_attrs:
         if attrs.get("role", "").lower() == "img" and attrs.get("aria-hidden", "").lower() != "true":
-            if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+            if not has_explicit_accessible_name(attrs):
                 issues += 1
         issues += aria_token_issue_count(attrs)
         issues += aria_range_issue_count(attrs)
@@ -415,7 +415,7 @@ def static_accessibility_issue_count(html: str) -> int:
             if attrs.get("aria-controls") and attrs["aria-controls"] not in tabpanel_ids:
                 issues += 1
         if role == "tabpanel":
-            if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+            if not has_explicit_accessible_name(attrs):
                 issues += 1
             if attrs.get("aria-labelledby") and attrs["aria-labelledby"] not in tab_ids:
                 issues += 1
@@ -429,13 +429,13 @@ def static_accessibility_issue_count(html: str) -> int:
             if tag not in {"button", "input", "select"} and attrs.get("tabindex") not in {"0", "-1"}:
                 issues += 1
         if role in {"group", "listbox", "menu", "menubar", "radiogroup", "toolbar", "tree"}:
-            if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+            if not has_explicit_accessible_name(attrs):
                 issues += 1
         if role in ARIA_REQUIRED_CHILD_ROLES and not has_required_owned_or_child_role(attrs, inner, ARIA_REQUIRED_CHILD_ROLES[role]):
             issues += 1
         if role in ARIA_REQUIRED_CHILD_ROLE_GROUPS and not has_required_owned_or_child_role(attrs, inner, ARIA_REQUIRED_CHILD_ROLE_GROUPS[role]):
             issues += 1
-        if role in {"form", "region"} and not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+        if role in {"form", "region"} and not has_explicit_accessible_name(attrs):
             issues += 1
         if role in {"menuitem", "menuitemcheckbox", "menuitemradio", "option", "radio", "treeitem"}:
             if not has_accessible_name(attrs, inner):
