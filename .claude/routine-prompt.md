@@ -44,6 +44,14 @@ Rules that must never be broken. Each has bitten the project before:
    correct roles/states when ARIA is needed, and text or live-region equivalents for visual state
    changes. During `chrome-devtools-mcp` verification, inspect the accessibility tree for custom
    controls, visual-only state, canvas/SVG output, and any ARIA you add.
+7. **Runtime evidence beats static claims**: A demo is not done until DevTools-backed runtime
+   evidence shows it works. Capture initial and post-interaction screenshots when the UI is visual,
+   inspect console and network failures, verify that live output/state changed after the primary
+   interaction, and check `/telemetry/demo/events` for errors/assertion failures from the page.
+8. **In-page assertions for expected behavior**: Where a demo has a primary action or critical state
+   transition, call `window.showcaseTelemetry?.assert(id, condition, details)` from the page after
+   the action. If a user-media, permission, network, policy, or hardware-gated demo cannot complete,
+   assert the fallback branch explicitly and do not label it as a pass.
 
 Every time you decide to write a folder, the path MUST be `v<N>/<slug(listing_name)>` where N is the
 milestone whose listing returned the feature.
@@ -108,6 +116,25 @@ browsers.chrome.origintrial, blink_components).
 
 Slug + folder path were already decided in Step 3 from the listing. The H1 is the LISTING name, not
 the detail name.
+
+## Step 5b: Runtime telemetry and evidence requirements
+
+Every served demo automatically loads `/public/demo-telemetry.js`. The collector records console
+errors/warnings, resource failures, unhandled rejections, clicks/submits, slow interactions,
+selected performance events, and page assertions to `/telemetry/demo`. Use this as a safety net, not
+as a replacement for DevTools verification.
+
+When adding or changing a demo:
+
+- add `window.showcaseTelemetry?.assert("short-contract-id", condition, details)` for the primary
+  feature contract and any important fallback branch;
+- make console output intentional and avoid noisy `console.error` / rejected promise paths;
+- check `/telemetry/demo/events?limit=25` after DevTools testing and treat unexpected `error` events
+  or `assert.fail` events as blockers;
+- if the demo needs permission/hardware/user activation, assert the real success path separately
+  from the unsupported or denied fallback path;
+- keep telemetry payloads privacy-safe: no typed field values, tokens, exact user content, or large
+  blobs.
 
 ## Step 6: Design demos — interactive only, no exceptions
 

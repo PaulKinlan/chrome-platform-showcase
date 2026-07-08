@@ -31,15 +31,21 @@ For every concept critique or user-reported fix, the reviewer must capture concr
 - browser/channel and URL tested;
 - every visible control clicked, typed into, dragged, or toggled;
 - observed DOM/readout/state changes for each interaction;
+- screenshots before and after the primary interaction when the UI is visual, plus video when
+  motion, drag/drop, recording, media, or timing behavior is the point of the demo;
 - accessibility evidence: keyboard path, visible focus, accessible names/labels, role/state for
   custom controls, and Chrome DevTools accessibility tree observations where state is visual-only,
   canvas/SVG-backed, or ARIA-backed;
 - console errors and failed network requests;
+- `/telemetry/demo/events` evidence, including any `runtime.error`, `resource.error`,
+  `console.error`, or `assert.fail` events emitted by the page;
 - unsupported/flag-gated fallback behavior, separated from actual runtime failures;
 - the relevant `/conformance/` route result.
 
 A page load without exercising the controls is not a critique. A passing conformance rollup without
-testing the changed concept UI is not enough evidence for a bug fix.
+testing the changed concept UI is not enough evidence for a bug fix. A demo that says "passed" while
+its primary action fails in-browser is a critique failure even if static checks and conformance JSON
+pass.
 
 Live probes are only evidence when they test the actual feature contract. Do not accept or generate
 generic probe panels that check broad baseline surfaces like `CSS.supports`, `customElements`,
@@ -102,15 +108,18 @@ These routes need zero maintenance — drop a JSON file next to a page and it ap
 
 Six criteria, each a `Verdict` of `pass | partial | fail | n/a` with a one-sentence rationale:
 
-| Criterion         | Question                                                                                            |
-| ----------------- | --------------------------------------------------------------------------------------------------- |
-| `spec_match`      | Does the demo actually demonstrate what the spec promises (not just the easy subset)?               |
-| `interactive`     | Is the surface real (controls / live readout / API call), not a styled code-card?                   |
-| `blurb_alignment` | Does the feature-index blurb match what the page delivers and the spec's framing?                   |
-| `edge_cases`      | Are failure modes / edge cases covered, or only the happy path?                                     |
-| `references`      | Does the page cite `chromestatus.com/feature/<id>`? (invariant #3)                                  |
-| `design_system`   | CSS variables / WCAG AA / button bg+color override / no static card? (invariants 5–7)               |
-| `accessibility`   | Keyboard path, accessible names/labels, semantic roles/states, visible focus, and non-visual state? |
+| Criterion          | Question                                                                                               |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| `spec_match`       | Does the demo actually demonstrate what the spec promises (not just the easy subset)?                  |
+| `interactive`      | Is the surface real (controls / live readout / API call), not a styled code-card?                      |
+| `blurb_alignment`  | Does the feature-index blurb match what the page delivers and the spec's framing?                      |
+| `edge_cases`       | Are failure modes / edge cases covered, or only the happy path?                                        |
+| `references`       | Does the page cite `chromestatus.com/feature/<id>`? (invariant #3)                                     |
+| `conformance`      | Does the suite prove the actual feature contract, including negative/fallback branches where relevant? |
+| `runtime_evidence` | Are DevTools screenshots/video/console/network/output checks captured and clean?                       |
+| `telemetry_health` | Does runtime telemetry show useful interactions/assertions and no unexpected errors?                   |
+| `design_system`    | CSS variables / WCAG AA / button bg+color override / no static card? (invariants 5–7)                  |
+| `accessibility`    | Keyboard path, accessible names/labels, semantic roles/states, visible focus, and accessibility tree?  |
 
 The valuable output is **`openQuestions`** — each is a work item with `title`, `detail`, optional
 `severity` (`minor`/`moderate`/`major`) and optional `suggestedSlug` (the slug to use if the answer

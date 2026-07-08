@@ -29,6 +29,14 @@ function escapeHTML(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
+function injectDemoTelemetry(html: string): string {
+  if (html.includes("/public/demo-telemetry.js")) return html;
+  const script = '<script src="/public/demo-telemetry.js" defer></script>';
+  return html.includes("</head>")
+    ? html.replace("</head>", `  ${script}\n</head>`)
+    : `${html}\n${script}`;
+}
+
 async function readReleaseAsset(release: string, sub: string): Promise<Response | null> {
   if (sub.includes("..")) return null;
   // Trailing slash or path with no extension: serve <path>/index.html.
@@ -40,6 +48,12 @@ async function readReleaseAsset(release: string, sub: string): Promise<Response 
   try {
     const file = await Deno.readFile(`./${release}/${key}`);
     const ext = key.split(".").pop() ?? "";
+    if (ext === "html") {
+      const html = new TextDecoder().decode(file);
+      return new Response(injectDemoTelemetry(html), {
+        headers: { "content-type": MIME[ext] },
+      });
+    }
     return new Response(file, {
       headers: { "content-type": MIME[ext] ?? "application/octet-stream" },
     });

@@ -65,6 +65,16 @@ export interface CritiqueReport {
     edge_cases: Verdict;
     // Does the page cite the chromestatus.com/feature/<id> reference link?
     references: Verdict;
+    // Does the conformance suite prove the real feature contract, including
+    // fallback/negative branches where relevant, instead of only checking that
+    // a broad API surface exists?
+    conformance: Verdict;
+    // Is there concrete browser evidence: screenshots/video where useful,
+    // console/network clean, controls exercised, and output state verified?
+    runtime_evidence: Verdict;
+    // Does the page emit useful runtime telemetry for errors, assertions,
+    // interactions, and performance so failures can be diagnosed after ship?
+    telemetry_health: Verdict;
     // Does it follow the design system rules (CSS variables / WCAG AA /
     // button colour override / no static-card)?
     design_system: Verdict;

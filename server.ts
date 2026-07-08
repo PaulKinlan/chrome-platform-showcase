@@ -7,6 +7,7 @@ import { handleConformanceRoute } from "./routes/conformance.ts";
 import { handleCritiquesRoute } from "./routes/critiques.ts";
 import { handleFeaturesRoute } from "./routes/features.ts";
 import { handleFaviconRoute } from "./routes/favicon.ts";
+import { handleDemoTelemetryRoute } from "./routes/demo-telemetry.ts";
 import { handleFedCmWellKnownRoute } from "./routes/fedcm-well-known.ts";
 import { handleIndexRoute } from "./routes/index.ts";
 import { handleProfileTelemetryRoute } from "./routes/profile-telemetry.ts";
@@ -26,6 +27,7 @@ const routes: RouteHandler[] = [
   handleFaviconRoute,
   handlePublicRoute,
   handleProfileTelemetryRoute,
+  handleDemoTelemetryRoute,
   handleFedCmWellKnownRoute,
   handleReleaseRoute,
 ];
