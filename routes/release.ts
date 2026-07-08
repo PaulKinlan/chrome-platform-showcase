@@ -37,6 +37,18 @@ function injectDemoTelemetry(html: string): string {
     : `${html}\n${script}`;
 }
 
+function demoTelemetryHeaders(extra: HeadersInit = {}): Headers {
+  const headers = new Headers(extra);
+  headers.set("reporting-endpoints", 'default="/telemetry/demo/report"');
+  headers.set(
+    "content-security-policy-report-only",
+    "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; " +
+      "img-src 'self' https: data: blob:; media-src 'self' https: data: blob:; " +
+      "connect-src 'self' https: data: blob:; report-uri /telemetry/demo/report; report-to default",
+  );
+  return headers;
+}
+
 async function readReleaseAsset(release: string, sub: string): Promise<Response | null> {
   if (sub.includes("..")) return null;
   // Trailing slash or path with no extension: serve <path>/index.html.
@@ -51,7 +63,7 @@ async function readReleaseAsset(release: string, sub: string): Promise<Response 
     if (ext === "html") {
       const html = new TextDecoder().decode(file);
       return new Response(injectDemoTelemetry(html), {
-        headers: { "content-type": MIME[ext] },
+        headers: demoTelemetryHeaders({ "content-type": MIME[ext] }),
       });
     }
     return new Response(file, {

@@ -121,8 +121,14 @@ the detail name.
 
 Every served demo automatically loads `/public/demo-telemetry.js`. The collector records console
 errors/warnings, resource failures, unhandled rejections, clicks/submits, slow interactions,
-selected performance events, and page assertions to `/telemetry/demo`. Use this as a safety net, not
-as a replacement for DevTools verification.
+selected performance events, and page assertions to `/telemetry/demo`. Served demo HTML also emits
+report-only Reporting API / CSP report headers to `/telemetry/demo/report`. Use this as a safety
+net, not as a replacement for DevTools verification.
+
+Telemetry retrieval is private: `/telemetry/demo/admin` and `/telemetry/demo/events` require HTTP
+Basic auth where the password is the `showcase_password` (or `SHOWCASE_PASSWORD`) environment
+variable. Event ingestion stays open to demo pages but is schema-validated, size-limited, and
+rejects obvious cross-site submissions using `Origin` / `Sec-Fetch-Site`.
 
 When adding or changing a demo:
 
