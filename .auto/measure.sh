@@ -92,6 +92,7 @@ CANVAS_RE = re.compile(r"<canvas\b([^>]*)>(.*?)</canvas>|<canvas\b([^>]*)/?>", r
 SVG_RE = re.compile(r"<svg\b([^>]*)>(.*?)</svg>|<svg\b([^>]*)/?>", re.I | re.S)
 ARIA_HIDDEN_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)\baria-hidden\s*=\s*(['\"]?)true\3([^>]*)>", re.I | re.S)
 STATEFUL_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>", re.I | re.S)
+CUSTOM_BUTTON_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>(.*?)</\1>", re.I | re.S)
 TAG_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
 CLICKABLE_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
@@ -242,6 +243,12 @@ for path in html_files:
         attrs = attrs_to_dict(m.group(1))
         if not has_accessible_name(attrs, m.group(2)):
             static_issues.append(f"{rel}: button missing accessible name")
+
+    for m in CUSTOM_BUTTON_RE.finditer(html):
+        attrs = attrs_to_dict(m.group(2))
+        if attrs.get("role", "").lower() == "button" and attrs.get("aria-hidden", "").lower() != "true":
+            if not has_accessible_name(attrs, m.group(3)):
+                static_issues.append(f"{rel}: role=button missing accessible name")
 
     for m in STATEFUL_CONTROL_RE.finditer(html):
         tag = m.group(1).lower()

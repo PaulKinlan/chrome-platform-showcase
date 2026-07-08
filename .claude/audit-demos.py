@@ -34,6 +34,7 @@ CANVAS_RE = re.compile(r"<canvas\b([^>]*)>(.*?)</canvas>|<canvas\b([^>]*)/?>", r
 SVG_RE = re.compile(r"<svg\b([^>]*)>(.*?)</svg>|<svg\b([^>]*)/?>", re.I | re.S)
 ARIA_HIDDEN_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)\baria-hidden\s*=\s*(['\"]?)true\3([^>]*)>", re.I | re.S)
 STATEFUL_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>", re.I | re.S)
+CUSTOM_BUTTON_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>(.*?)</\1>", re.I | re.S)
 TAG_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
 CLICKABLE_NON_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
@@ -262,6 +263,12 @@ def static_accessibility_issue_count(html: str) -> int:
     for match in BUTTON_RE.finditer(html):
         if not has_accessible_name(attrs_to_dict(match.group(1)), match.group(2)):
             issues += 1
+
+    for match in CUSTOM_BUTTON_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(2))
+        if attrs.get("role", "").lower() == "button" and attrs.get("aria-hidden", "").lower() != "true":
+            if not has_accessible_name(attrs, match.group(3)):
+                issues += 1
 
     for match in STATEFUL_CONTROL_RE.finditer(html):
         tag = match.group(1).lower()
