@@ -223,6 +223,12 @@ def static_accessibility_issue_count(html: str) -> int:
                 issues += 1
         if attrs.get("aria-haspopup") and attrs["aria-haspopup"].lower() not in {"true", "false", "menu", "listbox", "tree", "grid", "dialog"}:
             issues += 1
+        if attrs.get("aria-live") and attrs["aria-live"].lower() not in {"off", "polite", "assertive"}:
+            issues += 1
+        if attrs.get("aria-current") and attrs["aria-current"].lower() not in {"page", "step", "location", "date", "time", "true", "false"}:
+            issues += 1
+        if attrs.get("aria-orientation") and attrs["aria-orientation"].lower() not in {"horizontal", "vertical"}:
+            issues += 1
         for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby", "aria-activedescendant", "aria-owns"):
             if attrs.get(attr_name):
                 for ref in attrs[attr_name].split():
