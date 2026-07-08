@@ -303,14 +303,29 @@ def static_accessibility_issue_count(html: str) -> int:
     for match in ARIA_TAB_RE.finditer(html):
         tag = (match.group(1) or match.group(4) or "").lower()
         attrs = attrs_to_dict(match.group(2) or match.group(5) or "")
-        if attrs.get("role", "").lower() != "tab" or attrs.get("aria-hidden", "").lower() == "true":
+        role = attrs.get("role", "").lower()
+        inner = match.group(3) or ""
+        if attrs.get("aria-hidden", "").lower() == "true":
             continue
-        if not has_accessible_name(attrs, match.group(3) or ""):
-            issues += 1
-        if attrs.get("aria-selected") not in {"true", "false"}:
-            issues += 1
-        if tag not in {"button", "a"} and attrs.get("tabindex") not in {"0", "-1"}:
-            issues += 1
+        if role == "tab":
+            if not has_accessible_name(attrs, inner):
+                issues += 1
+            if attrs.get("aria-selected") not in {"true", "false"}:
+                issues += 1
+            if tag not in {"button", "a"} and attrs.get("tabindex") not in {"0", "-1"}:
+                issues += 1
+        if role in {"group", "listbox", "menu", "menubar", "radiogroup", "toolbar", "tree"}:
+            if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+                issues += 1
+        if role in {"menuitem", "option", "radio", "treeitem"}:
+            if not has_accessible_name(attrs, inner):
+                issues += 1
+            if role == "option" and attrs.get("aria-selected") not in {"true", "false"}:
+                issues += 1
+            if role == "radio" and attrs.get("aria-checked") not in {"true", "false"}:
+                issues += 1
+            if role == "treeitem" and tag not in {"button", "a"} and attrs.get("tabindex") not in {"0", "-1"}:
+                issues += 1
 
     for match in STATEFUL_CONTROL_RE.finditer(html):
         tag = match.group(1).lower()
