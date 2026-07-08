@@ -419,6 +419,12 @@ def static_accessibility_issue_count(html: str) -> int:
             issues += 1
         if role == "tree" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])treeitem\1", inner, re.I):
             issues += 1
+        if role in {"grid", "table"} and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])(row|rowgroup)\1", inner, re.I):
+            issues += 1
+        if role == "rowgroup" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])row\1", inner, re.I):
+            issues += 1
+        if role == "row" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])(cell|gridcell|columnheader|rowheader)\1", inner, re.I):
+            issues += 1
         if role in {"menuitem", "menuitemcheckbox", "menuitemradio", "option", "radio", "treeitem"}:
             if not has_accessible_name(attrs, inner):
                 issues += 1
