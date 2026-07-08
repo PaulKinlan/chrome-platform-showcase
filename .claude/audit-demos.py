@@ -21,6 +21,8 @@ RAW_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3,8}(?![0-9A-Za-z_-])|rgba\([^)]*\)|hsl
 CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 STYLE_BLOCK_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.I | re.S)
 STYLE_ATTR_RE = re.compile(r'\sstyle="([^"]*)"', re.I | re.S)
+SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.I | re.S)
+CODE_BLOCK_RE = re.compile(r"<pre\b[^>]*>.*?</pre>", re.I | re.S)
 IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
@@ -134,6 +136,9 @@ def likely_wrapped_by_label(html: str, start: int) -> bool:
 
 def static_accessibility_issue_count(html: str) -> int:
     """Count obvious static a11y issues. This is a safety net, not a full audit."""
+    # Ignore JS payload strings and code samples. This audit targets actual DOM
+    # markup in the page shell, not examples rendered as text or generated later.
+    html = CODE_BLOCK_RE.sub("", SCRIPT_BLOCK_RE.sub("", html))
     issues = 0
     labels_present = bool(LABEL_RE.search(html))
 

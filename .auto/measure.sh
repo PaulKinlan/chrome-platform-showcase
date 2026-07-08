@@ -79,6 +79,8 @@ for name, group, path, patterns in REQUIRED:
 html_files = sorted(ROOT.glob("v*/**/index.html"))
 static_issues: list[str] = []
 
+SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.I | re.S)
+CODE_BLOCK_RE = re.compile(r"<pre\b[^>]*>.*?</pre>", re.I | re.S)
 IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
@@ -119,6 +121,9 @@ def likely_wrapped_by_label(html_text: str, start: int) -> bool:
 for path in html_files:
     rel = path.relative_to(ROOT)
     html = path.read_text(encoding="utf-8", errors="ignore")
+    # Ignore JS payload strings and code samples. This audit targets actual DOM
+    # markup in the page shell, not examples rendered as text or generated later.
+    html = CODE_BLOCK_RE.sub("", SCRIPT_BLOCK_RE.sub("", html))
     labels_present = bool(LABEL_RE.search(html))
 
     for m in IMG_RE.finditer(html):
