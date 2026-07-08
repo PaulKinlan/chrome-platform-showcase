@@ -221,6 +221,8 @@ def static_accessibility_issue_count(html: str) -> int:
         if attrs.get("role", "").lower() == "img" and attrs.get("aria-hidden", "").lower() != "true":
             if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
                 issues += 1
+        if attrs.get("aria-haspopup") and attrs["aria-haspopup"].lower() not in {"true", "false", "menu", "listbox", "tree", "grid", "dialog"}:
+            issues += 1
         for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby", "aria-activedescendant", "aria-owns"):
             if attrs.get(attr_name):
                 for ref in attrs[attr_name].split():
