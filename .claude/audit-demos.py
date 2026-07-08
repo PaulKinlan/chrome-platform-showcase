@@ -28,6 +28,7 @@ IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 IFRAME_RE = re.compile(r"<iframe\b([^>]*)>", re.I | re.S)
 DIALOG_RE = re.compile(r"<(dialog|[a-z][\w:-]*)\b([^>]*)>", re.I | re.S)
 MEDIA_RE = re.compile(r"<(audio|video)\b([^>]*)>", re.I | re.S)
+TABLE_RE = re.compile(r"<table\b([^>]*)>(.*?)</table>", re.I | re.S)
 INDICATOR_RE = re.compile(r"<(progress|meter)\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
@@ -241,6 +242,15 @@ def static_accessibility_issue_count(html: str) -> int:
         if attrs.get("aria-hidden", "").lower() == "true" or is_hidden_from_page(attrs):
             continue
         if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby")):
+            issues += 1
+
+    for match in TABLE_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(1))
+        if attrs.get("role", "").lower() in {"presentation", "none"}:
+            continue
+        if attrs.get("aria-hidden", "").lower() == "true" or is_hidden_from_page(attrs):
+            continue
+        if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby") or "<caption" in match.group(2).lower()):
             issues += 1
 
     for match in INDICATOR_RE.finditer(html):
