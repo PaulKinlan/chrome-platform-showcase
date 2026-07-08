@@ -86,6 +86,7 @@ CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
 CANVAS_RE = re.compile(r"<canvas\b([^>]*)>(.*?)</canvas>|<canvas\b([^>]*)/?>", re.I | re.S)
 SVG_RE = re.compile(r"<svg\b([^>]*)>(.*?)</svg>|<svg\b([^>]*)/?>", re.I | re.S)
+STATEFUL_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
 CLICKABLE_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
 ATTR_RE = re.compile(r"([:\w-]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", re.I)
@@ -155,6 +156,16 @@ for path in html_files:
         attrs = attrs_to_dict(m.group(1))
         if not has_accessible_name(attrs, m.group(2)):
             static_issues.append(f"{rel}: button missing accessible name")
+
+    for m in STATEFUL_CONTROL_RE.finditer(html):
+        tag = m.group(1).lower()
+        attrs = attrs_to_dict(m.group(2))
+        if "aria-pressed" not in attrs and "aria-expanded" not in attrs:
+            continue
+        if tag == "a" and attrs.get("href"):
+            continue
+        if attrs.get("role") != "button" or attrs.get("tabindex") != "0":
+            static_issues.append(f"{rel}: stateful custom control missing button role or focusability")
 
     for m in CONTENTEDITABLE_RE.finditer(html):
         attrs = attrs_to_dict(f"{m.group(2)} {m.group(4)}")

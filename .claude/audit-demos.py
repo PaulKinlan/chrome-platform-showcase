@@ -28,6 +28,7 @@ CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
 CANVAS_RE = re.compile(r"<canvas\b([^>]*)>(.*?)</canvas>|<canvas\b([^>]*)/?>", re.I | re.S)
 SVG_RE = re.compile(r"<svg\b([^>]*)>(.*?)</svg>|<svg\b([^>]*)/?>", re.I | re.S)
+STATEFUL_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
 CLICKABLE_NON_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
 ATTR_RE = re.compile(r"([:\w-]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", re.I)
@@ -172,6 +173,16 @@ def static_accessibility_issue_count(html: str) -> int:
 
     for match in BUTTON_RE.finditer(html):
         if not has_accessible_name(attrs_to_dict(match.group(1)), match.group(2)):
+            issues += 1
+
+    for match in STATEFUL_CONTROL_RE.finditer(html):
+        tag = match.group(1).lower()
+        attrs = attrs_to_dict(match.group(2))
+        if "aria-pressed" not in attrs and "aria-expanded" not in attrs:
+            continue
+        if tag == "a" and attrs.get("href"):
+            continue
+        if attrs.get("role") != "button" or attrs.get("tabindex") != "0":
             issues += 1
 
     for match in CONTENTEDITABLE_RE.finditer(html):
