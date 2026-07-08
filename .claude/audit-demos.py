@@ -429,6 +429,8 @@ def static_accessibility_issue_count(html: str) -> int:
             issues += 1
         if role == "feed" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])article\1", inner, re.I):
             issues += 1
+        if role in {"form", "region"} and not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+            issues += 1
         if role in {"menuitem", "menuitemcheckbox", "menuitemradio", "option", "radio", "treeitem"}:
             if not has_accessible_name(attrs, inner):
                 issues += 1
