@@ -88,6 +88,20 @@ ARIA_TOKEN_VALUES = {
     "aria-checked": {"true", "false", "mixed"},
 }
 ARIA_RELEVANT_TOKENS = {"additions", "removals", "text", "all"}
+ARIA_REQUIRED_CHILD_ROLES = {
+    "feed": "article",
+    "list": "listitem",
+    "listbox": "option",
+    "rowgroup": "row",
+    "tree": "treeitem",
+}
+ARIA_REQUIRED_CHILD_ROLE_GROUPS = {
+    "grid": "row|rowgroup",
+    "menu": "menuitem|menuitemcheckbox|menuitemradio",
+    "menubar": "menuitem|menuitemcheckbox|menuitemradio",
+    "row": "cell|gridcell|columnheader|rowheader",
+    "table": "row|rowgroup",
+}
 
 
 def milestone_for(path: Path) -> int | None:
@@ -259,6 +273,10 @@ def aria_range_issue_count(attrs: dict[str, str]) -> int:
     return issues
 
 
+def has_required_owned_or_child_role(attrs: dict[str, str], inner: str, child_role_pattern: str) -> bool:
+    return bool(attrs.get("aria-owns") or re.search(rf"\brole\s*=\s*(['\"])({child_role_pattern})\1", inner, re.I))
+
+
 def static_accessibility_issue_count(html: str) -> int:
     """Count obvious static a11y issues. This is a safety net, not a full audit."""
     # Ignore JS payload strings and code samples. This audit targets actual DOM
@@ -413,21 +431,9 @@ def static_accessibility_issue_count(html: str) -> int:
         if role in {"group", "listbox", "menu", "menubar", "radiogroup", "toolbar", "tree"}:
             if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
                 issues += 1
-        if role == "listbox" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])option\1", inner, re.I):
+        if role in ARIA_REQUIRED_CHILD_ROLES and not has_required_owned_or_child_role(attrs, inner, ARIA_REQUIRED_CHILD_ROLES[role]):
             issues += 1
-        if role in {"menu", "menubar"} and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])(menuitem|menuitemcheckbox|menuitemradio)\1", inner, re.I):
-            issues += 1
-        if role == "tree" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])treeitem\1", inner, re.I):
-            issues += 1
-        if role in {"grid", "table"} and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])(row|rowgroup)\1", inner, re.I):
-            issues += 1
-        if role == "rowgroup" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])row\1", inner, re.I):
-            issues += 1
-        if role == "row" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])(cell|gridcell|columnheader|rowheader)\1", inner, re.I):
-            issues += 1
-        if role == "list" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])listitem\1", inner, re.I):
-            issues += 1
-        if role == "feed" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])article\1", inner, re.I):
+        if role in ARIA_REQUIRED_CHILD_ROLE_GROUPS and not has_required_owned_or_child_role(attrs, inner, ARIA_REQUIRED_CHILD_ROLE_GROUPS[role]):
             issues += 1
         if role in {"form", "region"} and not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
             issues += 1
