@@ -229,6 +229,12 @@ def static_accessibility_issue_count(html: str) -> int:
             issues += 1
         if attrs.get("aria-orientation") and attrs["aria-orientation"].lower() not in {"horizontal", "vertical"}:
             issues += 1
+        for attr_name in ("aria-disabled", "aria-expanded", "aria-hidden", "aria-modal", "aria-multiline", "aria-multiselectable", "aria-required", "aria-selected", "aria-busy"):
+            if attrs.get(attr_name) and attrs[attr_name].lower() not in {"true", "false"}:
+                issues += 1
+        for attr_name in ("aria-pressed", "aria-checked"):
+            if attrs.get(attr_name) and attrs[attr_name].lower() not in {"true", "false", "mixed"}:
+                issues += 1
         for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby", "aria-activedescendant", "aria-owns"):
             if attrs.get(attr_name):
                 for ref in attrs[attr_name].split():
