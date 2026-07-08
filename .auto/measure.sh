@@ -121,13 +121,18 @@ def likely_wrapped_by_label(html_text: str, start: int) -> bool:
     before = html_text[:start].lower()
     return before.rfind("<label") > before.rfind("</label>")
 
+
+def has_label_for(html_text: str, control_id: str) -> bool:
+    if not control_id:
+        return False
+    return bool(re.search(rf"<label\b[^>]*\bfor\s*=\s*(['\"])" + re.escape(control_id) + r"\1", html_text, re.I))
+
 for path in html_files:
     rel = path.relative_to(ROOT)
     html = path.read_text(encoding="utf-8", errors="ignore")
     # Ignore JS payload strings and code samples. This audit targets actual DOM
     # markup in the page shell, not examples rendered as text or generated later.
     html = CODE_BLOCK_RE.sub("", SCRIPT_BLOCK_RE.sub("", html))
-    labels_present = bool(LABEL_RE.search(html))
 
     for m in IMG_RE.finditer(html):
         attrs = attrs_to_dict(m.group(1))
@@ -143,7 +148,7 @@ for path in html_files:
             continue
         if likely_wrapped_by_label(html, m.start()):
             continue
-        if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title") or (attrs.get("id") and labels_present)):
+        if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title") or has_label_for(html, attrs.get("id", ""))):
             static_issues.append(f"{rel}: {tag} may be missing label")
 
     for m in BUTTON_RE.finditer(html):

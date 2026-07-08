@@ -137,13 +137,18 @@ def likely_wrapped_by_label(html: str, start: int) -> bool:
     return before.rfind("<label") > before.rfind("</label>")
 
 
+def has_label_for(html: str, control_id: str) -> bool:
+    if not control_id:
+        return False
+    return bool(re.search(rf"<label\b[^>]*\bfor\s*=\s*(['\"])" + re.escape(control_id) + r"\1", html, re.I))
+
+
 def static_accessibility_issue_count(html: str) -> int:
     """Count obvious static a11y issues. This is a safety net, not a full audit."""
     # Ignore JS payload strings and code samples. This audit targets actual DOM
     # markup in the page shell, not examples rendered as text or generated later.
     html = CODE_BLOCK_RE.sub("", SCRIPT_BLOCK_RE.sub("", html))
     issues = 0
-    labels_present = bool(LABEL_RE.search(html))
 
     for match in IMG_RE.finditer(html):
         attrs = attrs_to_dict(match.group(1))
@@ -161,7 +166,7 @@ def static_accessibility_issue_count(html: str) -> int:
             attrs.get("aria-label")
             or attrs.get("aria-labelledby")
             or attrs.get("title")
-            or (attrs.get("id") and labels_present)
+            or has_label_for(html, attrs.get("id", ""))
         ):
             issues += 1
 
