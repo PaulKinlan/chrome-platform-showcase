@@ -26,6 +26,7 @@ CODE_BLOCK_RE = re.compile(r"<pre\b[^>]*>.*?</pre>", re.I | re.S)
 SRCDOC_ATTR_RE = re.compile(r"\ssrcdoc\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I | re.S)
 IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 IFRAME_RE = re.compile(r"<iframe\b([^>]*)>", re.I | re.S)
+DIALOG_RE = re.compile(r"<(dialog|[a-z][\w:-]*)\b([^>]*)>", re.I | re.S)
 MEDIA_RE = re.compile(r"<(audio|video)\b([^>]*)>", re.I | re.S)
 INDICATOR_RE = re.compile(r"<(progress|meter)\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
@@ -221,6 +222,16 @@ def static_accessibility_issue_count(html: str) -> int:
     for match in IFRAME_RE.finditer(html):
         attrs = attrs_to_dict(match.group(1))
         if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby")):
+            issues += 1
+
+    for match in DIALOG_RE.finditer(html):
+        tag = match.group(1).lower()
+        attrs = attrs_to_dict(match.group(2))
+        if tag != "dialog" and attrs.get("role", "").lower() not in {"dialog", "alertdialog"}:
+            continue
+        if attrs.get("aria-hidden", "").lower() == "true" or is_hidden_from_page(attrs):
             continue
         if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby")):
             issues += 1
