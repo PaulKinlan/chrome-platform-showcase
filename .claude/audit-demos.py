@@ -67,6 +67,28 @@ INTERACTIVE_MARKERS = (
     "getContext(",
 )
 
+ARIA_TOKEN_VALUES = {
+    "aria-haspopup": {"true", "false", "menu", "listbox", "tree", "grid", "dialog"},
+    "aria-live": {"off", "polite", "assertive"},
+    "aria-current": {"page", "step", "location", "date", "time", "true", "false"},
+    "aria-orientation": {"horizontal", "vertical"},
+    "aria-sort": {"ascending", "descending", "none", "other"},
+    "aria-autocomplete": {"inline", "list", "both", "none"},
+    "aria-invalid": {"true", "false", "grammar", "spelling"},
+    "aria-disabled": {"true", "false"},
+    "aria-expanded": {"true", "false"},
+    "aria-hidden": {"true", "false"},
+    "aria-modal": {"true", "false"},
+    "aria-multiline": {"true", "false"},
+    "aria-multiselectable": {"true", "false"},
+    "aria-required": {"true", "false"},
+    "aria-selected": {"true", "false"},
+    "aria-busy": {"true", "false"},
+    "aria-pressed": {"true", "false", "mixed"},
+    "aria-checked": {"true", "false", "mixed"},
+}
+ARIA_RELEVANT_TOKENS = {"additions", "removals", "text", "all"}
+
 
 def milestone_for(path: Path) -> int | None:
     first = path.parts[0]
@@ -197,6 +219,25 @@ def has_shadow_reference_target(html: str, target_id: str) -> bool:
     )
 
 
+def aria_token_issue_count(attrs: dict[str, str]) -> int:
+    issues = 0
+    for attr_name, valid_values in ARIA_TOKEN_VALUES.items():
+        value = attrs.get(attr_name)
+        if value and value.lower() not in valid_values:
+            issues += 1
+
+    if attrs.get("aria-relevant"):
+        relevant_tokens = attrs["aria-relevant"].lower().split()
+        if (
+            not relevant_tokens
+            or any(token not in ARIA_RELEVANT_TOKENS for token in relevant_tokens)
+            or ("all" in relevant_tokens and len(relevant_tokens) > 1)
+        ):
+            issues += 1
+
+    return issues
+
+
 def static_accessibility_issue_count(html: str) -> int:
     """Count obvious static a11y issues. This is a safety net, not a full audit."""
     # Ignore JS payload strings and code samples. This audit targets actual DOM
@@ -221,30 +262,7 @@ def static_accessibility_issue_count(html: str) -> int:
         if attrs.get("role", "").lower() == "img" and attrs.get("aria-hidden", "").lower() != "true":
             if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
                 issues += 1
-        if attrs.get("aria-haspopup") and attrs["aria-haspopup"].lower() not in {"true", "false", "menu", "listbox", "tree", "grid", "dialog"}:
-            issues += 1
-        if attrs.get("aria-live") and attrs["aria-live"].lower() not in {"off", "polite", "assertive"}:
-            issues += 1
-        if attrs.get("aria-current") and attrs["aria-current"].lower() not in {"page", "step", "location", "date", "time", "true", "false"}:
-            issues += 1
-        if attrs.get("aria-orientation") and attrs["aria-orientation"].lower() not in {"horizontal", "vertical"}:
-            issues += 1
-        if attrs.get("aria-sort") and attrs["aria-sort"].lower() not in {"ascending", "descending", "none", "other"}:
-            issues += 1
-        if attrs.get("aria-autocomplete") and attrs["aria-autocomplete"].lower() not in {"inline", "list", "both", "none"}:
-            issues += 1
-        if attrs.get("aria-invalid") and attrs["aria-invalid"].lower() not in {"true", "false", "grammar", "spelling"}:
-            issues += 1
-        if attrs.get("aria-relevant"):
-            relevant_tokens = attrs["aria-relevant"].lower().split()
-            if not relevant_tokens or any(token not in {"additions", "removals", "text", "all"} for token in relevant_tokens) or ("all" in relevant_tokens and len(relevant_tokens) > 1):
-                issues += 1
-        for attr_name in ("aria-disabled", "aria-expanded", "aria-hidden", "aria-modal", "aria-multiline", "aria-multiselectable", "aria-required", "aria-selected", "aria-busy"):
-            if attrs.get(attr_name) and attrs[attr_name].lower() not in {"true", "false"}:
-                issues += 1
-        for attr_name in ("aria-pressed", "aria-checked"):
-            if attrs.get(attr_name) and attrs[attr_name].lower() not in {"true", "false", "mixed"}:
-                issues += 1
+        issues += aria_token_issue_count(attrs)
         for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby", "aria-activedescendant", "aria-owns"):
             if attrs.get(attr_name):
                 for ref in attrs[attr_name].split():
