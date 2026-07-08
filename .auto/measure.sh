@@ -82,7 +82,7 @@ static_issues: list[str] = []
 IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
-CLICKABLE_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)\bonclick\s*=([^>]*)>", re.I | re.S)
+CLICKABLE_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
 ATTR_RE = re.compile(r"([:\w-]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", re.I)
 LABEL_RE = re.compile(r"<label\b", re.I)
 
@@ -142,6 +142,8 @@ for path in html_files:
 
     for m in CLICKABLE_RE.finditer(html):
         attrs = attrs_to_dict(m.group(2))
+        if "onclick" not in attrs:
+            continue
         if not attrs.get("role") or not (attrs.get("tabindex") == "0" or attrs.get("tabindex") == "-1"):
             static_issues.append(f"{rel}: onclick on non-control without role/tabindex")
 

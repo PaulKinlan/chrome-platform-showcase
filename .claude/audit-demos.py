@@ -24,9 +24,7 @@ STYLE_ATTR_RE = re.compile(r'\sstyle="([^"]*)"', re.I | re.S)
 IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
-CLICKABLE_NON_CONTROL_RE = re.compile(
-    r"<(div|span|li|p|section|article)\b([^>]*)\bonclick\s*=([^>]*)>", re.I | re.S
-)
+CLICKABLE_NON_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
 ATTR_RE = re.compile(r"([:\w-]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", re.I)
 LABEL_RE = re.compile(r"<label\b", re.I)
 
@@ -162,6 +160,8 @@ def static_accessibility_issue_count(html: str) -> int:
 
     for match in CLICKABLE_NON_CONTROL_RE.finditer(html):
         attrs = attrs_to_dict(match.group(2))
+        if "onclick" not in attrs:
+            continue
         if not attrs.get("role") or attrs.get("tabindex") not in {"0", "-1"}:
             issues += 1
 
