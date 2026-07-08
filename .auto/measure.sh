@@ -87,6 +87,7 @@ CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
 CANVAS_RE = re.compile(r"<canvas\b([^>]*)>(.*?)</canvas>|<canvas\b([^>]*)/?>", re.I | re.S)
 SVG_RE = re.compile(r"<svg\b([^>]*)>(.*?)</svg>|<svg\b([^>]*)/?>", re.I | re.S)
+ARIA_HIDDEN_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)\baria-hidden\s*=\s*(['\"]?)true\3([^>]*)>", re.I | re.S)
 STATEFUL_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>", re.I | re.S)
 TAG_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
@@ -130,6 +131,17 @@ def has_label_for(html_text: str, control_id: str) -> bool:
         return False
     return bool(re.search(rf"<label\b[^>]*\bfor\s*=\s*(['\"])" + re.escape(control_id) + r"\1", html_text, re.I))
 
+
+def is_focusable_element(tag: str, attrs: dict[str, str]) -> bool:
+    if attrs.get("disabled") is not None:
+        return False
+    return (
+        tag in {"button", "input", "select", "textarea", "summary"}
+        or (tag == "a" and bool(attrs.get("href")))
+        or attrs.get("tabindex") is not None
+        or ("contenteditable" in attrs and attrs.get("contenteditable", "").lower() in {"", "true", "plaintext-only"})
+    )
+
 for path in html_files:
     rel = path.relative_to(ROOT)
     html = path.read_text(encoding="utf-8", errors="ignore")
@@ -142,6 +154,12 @@ for path in html_files:
     ids = set(id_values)
     for duplicate_id in sorted({value for value in id_values if id_values.count(value) > 1}):
         static_issues.append(f"{rel}: duplicate id '{duplicate_id}'")
+
+    for m in ARIA_HIDDEN_RE.finditer(html):
+        tag = m.group(1).lower()
+        attrs = attrs_to_dict(f"{m.group(2)} {m.group(4)}")
+        if is_focusable_element(tag, attrs):
+            static_issues.append(f"{rel}: focusable element is aria-hidden")
 
     for tag, attrs in element_attrs:
         for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby"):
