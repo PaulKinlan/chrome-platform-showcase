@@ -167,6 +167,8 @@ def attrs_to_dict(src: str) -> dict[str, str]:
 
 
 def has_explicit_accessible_name(attrs: dict[str, str]) -> bool:
+    # Some roles need a purpose label from attributes; descendant text can be
+    # content, not the name of the widget/landmark itself.
     return bool(attrs.get("aria-label", "").strip() or attrs.get("aria-labelledby", "").strip() or attrs.get("title", "").strip())
 
 
