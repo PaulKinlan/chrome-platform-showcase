@@ -417,6 +417,8 @@ def static_accessibility_issue_count(html: str) -> int:
             issues += 1
         if role in {"menu", "menubar"} and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])(menuitem|menuitemcheckbox|menuitemradio)\1", inner, re.I):
             issues += 1
+        if role == "tree" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])treeitem\1", inner, re.I):
+            issues += 1
         if role in {"menuitem", "menuitemcheckbox", "menuitemradio", "option", "radio", "treeitem"}:
             if not has_accessible_name(attrs, inner):
                 issues += 1
