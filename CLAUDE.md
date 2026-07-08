@@ -143,6 +143,15 @@ Per-demo inline `<style>` blocks must use the CSS variables defined in `public/s
 Every text-on-background pair must hit WCAG AA (4.5:1 normal text, 3:1 large). Common trap:
 medium-grey `#999` background with white text (~2.85:1, fails).
 
+### 5b. Every demo must be accessible
+
+Accessibility is a release-quality goal, not a polish pass. Every concept page must support keyboard
+operation, visible focus, accessible names or labels for controls, useful native semantics or ARIA
+roles where native elements are not possible, and non-visual text/live-region equivalents for visual
+state changes. When semantics are not obvious, use `chrome-devtools-mcp` to inspect the
+accessibility tree and record what a screen reader would see. Screenshots are useful evidence, but
+they are not a substitute for DOM semantics or accessibility-tree evidence.
+
 ### 6. If you override a `button` background, also override `color`
 
 The global `button` rule in `public/styles.css` sets BOTH `background: var(--text-black)` and
@@ -205,7 +214,9 @@ For every user-reported URL bug:
 4. After the fix, update or regenerate the touched `_questions.json` and relevant `conformance.json`
    so the quality and conformance files match the repaired behavior.
 5. In the handoff, report the browser/channel, URL, controls exercised, expected vs observed
-   behavior, console/network result, screenshots or DOM observations, and Deno checks.
+   behavior, console/network result, accessibility evidence (keyboard path, accessible names/labels,
+   focus behavior, and accessibility tree/ARIA/live-region observations where relevant), screenshots
+   or DOM observations, and Deno checks.
 
 When a bug report involves a live probe, verify that the probe is not just present but meaningful:
 its checks must match the feature's spec contract and the page's conformance assertions. Remove or
@@ -245,8 +256,12 @@ For demo changes and bug fixes, also verify with `chrome-devtools-mcp`:
 - Exercise every visible button, input, slider, tab, toggle, and "try it" action on the changed
   concept.
 - Confirm the DOM/live output changed as intended, not just that the page loaded.
+- Confirm controls are keyboard-operable, have accessible names/labels, expose visible focus, and
+  surface changing state through text, semantic output, or an appropriate live region.
 - Inspect console and network logs and record any unsupported API fallback separately from real
   runtime errors.
+- Inspect the Chrome DevTools accessibility tree when the demo uses custom controls, visual-only
+  output, canvas/SVG, or ARIA, and record the observed name/role/state.
 - Open the relevant `/conformance/` route and confirm the assertions reflect the repaired contract.
 
 If you changed escapeHTML or anything that builds HTML attributes:

@@ -21,6 +21,29 @@ RAW_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3,8}(?![0-9A-Za-z_-])|rgba\([^)]*\)|hsl
 CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 STYLE_BLOCK_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.I | re.S)
 STYLE_ATTR_RE = re.compile(r'\sstyle="([^"]*)"', re.I | re.S)
+SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.I | re.S)
+CODE_BLOCK_RE = re.compile(r"<pre\b[^>]*>.*?</pre>", re.I | re.S)
+SRCDOC_ATTR_RE = re.compile(r"\ssrcdoc\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I | re.S)
+IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
+IFRAME_RE = re.compile(r"<iframe\b([^>]*)>", re.I | re.S)
+DIALOG_RE = re.compile(r"<(dialog|[a-z][\w:-]*)\b([^>]*)>", re.I | re.S)
+MEDIA_RE = re.compile(r"<(audio|video)\b([^>]*)>", re.I | re.S)
+TABLE_RE = re.compile(r"<table\b([^>]*)>(.*?)</table>", re.I | re.S)
+FIELDSET_RE = re.compile(r"<fieldset\b([^>]*)>(.*?)</fieldset>", re.I | re.S)
+INDICATOR_RE = re.compile(r"<(progress|meter)\b([^>]*)>", re.I | re.S)
+CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
+CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
+CANVAS_RE = re.compile(r"<canvas\b([^>]*)>(.*?)</canvas>|<canvas\b([^>]*)/?>", re.I | re.S)
+SVG_RE = re.compile(r"<svg\b([^>]*)>(.*?)</svg>|<svg\b([^>]*)/?>", re.I | re.S)
+ARIA_HIDDEN_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)\baria-hidden\s*=\s*(['\"]?)true\3([^>]*)>", re.I | re.S)
+STATEFUL_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>", re.I | re.S)
+CUSTOM_BUTTON_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>(.*?)</\1>", re.I | re.S)
+ARIA_TAB_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)>(.*?)</\1>|<([a-z][\w:-]*)\b([^>]*)/?>", re.I | re.S)
+TAG_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)>", re.I | re.S)
+BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
+CLICKABLE_NON_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
+ATTR_RE = re.compile(r"([:\w-]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", re.I)
+LABEL_RE = re.compile(r"<label\b", re.I)
 
 INTERACTIVE_MARKERS = (
     "<button",
@@ -94,11 +117,262 @@ def css_raw_color_count(html: str) -> int:
     return count
 
 
+def attrs_to_dict(src: str) -> dict[str, str]:
+    attrs: dict[str, str] = {}
+    for key, value in ATTR_RE.findall(src):
+        key = key.lower()
+        if not key or key == "/":
+            continue
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        attrs[key] = value
+    return attrs
+
+
+def has_accessible_name(attrs: dict[str, str], inner: str = "") -> bool:
+    if attrs.get("aria-hidden", "").lower() == "true":
+        return True
+    if attrs.get("aria-label", "").strip():
+        return True
+    if attrs.get("aria-labelledby", "").strip():
+        return True
+    if attrs.get("title", "").strip():
+        return True
+    if re.sub(r"<[^>]+>", "", inner).strip():
+        return True
+    return False
+
+
+def likely_wrapped_by_label(html: str, start: int) -> bool:
+    before = html[:start].lower()
+    return before.rfind("<label") > before.rfind("</label>")
+
+
+def has_label_for(html: str, control_id: str) -> bool:
+    if not control_id:
+        return False
+    return bool(re.search(rf"<label\b[^>]*\bfor\s*=\s*(['\"])" + re.escape(control_id) + r"\1", html, re.I))
+
+
+def strip_srcdoc_attrs(html: str) -> str:
+    out: list[str] = []
+    last = 0
+    for match in re.finditer(r"\ssrcdoc\s*=\s*(['\"])", html, re.I):
+        quote = match.group(1)
+        index = match.end()
+        while index < len(html) and html[index] != quote:
+            index += 1
+        if index < len(html):
+            out.append(html[last:match.start()])
+            last = index + 1
+    out.append(html[last:])
+    return "".join(out)
+
+
+def is_hidden_from_page(attrs: dict[str, str]) -> bool:
+    style = attrs.get("style", "").lower().replace(" ", "")
+    return attrs.get("hidden") is not None or "display:none" in style
+
+
+def is_focusable_element(tag: str, attrs: dict[str, str]) -> bool:
+    if attrs.get("disabled") is not None:
+        return False
+    return (
+        tag in {"button", "input", "select", "textarea", "summary"}
+        or (tag == "a" and bool(attrs.get("href")))
+        or attrs.get("tabindex") is not None
+        or ("contenteditable" in attrs and attrs.get("contenteditable", "").lower() in {"", "true", "plaintext-only"})
+    )
+
+
+def static_accessibility_issue_count(html: str) -> int:
+    """Count obvious static a11y issues. This is a safety net, not a full audit."""
+    # Ignore JS payload strings and code samples. This audit targets actual DOM
+    # markup in the page shell, not examples rendered as text or generated later.
+    html = CODE_BLOCK_RE.sub("", SCRIPT_BLOCK_RE.sub("", strip_srcdoc_attrs(html)))
+    issues = 0
+
+    element_attrs = [(match.group(1).lower(), attrs_to_dict(match.group(2))) for match in TAG_RE.finditer(html)]
+    id_values = [attrs["id"] for _, attrs in element_attrs if attrs.get("id")]
+    ids = set(id_values)
+    issues += len(id_values) - len(ids)
+
+    for match in ARIA_HIDDEN_RE.finditer(html):
+        tag = match.group(1).lower()
+        attrs = attrs_to_dict(f"{match.group(2)} {match.group(4)}")
+        if is_focusable_element(tag, attrs):
+            issues += 1
+
+    for tag, attrs in element_attrs:
+        if attrs.get("role", "").lower() == "img" and attrs.get("aria-hidden", "").lower() != "true":
+            if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+                issues += 1
+        for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby"):
+            if attrs.get(attr_name):
+                for ref in attrs[attr_name].split():
+                    if ref not in ids:
+                        issues += 1
+        if "aria-expanded" in attrs and tag != "summary" and not attrs.get("aria-controls"):
+            issues += 1
+
+    for match in IMG_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(1))
+        if attrs.get("aria-hidden", "").lower() != "true" and "alt" not in attrs:
+            issues += 1
+
+    for match in IFRAME_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(1))
+        if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby")):
+            issues += 1
+
+    for match in DIALOG_RE.finditer(html):
+        tag = match.group(1).lower()
+        attrs = attrs_to_dict(match.group(2))
+        if tag != "dialog" and attrs.get("role", "").lower() not in {"dialog", "alertdialog"}:
+            continue
+        if attrs.get("aria-hidden", "").lower() == "true" or is_hidden_from_page(attrs):
+            continue
+        if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby")):
+            issues += 1
+
+    for match in MEDIA_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(2))
+        if attrs.get("aria-hidden", "").lower() == "true" or is_hidden_from_page(attrs):
+            continue
+        if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby")):
+            issues += 1
+
+    for match in TABLE_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(1))
+        if attrs.get("role", "").lower() in {"presentation", "none"}:
+            continue
+        if attrs.get("aria-hidden", "").lower() == "true" or is_hidden_from_page(attrs):
+            continue
+        if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby") or "<caption" in match.group(2).lower()):
+            issues += 1
+
+    for match in FIELDSET_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(1))
+        if attrs.get("aria-hidden", "").lower() == "true" or is_hidden_from_page(attrs):
+            continue
+        if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby") or "<legend" in match.group(2).lower()):
+            issues += 1
+
+    for match in INDICATOR_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(2))
+        if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if likely_wrapped_by_label(html, match.start()):
+            continue
+        if not (
+            attrs.get("aria-label")
+            or attrs.get("aria-labelledby")
+            or attrs.get("title")
+            or has_label_for(html, attrs.get("id", ""))
+        ):
+            issues += 1
+
+    for match in CONTROL_RE.finditer(html):
+        tag = match.group(1).lower()
+        attrs = attrs_to_dict(match.group(2))
+        if tag == "input" and attrs.get("type", "").lower() in {"hidden", "submit", "button", "reset"}:
+            continue
+        if likely_wrapped_by_label(html, match.start()):
+            continue
+        if not (
+            attrs.get("aria-label")
+            or attrs.get("aria-labelledby")
+            or attrs.get("title")
+            or has_label_for(html, attrs.get("id", ""))
+        ):
+            issues += 1
+
+    for match in BUTTON_RE.finditer(html):
+        if not has_accessible_name(attrs_to_dict(match.group(1)), match.group(2)):
+            issues += 1
+
+    for match in CUSTOM_BUTTON_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(2))
+        if attrs.get("role", "").lower() == "button" and attrs.get("aria-hidden", "").lower() != "true":
+            if not has_accessible_name(attrs, match.group(3)):
+                issues += 1
+
+    for match in ARIA_TAB_RE.finditer(html):
+        tag = (match.group(1) or match.group(4) or "").lower()
+        attrs = attrs_to_dict(match.group(2) or match.group(5) or "")
+        if attrs.get("role", "").lower() != "tab" or attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if not has_accessible_name(attrs, match.group(3) or ""):
+            issues += 1
+        if attrs.get("aria-selected") not in {"true", "false"}:
+            issues += 1
+        if tag not in {"button", "a"} and attrs.get("tabindex") not in {"0", "-1"}:
+            issues += 1
+
+    for match in STATEFUL_CONTROL_RE.finditer(html):
+        tag = match.group(1).lower()
+        attrs = attrs_to_dict(match.group(2))
+        if "aria-pressed" not in attrs and "aria-expanded" not in attrs:
+            continue
+        if tag == "a" and attrs.get("href"):
+            continue
+        if attrs.get("role") != "button" or attrs.get("tabindex") != "0":
+            issues += 1
+
+    for match in CONTENTEDITABLE_RE.finditer(html):
+        attrs = attrs_to_dict(f"{match.group(2)} {match.group(4)}")
+        if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if attrs.get("role") not in {"textbox", "searchbox"}:
+            issues += 1
+        if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+            issues += 1
+
+    for match in CANVAS_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(1) or match.group(3) or "")
+        inner = match.group(2) or ""
+        if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title") or re.sub(r"<[^>]+>", "", inner).strip()):
+            issues += 1
+
+    for match in SVG_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(1) or match.group(3) or "")
+        inner = match.group(2) or ""
+        if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if not (
+            attrs.get("aria-label")
+            or attrs.get("aria-labelledby")
+            or attrs.get("title")
+            or "<title" in inner.lower()
+            or re.sub(r"<[^>]+>", "", inner).strip()
+        ):
+            issues += 1
+
+    for match in re.finditer(r"tabindex\s*=\s*['\"]?([0-9]+)", html, re.I):
+        if int(match.group(1)) > 0:
+            issues += 1
+
+    for match in CLICKABLE_NON_CONTROL_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(2))
+        if "onclick" not in attrs:
+            continue
+        if not attrs.get("role") or attrs.get("tabindex") not in {"0", "-1"}:
+            issues += 1
+
+    return issues
+
+
 def run(strict: bool) -> int:
     errors: list[str] = []
     warnings: list[str] = []
     static_pages: list[str] = []
     raw_color_pages: list[str] = []
+    accessibility_pages: list[str] = []
 
     for path in html_files():
         rel = path.relative_to(ROOT)
@@ -125,10 +399,16 @@ def run(strict: bool) -> int:
         if css_raw_color_count(html):
             raw_color_pages.append(str(rel))
 
+        a11y_issues = static_accessibility_issue_count(html)
+        if a11y_issues:
+            accessibility_pages.append(f"{rel} ({a11y_issues})")
+
     if static_pages:
         warnings.append(f"{len(static_pages)} concept pages need stronger interactive affordances")
     if raw_color_pages:
         warnings.append(f"{len(raw_color_pages)} pages contain raw color literals/functions")
+    if accessibility_pages:
+        warnings.append(f"{len(accessibility_pages)} pages contain likely static accessibility issues")
 
     for msg in errors:
         print(f"ERROR: {msg}", file=sys.stderr)
@@ -148,6 +428,12 @@ def run(strict: bool) -> int:
                 print(f"  {item}")
             if len(raw_color_pages) > 120:
                 print(f"  ... {len(raw_color_pages) - 120} more")
+        if accessibility_pages:
+            print("\nPages with likely static accessibility issues (count in parentheses):")
+            for item in accessibility_pages[:120]:
+                print(f"  {item}")
+            if len(accessibility_pages) > 120:
+                print(f"  ... {len(accessibility_pages) - 120} more")
 
     return 1 if errors else 0
 

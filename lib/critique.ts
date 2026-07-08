@@ -68,6 +68,9 @@ export interface CritiqueReport {
     // Does it follow the design system rules (CSS variables / WCAG AA /
     // button colour override / no static-card)?
     design_system: Verdict;
+    // Is the demo accessible: keyboard-operable controls, useful semantics,
+    // accessible names/labels, non-visual state, and clear live updates?
+    accessibility: Verdict;
   };
 
   // Open questions / work items derived from the rubric. Empty list means the
