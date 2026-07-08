@@ -196,6 +196,8 @@ def static_accessibility_issue_count(html: str) -> int:
     element_attrs = [(match.group(1).lower(), attrs_to_dict(match.group(2))) for match in TAG_RE.finditer(html)]
     id_values = [attrs["id"] for _, attrs in element_attrs if attrs.get("id")]
     ids = set(id_values)
+    tab_ids = {attrs["id"] for _, attrs in element_attrs if attrs.get("role", "").lower() == "tab" and attrs.get("id")}
+    tabpanel_ids = {attrs["id"] for _, attrs in element_attrs if attrs.get("role", "").lower() == "tabpanel" and attrs.get("id")}
     issues += len(id_values) - len(ids)
 
     for match in ARIA_HIDDEN_RE.finditer(html):
@@ -313,6 +315,13 @@ def static_accessibility_issue_count(html: str) -> int:
             if attrs.get("aria-selected") not in {"true", "false"}:
                 issues += 1
             if tag not in {"button", "a"} and attrs.get("tabindex") not in {"0", "-1"}:
+                issues += 1
+            if attrs.get("aria-controls") and attrs["aria-controls"] not in tabpanel_ids:
+                issues += 1
+        if role == "tabpanel":
+            if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+                issues += 1
+            if attrs.get("aria-labelledby") and attrs["aria-labelledby"] not in tab_ids:
                 issues += 1
         if role in {"group", "listbox", "menu", "menubar", "radiogroup", "toolbar", "tree"}:
             if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
