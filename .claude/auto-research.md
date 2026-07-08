@@ -31,6 +31,9 @@ For every concept critique or user-reported fix, the reviewer must capture concr
 - browser/channel and URL tested;
 - every visible control clicked, typed into, dragged, or toggled;
 - observed DOM/readout/state changes for each interaction;
+- accessibility evidence: keyboard path, visible focus, accessible names/labels, role/state for
+  custom controls, and Chrome DevTools accessibility tree observations where state is visual-only,
+  canvas/SVG-backed, or ARIA-backed;
 - console errors and failed network requests;
 - unsupported/flag-gated fallback behavior, separated from actual runtime failures;
 - the relevant `/conformance/` route result.
@@ -99,14 +102,15 @@ These routes need zero maintenance — drop a JSON file next to a page and it ap
 
 Six criteria, each a `Verdict` of `pass | partial | fail | n/a` with a one-sentence rationale:
 
-| Criterion         | Question                                                                              |
-| ----------------- | ------------------------------------------------------------------------------------- |
-| `spec_match`      | Does the demo actually demonstrate what the spec promises (not just the easy subset)? |
-| `interactive`     | Is the surface real (controls / live readout / API call), not a styled code-card?     |
-| `blurb_alignment` | Does the feature-index blurb match what the page delivers and the spec's framing?     |
-| `edge_cases`      | Are failure modes / edge cases covered, or only the happy path?                       |
-| `references`      | Does the page cite `chromestatus.com/feature/<id>`? (invariant #3)                    |
-| `design_system`   | CSS variables / WCAG AA / button bg+color override / no static card? (invariants 5–7) |
+| Criterion         | Question                                                                                            |
+| ----------------- | --------------------------------------------------------------------------------------------------- |
+| `spec_match`      | Does the demo actually demonstrate what the spec promises (not just the easy subset)?               |
+| `interactive`     | Is the surface real (controls / live readout / API call), not a styled code-card?                   |
+| `blurb_alignment` | Does the feature-index blurb match what the page delivers and the spec's framing?                   |
+| `edge_cases`      | Are failure modes / edge cases covered, or only the happy path?                                     |
+| `references`      | Does the page cite `chromestatus.com/feature/<id>`? (invariant #3)                                  |
+| `design_system`   | CSS variables / WCAG AA / button bg+color override / no static card? (invariants 5–7)               |
+| `accessibility`   | Keyboard path, accessible names/labels, semantic roles/states, visible focus, and non-visual state? |
 
 The valuable output is **`openQuestions`** — each is a work item with `title`, `detail`, optional
 `severity` (`minor`/`moderate`/`major`) and optional `suggestedSlug` (the slug to use if the answer
@@ -162,11 +166,12 @@ browser pass is blocked rather than downgraded to a different browser tool. Cove
 > friendly fallback warning or a behind-a-flag note rather than completely crashing, throwing
 > unhandled exceptions, or rendering a broken blank screen. Do not score the page as `fail` on the
 > rubric solely due to lack of browser support, as long as this fallback behavior is correctly
-> implemented. Score the six-criterion rubric in `lib/critique.ts` honestly — partial/fail are
-> useful, don't inflate. Write the `CritiqueReport` JSON to
-> `v<N>/<feature>/<concept>/_questions.json`. Use the exact shape of
-> `v149/css-gap-decorations/rule-builder/_questions.json`. Commit and push **each file on its own**
-> with a single bash call:
+> implemented. Score the seven-criterion rubric in `lib/critique.ts` honestly, including
+> `accessibility`: keyboard operation, accessible names/labels, semantic roles/states, visible
+> focus, and accessibility tree/ARIA/live-region evidence where relevant. Partial/fail are useful,
+> don't inflate. Write the `CritiqueReport` JSON to `v<N>/<feature>/<concept>/_questions.json`. Use
+> the exact shape of `v149/css-gap-decorations/rule-builder/_questions.json`. Commit and push **each
+> file on its own** with a single bash call:
 > `git add <file> && git commit -m "critique: v<N>/<feature>/<concept>" && git push` (see the race
 > note below). Keep `reviewer` set to your subagent id.
 

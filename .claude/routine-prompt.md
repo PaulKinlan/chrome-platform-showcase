@@ -39,6 +39,11 @@ Rules that must never be broken. Each has bitten the project before:
    not substitute Playwright, the in-app browser, screenshots from another tool, or generic browser
    automation. If `chrome-devtools-mcp` is unavailable, stop and report that the feature is blocked
    on browser verification rather than claiming it was tested.
+6. **Accessibility is a release goal**: Every demo must be keyboard-operable and expose meaningful
+   semantics. Controls need accessible names/labels, visible focus, native elements where possible,
+   correct roles/states when ARIA is needed, and text or live-region equivalents for visual state
+   changes. During `chrome-devtools-mcp` verification, inspect the accessibility tree for custom
+   controls, visual-only state, canvas/SVG output, and any ARIA you add.
 
 Every time you decide to write a folder, the path MUST be `v<N>/<slug(listing_name)>` where N is the
 milestone whose listing returned the feature.
@@ -180,10 +185,11 @@ Feature index skeleton:
 ```html
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title><listing name> — Chrome <N> — chrome platform showcase</title>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>
+      <listing name> — Chrome <N> — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
 </head>
 <body>
@@ -224,6 +230,9 @@ Before committing, start the local server and verify each new concept with `chro
   or fallback banner.
 - Inspect console and network logs; fix unhandled errors, failed same-origin demo routes, blank
   states, and stale readouts.
+- Verify accessibility: tab through the demo, confirm visible focus, check that each control has an
+  accessible name/label, confirm custom widgets expose correct role/state, and use the Chrome
+  DevTools accessibility tree when state is visual-only or ARIA-backed.
 - For unsupported, origin-trial, flag-gated, OS-specific, or device-specific features, verify the
   fallback clearly states the missing capability and never reports fake success.
 

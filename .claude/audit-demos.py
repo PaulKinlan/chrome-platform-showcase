@@ -21,6 +21,14 @@ RAW_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3,8}(?![0-9A-Za-z_-])|rgba\([^)]*\)|hsl
 CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 STYLE_BLOCK_RE = re.compile(r"<style[^>]*>(.*?)</style>", re.I | re.S)
 STYLE_ATTR_RE = re.compile(r'\sstyle="([^"]*)"', re.I | re.S)
+IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
+CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
+BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
+CLICKABLE_NON_CONTROL_RE = re.compile(
+    r"<(div|span|li|p|section|article)\b([^>]*)\bonclick\s*=([^>]*)>", re.I | re.S
+)
+ATTR_RE = re.compile(r"([:\w-]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", re.I)
+LABEL_RE = re.compile(r"<label\b", re.I)
 
 INTERACTIVE_MARKERS = (
     "<button",
@@ -94,11 +102,78 @@ def css_raw_color_count(html: str) -> int:
     return count
 
 
+def attrs_to_dict(src: str) -> dict[str, str]:
+    attrs: dict[str, str] = {}
+    for key, value in ATTR_RE.findall(src):
+        key = key.lower()
+        if not key or key == "/":
+            continue
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        attrs[key] = value
+    return attrs
+
+
+def has_accessible_name(attrs: dict[str, str], inner: str = "") -> bool:
+    if attrs.get("aria-hidden", "").lower() == "true":
+        return True
+    if attrs.get("aria-label", "").strip():
+        return True
+    if attrs.get("aria-labelledby", "").strip():
+        return True
+    if attrs.get("title", "").strip():
+        return True
+    if re.sub(r"<[^>]+>", "", inner).strip():
+        return True
+    return False
+
+
+def static_accessibility_issue_count(html: str) -> int:
+    """Count obvious static a11y issues. This is a safety net, not a full audit."""
+    issues = 0
+    labels_present = bool(LABEL_RE.search(html))
+
+    for match in IMG_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(1))
+        if attrs.get("aria-hidden", "").lower() != "true" and "alt" not in attrs:
+            issues += 1
+
+    for match in CONTROL_RE.finditer(html):
+        tag = match.group(1).lower()
+        attrs = attrs_to_dict(match.group(2))
+        if tag == "input" and attrs.get("type", "").lower() in {"hidden", "submit", "button", "reset"}:
+            continue
+        if not (
+            attrs.get("aria-label")
+            or attrs.get("aria-labelledby")
+            or attrs.get("title")
+            or (attrs.get("id") and labels_present)
+        ):
+            issues += 1
+
+    for match in BUTTON_RE.finditer(html):
+        if not has_accessible_name(attrs_to_dict(match.group(1)), match.group(2)):
+            issues += 1
+
+    for match in re.finditer(r"tabindex\s*=\s*['\"]?([0-9]+)", html, re.I):
+        if int(match.group(1)) > 0:
+            issues += 1
+
+    for match in CLICKABLE_NON_CONTROL_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(2))
+        if not attrs.get("role") or attrs.get("tabindex") not in {"0", "-1"}:
+            issues += 1
+
+    return issues
+
+
 def run(strict: bool) -> int:
     errors: list[str] = []
     warnings: list[str] = []
     static_pages: list[str] = []
     raw_color_pages: list[str] = []
+    accessibility_pages: list[str] = []
 
     for path in html_files():
         rel = path.relative_to(ROOT)
@@ -125,10 +200,16 @@ def run(strict: bool) -> int:
         if css_raw_color_count(html):
             raw_color_pages.append(str(rel))
 
+        a11y_issues = static_accessibility_issue_count(html)
+        if a11y_issues:
+            accessibility_pages.append(f"{rel} ({a11y_issues})")
+
     if static_pages:
         warnings.append(f"{len(static_pages)} concept pages need stronger interactive affordances")
     if raw_color_pages:
         warnings.append(f"{len(raw_color_pages)} pages contain raw color literals/functions")
+    if accessibility_pages:
+        warnings.append(f"{len(accessibility_pages)} pages contain likely static accessibility issues")
 
     for msg in errors:
         print(f"ERROR: {msg}", file=sys.stderr)
@@ -148,6 +229,12 @@ def run(strict: bool) -> int:
                 print(f"  {item}")
             if len(raw_color_pages) > 120:
                 print(f"  ... {len(raw_color_pages) - 120} more")
+        if accessibility_pages:
+            print("\nPages with likely static accessibility issues (count in parentheses):")
+            for item in accessibility_pages[:120]:
+                print(f"  {item}")
+            if len(accessibility_pages) > 120:
+                print(f"  ... {len(accessibility_pages) - 120} more")
 
     return 1 if errors else 0
 

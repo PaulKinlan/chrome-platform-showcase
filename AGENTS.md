@@ -63,6 +63,10 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
   real DOM injection bugs on `/features`.
 - Demo CSS should use variables from `public/styles.css`, not raw hex colors. Keep text/background
   pairs at WCAG AA contrast.
+- Every demo must be accessible, not just visually polished: controls need keyboard operation,
+  accessible names/labels, semantic roles where native elements are not possible, visible focus, and
+  non-visual text/live-region equivalents for visual state changes. Use the Chrome DevTools
+  accessibility tree when browser-verifying a demo where semantics are not obvious.
 - If a local rule changes a `button` background, also set `color`; the global button style sets
   both.
 - Concept pages must be genuinely interactive. Do not ship static code cards. Use real controls,
@@ -209,7 +213,9 @@ Before handing off meaningful changes:
   `deno task audit` or `deno task check` when generated demos changed.
 - Start the server and smoke test key routes when routing, rendering, or shared styles changed.
 - Use `chrome-devtools-mcp` for browser verification, including the exact user-reported click path
-  for bug fixes. Do not use another browser automation tool as a substitute.
+  for bug fixes. Do not use another browser automation tool as a substitute. Include accessibility
+  evidence for changed demos: keyboard path, accessible names/labels for controls, visible focus,
+  and accessibility tree/ARIA/live-region observations when state changes are not plain text.
 - If escaping, route rendering, or `/features` changed, inspect quoted text in attributes and verify
   no injected markup escapes the expected tree.
 - If `public/styles.css` changed, check a mobile-width page and at least one existing demo for
