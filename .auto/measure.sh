@@ -83,6 +83,7 @@ SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.I | re.S)
 CODE_BLOCK_RE = re.compile(r"<pre\b[^>]*>.*?</pre>", re.I | re.S)
 IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
+CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
 CLICKABLE_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
 ATTR_RE = re.compile(r"([:\w-]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", re.I)
@@ -147,6 +148,15 @@ for path in html_files:
         attrs = attrs_to_dict(m.group(1))
         if not has_accessible_name(attrs, m.group(2)):
             static_issues.append(f"{rel}: button missing accessible name")
+
+    for m in CONTENTEDITABLE_RE.finditer(html):
+        attrs = attrs_to_dict(f"{m.group(2)} {m.group(4)}")
+        if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if attrs.get("role") not in {"textbox", "searchbox"}:
+            static_issues.append(f"{rel}: contenteditable missing textbox role")
+        if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+            static_issues.append(f"{rel}: contenteditable missing accessible name")
 
     for m in re.finditer(r"tabindex\s*=\s*['\"]?([0-9]+)", html, re.I):
         if int(m.group(1)) > 0:

@@ -82,3 +82,7 @@ future demo-building and review work ask, record, and enforce accessibility ques
   `AGENTS.md`, `CLAUDE.md`, `.claude/routine-prompt.md`, `.claude/auto-research.md`, the typed
   critique rubric, and `.claude/audit-demos.py`. Result: `a11y_goal_gaps` 7 → 0. Checks passed.
   Static corpus issues remain high, so the loop now optimizes `static_a11y_issues` directly.
+- Static accessibility issue reduction: added programmatic labels to generated controls, keyboard
+  semantics/Enter+Space activation for inline clickable non-controls, accessible names for icon
+  buttons, alt text for images, and scanner fixes for wrapping labels plus script/code examples.
+  Result: `static_a11y_issues` 1801 → 0 and `deno task check` has no accessibility warnings.

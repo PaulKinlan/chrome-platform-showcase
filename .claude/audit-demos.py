@@ -25,6 +25,7 @@ SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.I | re.S)
 CODE_BLOCK_RE = re.compile(r"<pre\b[^>]*>.*?</pre>", re.I | re.S)
 IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
+CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
 CLICKABLE_NON_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
 ATTR_RE = re.compile(r"([:\w-]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", re.I)
@@ -164,6 +165,15 @@ def static_accessibility_issue_count(html: str) -> int:
 
     for match in BUTTON_RE.finditer(html):
         if not has_accessible_name(attrs_to_dict(match.group(1)), match.group(2)):
+            issues += 1
+
+    for match in CONTENTEDITABLE_RE.finditer(html):
+        attrs = attrs_to_dict(f"{match.group(2)} {match.group(4)}")
+        if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if attrs.get("role") not in {"textbox", "searchbox"}:
+            issues += 1
+        if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
             issues += 1
 
     for match in re.finditer(r"tabindex\s*=\s*['\"]?([0-9]+)", html, re.I):
