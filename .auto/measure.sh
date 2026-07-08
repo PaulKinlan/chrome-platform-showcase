@@ -84,6 +84,7 @@ CODE_BLOCK_RE = re.compile(r"<pre\b[^>]*>.*?</pre>", re.I | re.S)
 SRCDOC_ATTR_RE = re.compile(r"\ssrcdoc\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I | re.S)
 IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 IFRAME_RE = re.compile(r"<iframe\b([^>]*)>", re.I | re.S)
+INDICATOR_RE = re.compile(r"<(progress|meter)\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
 CANVAS_RE = re.compile(r"<canvas\b([^>]*)>(.*?)</canvas>|<canvas\b([^>]*)/?>", re.I | re.S)
@@ -184,6 +185,16 @@ for path in html_files:
             continue
         if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby")):
             static_issues.append(f"{rel}: iframe missing accessible name")
+
+    for m in INDICATOR_RE.finditer(html):
+        tag = m.group(1).lower()
+        attrs = attrs_to_dict(m.group(2))
+        if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if likely_wrapped_by_label(html, m.start()):
+            continue
+        if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title") or has_label_for(html, attrs.get("id", ""))):
+            static_issues.append(f"{rel}: {tag} missing accessible name")
 
     for m in CONTROL_RE.finditer(html):
         tag, attr_src = m.group(1).lower(), m.group(2)

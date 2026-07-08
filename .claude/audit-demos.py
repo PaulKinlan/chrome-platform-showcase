@@ -26,6 +26,7 @@ CODE_BLOCK_RE = re.compile(r"<pre\b[^>]*>.*?</pre>", re.I | re.S)
 SRCDOC_ATTR_RE = re.compile(r"\ssrcdoc\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I | re.S)
 IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 IFRAME_RE = re.compile(r"<iframe\b([^>]*)>", re.I | re.S)
+INDICATOR_RE = re.compile(r"<(progress|meter)\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
 CANVAS_RE = re.compile(r"<canvas\b([^>]*)>(.*?)</canvas>|<canvas\b([^>]*)/?>", re.I | re.S)
@@ -196,6 +197,20 @@ def static_accessibility_issue_count(html: str) -> int:
         if attrs.get("aria-hidden", "").lower() == "true":
             continue
         if not (attrs.get("title") or attrs.get("aria-label") or attrs.get("aria-labelledby")):
+            issues += 1
+
+    for match in INDICATOR_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(2))
+        if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if likely_wrapped_by_label(html, match.start()):
+            continue
+        if not (
+            attrs.get("aria-label")
+            or attrs.get("aria-labelledby")
+            or attrs.get("title")
+            or has_label_for(html, attrs.get("id", ""))
+        ):
             issues += 1
 
     for match in CONTROL_RE.finditer(html):
