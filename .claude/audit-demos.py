@@ -200,6 +200,9 @@ def static_accessibility_issue_count(html: str) -> int:
             issues += 1
 
     for tag, attrs in element_attrs:
+        if attrs.get("role", "").lower() == "img" and attrs.get("aria-hidden", "").lower() != "true":
+            if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+                issues += 1
         for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby"):
             if attrs.get(attr_name):
                 for ref in attrs[attr_name].split():

@@ -185,6 +185,9 @@ for path in html_files:
             static_issues.append(f"{rel}: focusable element is aria-hidden")
 
     for tag, attrs in element_attrs:
+        if attrs.get("role", "").lower() == "img" and attrs.get("aria-hidden", "").lower() != "true":
+            if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
+                static_issues.append(f"{rel}: role=img missing accessible name")
         for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby"):
             if attrs.get(attr_name):
                 for ref in attrs[attr_name].split():
