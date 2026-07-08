@@ -29,6 +29,7 @@ CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bco
 CANVAS_RE = re.compile(r"<canvas\b([^>]*)>(.*?)</canvas>|<canvas\b([^>]*)/?>", re.I | re.S)
 SVG_RE = re.compile(r"<svg\b([^>]*)>(.*?)</svg>|<svg\b([^>]*)/?>", re.I | re.S)
 STATEFUL_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article|a)\b([^>]*)>", re.I | re.S)
+TAG_RE = re.compile(r"<([a-z][\w:-]*)\b([^>]*)>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
 CLICKABLE_NON_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
 ATTR_RE = re.compile(r"([:\w-]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", re.I)
@@ -150,6 +151,17 @@ def static_accessibility_issue_count(html: str) -> int:
     # markup in the page shell, not examples rendered as text or generated later.
     html = CODE_BLOCK_RE.sub("", SCRIPT_BLOCK_RE.sub("", html))
     issues = 0
+
+    element_attrs = [(match.group(1).lower(), attrs_to_dict(match.group(2))) for match in TAG_RE.finditer(html)]
+    ids = {attrs["id"] for _, attrs in element_attrs if attrs.get("id")}
+
+    for tag, attrs in element_attrs:
+        if attrs.get("aria-controls"):
+            for ref in attrs["aria-controls"].split():
+                if ref not in ids:
+                    issues += 1
+        elif "aria-expanded" in attrs and tag != "summary":
+            issues += 1
 
     for match in IMG_RE.finditer(html):
         attrs = attrs_to_dict(match.group(1))
