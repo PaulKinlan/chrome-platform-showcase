@@ -85,6 +85,7 @@ IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
 CANVAS_RE = re.compile(r"<canvas\b([^>]*)>(.*?)</canvas>|<canvas\b([^>]*)/?>", re.I | re.S)
+SVG_RE = re.compile(r"<svg\b([^>]*)>(.*?)</svg>|<svg\b([^>]*)/?>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
 CLICKABLE_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
 ATTR_RE = re.compile(r"([:\w-]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", re.I)
@@ -166,6 +167,20 @@ for path in html_files:
             continue
         if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title") or re.sub(r"<[^>]+>", "", inner).strip()):
             static_issues.append(f"{rel}: canvas missing accessible name or fallback")
+
+    for m in SVG_RE.finditer(html):
+        attrs = attrs_to_dict(m.group(1) or m.group(3) or "")
+        inner = m.group(2) or ""
+        if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if not (
+            attrs.get("aria-label")
+            or attrs.get("aria-labelledby")
+            or attrs.get("title")
+            or "<title" in inner.lower()
+            or re.sub(r"<[^>]+>", "", inner).strip()
+        ):
+            static_issues.append(f"{rel}: svg missing accessible name or hidden state")
 
     for m in re.finditer(r"tabindex\s*=\s*['\"]?([0-9]+)", html, re.I):
         if int(m.group(1)) > 0:

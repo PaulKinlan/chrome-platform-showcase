@@ -27,6 +27,7 @@ IMG_RE = re.compile(r"<img\b([^>]*)>", re.I | re.S)
 CONTROL_RE = re.compile(r"<(input|select|textarea)\b([^>]*)>", re.I | re.S)
 CONTENTEDITABLE_RE = re.compile(r"<(div|p|span|pre|section|article)\b([^>]*)\bcontenteditable(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?([^>]*)>", re.I | re.S)
 CANVAS_RE = re.compile(r"<canvas\b([^>]*)>(.*?)</canvas>|<canvas\b([^>]*)/?>", re.I | re.S)
+SVG_RE = re.compile(r"<svg\b([^>]*)>(.*?)</svg>|<svg\b([^>]*)/?>", re.I | re.S)
 BUTTON_RE = re.compile(r"<button\b([^>]*)>(.*?)</button>", re.I | re.S)
 CLICKABLE_NON_CONTROL_RE = re.compile(r"<(div|span|li|p|section|article)\b([^>]*)>", re.I | re.S)
 ATTR_RE = re.compile(r"([:\w-]+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", re.I)
@@ -183,6 +184,20 @@ def static_accessibility_issue_count(html: str) -> int:
         if attrs.get("aria-hidden", "").lower() == "true":
             continue
         if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title") or re.sub(r"<[^>]+>", "", inner).strip()):
+            issues += 1
+
+    for match in SVG_RE.finditer(html):
+        attrs = attrs_to_dict(match.group(1) or match.group(3) or "")
+        inner = match.group(2) or ""
+        if attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        if not (
+            attrs.get("aria-label")
+            or attrs.get("aria-labelledby")
+            or attrs.get("title")
+            or "<title" in inner.lower()
+            or re.sub(r"<[^>]+>", "", inner).strip()
+        ):
             issues += 1
 
     for match in re.finditer(r"tabindex\s*=\s*['\"]?([0-9]+)", html, re.I):
