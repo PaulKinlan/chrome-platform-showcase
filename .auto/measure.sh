@@ -111,6 +111,11 @@ def has_accessible_name(attrs: dict[str, str], inner: str = "") -> bool:
         return True
     return False
 
+
+def likely_wrapped_by_label(html_text: str, start: int) -> bool:
+    before = html_text[:start].lower()
+    return before.rfind("<label") > before.rfind("</label>")
+
 for path in html_files:
     rel = path.relative_to(ROOT)
     html = path.read_text(encoding="utf-8", errors="ignore")
@@ -127,6 +132,8 @@ for path in html_files:
         tag, attr_src = m.group(1).lower(), m.group(2)
         attrs = attrs_to_dict(attr_src)
         if tag == "input" and attrs.get("type", "").lower() in {"hidden", "submit", "button", "reset"}:
+            continue
+        if likely_wrapped_by_label(html, m.start()):
             continue
         if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title") or (attrs.get("id") and labels_present)):
             static_issues.append(f"{rel}: {tag} may be missing label")

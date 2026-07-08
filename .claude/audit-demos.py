@@ -127,6 +127,11 @@ def has_accessible_name(attrs: dict[str, str], inner: str = "") -> bool:
     return False
 
 
+def likely_wrapped_by_label(html: str, start: int) -> bool:
+    before = html[:start].lower()
+    return before.rfind("<label") > before.rfind("</label>")
+
+
 def static_accessibility_issue_count(html: str) -> int:
     """Count obvious static a11y issues. This is a safety net, not a full audit."""
     issues = 0
@@ -141,6 +146,8 @@ def static_accessibility_issue_count(html: str) -> int:
         tag = match.group(1).lower()
         attrs = attrs_to_dict(match.group(2))
         if tag == "input" and attrs.get("type", "").lower() in {"hidden", "submit", "button", "reset"}:
+            continue
+        if likely_wrapped_by_label(html, match.start()):
             continue
         if not (
             attrs.get("aria-label")
