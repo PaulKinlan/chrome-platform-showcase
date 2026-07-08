@@ -22,12 +22,12 @@ future demo-building and review work ask, record, and enforce accessibility ques
 
 ## Metrics
 
-- **Primary**: `a11y_goal_gaps` (count, lower is better) — missing accessibility validation
-  integration points across docs, routine prompt, critique model, and audit tooling.
+- **Primary**: `static_a11y_issues` (count, lower is better) — objective static HTML issues found
+  in demos by `.auto/measure.sh` (missing alt text, unlabeled controls, unnamed buttons, positive
+  tabindex, clickable non-controls lacking roles).
 - **Secondary**:
-  - `static_a11y_issues` — objective static HTML issues found in demos by `.auto/measure.sh`
-    (missing alt text, unlabeled controls, unnamed buttons, positive tabindex, clickable
-    non-controls lacking roles).
+  - `a11y_goal_gaps` — missing accessibility validation integration points across docs, routine
+    prompt, critique model, and audit tooling. This should stay at 0.
   - `docs_gaps` — missing documentation/routine accessibility requirements.
   - `code_gaps` — missing typed critique/audit integration.
   - `audit_strict_errors` — strict repository audit errors.
@@ -77,4 +77,8 @@ future demo-building and review work ask, record, and enforce accessibility ques
 
 ## What's Been Tried
 
-- Baseline setup created this playbook and `.auto/measure.sh`. No project behavior changed yet.
+- Baseline setup created this playbook and `.auto/measure.sh`.
+- Accessibility process integration experiment: added explicit accessibility requirements to
+  `AGENTS.md`, `CLAUDE.md`, `.claude/routine-prompt.md`, `.claude/auto-research.md`, the typed
+  critique rubric, and `.claude/audit-demos.py`. Result: `a11y_goal_gaps` 7 → 0. Checks passed.
+  Static corpus issues remain high, so the loop now optimizes `static_a11y_issues` directly.
