@@ -415,12 +415,14 @@ def static_accessibility_issue_count(html: str) -> int:
                 issues += 1
         if role == "listbox" and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])option\1", inner, re.I):
             issues += 1
-        if role in {"menuitem", "option", "radio", "treeitem"}:
+        if role in {"menu", "menubar"} and not attrs.get("aria-owns") and not re.search(r"\brole\s*=\s*(['\"])(menuitem|menuitemcheckbox|menuitemradio)\1", inner, re.I):
+            issues += 1
+        if role in {"menuitem", "menuitemcheckbox", "menuitemradio", "option", "radio", "treeitem"}:
             if not has_accessible_name(attrs, inner):
                 issues += 1
             if role == "option" and attrs.get("aria-selected") not in {"true", "false"}:
                 issues += 1
-            if role == "radio" and attrs.get("aria-checked") not in {"true", "false"}:
+            if role in {"menuitemcheckbox", "menuitemradio", "radio"} and attrs.get("aria-checked") not in {"true", "false"}:
                 issues += 1
             if role == "treeitem" and tag not in {"button", "a"} and attrs.get("tabindex") not in {"0", "-1"}:
                 issues += 1
