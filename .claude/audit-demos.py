@@ -186,6 +186,17 @@ def is_focusable_element(tag: str, attrs: dict[str, str]) -> bool:
     )
 
 
+def has_shadow_reference_target(html: str, target_id: str) -> bool:
+    """Return true when a custom element explicitly exposes a shadow-root target."""
+    if not target_id:
+        return False
+    quoted = re.escape(target_id)
+    return bool(
+        re.search(rf"\bshadowrootreferencetarget\s*=\s*(['\"])" + quoted + r"\1", html, re.I)
+        or re.search(rf"\bshadowRootReferenceTarget\s*:\s*(['\"])" + quoted + r"\1", html)
+    )
+
+
 def static_accessibility_issue_count(html: str) -> int:
     """Count obvious static a11y issues. This is a safety net, not a full audit."""
     # Ignore JS payload strings and code samples. This audit targets actual DOM
@@ -210,11 +221,14 @@ def static_accessibility_issue_count(html: str) -> int:
         if attrs.get("role", "").lower() == "img" and attrs.get("aria-hidden", "").lower() != "true":
             if not (attrs.get("aria-label") or attrs.get("aria-labelledby") or attrs.get("title")):
                 issues += 1
-        for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby"):
+        for attr_name in ("aria-controls", "aria-labelledby", "aria-describedby", "aria-activedescendant"):
             if attrs.get(attr_name):
                 for ref in attrs[attr_name].split():
-                    if ref not in ids:
-                        issues += 1
+                    if ref in ids:
+                        continue
+                    if attr_name == "aria-activedescendant" and "-" in tag and has_shadow_reference_target(html, ref):
+                        continue
+                    issues += 1
         if "aria-expanded" in attrs and tag != "summary" and not attrs.get("aria-controls"):
             issues += 1
 
