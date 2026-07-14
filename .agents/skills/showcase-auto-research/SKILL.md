@@ -1,6 +1,6 @@
 ---
 name: showcase-auto-research
-description: Run chrome-platform-showcase auto-research, conformance, and goal-setting workflows. Trigger when the user asks to run showcase auto research, critique demos, generate conformance suites, or turn critique open questions into demo work.
+description: Audit chrome-platform-showcase coverage, build missing demos, and run critique, conformance, validation, and goal-setting workflows. Trigger when the user asks to run showcase auto research, fill demo-pending releases, critique demos, generate conformance suites, validate demos, or turn critique open questions into demo work.
 ---
 
 # Showcase Auto Research
@@ -10,10 +10,11 @@ This is not the remote Claude routine.
 
 ## First Steps
 
-1. Read `CLAUDE.md`, `AGENTS.md`, and `.claude/auto-research.md`.
-2. Read `lib/critique.ts` for critique shape when writing `_questions.json`.
-3. Read `lib/conformance.ts` for conformance shape when writing `conformance.json`.
-4. Start from a current checkout:
+1. Read `CLAUDE.md`, `AGENTS.md`, `.claude/routine-prompt.md`, and `.claude/auto-research.md`.
+2. Read `lib/chromestatus.ts` and the milestone renderer in `server.ts` so coverage uses the same ChromeStatus listing and slug rules as the site.
+3. Read `lib/critique.ts` for critique shape when writing `_questions.json`.
+4. Read `lib/conformance.ts` for conformance shape when writing `conformance.json`.
+5. Start from a current checkout:
 
 ```bash
 git pull --rebase
@@ -24,19 +25,80 @@ git status --short
 
 Infer the mode from the user prompt:
 
-- `critique`: write missing `_questions.json` files.
-- `conformance`: write missing `conformance.json` files.
-- `all` or `auto-research`: run a small critique + conformance batch.
+- `coverage`, `pending`, or `build`: inventory the milestone and build missing feature and uber demos.
+- `critique`: write missing `_questions.json` files for demos that exist.
+- `conformance`: write missing `conformance.json` files for features that exist.
+- `all` or `auto-research`: **coverage/build first**, then critique and conformance. Never treat critique + conformance coverage as release coverage.
+- `validate`: exercise every implemented concept and conformance route in the requested scope.
 - `goals` or `goal-setting`: fix one concrete open question and re-critique.
 
-If the user provides milestones, use those. If not, use conservative defaults:
+If the user provides milestones, use those. If not:
 
-- Critique default: `v138`, `v150`
-- Conformance default: `v140`, `v130`
-- Goal-setting default: choose one actionable `major` or `moderate` open question.
+- Coverage/build and `all`: inspect the newest two tracked milestones and select those with pending demos. At the time of execution, derive this from ChromeStatus and the rendered milestone pages; do not rely on hard-coded milestone numbers.
+- Critique fallback, only when the newest releases have no pending demos: `v138`, `v150`.
+- Conformance fallback, only when the newest releases have no pending demos: `v140`, `v130`.
+- Goal-setting: choose one actionable `major` or `moderate` open question.
 
 Ask before launching more than six milestones or a full sweep; the operator manual calls out quota
-risk for large fan-out runs.
+risk for large fan-out runs. A request for “all demos” or a “full sweep” is already authorization.
+
+## Mandatory Coverage And Build Pass
+
+Run this pass before critique or conformance in `all` / `auto-research` mode.
+
+### Build the coverage inventory
+
+For each target milestone:
+
+1. Fetch the ChromeStatus milestone listing used by the server. Use `features_by_type` membership for the milestone; never infer the milestone from a feature detail response.
+2. Deduplicate cards by ChromeStatus feature ID. A feature can appear in more than one status section, but one implementation satisfies that feature ID.
+3. Derive each slug from the milestone listing name with the same slug function as `server.ts`. Do not use the feature-detail name.
+4. Compare the complete unique feature-ID set with disk and with the rendered milestone page:
+   - implemented feature: `v<N>/<slug>/index.html` exists and the milestone card links to `/v<N>/<slug>/`;
+   - pending feature: the card links only to ChromeStatus, says `demo pending`, or the canonical feature folder/index is absent;
+   - incomplete feature: the feature index exists but has no interactive concept pages, lacks the mandatory ChromeStatus link, or only contains static code/reference cards;
+   - pending uber demo: `/v<N>/uber-demo/index.html` is absent or the milestone page says it has not been built.
+5. Print and preserve an exact inventory before building:
+
+```text
+v<N> unique tracked features: <total>
+implemented: <implemented>
+pending: <pending>
+incomplete: <incomplete>
+uber demo: implemented | pending
+```
+
+The denominator is the unique ChromeStatus feature-ID set, not the number of folders already on disk. Never report a milestone as complete after inspecting only implemented folders.
+
+### Build every pending item in scope
+
+For each pending or incomplete feature:
+
+1. Read `.claude/routine-prompt.md`, the milestone listing entry, ChromeStatus detail, linked spec, and existing neighboring demos.
+2. Build `v<N>/<canonical-slug>/index.html` plus interactive concept pages for **every distinct use case**. Two or three concepts are a floor, not a cap.
+3. Follow all project invariants: real interaction, exact feature probes, graceful unsupported/flag/device fallbacks, CSS variables, WCAG AA, keyboard/accessibility semantics, and a `chromestatus.com/feature/<id>` link on every page.
+4. For HTTP/header/cache/redirect behavior, add the required server route as a manual top-level change; do not fake the contract in client-side text.
+5. Use `chrome-devtools-mcp` on every new concept. Exercise every visible control, inspect the accessibility tree where needed, inspect console/network/telemetry, and verify the fallback path when the current browser lacks the feature.
+6. Commit and push one feature at a time, staging only that feature and any route code it requires:
+
+```bash
+git add v<N>/<feature>/ server.ts && git commit -m "add v<N> <feature> demos" && git push
+```
+
+Omit `server.ts` when it was not changed. Build the uber demo after the per-feature batch and commit it separately.
+
+### Prove the coverage gap closed
+
+After building, regenerate the inventory from ChromeStatus, disk, and the rendered local milestone page. A target milestone is complete only when:
+
+- every unique tracked feature ID maps to its canonical local demo link;
+- no card says `demo pending` or links only to ChromeStatus because its demo is absent;
+- each feature has interactive concept coverage and the mandatory ChromeStatus reference;
+- the requested uber demo exists;
+- local routes return 200 and were exercised through `chrome-devtools-mcp`;
+- after push/deploy, the live `/v<N>/` page links every implemented card locally and no longer labels those cards `demo pending`. If deployment has not updated yet, report `live verification: deployment pending` rather than claiming the live gap is closed.
+
+If time or quota stops the batch, report `implemented/total` and list every remaining feature ID + canonical slug. Do not say “complete,” “clean,” or “all” when pending items remain.
 
 ## Critique Pass
 
@@ -97,6 +159,19 @@ once. If subagents are unavailable, process milestones serially.
 Sibling agents share one working tree. Stage only the file being committed; do not use `git add -A`
 inside the fan-out. If a push races, pull/rebase and retry the push for the already-created commit.
 
+## Completion Rules
+
+Do not use critique counts or conformance counts as evidence that a release's demos are implemented. These are separate axes:
+
+```text
+coverage: <implemented>/<unique tracked> feature demos; uber: implemented | pending
+critique: <reports>/<implemented concepts>
+conformance: <suites>/<implemented features>
+validation: <exercised>/<implemented concepts>
+```
+
+For `all`, report all four axes. A no-op is valid only when coverage has zero pending/incomplete features, the uber demo exists, and critique/conformance have no gaps. Check the rendered `/v<N>/` page itself before making that claim.
+
 ## After Each Batch
 
 Run:
@@ -107,5 +182,12 @@ deno check server.ts
 git status --short
 ```
 
-If `deno fmt` changed generated JSON, commit and push only those relevant formatting changes. Report
-commits, pushed refs, routes to inspect (`/critiques`, `/conformance`), and any blocked milestones.
+If `deno fmt` changed generated JSON, commit and push only those relevant formatting changes. Report:
+
+- coverage before and after (`implemented/unique tracked`, incomplete, uber status);
+- every built feature and commit;
+- critique, conformance, and validation counts with their own denominators;
+- pushed refs and routes to inspect (`/v<N>/`, `/critiques`, `/conformance`);
+- every pending feature or blocked milestone.
+
+The final check is visual and literal: open each target `/v<N>/` page and confirm there are no `demo pending` cards left in the requested scope.
