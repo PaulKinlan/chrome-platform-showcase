@@ -202,12 +202,21 @@
   <header class="lede-block">
     <p class="eyebrow">v150 · Web API · Speech</p>
     <h1>Device Capability Probe</h1>
-    <p class="lede">Check what speech recognition capabilities your current browser and device expose. The probe inspects <code>SpeechRecognition</code>, <code>SpeechRecognition.available()</code> with the <code>quality</code> option, local language-pack status, <code>unspokenPunctuation</code>, microphone readiness, and a brief start/abort trial for each quality tier.</p>
+    <p class="lede">Check what speech recognition capabilities your current browser and device expose for a specific BCP 47 language. The probe inspects <code>SpeechRecognition</code>, <code>SpeechRecognition.available()</code> with the <code>quality</code> option, local language-pack status, the instance <code>quality</code> property, microphone readiness, and a brief start/abort trial for each quality tier.</p>
   </header>
 
   <div class="controls">
     <button class="action-btn primary" id="btnProbe">Run Capability Probe</button>
     <button class="action-btn" id="btnReset">Reset</button>
+    <label class="check-row" for="probeLang">language</label>
+    <select class="select-control" id="probeLang">
+      <option value="en-US">English (US) — en-US</option>
+      <option value="en-GB">English (UK) — en-GB</option>
+      <option value="de-DE">German — de-DE</option>
+      <option value="es-ES">Spanish — es-ES</option>
+      <option value="fr-FR">French — fr-FR</option>
+      <option value="ja-JP">Japanese — ja-JP</option>
+    </select>
     <label class="check-row"><input type="checkbox" id="localOnly" checked> require <code>processLocally</code></label>
     <label class="check-row" for="trialTier">trial tier</label>
     <select class="select-control" id="trialTier">
@@ -304,8 +313,8 @@
   const PROBES = [
     { id: 'sr-basic',    label: 'SpeechRecognition API',      desc: 'window.SpeechRecognition or webkitSpeechRecognition exists' },
     { id: 'sr-quality',  label: 'quality option',             desc: 'SpeechRecognition.available({ quality }) accepts command, dictation, and conversation' },
-    { id: 'sr-ondevice', label: 'local recognition pack',     desc: 'processLocally plus SpeechRecognition.available() for en-US dictation' },
-    { id: 'sr-punct',    label: 'unspokenPunctuation',        desc: 'Auto-inferred punctuation without speaking it (Chrome 150)' },
+    { id: 'sr-ondevice', label: 'local recognition pack',     desc: 'processLocally plus SpeechRecognition.available() for the selected language and dictation quality' },
+    { id: 'sr-instance-quality', label: 'quality property',           desc: 'A SpeechRecognition instance exposes the Chrome 150 quality hint' },
     { id: 'sr-perm',     label: 'Microphone permission',      desc: 'navigator.permissions — microphone access state' },
     { id: 'sr-secure',   label: 'Secure context',             desc: 'SpeechRecognition requires HTTPS or localhost' },
   ];
@@ -385,6 +394,12 @@
     tbody.replaceChildren(tr);
   }
 
+  function hasQualityProperty() {
+    if (!SR) return false;
+    try { return 'quality' in new SR(); }
+    catch (_) { return false; }
+  }
+
   function hasProcessLocally() {
     if (!SR) return false;
     if ('processLocally' in SR.prototype) return true;
@@ -410,7 +425,11 @@
     }
   }
 
-  async function queryQualityStatuses(processLocally) {
+  function selectedLanguage() {
+    return document.getElementById('probeLang').value;
+  }
+
+  async function queryQualityStatuses(processLocally, lang = selectedLanguage()) {
     if (!SR) {
       return {
         ok: false,
@@ -430,7 +449,7 @@
     for (const quality of QUALITY_TIERS) {
       try {
         const status = await SR.available({
-          langs: ['en-US'],
+          langs: [lang],
           processLocally,
           quality,
         });
@@ -455,7 +474,7 @@
     return {
       ok: true,
       statuses,
-      detail: QUALITY_TIERS.map((quality) => quality + ': ' + statuses[quality]).join(', '),
+      detail: lang + ' — ' + QUALITY_TIERS.map((quality) => quality + ': ' + statuses[quality]).join(', '),
     };
   }
 
@@ -502,12 +521,18 @@
     // 2. quality option on SpeechRecognition.available()
     await delay(120);
     const localOnly = document.getElementById('localOnly').checked;
-    const qualityProbe = await queryQualityStatuses(localOnly);
-    if (qualityProbe.ok) {
+    const lang = selectedLanguage();
+    const qualityProbe = await queryQualityStatuses(localOnly, lang);
+    if (qualityProbe.ok && hasQualityProperty()) {
       setBadge('sr-quality', 'badge-yes', 'yes');
-      setDetail('sr-quality', 'SpeechRecognition.available() accepted quality for all tiers. ' + qualityProbe.detail + '.');
-      log('✓ quality option accepted for command, dictation, and conversation', 'log-ok');
+      setDetail('sr-quality', 'The instance quality property exists and available() returned statuses for all tiers. ' + qualityProbe.detail + '.');
+      log('✓ quality option and instance property available', 'log-ok');
       addResult('quality option', 'Accepted', qualityProbe.detail);
+    } else if (qualityProbe.ok) {
+      setBadge('sr-quality', 'badge-partial', '?');
+      setDetail('sr-quality', 'available() returned statuses, but the instance quality property is absent. Web IDL ignores unknown dictionary members, so this does not prove the quality option is implemented. ' + qualityProbe.detail + '.');
+      log('? available() returned statuses, but SpeechRecognition.quality is absent', 'log-warn');
+      addResult('quality option', 'Not proven', qualityProbe.detail + '; instance quality property absent');
     } else {
       const unavailableBecauseOld = qualityProbe.detail.includes('available() is not exposed');
       setBadge('sr-quality', unavailableBecauseOld ? 'badge-partial' : 'badge-no', unavailableBecauseOld ? '?' : 'no');
@@ -536,7 +561,7 @@
       } else {
         try {
           const status = qualityProbe.statuses.dictation || await SR.available({
-            langs: ['en-US'],
+            langs: [lang],
             processLocally: true,
             quality: 'dictation',
           });
@@ -544,7 +569,7 @@
           setBadge('sr-ondevice', ok ? 'badge-yes' : 'badge-partial', ok ? 'yes' : String(status));
           setDetail(
             'sr-ondevice',
-            'en-US dictation local pack status: ' + status + '. ' +
+            lang + ' dictation local pack status: ' + status + '. ' +
               (canInstallPacks ? 'install() is exposed for downloadable packs. ' : 'install() is not exposed. ') +
               policy,
           );
@@ -562,25 +587,25 @@
       addResult('Local recognition', 'N/A', 'SpeechRecognition not available');
     }
 
-    // 4. unspokenPunctuation
+    // 4. quality property on the recognition instance
     await delay(120);
     if (SR) {
       const sr = new SR();
-      const hasPunct = 'unspokenPunctuation' in sr;
-      if (hasPunct) {
-        setBadge('sr-punct', 'badge-yes', 'yes');
-        setDetail('sr-punct', 'unspokenPunctuation property available. Default: ' + sr.unspokenPunctuation + '.');
-        log('✓ unspokenPunctuation available, default: ' + sr.unspokenPunctuation, 'log-ok');
-        addResult('unspokenPunctuation', 'Available', 'Default: ' + sr.unspokenPunctuation);
+      const hasQuality = hasQualityProperty();
+      if (hasQuality) {
+        setBadge('sr-instance-quality', 'badge-yes', 'yes');
+        setDetail('sr-instance-quality', 'SpeechRecognition.quality is exposed. Current/default value: ' + String(sr.quality) + '.');
+        log('✓ SpeechRecognition.quality available', 'log-ok');
+        addResult('quality property', 'Available', 'Default: ' + String(sr.quality));
       } else {
-        setBadge('sr-punct', 'badge-no', 'no');
-        setDetail('sr-punct', 'unspokenPunctuation not found. Requires Chrome 150+ with the feature flag or origin trial.');
-        log('✗ unspokenPunctuation not available', 'log-warn');
-        addResult('unspokenPunctuation', 'Not available', 'Chrome 150+ required');
+        setBadge('sr-instance-quality', 'badge-no', 'no');
+        setDetail('sr-instance-quality', 'SpeechRecognition exists, but this build does not expose the quality hint. unspokenPunctuation is not tested here because it is a separate Chrome 151 feature.');
+        log('✗ SpeechRecognition.quality not exposed in this build', 'log-warn');
+        addResult('quality property', 'Not available', 'The Chrome 150 quality hint is not exposed in this build');
       }
     } else {
-      setBadge('sr-punct', 'badge-no', 'n/a');
-      addResult('unspokenPunctuation', 'N/A', 'SpeechRecognition not available');
+      setBadge('sr-instance-quality', 'badge-no', 'n/a');
+      addResult('quality property', 'N/A', 'SpeechRecognition not available');
     }
 
     // 5. Microphone permission
@@ -638,6 +663,7 @@
   async function runTrial() {
     const button = document.getElementById('btnTrial');
     const quality = document.getElementById('trialTier').value;
+    const lang = selectedLanguage();
     const localOnly = document.getElementById('localOnly').checked;
     button.disabled = true;
     setTrialStatus('Preparing ' + quality + ' start() trial…', 'warn');
@@ -649,13 +675,13 @@
       return;
     }
 
-    const preflight = await queryQualityStatuses(localOnly);
+    const preflight = await queryQualityStatuses(localOnly, lang);
     const packStatus = preflight.statuses[quality] || 'not checked';
 
     let recognition;
     try {
       recognition = new SR();
-      recognition.lang = 'en-US';
+      recognition.lang = lang;
       recognition.continuous = false;
       recognition.interimResults = false;
       recognition.maxAlternatives = 1;
@@ -690,7 +716,7 @@
       recognition.onstart = () => {
         window.setTimeout(() => {
           finish(
-            'Started and aborted a ' + quality + ' trial. Local pack preflight: ' + packStatus + '.',
+            'Started and aborted a ' + lang + ' / ' + quality + ' trial. Local pack preflight: ' + packStatus + '.',
             'ok',
             'log-ok',
           );
@@ -698,14 +724,14 @@
       };
       recognition.onerror = (event) => {
         finish(
-          'Trial reported ' + (event.error || 'unknown-error') + ' for ' + quality + '. Local pack preflight: ' + packStatus + '.',
+          'Trial reported ' + (event.error || 'unknown-error') + ' for ' + lang + ' / ' + quality + '. Local pack preflight: ' + packStatus + '.',
           event.error === 'not-allowed' || event.error === 'audio-capture' ? 'warn' : 'err',
           event.error === 'not-allowed' || event.error === 'audio-capture' ? 'log-warn' : 'log-err',
         );
       };
       recognition.onend = () => {
         finish(
-          'Trial ended before onstart for ' + quality + '. Local pack preflight: ' + packStatus + '.',
+          'Trial ended before onstart for ' + lang + ' / ' + quality + '. Local pack preflight: ' + packStatus + '.',
           'warn',
           'log-warn',
         );
@@ -713,7 +739,7 @@
 
       timeoutId = window.setTimeout(() => {
         finish(
-          'Trial timed out before start() produced an event for ' + quality + '. Local pack preflight: ' + packStatus + '.',
+          'Trial timed out before start() produced an event for ' + lang + ' / ' + quality + '. Local pack preflight: ' + packStatus + '.',
           'warn',
           'log-warn',
         );
@@ -721,10 +747,10 @@
 
       try {
         recognition.start();
-        log('Started recognition trial for ' + quality + ' with processLocally=' + localOnly + '.', 'log-info');
+        log('Started recognition trial for ' + lang + ' / ' + quality + ' with processLocally=' + localOnly + '.', 'log-info');
       } catch (error) {
         finish(
-          'start() threw ' + (error.name || 'Error') + ' for ' + quality + '. Local pack preflight: ' + packStatus + '.',
+          'start() threw ' + (error.name || 'Error') + ' for ' + lang + ' / ' + quality + '. Local pack preflight: ' + packStatus + '.',
           'err',
           'log-err',
         );
