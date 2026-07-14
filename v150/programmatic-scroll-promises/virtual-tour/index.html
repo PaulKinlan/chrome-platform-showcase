@@ -197,6 +197,7 @@
     </div>
     <div class="tour-controls">
       <button class="tour-btn primary" id="btnStart" onclick="startTour()">▶ Start tour</button>
+      <button class="tour-btn secondary" id="btnStop" onclick="stopTour()" disabled>Stop tour</button>
       <button class="tour-btn secondary" id="btnReset" onclick="resetTour()">Reset</button>
     </div>
   </div>
@@ -211,54 +212,35 @@
 
   <section class="source-panel" aria-labelledby="tour-source-title">
     <h2 id="tour-source-title">source</h2>
-    <pre id="tour-source"><code>const viewport = document.getElementById("tourViewport");
-const log = document.getElementById("eventLog");
-
-function logMsg(message, cls) {
-  const row = document.createElement("div");
-  row.className = cls || "log-info";
-  row.textContent = `${new Date().toLocaleTimeString("en", {
-    hour12: false,
-  })} - ${message}`;
-  log.appendChild(row);
-}
+    <pre id="tour-source"><code>let runToken = 0;
 
 function smoothScrollTo(top) {
-  const promise = viewport.scrollTo({ top, behavior: "smooth" });
-
-  if (promise &amp;&amp; typeof promise.then === "function") {
-    return promise; // Chrome 150+: resolves when smooth scrolling settles.
+  const nativePromise = viewport.scrollTo({ top, behavior: "smooth" });
+  if (nativePromise &amp;&amp; typeof nativePromise.then === "function") {
+    return nativePromise; // Chrome 150+: settles with the scroll.
   }
 
-  viewport.scrollTop = top;
-  return Promise.resolve();
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function setStop(i, state) {
-  document.getElementById(`badge-${i}`).textContent =
-    state === "current" ? "Visiting" : "Visited";
-  document.getElementById(`prog-${i}`).className =
-    state === "current" ? "prog-dot current" : "prog-dot done";
+  // Earlier browsers return undefined. Resolve on scrollend instead of
+  // immediately issuing the next scroll and skipping intermediate stops.
+  return new Promise(resolve => {
+    viewport.addEventListener("scrollend", resolve, { once: true });
+  });
 }
 
 async function startTour() {
+  const thisRun = ++runToken;
   for (let i = 0; i &lt; 5; i++) {
     const stop = document.getElementById(`stop-${i}`);
-
-    logMsg(`Scrolling to stop ${i + 1}...`, "log-scroll");
-    setStop(i, "current");
-
     await smoothScrollTo(stop.offsetTop);
-
-    logMsg(`Arrived at stop ${i + 1}.`, "log-arrive");
-    setStop(i, "done");
-
+    if (thisRun !== runToken) return; // stopped or reset
+    markVisited(i);
     if (i &lt; 4) await sleep(900);
   }
+}
+
+function stopTour() {
+  runToken++; // prevents the pending sequence from marking later stops
+  viewport.scrollTo({ top: viewport.scrollTop, behavior: "instant" });
 }</code></pre>
   </section>
 
@@ -279,6 +261,7 @@ async function startTour() {
 <script>
 (function () {
   let running = false;
+  let runToken = 0;
   const viewport = document.getElementById('tourViewport');
 
   const log = document.getElementById('eventLog');
@@ -291,16 +274,44 @@ async function startTour() {
   }
 
   function smoothScrollTo(top) {
-    if (typeof viewport.scrollTo === 'function') {
-      const promise = viewport.scrollTo({ top, behavior: 'smooth' });
-      if (promise && typeof promise.then === 'function') return promise;
+    if (Math.abs(viewport.scrollTop - top) < 1) return Promise.resolve();
+
+    let cleanup = () => {};
+    const fallback = new Promise(resolve => {
+      let debounceTimer;
+      const finish = () => {
+        cleanup();
+        resolve();
+      };
+      const onScroll = () => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(finish, 120);
+      };
+      const timeout = setTimeout(finish, 3000);
+      cleanup = () => {
+        clearTimeout(timeout);
+        clearTimeout(debounceTimer);
+        viewport.removeEventListener('scroll', onScroll);
+        viewport.removeEventListener('scrollend', finish);
+      };
+      viewport.addEventListener('scroll', onScroll, { passive: true });
+      viewport.addEventListener('scrollend', finish, { once: true });
+    });
+
+    const nativeResult = viewport.scrollTo({ top, behavior: 'smooth' });
+    if (nativeResult && typeof nativeResult.then === 'function') {
+      cleanup();
+      return nativeResult;
     }
-    // Polyfill: manually animate and resolve after estimated duration
-    viewport.scrollTop = top;
-    return Promise.resolve();
+    return fallback;
   }
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function setControls(isRunning) {
+    document.getElementById('btnStart').disabled = isRunning;
+    document.getElementById('btnStop').disabled = !isRunning;
+  }
 
   function setStop(i, state) {
     const badge = document.getElementById('badge-' + i);
@@ -319,47 +330,75 @@ async function startTour() {
 
   window.startTour = async function () {
     if (running) return;
+    const thisRun = ++runToken;
     running = true;
-    document.getElementById('btnStart').disabled = true;
     resetTour(true);
-    log.innerHTML = '';
+    running = true;
+    setControls(true);
+    log.replaceChildren();
 
-    for (let i = 0; i < 5; i++) {
-      const stop = document.getElementById('stop-' + i);
-      const top  = stop.offsetTop;
+    try {
+      for (let i = 0; i < 5; i++) {
+        if (thisRun !== runToken) return;
+        const stop = document.getElementById('stop-' + i);
+        const top = Math.min(stop.offsetTop, viewport.scrollHeight - viewport.clientHeight);
 
-      logMsg(`Scrolling to stop ${i + 1}…`, 'log-scroll');
-      setStop(i, 'current');
+        logMsg(`Scrolling to stop ${i + 1}…`, 'log-scroll');
+        setStop(i, 'current');
 
-      await smoothScrollTo(top);
-      logMsg(`Arrived at stop ${i + 1}.`, 'log-arrive');
-      setStop(i, 'done');
+        await smoothScrollTo(top);
+        if (thisRun !== runToken) return;
+        logMsg(`Arrived at stop ${i + 1}.`, 'log-arrive');
+        setStop(i, 'done');
 
-      if (i < 4) {
-        document.getElementById('insightBox').textContent =
-          `Awaiting 900ms pause at stop ${i + 1} before scrolling to stop ${i + 2}. Without promises, this pause timing was a setTimeout guess.`;
-        await sleep(900);
+        if (i < 4) {
+          document.getElementById('insightBox').textContent =
+            `Paused at stop ${i + 1}; stop ${i + 2} will begin only after this step settles.`;
+          await sleep(900);
+        }
+      }
+
+      logMsg('Tour complete — all 5 stops visited.', 'log-done');
+      document.getElementById('insightBox').textContent =
+        'Tour complete. Each scroll settled before the next stop began.';
+    } catch (error) {
+      if (thisRun === runToken) {
+        logMsg(`Tour stopped: ${error.name}: ${error.message}`, 'log-info');
+      }
+    } finally {
+      if (thisRun === runToken) {
+        running = false;
+        setControls(false);
       }
     }
-
-    logMsg('Tour complete — all 5 stops visited.', 'log-done');
-    document.getElementById('insightBox').textContent =
-      'Tour complete. Each scroll promise resolved before the next stop was visited — no setTimeout guesses needed.';
-    document.getElementById('btnStart').disabled = false;
-    running = false;
   };
 
-  window.resetTour = function (internal) {
-    if (running && !internal) return;
-    viewport.scrollTop = 0;
+  window.stopTour = function () {
+    if (!running) return;
+    runToken++;
+    running = false;
+    viewport.scrollTo({ top: viewport.scrollTop, behavior: 'instant' });
+    setControls(false);
+    logMsg('Tour stopped at the current position.', 'log-info');
+    document.getElementById('insightBox').textContent =
+      'Tour stopped. No later stop will be marked visited; start again or reset.';
+  };
+
+  window.resetTour = function (internal = false) {
+    if (!internal) runToken++;
+    running = false;
+    viewport.scrollTo({ top: 0, behavior: 'instant' });
     for (let i = 0; i < 5; i++) {
       document.getElementById('badge-' + i).textContent = 'Waiting';
       document.getElementById('badge-' + i).className = 'ts-badge';
       document.getElementById('prog-' + i).className = 'prog-dot';
     }
     document.getElementById('stopIndicator').textContent = 'Stop — / 5';
+    setControls(false);
     if (!internal) {
       log.innerHTML = '<div class="log-info">// Press "Start tour" to begin the scrolling sequence…</div>';
+      document.getElementById('insightBox').textContent =
+        'The tour waits for each scroll to settle before pausing and moving to the next stop.';
     }
   };
 })();
