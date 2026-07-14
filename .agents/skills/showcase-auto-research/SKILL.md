@@ -172,7 +172,12 @@ The validation report must explicitly mark each applicable item pass/fail/not-ap
 - **Broken shape geometry:** float/shape appears on the wrong side or text overlaps the exclusion shape.
 - **Broken cancellation:** stop/abort/reset advances to a later state, leaves stale output, or fails to restore controls.
 - **Unreadable effective colors:** code/status text has insufficient contrast after inheritance and computed styles.
-- **False support probe:** an ignored unknown option/dictionary member is treated as feature support.
+- **False support probe:** an ignored unknown option/dictionary member, constructor alone, or partial interface exposure is treated as full feature support. Probe the exact method/property used by the interaction.
+- **Host-language collisions:** a global binding or inline handler name collides with browser globals/platform methods (for example `top` or `animate`), or hostile sample strings terminate `<script>` parsing or break quote boundaries. Syntax-check extracted inline scripts and load the actual page.
+- **Stale generated controls:** a control captured before a rerender writes into a removed row/label/model entry. Repeatedly add/remove/rebuild controls and ensure delayed handlers guard stale nodes and indexes.
+- **Return-shape drift:** code unconditionally chains `.then()`/`.catch()` or iterates an API result whose documented return shape differs across browser revisions. Record and handle the actual value without hiding real errors.
+- **Initialization races:** controls can run before databases, workers, crash contexts, models, or adapters are ready. Exercise controls immediately after load and require an explicit initializing state or safe queue/guard.
+- **Hidden accessibility leaks:** offscreen probe elements remain focusable or named controls are generated without programmatic labels. Count accessible names after every rerender, not only initial markup.
 - **Stale evidence:** the page was not freshly reloaded and fully re-exercised after the last edit.
 
 ## Goal-Setting Pass
