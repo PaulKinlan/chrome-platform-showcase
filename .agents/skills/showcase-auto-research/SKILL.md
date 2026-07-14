@@ -79,7 +79,9 @@ For each pending or incomplete feature:
 3. Follow all project invariants: real interaction, exact feature probes, graceful unsupported/flag/device fallbacks, CSS variables, WCAG AA, keyboard/accessibility semantics, and a `chromestatus.com/feature/<id>` link on every page.
 4. For HTTP/header/cache/redirect behavior, add the required server route as a manual top-level change; do not fake the contract in client-side text.
 5. Use `chrome-devtools-mcp` on every new concept. Exercise every visible control, inspect the accessibility tree where needed, inspect console/network/telemetry, and verify the fallback path when the current browser lacks the feature.
-6. Commit and push one feature at a time, staging only that feature and any route code it requires:
+6. **Visually inspect the rendered result, not only DOM text or console state.** Capture a full-page screenshot before and after the primary interaction at desktop width, plus a mobile screenshot when layout changes. Reject pages with detached popovers, wrong float/shape sides, text crossing shapes, gradient/content bleed, clipped controls, unreadable code, low contrast, overlap, or an unsupported fallback that looks like the feature worked.
+7. For text and code surfaces, inspect computed foreground/background colors and run a contrast audit. A clean console does not make unreadable output valid.
+8. Commit and push one feature at a time, staging only that feature and any route code it requires:
 
 ```bash
 git add v<N>/<feature>/ server.ts && git commit -m "add v<N> <feature> demos" && git push
@@ -96,6 +98,7 @@ After building, regenerate the inventory from ChromeStatus, disk, and the render
 - each feature has interactive concept coverage and the mandatory ChromeStatus reference;
 - the requested uber demo exists;
 - local routes return 200 and were exercised through `chrome-devtools-mcp`;
+- desktop/mobile screenshots show correct geometry, anchoring, clipping, fallback rendering, and readable contrast;
 - after push/deploy, the live `/v<N>/` page links every implemented card locally and no longer labels those cards `demo pending`. If deployment has not updated yet, report `live verification: deployment pending` rather than claiming the live gap is closed.
 
 If time or quota stops the batch, report `implemented/total` and list every remaining feature ID + canonical slug. Do not say “complete,” “clean,” or “all” when pending items remain.
@@ -135,6 +138,18 @@ For each target milestone:
 ```bash
 git add <file> && git commit -m "conformance: v<N>/<feature>" && git push
 ```
+
+## Validation Pass
+
+A validation request is exhaustive within its stated scope unless the user explicitly asks for sampling.
+
+1. Build an exact route manifest from disk for every `v<N>/<feature>/<concept>/index.html` in scope. Report `tested/total`; never call a sample a full sweep.
+2. Open every concept through `chrome-devtools-mcp`, exercise every visible control, and run its feature/concept conformance route.
+3. Capture and inspect screenshots. Automated clicks, DOM snapshots, and console logs cannot detect wrong visual anchoring, float geometry, overlap, bleed, or contrast on their own.
+4. Treat capability/version messages as claims that need proof. Detect the exact API/property/value; do not tell a Chrome 150 user to “upgrade to 146” or equate a missing flag, origin trial, language pack, hardware capability, or permission with an old browser.
+5. For unsupported APIs, verify that the fallback is visually coherent and names the exact missing capability and selected inputs (for example, language, quality tier, permission, or device requirement).
+6. Save per-route results. A milestone is complete only when `tested === total`; list timeouts and blocked/device-only routes separately.
+7. For every confirmed bug, reproduce the exact live URL before editing, fix the demo rather than immutable conformance assertions, re-test adjacent controls, regenerate the concept critique, and capture the repaired screenshot.
 
 ## Goal-Setting Pass
 
