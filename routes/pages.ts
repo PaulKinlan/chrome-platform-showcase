@@ -1,3 +1,4 @@
+import { renderBreadcrumbs } from "../lib/breadcrumbs.ts";
 import { chromeStatusUrl, getMilestoneFeatures, slugify } from "../lib/chromestatus.ts";
 import type { Channel, Channels, FeatureSummary, MilestoneFeatures } from "../lib/chromestatus.ts";
 import { escapeHTML } from "./html.ts";
@@ -919,6 +920,7 @@ export async function renderReleasePage(
   release: string,
   milestone: number,
   channels: Channels,
+  origin: string,
 ): Promise<string> {
   let features: MilestoneFeatures;
   try {
@@ -930,6 +932,10 @@ export async function renderReleasePage(
   }
 
   const status = statusBadgeFor(channels, milestone);
+  const breadcrumbs = renderBreadcrumbs([
+    { name: "Chrome platform showcase", path: "/" },
+    { name: `Chrome ${milestone}`, path: `/${release}/` },
+  ], origin);
   const hasUberDemo = await releaseHasUberDemo(release);
   const sections = await Promise.all(features.groups.map(async (group) => {
     const cards = await Promise.all(group.features.map(async (f) => {
@@ -974,10 +980,12 @@ export async function renderReleasePage(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>chrome ${milestone} demos — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
+  ${breadcrumbs.canonical}
+  ${breadcrumbs.structuredData}
 </head>
 <body>
 <main>
-  <p class="crumbs"><a href="/">&larr; all releases</a></p>
+  ${breadcrumbs.navigation}
 
   <header class="lede-block">
     <p class="eyebrow">chrome ${milestone} · ${escapeHTML(status.toLowerCase())}</p>

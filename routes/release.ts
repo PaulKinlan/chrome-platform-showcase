@@ -1,3 +1,4 @@
+import { renderBreadcrumbs } from "../lib/breadcrumbs.ts";
 import { getChannels } from "../lib/chromestatus.ts";
 import { knownReleaseMilestones, renderReleasePage } from "./pages.ts";
 
@@ -37,6 +38,73 @@ function injectDemoTelemetry(html: string): string {
     : `${html}\n${script}`;
 }
 
+function headingText(html: string): string {
+  const heading = html.match(/<h1(?:\s[^>]*)?>([\s\S]*?)<\/h1>/i)?.[1] ?? "";
+  return heading
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([\da-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function injectReleaseBreadcrumbs(
+  html: string,
+  release: string,
+  key: string,
+  origin: string,
+): Promise<string> {
+  if (!key.endsWith("index.html")) return html;
+  const segments = key.replace(/\/index\.html$/, "").split("/").filter(Boolean);
+  if (segments.length === 0 || segments.length > 2) return html;
+
+  const milestone = release.replace(/^v/, "");
+  const currentTitle = headingText(html);
+  if (!currentTitle) return html;
+
+  const items = [
+    { name: "Chrome platform showcase", path: "/" },
+    { name: `Chrome ${milestone}`, path: `/${release}/` },
+  ];
+
+  if (segments.length === 2) {
+    try {
+      const featureHTML = await Deno.readTextFile(`./${release}/${segments[0]}/index.html`);
+      const featureTitle = headingText(featureHTML);
+      if (featureTitle) {
+        items.push({ name: featureTitle, path: `/${release}/${segments[0]}/` });
+      }
+    } catch {
+      // Keep the useful home/release trail if a feature index cannot be read.
+    }
+  }
+
+  items.push({
+    name: currentTitle,
+    path: `/${release}/${segments.join("/")}/`,
+  });
+
+  const breadcrumbs = renderBreadcrumbs(items, origin);
+  const withNavigation = /<p\s+class=["']crumbs["'][^>]*>[\s\S]*?<\/p>/i.test(html)
+    ? html.replace(
+      /<p\s+class=["']crumbs["'][^>]*>[\s\S]*?<\/p>/i,
+      breadcrumbs.navigation,
+    )
+    : html.replace(/<main(?:\s[^>]*)?>/i, (main) => `${main}\n${breadcrumbs.navigation}`);
+
+  return withNavigation.includes("</head>")
+    ? withNavigation.replace(
+      "</head>",
+      `  ${breadcrumbs.canonical}\n  ${breadcrumbs.structuredData}\n</head>`,
+    )
+    : withNavigation;
+}
+
 function demoTelemetryHeaders(extra: HeadersInit = {}): Headers {
   const headers = new Headers(extra);
   headers.set("reporting-endpoints", 'default="/telemetry/demo/report"');
@@ -49,7 +117,11 @@ function demoTelemetryHeaders(extra: HeadersInit = {}): Headers {
   return headers;
 }
 
-async function readReleaseAsset(release: string, sub: string): Promise<Response | null> {
+async function readReleaseAssetFromDisk(
+  release: string,
+  sub: string,
+  origin: string,
+): Promise<Response | null> {
   if (sub.includes("..")) return null;
   // Trailing slash or path with no extension: serve <path>/index.html.
   let key = sub.replace(/^\/+/, "");
@@ -62,7 +134,8 @@ async function readReleaseAsset(release: string, sub: string): Promise<Response 
     const ext = key.split(".").pop() ?? "";
     if (ext === "html") {
       const html = new TextDecoder().decode(file);
-      return new Response(injectDemoTelemetry(html), {
+      const withBreadcrumbs = await injectReleaseBreadcrumbs(html, release, key, origin);
+      return new Response(injectDemoTelemetry(withBreadcrumbs), {
         headers: demoTelemetryHeaders({ "content-type": MIME[ext] }),
       });
     }
@@ -4437,13 +4510,16 @@ function renderProcessingInstructionStreamingUseCaseRoute(
 }
 
 export async function handleReleaseRoute(req: Request): Promise<Response | null> {
-  const path = new URL(req.url).pathname;
+  const requestURL = new URL(req.url);
+  const path = requestURL.pathname;
   const releaseMatch = path.match(/^\/(v\d+)(\/.*)?$/);
   if (!releaseMatch) return null;
 
   const release = releaseMatch[1];
   const milestone = Number(release.slice(1));
   const sub = releaseMatch[2] ?? "/";
+  const readReleaseAsset = (releaseName: string, assetPath: string) =>
+    readReleaseAssetFromDisk(releaseName, assetPath, requestURL.origin);
 
   let channels;
   try {
@@ -4459,9 +4535,12 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
 
   if (sub === "/" || sub === "/index.html") {
     try {
-      return new Response(await renderReleasePage(release, milestone, channels), {
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
+      return new Response(
+        await renderReleasePage(release, milestone, channels, requestURL.origin),
+        {
+          headers: { "content-type": "text/html; charset=utf-8" },
+        },
+      );
     } catch (err) {
       return new Response(`Failed to render release: ${err}`, { status: 502 });
     }
