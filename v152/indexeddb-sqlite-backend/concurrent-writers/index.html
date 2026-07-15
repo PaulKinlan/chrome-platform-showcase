@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Concurrent Writers — IndexedDB SQLite — Chrome 152</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.875rem;
+      color: var(--text-charcoal);
+    }
+
+    /* ── Controls ── */
+    .controls-row {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      margin-bottom: 1.25rem;
+    }
+    .ctrl { display: flex; flex-direction: column; gap: 0.3rem; }
+    .ctrl label { font-size: 0.72rem; font-family: monospace; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+    .ctrl input[type=range] { width: 120px; }
+    .ctrl-val { font-size: 0.72rem; font-family: monospace; color: var(--text-charcoal); }
+
+    .run-btn {
+      padding: 0.45rem 1.2rem;
+      font-size: 0.85rem;
+      font-family: monospace;
+      font-weight: 700;
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      cursor: pointer;
+      align-self: flex-end;
+    }
+    .run-btn:disabled { opacity: 0.5; cursor: default; }
+
+    /* ── Progress lanes ── */
+    .lanes {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      margin-bottom: 1.25rem;
+    }
+    .lane {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    .lane-label {
+      font-size: 0.68rem;
+      font-family: monospace;
+      color: var(--text-muted);
+      width: 64px;
+      flex-shrink: 0;
+    }
+    .lane-track {
+      flex: 1;
+      height: 14px;
+      background: var(--bg-stone);
+      border: 1px solid var(--border-black);
+      position: relative;
+      overflow: hidden;
+    }
+    .lane-fill {
+      height: 100%;
+      background: var(--accent-blue);
+      width: 0%;
+      transition: width 0.05s linear;
+    }
+    .lane-fill.done { background: var(--accent-emerald); }
+    .lane-fill.error { background: var(--accent-rose); }
+    .lane-stat {
+      font-size: 0.65rem;
+      font-family: monospace;
+      color: var(--text-muted);
+      width: 80px;
+      flex-shrink: 0;
+      text-align: right;
+    }
+
+    /* ── Summary ── */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: var(--border-black);
+      border: 1px solid var(--border-black);
+      margin-bottom: 1.25rem;
+    }
+    .summary-cell {
+      background: var(--bg-paper);
+      padding: 0.65rem 0.75rem;
+      text-align: center;
+    }
+    .summary-title {
+      font-size: 0.62rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-family: monospace;
+      color: var(--text-muted);
+      margin-bottom: 0.3rem;
+    }
+    .summary-val {
+      font-size: 1rem;
+      font-weight: 700;
+      font-family: monospace;
+      color: var(--text-black);
+    }
+    .summary-val.green { color: var(--accent-emerald); }
+    .summary-val.red   { color: var(--accent-rose); }
+
+    /* ── Verify section ── */
+    .verify-btn {
+      padding: 0.35rem 0.9rem;
+      font-size: 0.78rem;
+      font-family: monospace;
+      font-weight: 600;
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-charcoal);
+      cursor: pointer;
+      margin-bottom: 0.75rem;
+    }
+    .verify-result {
+      font-size: 0.78rem;
+      font-family: monospace;
+      color: var(--text-muted);
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      min-height: 2em;
+    }
+
+    /* ── Event log ── */
+    .log-wrap { border: 1px solid var(--border-black); margin-bottom: 1.25rem; }
+    .log-title { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; font-family: monospace; color: var(--text-muted); padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--border-black); background: var(--bg-stone); }
+    .log-body { height: 120px; overflow-y: auto; padding: 0.35rem 0.6rem; font-size: 0.7rem; font-family: monospace; background: var(--bg-paper); color: var(--text-muted); }
+    .log-line { margin-bottom: 0.12rem; }
+    .log-line.ok { color: var(--accent-emerald); }
+    .log-line.err { color: var(--accent-rose); }
+    .log-line.info { color: var(--accent-blue); }
+
+    @media (max-width: 520px) { .summary-grid { grid-template-columns: 1fr 1fr; } }
+
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs">
+    <a href="/v152/">&larr; Chrome 152</a> /
+    <a href="/v152/indexeddb-sqlite-backend/">IndexedDB: SQLite backend</a>
+  </p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v152 · Storage</p>
+    <h1>Concurrent Writers</h1>
+    <p class="lede">Launch multiple parallel <code>readwrite</code> transactions that each write 50 records simultaneously. After all transactions complete, read every record back and verify the count. The SQLite backend's WAL (write-ahead logging) and atomic transactions ensure no writes are lost — even under high concurrency.</p>
+  </header>
+
+  <div class="note">The web API is identical before and after Chrome 152's SQLite migration. This demo exercises the same <code>IDBTransaction</code> patterns, but Chrome 152+ uses SQLite's atomic transactions under the hood — providing better durability guarantees under concurrent load.</div>
+
+  <div class="controls-row">
+    <div class="ctrl">
+      <label>Writers</label>
+      <input type="range" id="num-writers" min="1" max="8" value="4" aria-label="Num writers">
+      <span class="ctrl-val" id="writers-val">4</span>
+    </div>
+    <div class="ctrl">
+      <label>Records / writer</label>
+      <input type="range" id="records-per-writer" min="10" max="200" value="50" step="10" aria-label="Records per writer">
+      <span class="ctrl-val" id="records-val">50</span>
+    </div>
+    <button class="run-btn" id="run-btn">▶ Run test</button>
+  </div>
+
+  <div class="lanes" id="lanes"></div>
+
+  <div class="summary-grid">
+    <div class="summary-cell">
+      <div class="summary-title">writers</div>
+      <div class="summary-val" id="sum-writers">—</div>
+    </div>
+    <div class="summary-cell">
+      <div class="summary-title">writes attempted</div>
+      <div class="summary-val" id="sum-attempted">—</div>
+    </div>
+    <div class="summary-cell">
+      <div class="summary-title">writes verified</div>
+      <div class="summary-val green" id="sum-verified">—</div>
+    </div>
+    <div class="summary-cell">
+      <div class="summary-title">errors</div>
+      <div class="summary-val red" id="sum-errors">—</div>
+    </div>
+  </div>
+
+  <button class="verify-btn" id="verify-btn" disabled>Verify all records in DB</button>
+  <div class="verify-result" id="verify-result">Run the test first, then verify.</div>
+
+  <div class="log-wrap">
+    <div class="log-title">transaction log</div>
+    <div class="log-body" id="log-body"></div>
+  </div>
+
+  <section>
+    <h2>code</h2>
+    <pre><code>// Open the database
+const db = await new Promise((resolve, reject) => {
+  const req = indexedDB.open('concurrent-test', 1);
+  req.onupgradeneeded = e => e.target.result.createObjectStore('records', { keyPath: 'id' });
+  req.onsuccess = e => resolve(e.target.result);
+  req.onerror = reject;
+});
+
+// Launch N parallel readwrite transactions
+const writers = Array.from({ length: N }, (_, w) =>
+  new Promise((resolve, reject) => {
+    const tx = db.transaction(['records'], 'readwrite');
+    const store = tx.objectStore('records');
+    // Write 50 records per transaction
+    for (let i = 0; i < 50; i++) {
+      store.put({ id: `w${w}-r${i}`, writer: w, value: Math.random() });
+    }
+    tx.oncomplete = resolve;
+    tx.onerror = reject;
+  })
+);
+
+// Wait for all to finish
+await Promise.all(writers);
+
+// Verify: count all records
+const count = await new Promise(resolve => {
+  const tx = db.transaction(['records'], 'readonly');
+  tx.objectStore('records').count().onsuccess = e => resolve(e.target.result);
+});</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../write-integrity-test/">Write Integrity Test</a></li>
+      <li><a href="../offline-data-vault/">Offline Data Vault</a></li>
+      <li><a href="https://chromestatus.com/feature/5161589557821440" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API" target="_blank" rel="noopener">MDN — IndexedDB API</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const numWritersInput = document.getElementById('num-writers');
+  const recordsPerWriterInput = document.getElementById('records-per-writer');
+  const writersVal = document.getElementById('writers-val');
+  const recordsVal = document.getElementById('records-val');
+  const runBtn = document.getElementById('run-btn');
+  const lanesEl = document.getElementById('lanes');
+  const sumWriters = document.getElementById('sum-writers');
+  const sumAttempted = document.getElementById('sum-attempted');
+  const sumVerified = document.getElementById('sum-verified');
+  const sumErrors = document.getElementById('sum-errors');
+  const verifyBtn = document.getElementById('verify-btn');
+  const verifyResult = document.getElementById('verify-result');
+  const logBody = document.getElementById('log-body');
+
+  numWritersInput.addEventListener('input', () => { writersVal.textContent = numWritersInput.value; });
+  recordsPerWriterInput.addEventListener('input', () => { recordsVal.textContent = recordsPerWriterInput.value; });
+
+  function log(msg, cls) {
+    const line = document.createElement('div');
+    line.className = 'log-line' + (cls ? ' ' + cls : '');
+    line.textContent = msg;
+    logBody.appendChild(line);
+    logBody.scrollTop = logBody.scrollHeight;
+    if (logBody.children.length > 200) logBody.removeChild(logBody.firstChild);
+  }
+
+  function openDB(dbName) {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(dbName, 1);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains('records')) {
+          db.createObjectStore('records', { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = e => resolve(e.target.result);
+      req.onerror = e => reject(e.target.error);
+    });
+  }
+
+  function clearStore(db) {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(['records'], 'readwrite');
+      tx.objectStore('records').clear();
+      tx.oncomplete = resolve;
+      tx.onerror = e => reject(e.target.error);
+    });
+  }
+
+  let lastDbName = null;
+  let lastAttempted = 0;
+
+  async function runTest() {
+    runBtn.disabled = true;
+    verifyBtn.disabled = true;
+
+    const N = parseInt(numWritersInput.value);
+    const RPW = parseInt(recordsPerWriterInput.value);
+    const dbName = 'concurrent-writers-' + Date.now();
+    lastDbName = dbName;
+    lastAttempted = N * RPW;
+
+    log(`Starting: ${N} writers × ${RPW} records = ${N * RPW} total`, 'info');
+
+    // Build lanes UI
+    lanesEl.innerHTML = '';
+    const fills = [];
+    const stats = [];
+    for (let w = 0; w < N; w++) {
+      const lane = document.createElement('div');
+      lane.className = 'lane';
+      lane.innerHTML = `
+        <div class="lane-label">writer ${w}</div>
+        <div class="lane-track"><div class="lane-fill" id="fill-${w}"></div></div>
+        <div class="lane-stat" id="stat-${w}">0/${RPW}</div>`;
+      lanesEl.appendChild(lane);
+      fills.push(document.getElementById(`fill-${w}`));
+      stats.push(document.getElementById(`stat-${w}`));
+    }
+
+    let totalErrors = 0;
+
+    try {
+      const db = await openDB(dbName);
+      await clearStore(db);
+
+      const writerPromises = Array.from({ length: N }, (_, w) =>
+        new Promise((resolve, reject) => {
+          const tx = db.transaction(['records'], 'readwrite');
+          const store = tx.objectStore('records');
+          let written = 0;
+          for (let r = 0; r < RPW; r++) {
+            const req = store.put({ id: `w${w}-r${r}`, writer: w, seq: r, ts: Date.now() });
+            req.onsuccess = () => {
+              written++;
+              fills[w].style.width = (written / RPW * 100) + '%';
+              stats[w].textContent = `${written}/${RPW}`;
+            };
+            req.onerror = e => {
+              totalErrors++;
+              fills[w].classList.add('error');
+              log(`writer ${w} error on record ${r}: ${e.target.error}`, 'err');
+            };
+          }
+          tx.oncomplete = () => {
+            fills[w].classList.add('done');
+            stats[w].textContent = `✓ ${RPW}/${RPW}`;
+            log(`writer ${w} completed — ${RPW} records`, 'ok');
+            resolve();
+          };
+          tx.onerror = e => {
+            totalErrors++;
+            fills[w].classList.add('error');
+            log(`writer ${w} transaction error: ${e.target.error}`, 'err');
+            reject(e.target.error);
+          };
+        })
+      );
+
+      await Promise.allSettled(writerPromises);
+
+      sumWriters.textContent = N;
+      sumAttempted.textContent = N * RPW;
+      sumErrors.textContent = totalErrors;
+      sumVerified.textContent = '—';
+
+      log(`All transactions settled. Errors: ${totalErrors}. Click "Verify" to count records.`, totalErrors ? 'err' : 'info');
+      verifyBtn.disabled = false;
+
+      verifyBtn.onclick = async () => {
+        const count = await new Promise((res, rej) => {
+          const tx = db.transaction(['records'], 'readonly');
+          const req = tx.objectStore('records').count();
+          req.onsuccess = e => res(e.target.result);
+          req.onerror = e => rej(e.target.error);
+        });
+        sumVerified.textContent = count;
+        const ok = count === N * RPW;
+        verifyResult.innerHTML = ok
+          ? `<span style="color:var(--accent-emerald)">✓ All ${count} records present — no data lost under concurrent writes</span>`
+          : `<span style="color:var(--accent-rose)">⚠ Found ${count} records, expected ${N * RPW} — ${N * RPW - count} missing</span>`;
+        log(`Verification: ${count}/${N * RPW} records found`, ok ? 'ok' : 'err');
+      };
+
+    } catch (err) {
+      log(`Fatal error: ${err}`, 'err');
+      sumErrors.textContent = (totalErrors + 1);
+    }
+
+    runBtn.disabled = false;
+  }
+
+  runBtn.addEventListener('click', runTest);
+</script>
+</body>
+</html>
