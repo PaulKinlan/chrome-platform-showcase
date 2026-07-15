@@ -4467,6 +4467,20 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
     }
   }
 
+  if (release === "v152") {
+    const responsiveIframeResponse = renderResponsiveIframeEmbed(req, sub);
+    if (responsiveIframeResponse) return responsiveIframeResponse;
+    if (sub === "/responsively-sized-iframe/iframe-resize-demo/child.html") {
+      const child = await readReleaseAsset(release, sub);
+      if (child) {
+        return withHeaders(child, {
+          "supports-responsive-sizing": "1",
+          "cache-control": "no-store",
+        });
+      }
+    }
+  }
+
   if (release === "v150") {
     const cssUrlModifierDemoResponse = await renderCssUrlModifierDemoRoute(req, sub);
     if (cssUrlModifierDemoResponse) return cssUrlModifierDemoResponse;
@@ -4614,7 +4628,10 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
     if (wsBfcacheResponse) return wsBfcacheResponse;
   }
 
-  if (release === "v151" && sub === "/cpu-performance-api/capability-echo") {
+  if (
+    (release === "v151" || release === "v152") &&
+    sub === "/cpu-performance-api/capability-echo"
+  ) {
     return renderV151CapabilityEcho(req);
   }
   if (
@@ -4631,7 +4648,10 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
   ) {
     return renderV151PolicyEcho(req);
   }
-  if (release === "v151" && sub === "/renewed-html-insertion-streaming-methods/html-stream") {
+  if (
+    (release === "v151" || release === "v152") &&
+    sub === "/renewed-html-insertion-streaming-methods/html-stream"
+  ) {
     return renderV151HtmlStream(req);
   }
 

@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Adaptive Animation — CPU Performance API — Chrome 152</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.875rem;
+      color: var(--text-charcoal);
+    }
+
+    /* ── Tier selector ── */
+    .tier-row {
+      display: flex;
+      gap: 0.4rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+      align-items: center;
+    }
+    .tier-label {
+      font-size: 0.78rem;
+      font-family: monospace;
+      color: var(--text-muted);
+      margin-right: 0.4rem;
+    }
+    .tier-btn {
+      padding: 0.3rem 0.8rem;
+      font-size: 0.78rem;
+      font-family: monospace;
+      cursor: pointer;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+    }
+    .tier-btn:hover { background: var(--bg-ivory); }
+    .tier-btn.active { background: var(--text-black); color: var(--bg-ivory); }
+
+    /* ── Animation stage ── */
+    .stage {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      height: 220px;
+      position: relative;
+      overflow: hidden;
+      margin-bottom: 1rem;
+    }
+
+    /* Tier 0 — no animation, just a static card */
+    .card-item {
+      position: absolute;
+      width: 60px;
+      height: 60px;
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.7rem;
+      font-family: monospace;
+      color: var(--text-charcoal);
+    }
+
+    /* Tier 1 — simple fade-in animation, no transform */
+    @keyframes fade-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+
+    /* Tier 2 — translate animation */
+    @keyframes slide-loop {
+      0% { transform: translateX(0); }
+      50% { transform: translateX(calc(100% + 16px)); }
+      100% { transform: translateX(0); }
+    }
+
+    /* Tier 3 — rotate + translate */
+    @keyframes orbit {
+      from { transform: rotate(0deg) translateX(80px) rotate(0deg); }
+      to   { transform: rotate(360deg) translateX(80px) rotate(-360deg); }
+    }
+
+    /* Tier 4+ — particles + blur + complex */
+    @keyframes particle-drift {
+      0%   { transform: translate(0, 0) scale(1); opacity: 0.9; }
+      25%  { transform: translate(var(--dx1), var(--dy1)) scale(0.9); opacity: 0.7; }
+      50%  { transform: translate(var(--dx2), var(--dy2)) scale(1.1); opacity: 1; }
+      75%  { transform: translate(var(--dx3), var(--dy3)) scale(0.95); opacity: 0.8; }
+      100% { transform: translate(0, 0) scale(1); opacity: 0.9; }
+    }
+
+    .particle {
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent-blue);
+    }
+
+    /* ── Description panel ── */
+    .desc-panel {
+      border: 1px solid var(--border-black);
+      padding: 0.75rem 1rem;
+      background: var(--bg-paper);
+      margin-bottom: 1rem;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 0.6rem 1rem;
+      align-items: start;
+    }
+    .desc-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      font-family: monospace;
+      padding-top: 0.1rem;
+    }
+    .desc-value {
+      font-size: 0.82rem;
+      font-family: monospace;
+      color: var(--text-charcoal);
+    }
+    .desc-value strong { color: var(--text-black); }
+
+    /* ── Detected tier ── */
+    .detected-tier {
+      display: inline-block;
+      padding: 0.2rem 0.6rem;
+      font-size: 0.75rem;
+      font-family: monospace;
+      border: 1px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      margin-left: 0.4rem;
+    }
+
+    pre code { font-size: 0.8125rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs">
+    <a href="/v152/">&larr; Chrome 152</a> /
+    <a href="/v152/cpu-performance-api/">CPU Performance API</a>
+  </p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v152 · capabilities · performance · CSS</p>
+    <h1>Adaptive Animation</h1>
+    <p class="lede">Read <code>navigator.cpuPerformance</code> on load and pick an animation preset that fits the device's capabilities. Low-tier devices get no motion; mid-tier gets simple transitions; high-tier gets the full particle show.</p>
+  </header>
+
+  <div class="note" id="support-note">Checking CPU Performance API…</div>
+
+  <section>
+    <h2>live demo</h2>
+    <p style="font-size:0.82rem;color:var(--text-muted);font-family:monospace;margin-bottom:0.5rem;">
+      Detected tier: <span id="detected-tier-badge" class="detected-tier">—</span>
+      (click a button to override)
+    </p>
+
+    <div class="tier-row">
+      <span class="tier-label">Simulate tier:</span>
+      <button class="tier-btn" data-tier="0">0 — none</button>
+      <button class="tier-btn" data-tier="1">1 — fade</button>
+      <button class="tier-btn" data-tier="2">2 — slide</button>
+      <button class="tier-btn" data-tier="3">3 — orbit</button>
+      <button class="tier-btn" data-tier="4">4 — particles</button>
+    </div>
+
+    <div class="stage" id="stage"></div>
+
+    <div class="desc-panel" id="desc-panel">
+      <span class="desc-label">Tier</span><span class="desc-value" id="d-tier">—</span>
+      <span class="desc-label">Motion</span><span class="desc-value" id="d-motion">—</span>
+      <span class="desc-label">Animation type</span><span class="desc-value" id="d-type">—</span>
+      <span class="desc-label">CSS used</span><span class="desc-value" id="d-css">—</span>
+      <span class="desc-label">Rationale</span><span class="desc-value" id="d-rationale">—</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>code</h2>
+    <pre><code>// Read the tier on page load (Chrome 152+)
+const measuredTier = typeof navigator.cpuPerformance === 'number'
+  ? navigator.cpuPerformance
+  : 1; // fallback to tier 1 if unsupported
+const tier = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  ? 0
+  : measuredTier;
+
+function pickAnimationPreset(tier) {
+  if (tier === 0) return { motion: 'none',     css: 'animation: none' };
+  if (tier === 1) return { motion: 'minimal',  css: 'animation: fade-pulse 2s ease-in-out infinite' };
+  if (tier === 2) return { motion: 'standard', css: 'animation: slide-loop 3s ease-in-out infinite' };
+  if (tier === 3) return { motion: 'rich',     css: 'animation: orbit 4s linear infinite' };
+  return              { motion: 'full',     css: 'particles: 20 + blur + scale' };
+}
+
+const preset = pickAnimationPreset(tier);
+
+// Apply to your component
+const hero = document.querySelector('.hero');
+hero.dataset.animationPreset = preset.motion;
+
+// The CSS then responds to the data-attribute:
+// [data-animation-preset="minimal"] .hero-icon { animation: fade-pulse 2s ... }
+// [data-animation-preset="none"]    .hero-icon { animation: none }
+
+// Prefer-reduced-motion is still respected regardless of tier:
+if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  hero.dataset.animationPreset = 'none';
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../device-tier-readout/">Device Tier Readout</a></li>
+      <li><a href="../quality-tier-selector/">Quality Tier Selector</a></li>
+      <li><a href="https://chromestatus.com/feature/5189864286978048" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  const stage = document.getElementById('stage');
+  const supportNote = document.getElementById('support-note');
+  const detectedBadge = document.getElementById('detected-tier-badge');
+
+  // Check API support
+  const hasCpuPerf = typeof navigator.cpuPerformance === 'number'
+    && Number.isFinite(navigator.cpuPerformance);
+
+  let detectedTier;
+  if (hasCpuPerf) {
+    detectedTier = Math.max(0, Math.floor(navigator.cpuPerformance));
+    supportNote.innerHTML = `<strong>CPU Performance API supported</strong> — your device tier is <strong>${detectedTier}</strong>. Showing the matching animation preset. Use the buttons above to simulate other tiers.`;
+    detectedBadge.textContent = String(detectedTier);
+  } else {
+    detectedTier = 2; // reasonable default
+    supportNote.innerHTML = '<strong>CPU Performance API not available</strong> — requires Chrome 152+. Defaulting to tier 2. Use the buttons to explore all presets.';
+    detectedBadge.textContent = 'not available (default: 2)';
+  }
+
+  // Check prefers-reduced-motion
+  const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (prefersReduced) {
+    supportNote.innerHTML += '<br><em>prefers-reduced-motion is active — animation output stays at tier 0 even when you simulate higher tiers.</em>';
+    detectedBadge.textContent += ' (motion override active)';
+  }
+
+  const TIER_INFO = {
+    0: {
+      motion: 'none',
+      type: 'Static — no animation',
+      css: 'animation: none',
+      rationale: 'Tier 0 devices (or prefers-reduced-motion). No animation avoids battery drain and potential jank on very slow hardware.',
+    },
+    1: {
+      motion: 'minimal',
+      type: 'Opacity pulse (fade)',
+      css: 'animation: fade-pulse 2s ease-in-out infinite',
+      rationale: 'Tier 1 — low-end. Opacity-only animation is GPU-composited and has near-zero CPU cost. Safe for budget phones.',
+    },
+    2: {
+      motion: 'standard',
+      type: 'Translation slide',
+      css: 'animation: slide-loop 3s ease-in-out infinite',
+      rationale: 'Tier 2 — mid-range. transform: translateX() is composited. Adds spatial motion without triggering layout.',
+    },
+    3: {
+      motion: 'rich',
+      type: 'Rotation orbit',
+      css: 'animation: orbit 4s linear infinite (rotate + translateX)',
+      rationale: 'Tier 3 — capable. Compound transforms are still composited but require more GPU fill. Appropriate for a modern phone or budget laptop.',
+    },
+    4: {
+      motion: 'full',
+      type: 'Particle system (20 nodes, blur, scale)',
+      css: 'Multiple animations + CSS filter: blur() on stage',
+      rationale: 'Tier 4 — high-end. 20 independently animated nodes with blur filters. Only appropriate for powerful devices.',
+    },
+  };
+
+  function effectiveTier(tier) {
+    return prefersReduced ? 0 : tier;
+  }
+
+  function renderStage(tier, requestedTier = tier) {
+    stage.innerHTML = '';
+    stage.style.filter = '';
+
+    const info = TIER_INFO[tier] ?? TIER_INFO[2];
+
+    document.getElementById('d-tier').innerHTML = requestedTier === tier
+      ? `<strong>${tier}</strong>`
+      : `<strong>${tier}</strong> (prefers-reduced-motion override from requested tier ${requestedTier})`;
+    document.getElementById('d-motion').textContent = info.motion;
+    document.getElementById('d-type').textContent = info.type;
+    document.getElementById('d-css').textContent = info.css;
+    document.getElementById('d-rationale').textContent = info.rationale;
+
+    if (tier === 0) {
+      // Static card
+      const el = document.createElement('div');
+      el.className = 'card-item';
+      el.style.cssText = 'left:50%;top:50%;transform:translate(-50%,-50%);';
+      el.textContent = 'STATIC';
+      stage.appendChild(el);
+
+    } else if (tier === 1) {
+      // Fade pulse
+      const el = document.createElement('div');
+      el.className = 'card-item';
+      el.style.cssText = 'left:50%;top:50%;transform:translate(-50%,-50%);animation:fade-pulse 2s ease-in-out infinite;';
+      el.textContent = 'FADE';
+      stage.appendChild(el);
+
+    } else if (tier === 2) {
+      // Slide loop — 3 cards sliding
+      for (let i = 0; i < 3; i++) {
+        const el = document.createElement('div');
+        el.className = 'card-item';
+        const startX = 10 + i * 80;
+        el.style.cssText = `left:${startX}px;top:50%;transform:translateY(-50%);animation:slide-loop ${2.5 + i * 0.5}s ease-in-out infinite;animation-delay:${i * 0.4}s;`;
+        el.textContent = `ITEM ${i + 1}`;
+        stage.appendChild(el);
+      }
+
+    } else if (tier === 3) {
+      // Orbit — 4 cards orbiting a center
+      const center = document.createElement('div');
+      center.className = 'card-item';
+      center.style.cssText = 'left:50%;top:50%;transform:translate(-50%,-50%);background:var(--bg-stone);z-index:1;';
+      center.textContent = '●';
+      stage.appendChild(center);
+
+      for (let i = 0; i < 4; i++) {
+        const el = document.createElement('div');
+        el.className = 'card-item';
+        el.style.cssText = `
+          left:50%;top:50%;
+          transform-origin:0 0;
+          animation:orbit ${3 + i * 0.8}s linear infinite;
+          animation-delay:${i * (3 / 4)}s;
+          width:40px;height:40px;font-size:0.6rem;
+        `;
+        el.textContent = i + 1;
+        stage.appendChild(el);
+      }
+
+    } else {
+      // Tier 4+ — 20 particles
+      stage.style.filter = 'none'; // subtle blur removed for clarity
+      const colors = ['var(--accent-blue)', 'var(--accent-emerald)', 'var(--accent-rose)', 'var(--text-charcoal)'];
+      for (let i = 0; i < 20; i++) {
+        const el = document.createElement('div');
+        el.className = 'particle';
+        const x = 5 + Math.random() * 90;
+        const y = 5 + Math.random() * 90;
+        const dx1 = (Math.random() - 0.5) * 80 + 'px';
+        const dy1 = (Math.random() - 0.5) * 60 + 'px';
+        const dx2 = (Math.random() - 0.5) * 120 + 'px';
+        const dy2 = (Math.random() - 0.5) * 90 + 'px';
+        const dx3 = (Math.random() - 0.5) * 60 + 'px';
+        const dy3 = (Math.random() - 0.5) * 80 + 'px';
+        const size = 6 + Math.random() * 18;
+        const dur = 3 + Math.random() * 4;
+        el.style.cssText = `
+          left:${x}%;top:${y}%;
+          width:${size}px;height:${size}px;
+          background:${colors[i % colors.length]};
+          --dx1:${dx1};--dy1:${dy1};
+          --dx2:${dx2};--dy2:${dy2};
+          --dx3:${dx3};--dy3:${dy3};
+          animation:particle-drift ${dur}s ease-in-out infinite;
+          animation-delay:${(i * 0.15).toFixed(2)}s;
+        `;
+        stage.appendChild(el);
+      }
+    }
+  }
+
+  // Tier buttons
+  document.querySelectorAll('.tier-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tier-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const requestedTier = parseInt(btn.dataset.tier, 10);
+      renderStage(effectiveTier(requestedTier), requestedTier);
+    });
+  });
+
+  // Initial render
+  const initTier = detectedTier;
+  const initBtn = document.querySelector(`[data-tier="${initTier}"]`)
+    || document.querySelector('[data-tier="2"]');
+  if (initBtn) initBtn.classList.add('active');
+  renderStage(effectiveTier(initTier), initTier);
+</script>
+</body>
+</html>
