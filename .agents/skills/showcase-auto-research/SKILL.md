@@ -105,6 +105,19 @@ After building, regenerate the inventory from ChromeStatus, disk, and the render
 
 If time or quota stops the batch, report `implemented/total` and list every remaining feature ID + canonical slug. Do not say “complete,” “clean,” or “all” when pending items remain.
 
+## Uber Demo Design And Integrity
+
+An uber demo is a believable product experience, not a feature checklist arranged in a grid.
+
+1. Start with one user goal and select milestone features only when each one materially improves that goal. It is acceptable—and usually necessary—to use stable features from earlier Chrome releases as connective tissue. Never distort the information architecture just to place every new feature on the same screen.
+2. Give behavior APIs real work. A scroll-promise demo needs a genuinely scrollable journey with a visible start and destination; cancellation needs an operation that can still be in flight; gap decoration needs a real gap; shape clipping must improve a deliberate visual rather than mutilating a card border. If removing the API would not change the experience, choose a better use case.
+3. Keep decorative and structural responsibilities separate. Do not clip the element whose border or reading surface must remain intact. Apply experimental shape/paint effects to an inner illustration, pseudo-element, or dedicated layer, then inspect the resulting geometry at desktop and mobile sizes.
+4. Treat feature APIs as versioned inputs at the integration boundary. Normalize documented return shapes (string, iterable, array, promise, or void) before array methods, iteration, optional chaining, or promise chaining. Report the observed shape and degraded behavior; never turn a compatibility difference into a generic parse error or a false success.
+5. Derive all counts and summaries from the rendered implementation. If an index links four demos, its heading and prose must say four. Verify card/link counts, named feature counts, code snippets, and “features at work” tables against the DOM after the final edit.
+6. Syntax-check every inline script, including sample HTML/JavaScript strings containing quotes, `</script>`, keyboard key names, event-handler attributes, and template literals. Then load the real URL—the extracted script passing a parser is necessary but not sufficient.
+7. Validate the feature demos used by the uber demo as well as the uber route itself. Initial-load console warnings and errors are failures, including browser diagnostics for invalid experimental attribute tokens. Exercise every control and inspect console/network again after each state-changing sequence.
+8. Prefer two focused experiences over one incoherent “everything” page when a release spans unrelated surfaces. If a release has multiple uber concepts, label the exact count and explain each concept's distinct job; do not leave stale “one/two demos” copy after adding more routes.
+
 ## Critique Pass
 
 For each target milestone:

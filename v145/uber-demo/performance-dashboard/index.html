@@ -154,6 +154,7 @@ for (let i = 0; i < 40; i++) {
 }
 
 const frameSamples = [];
+const supportedEntryTypes = new Set(window.PerformanceObserver?.supportedEntryTypes ?? []);
 
 function pushFrame(ms) {
   frameSamples.push(ms);
@@ -176,7 +177,10 @@ function pushFrame(ms) {
 }
 
 if ("PerformanceObserver" in window) {
-  try {
+  const timingTypes = ["event", "long-animation-frame"].filter((type) =>
+    supportedEntryTypes.has(type)
+  );
+  if (timingTypes.length) {
     const obs = new PerformanceObserver((list) => {
       for (const e of list.getEntries()) {
         if (e.paintTime != null) paintEl.textContent = e.paintTime.toFixed(1) + "ms";
@@ -187,9 +191,8 @@ if ("PerformanceObserver" in window) {
         if (e.duration) pushFrame(e.duration);
       }
     });
-    obs.observe({ type: "event", buffered: true });
-    obs.observe({ type: "long-animation-frame", buffered: true });
-  } catch (e) {/* observer types unsupported */}
+    timingTypes.forEach((type) => obs.observe({ type, buffered: true }));
+  }
 }
 
 const stage = document.getElementById("stage");
@@ -202,17 +205,17 @@ function updateContainerSize() {
 updateContainerSize();
 new ResizeObserver(updateContainerSize).observe(stage);
 
-if ("PerformanceObserver" in window) {
-  try {
-    const obs = new PerformanceObserver((list) => {
-      for (const e of list.getEntries()) {
-        if (e.entryType === "container") {
-          containerVal.textContent = e.startTime.toFixed(1) + "ms";
-        }
+if (supportedEntryTypes.has("container")) {
+  const obs = new PerformanceObserver((list) => {
+    for (const e of list.getEntries()) {
+      if (e.entryType === "container") {
+        containerVal.textContent = e.startTime.toFixed(1) + "ms";
       }
-    });
-    obs.observe({ type: "container", buffered: true });
-  } catch { containerVal.textContent = "n/a"; }
+    }
+  });
+  obs.observe({ type: "container", buffered: true });
+} else {
+  containerVal.textContent = "not exposed";
 }
 
 document.getElementById("resize-container").addEventListener("click", () => {
@@ -227,23 +230,23 @@ const clsVal = document.getElementById("cls-val");
 const clsRect = document.getElementById("cls-rect");
 let clsTotal = 0;
 
-if ("PerformanceObserver" in window) {
-  try {
-    const obs = new PerformanceObserver((list) => {
-      for (const e of list.getEntries()) {
-        if (!e.hadRecentInput) {
-          clsTotal += e.value;
-          clsVal.textContent = clsTotal.toFixed(3);
-          const src = e.sources?.[0];
-          if (src && src.currentRect) {
-            const r = src.currentRect;
-            clsRect.textContent = `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}×${Math.round(r.height)}`;
-          }
+if (supportedEntryTypes.has("layout-shift")) {
+  const obs = new PerformanceObserver((list) => {
+    for (const e of list.getEntries()) {
+      if (!e.hadRecentInput) {
+        clsTotal += e.value;
+        clsVal.textContent = clsTotal.toFixed(3);
+        const src = e.sources?.[0];
+        if (src && src.currentRect) {
+          const r = src.currentRect;
+          clsRect.textContent = `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}×${Math.round(r.height)}`;
         }
       }
-    });
-    obs.observe({ type: "layout-shift", buffered: true });
-  } catch { clsVal.textContent = "n/a"; }
+    }
+  });
+  obs.observe({ type: "layout-shift", buffered: true });
+} else {
+  clsVal.textContent = "not exposed";
 }
 
 document.getElementById("cause-shift").addEventListener("click", () => {
@@ -251,22 +254,35 @@ document.getElementById("cause-shift").addEventListener("click", () => {
 });
 
 const crashStatus = document.getElementById("crash-status");
+const hasCrashReporter = typeof navigator.crashReporter?.setKey === "function";
+
+function setCrashStatus(message, ok) {
+  const pill = document.createElement("span");
+  pill.className = `pill ${ok ? "ok" : "bad"}`;
+  pill.textContent = message;
+  crashStatus.replaceChildren(pill);
+}
+
+if (!hasCrashReporter) {
+  setCrashStatus("navigator.crashReporter.setKey() is not exposed in this browser/context", false);
+}
+
 document.getElementById("set-crash").addEventListener("click", () => {
   const k = document.getElementById("ck").value.trim();
   const v = document.getElementById("cv").value.trim();
-  if (!k) { crashStatus.innerHTML = `<span class="pill bad">empty key</span>`; return; }
+  if (!k) {
+    setCrashStatus("empty key", false);
+    return;
+  }
+  if (!hasCrashReporter) {
+    setCrashStatus("not written: navigator.crashReporter.setKey() is unavailable", false);
+    return;
+  }
   try {
-    if (window.crashReportingControl?.setReportFields) {
-      window.crashReportingControl.setReportFields({ [k]: v });
-      crashStatus.innerHTML = `<span class="pill ok">attached ${k}=${v}</span>`;
-    } else if (navigator?.crashReports?.setReportingFields) {
-      navigator.crashReports.setReportingFields({ [k]: v });
-      crashStatus.innerHTML = `<span class="pill ok">attached ${k}=${v}</span>`;
-    } else {
-      crashStatus.innerHTML = `<span class="pill bad">API unavailable — Chrome 145+ behind flag</span>`;
-    }
-  } catch (e) {
-    crashStatus.innerHTML = `<span class="pill bad">${e.message}</span>`;
+    const result = navigator.crashReporter.setKey(k, v);
+    setCrashStatus(`setKey(${JSON.stringify(k)}, ${JSON.stringify(v)}) returned ${String(result)}`, true);
+  } catch (error) {
+    setCrashStatus(error instanceof Error ? error.message : String(error), false);
   }
 });
 
