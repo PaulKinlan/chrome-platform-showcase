@@ -906,6 +906,15 @@ async function featureHasDemo(release: string, feature: FeatureSummary): Promise
   }
 }
 
+async function releaseHasUberDemo(release: string): Promise<boolean> {
+  try {
+    await Deno.stat(`./${release}/uber-demo/index.html`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function renderReleasePage(
   release: string,
   milestone: number,
@@ -921,6 +930,7 @@ export async function renderReleasePage(
   }
 
   const status = statusBadgeFor(channels, milestone);
+  const hasUberDemo = await releaseHasUberDemo(release);
   const sections = await Promise.all(features.groups.map(async (group) => {
     const cards = await Promise.all(group.features.map(async (f) => {
       const hasDemo = await featureHasDemo(release, f);
@@ -977,7 +987,12 @@ export async function renderReleasePage(
 
   <section>
     <h2>uber demo</h2>
-    <p>The release-level experience lives at <code>/${release}/uber-demo/</code> when it has been built. Per-feature demos below are built automatically, one feature per commit, and every distinct use case should become an interactive concept page.</p>
+    ${
+    hasUberDemo
+      ? `<p><a class="tag tag-live" href="/${release}/uber-demo/">open the Chrome ${milestone} uber demo &rarr;</a></p>`
+      : `<p><span class="tag tag-pending">uber demo pending</span> The release-level experience will live at <code>/${release}/uber-demo/</code>.</p>`
+  }
+    <p>Per-feature demos below are built automatically, one feature per commit, and every distinct use case should become an interactive concept page.</p>
   </section>
 
   <section>
