@@ -28,7 +28,7 @@ lib/
 public/styles.css     Shared design system. Editorial / print-inspired. Uses CSS variables — see below.
 v<N>/                 One folder per Chrome milestone. Each contains <feature-slug>/index.html + concept subfolders.
 .claude/
-  routine-prompt.md   Source of truth for the routine prompt. Update this AND the live routine when changing rules.
+  routine-prompt.md   Source of truth for the routine. The live routines just bootstrap-read this file; edit here.
   auto-research.md    How the self-critique loop, conformance probes, and goal-setting work + how to re-run them.
 lib/
   critique.ts         Data model for self-critique reports (_questions.json). See .claude/auto-research.md.
