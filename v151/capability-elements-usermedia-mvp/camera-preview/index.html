@@ -23,7 +23,7 @@
   <div id="support-note"></div>
   <div id="usermedia-slot"></div>
   <button class="btn" id="fallback-btn" style="display:none;">Start camera (getUserMedia fallback)</button>
-  <video id="video" autoplay playsinline style="display:none;" aria-label="camera preview video preview"></video>
+  <video id="video" playsinline muted style="display:none;" aria-label="camera preview video preview"></video>
   <div class="status" id="status">Click to start the camera.</div>
   <section><h2>references</h2><ul>
     <li><a href="https://chromestatus.com/feature/4926233538330624" target="_blank" rel="noopener">ChromeStatus entry</a></li>
@@ -34,29 +34,96 @@
 <script>
 (function () {
   var supportsUM = false;
-  try { supportsUM = document.createElement("usermedia").constructor !== HTMLUnknownElement; } catch {}
+  try { supportsUM = document.createElement("usermedia").constructor !== HTMLUnknownElement; } catch (e) { /* ignore */ }
   var slot = document.getElementById("usermedia-slot");
   var fallbackBtn = document.getElementById("fallback-btn");
   var video = document.getElementById("video");
   var status = document.getElementById("status");
+  var activeStream = null;
+
+  // Guard the <video>: a MediaStream-backed element can emit an "error" event if
+  // the track drops (camera unplugged, another app grabs it, permission revoked).
+  // Handle it cleanly so we never surface an unhandled resource error, and never
+  // leave a broken media element on screen.
+  video.addEventListener("error", function (ev) {
+    ev.preventDefault();
+    stopStream();
+    video.style.display = "none";
+    status.textContent = "✗ Camera preview ended (the media track became unavailable).";
+  });
+
+  function stopStream() {
+    if (activeStream) {
+      activeStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) { /* ignore */ } });
+      activeStream = null;
+    }
+  }
+
+  function showStream(stream, sourceLabel) {
+    stopStream();
+    activeStream = stream;
+    video.srcObject = stream;
+    video.style.display = "";
+    // Explicit play() so a blocked autoplay surfaces as a caught promise
+    // rejection, never an unhandled media element error.
+    video.play().catch(function () { /* autoplay may be blocked; preview still binds */ });
+    var track = stream.getVideoTracks()[0];
+    status.textContent = "✓ Camera active via " + sourceLabel + ". Track label: " + (track ? track.label || "(unnamed)" : "(none)");
+  }
+
+  function enableFallback(reason) {
+    if (reason) {
+      document.getElementById("support-note").innerHTML =
+        '<div class="unsupported-note">' + reason + " Using the getUserMedia fallback — click the button below.</div>";
+    }
+    fallbackBtn.style.display = "";
+    status.textContent = "Click the button to start the camera via getUserMedia.";
+  }
+
+  fallbackBtn.addEventListener("click", async function () {
+    status.textContent = "Requesting camera…";
+    try {
+      var stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      showStream(stream, "getUserMedia fallback");
+    } catch (e) {
+      // Denied / no camera: clean labelled fallback, never a broken src.
+      status.textContent = "✗ " + e.name + ": " + e.message;
+    }
+  });
 
   if (supportsUM) {
-    slot.innerHTML = '<usermedia style="display:block;width:320px;height:240px;border:2px solid var(--border-black)"></usermedia>';
-    status.textContent = "✓ <usermedia> element rendered. Click it to start the camera stream.";
-  } else {
-    document.getElementById("support-note").innerHTML = '<div class="unsupported-note">⚠ &lt;usermedia&gt; not supported. Using getUserMedia fallback — click the button below.</div>';
-    fallbackBtn.style.display = "";
-    fallbackBtn.addEventListener("click", async function () {
-      status.textContent = "Requesting camera…";
-      try {
-        var stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        video.srcObject = stream;
-        video.style.display = "";
-        status.textContent = "✓ Camera active via getUserMedia fallback. Track label: " + stream.getVideoTracks()[0].label;
-      } catch (e) {
-        status.textContent = "✗ " + e.name + ": " + e.message;
+    var um = document.createElement("usermedia");
+    um.style.cssText = "display:block;width:320px;height:240px;border:2px solid var(--border-black)";
+    // Wire the element lifecycle so a real stream is shown and denial/registration
+    // failures are reflected as clean status text instead of a dead element.
+    um.addEventListener("stream", function (ev) {
+      var s = (ev && ev.stream) || um.stream;
+      if (s) showStream(s, "<usermedia> element");
+    });
+    um.addEventListener("promptdismiss", function () {
+      status.textContent = "Camera prompt dismissed — no stream started.";
+    });
+    um.addEventListener("validationstatuschange", function () {
+      if (um.isValid === false) {
+        enableFallback("⚠ The &lt;usermedia&gt; element could not register (" + (um.invalidReason || "invalid") + ").");
       }
     });
+    // The element itself never sets a src, but guard defensively.
+    um.addEventListener("error", function (ev) { ev.preventDefault(); });
+    slot.appendChild(um);
+
+    // A newly-registered permission element may be invalid (experimental /
+    // origin-trial gated). Surface the getUserMedia path when it is not usable.
+    requestAnimationFrame(function () {
+      if (um.isValid === false) {
+        enableFallback("⚠ The &lt;usermedia&gt; element registered but is not usable here (" + (um.invalidReason || "invalid") + ").");
+      } else {
+        status.textContent = "✓ <usermedia> element rendered. Click it to start the camera stream.";
+        enableFallback(null);
+      }
+    });
+  } else {
+    enableFallback("⚠ &lt;usermedia&gt; is not supported in this browser.");
   }
 })();
 </script>
