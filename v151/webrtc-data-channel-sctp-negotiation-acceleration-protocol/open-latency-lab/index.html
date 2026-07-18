@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Open-Latency Lab — WebRTC SNAP — Chrome 151 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .controls { display: flex; gap: var(--space-4); flex-wrap: wrap; align-items: end; margin: var(--space-4) 0; }
+    .controls label { display: flex; flex-direction: column; gap: var(--space-1); font-family: var(--font-mono); font-size: 0.76rem; color: var(--text-muted); }
+    .stat-row { display: flex; gap: var(--space-4); flex-wrap: wrap; margin: var(--space-4) 0; }
+    .stat { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3) var(--space-4); min-width: 130px; box-shadow: var(--thin-shadow); }
+    .stat .k { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .stat .v { font-family: var(--font-mono); font-size: 1.5rem; color: var(--text-black); }
+    .status { font-family: var(--font-mono); font-size: 0.8rem; padding: var(--space-1) var(--space-3); border: 2px solid var(--border-black); display: inline-block; margin: var(--space-2) 0; }
+    .status.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .status.bad { background: var(--accent-rose); color: var(--bg-ivory); }
+    .status.idle { background: var(--bg-stone); color: var(--text-charcoal); }
+    table { border-collapse: collapse; width: 100%; margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.82rem; }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); text-align: right; }
+    th { background: var(--bg-stone); color: var(--text-black); text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+    .bar-cell { position: relative; }
+    .bar { position: absolute; inset: 0; background: var(--accent-blue); opacity: 0.16; }
+    .bar-val { position: relative; }
+    pre { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-4); overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebRTC SNAP</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v151 · webrtc · data channel</p>
+    <h1>Open-Latency Lab</h1>
+    <p class="lede">Open a real data channel over a same-page <code>RTCPeerConnection</code> loopback and time <code>createDataChannel</code> &rarr; the channel's <code>open</code> event. That interval — the DTLS plus SCTP association setup — is exactly what SNAP shortens by pre-negotiating the SCTP <code>INIT</code> parameters in SDP.</p>
+  </header>
+
+  <p class="note">Both peers live in this one page, so ICE resolves over host candidates with near-zero network delay. The absolute numbers are a floor, not real-world latency — but the run-to-run measurement is genuine, and it isolates the establishment work SNAP removes. The RTCPeerConnection / RTCDataChannel API is unchanged by SNAP; nothing here is simulated.</p>
+
+  <div class="controls">
+    <label>Runs
+      <input type="number" id="runs" min="1" max="25" value="8">
+    </label>
+    <button id="run" type="button">Run latency test</button>
+    <button id="reset" type="button">Reset</button>
+  </div>
+
+  <div id="status" class="status idle" role="status" aria-live="polite">idle — press “Run latency test”</div>
+
+  <div class="stat-row" aria-live="polite">
+    <div class="stat"><div class="k">last open</div><div class="v" id="s-last">—</div></div>
+    <div class="stat"><div class="k">median</div><div class="v" id="s-median">—</div></div>
+    <div class="stat"><div class="k">min</div><div class="v" id="s-min">—</div></div>
+    <div class="stat"><div class="k">max</div><div class="v" id="s-max">—</div></div>
+  </div>
+
+  <table id="results" hidden>
+    <caption class="note" style="text-align:left;caption-side:top;margin-bottom:var(--space-2)">per-run data-channel open time (ms)</caption>
+    <thead><tr><th scope="col">run</th><th scope="col">createDataChannel → open (ms)</th></tr></thead>
+    <tbody id="results-body"></tbody>
+  </table>
+
+  <section>
+    <h2>how it works</h2>
+    <p>Each run builds two <code>RTCPeerConnection</code>s, opens a data channel on the offerer, and shuttles the offer, answer, and ICE candidates between them directly (no signalling server needed for loopback). We start a high-resolution timer at <code>createDataChannel()</code> and stop it in the channel's <code>open</code> event:</p>
+    <pre><code>const t0 = performance.now();
+const a = new RTCPeerConnection();
+const b = new RTCPeerConnection();
+a.onicecandidate = (e) =&gt; e.candidate &amp;&amp; b.addIceCandidate(e.candidate);
+b.onicecandidate = (e) =&gt; e.candidate &amp;&amp; a.addIceCandidate(e.candidate);
+
+const dc = a.createDataChannel("probe");   // SCTP association starts here
+dc.addEventListener("open", () =&gt; {
+  const openMs = performance.now() - t0;    // &larr; SNAP targets this interval
+});
+
+const offer = await a.createOffer();
+await a.setLocalDescription(offer);
+await b.setRemoteDescription(offer);
+const answer = await b.createAnswer();
+await b.setLocalDescription(answer);
+await a.setRemoteDescription(answer);</code></pre>
+    <p>On a real network the SCTP <code>INIT</code>/<code>INIT-ACK</code>/<code>COOKIE-ECHO</code>/<code>COOKIE-ACK</code> exchange happens <em>after</em> DTLS finishes, adding up to two round trips. SNAP carries those <code>INIT</code> parameters in the SDP you already exchange, so the association is ready as soon as DTLS is — the establishment interval this lab measures is what shrinks.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../sdp-sctp-inspector/">SDP &amp; SCTP Inspector</a> — read the SCTP negotiation lines and probe for <code>a=sctp-init</code>.</li>
+      <li><a href="../reliable-vs-unreliable/">Reliable vs Unreliable Streams</a> — the SCTP parameters SNAP negotiates.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5137946677215232" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://datatracker.ietf.org/doc/draft-hancke-tsvwg-snap/" target="_blank" rel="noopener">IETF draft-hancke-tsvwg-snap</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(function () {
+  const runBtn = document.getElementById("run");
+  const resetBtn = document.getElementById("reset");
+  const runsInput = document.getElementById("runs");
+  const statusEl = document.getElementById("status");
+  const sLast = document.getElementById("s-last");
+  const sMedian = document.getElementById("s-median");
+  const sMin = document.getElementById("s-min");
+  const sMax = document.getElementById("s-max");
+  const table = document.getElementById("results");
+  const tbody = document.getElementById("results-body");
+
+  const hasRTC = typeof RTCPeerConnection === "function";
+  if (!hasRTC) {
+    statusEl.textContent = "RTCPeerConnection is not available in this browser.";
+    statusEl.className = "status bad";
+    runBtn.disabled = true;
+    window.showcaseTelemetry?.assert("webrtc-openlatency-support", false, { reason: "no RTCPeerConnection" });
+  }
+
+  const samples = [];
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = "status " + cls;
+  }
+
+  function median(arr) {
+    if (!arr.length) return NaN;
+    const s = [...arr].sort((x, y) => x - y);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  function fmt(n) { return Number.isFinite(n) ? n.toFixed(1) + " ms" : "—"; }
+
+  function render() {
+    if (!samples.length) {
+      sLast.textContent = sMedian.textContent = sMin.textContent = sMax.textContent = "—";
+      table.hidden = true;
+      tbody.replaceChildren();
+      return;
+    }
+    sLast.textContent = fmt(samples[samples.length - 1]);
+    sMedian.textContent = fmt(median(samples));
+    sMin.textContent = fmt(Math.min(...samples));
+    sMax.textContent = fmt(Math.max(...samples));
+    const max = Math.max(...samples, 0.0001);
+    table.hidden = false;
+    tbody.replaceChildren();
+    samples.forEach((ms, i) => {
+      const tr = document.createElement("tr");
+      const idx = document.createElement("td");
+      idx.textContent = String(i + 1);
+      const val = document.createElement("td");
+      val.className = "bar-cell";
+      const bar = document.createElement("span");
+      bar.className = "bar";
+      bar.style.width = Math.max(2, (ms / max) * 100) + "%";
+      const num = document.createElement("span");
+      num.className = "bar-val";
+      num.textContent = ms.toFixed(1);
+      val.append(bar, num);
+      tr.append(idx, val);
+      tbody.append(tr);
+    });
+  }
+
+  function openOnce() {
+    return new Promise((resolve, reject) => {
+      let a, b, settled = false;
+      const cleanup = () => { try { a && a.close(); } catch (_) {} try { b && b.close(); } catch (_) {} };
+      const fail = (err) => { if (settled) return; settled = true; cleanup(); reject(err); };
+      const timer = setTimeout(() => fail(new Error("timeout opening data channel")), 8000);
+      try {
+        a = new RTCPeerConnection();
+        b = new RTCPeerConnection();
+        a.onicecandidate = (e) => { if (e.candidate) b.addIceCandidate(e.candidate).catch(() => {}); };
+        b.onicecandidate = (e) => { if (e.candidate) a.addIceCandidate(e.candidate).catch(() => {}); };
+        a.onicecandidateerror = () => {};
+        const t0 = performance.now();
+        const dc = a.createDataChannel("probe");
+        dc.addEventListener("open", () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          const openMs = performance.now() - t0;
+          cleanup();
+          resolve(openMs);
+        });
+        dc.addEventListener("error", (ev) => fail(ev.error || new Error("data channel error")));
+        (async () => {
+          const offer = await a.createOffer();
+          await a.setLocalDescription(offer);
+          await b.setRemoteDescription(offer);
+          const answer = await b.createAnswer();
+          await b.setLocalDescription(answer);
+          await a.setRemoteDescription(answer);
+        })().catch(fail);
+      } catch (err) { fail(err); }
+    });
+  }
+
+  async function runTest() {
+    if (!hasRTC) return;
+    const n = Math.max(1, Math.min(25, parseInt(runsInput.value, 10) || 1));
+    runBtn.disabled = true;
+    resetBtn.disabled = true;
+    setStatus("running " + n + " open(s)…", "idle");
+    let ok = 0;
+    for (let i = 0; i < n; i++) {
+      try {
+        const ms = await openOnce();
+        samples.push(ms);
+        ok++;
+        render();
+        setStatus("run " + (i + 1) + "/" + n + " — opened in " + ms.toFixed(1) + " ms", "ok");
+      } catch (err) {
+        setStatus("run " + (i + 1) + "/" + n + " failed: " + (err && err.message ? err.message : err), "bad");
+        break;
+      }
+    }
+    runBtn.disabled = false;
+    resetBtn.disabled = false;
+    if (ok > 0) {
+      setStatus("done — " + ok + " channel(s) opened, median " + fmt(median(samples)), "ok");
+    }
+    window.showcaseTelemetry?.assert("webrtc-openlatency-opened", ok > 0, { opened: ok, requested: n });
+  }
+
+  runBtn.addEventListener("click", runTest);
+  resetBtn.addEventListener("click", () => { samples.length = 0; render(); setStatus("idle — press “Run latency test”", "idle"); });
+  render();
+})();
+</script>
+</body>
+</html>
