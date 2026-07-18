@@ -82,11 +82,11 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v150</p>
     <h1>Worker Processor</h1>
-    <p class="lede">Move the <code>MediaStreamTrackProcessor</code> into a dedicated Worker thread — the recommended architecture for heavy per-frame transforms — and read <code>totalFrames</code> / <code>discardedFrames</code> from the worker back to the main thread via <code>postMessage</code>. The main thread only receives the health stats, never the raw frames.</p>
+    <p class="lede">Transfer the processor's <code>.readable</code> stream to a dedicated Worker for the heavy per-frame work, and read <code>totalFrames</code> / <code>discardedFrames</code> from the <code>MediaStreamTrackProcessor</code> on the main thread. A <code>ReadableStream</code> is transferable, so the frames cross to the worker — but a <code>CanvasCaptureMediaStreamTrack</code> is <em>not</em>, so the track object is never posted.</p>
   </header>
 
   <div class="note">
-    This demo uses a canvas-based synthetic <code>MediaStream</code> (no camera permission required). The processor lives in an inline <code>Blob</code> Worker. Counter stats are sent to main thread at 1 Hz. Slow down the consumer with the slider to induce frame drops.
+    This demo uses a canvas-based synthetic <code>MediaStream</code> (no camera permission required). The main thread builds the <code>MediaStreamTrackProcessor</code> and transfers its <code>.readable</code> stream to an inline <code>Blob</code> Worker that drains the frames. The counters are read from the processor on the main thread at 1 Hz. Slow down the worker consumer with the slider to induce frame drops.
   </div>
 
   <div class="stage">
@@ -142,46 +142,37 @@
       <h4>Main thread</h4>
       <div class="thread-item">Canvas draw loop (30 fps)</div>
       <div class="thread-item"><code>canvas.captureStream(30)</code></div>
-      <div class="thread-item">Transfer track to Worker via <code>postMessage</code></div>
-      <div class="thread-item">Receive counter stats @ 1 Hz</div>
-      <div class="thread-item">Update UI</div>
+      <div class="thread-item"><code>new MediaStreamTrackProcessor(track)</code></div>
+      <div class="thread-item">Transfer <code>processor.readable</code> to Worker</div>
+      <div class="thread-item">Read <code>totalFrames</code> / <code>discardedFrames</code> @ 1 Hz</div>
     </div>
     <div class="thread-arrow">⇄</div>
     <div class="thread-box">
       <h4>Dedicated Worker</h4>
-      <div class="thread-item"><code>new MediaStreamTrackProcessor(track)</code></div>
-      <div class="thread-item">Pull frames from <code>.readable</code></div>
+      <div class="thread-item">Receive transferred <code>ReadableStream</code></div>
+      <div class="thread-item">Pull frames from <code>reader.read()</code></div>
       <div class="thread-item">Simulated per-frame work (configurable delay)</div>
       <div class="thread-item"><code>frame.close()</code></div>
-      <div class="thread-item">Post <code>{ totalFrames, discardedFrames }</code> @ 1 Hz</div>
+      <div class="thread-item">Post drain progress to main</div>
     </div>
   </div>
 
-  <pre><code>// main.js
+  <pre><code>// main.js — keep the processor + counters on the main thread
 const track = canvas.captureStream(30).getVideoTracks()[0];
+const processor = new MediaStreamTrackProcessor({ track });
+
+// A ReadableStream IS transferable; a CanvasCaptureMediaStreamTrack is NOT,
+// so transfer the stream and never postMessage the track object.
 const worker = new Worker(workerUrl);
-worker.postMessage({ type: 'start', track }, [track]);
+worker.postMessage({ readable: processor.readable }, [processor.readable]);
 
-worker.onmessage = ({ data }) => {
-  if (data.type === 'stats') {
-    console.log(data.totalFrames, data.discardedFrames);
-  }
-};
+setInterval(() => {
+  console.log(processor.totalFrames, processor.discardedFrames);
+}, 1000);
 
-// worker.js
+// worker.js — heavy per-frame work drains the transferred stream
 self.onmessage = ({ data }) => {
-  if (data.type !== 'start') return;
-  const processor = new MediaStreamTrackProcessor({ track: data.track });
-  const reader = processor.readable.getReader();
-
-  setInterval(() => {
-    self.postMessage({
-      type: 'stats',
-      totalFrames: processor.totalFrames,
-      discardedFrames: processor.discardedFrames,
-    });
-  }, 1000);
-
+  const reader = data.readable.getReader();
   (async () => {
     while (true) {
       const { done, value: frame } = await reader.read();
@@ -208,46 +199,31 @@ self.onmessage = ({ data }) => {
 (function () {
   const PROD_FPS = 30;
 
-  /* ── worker source (inline blob) ── */
+  /* ── worker source (inline blob) ──
+     The worker receives the transferred ReadableStream and drains it, doing the
+     heavy per-frame work. It never touches the track object (not transferable). */
   const WORKER_SRC = `
+self._delay = 0;
 self.onmessage = function(e) {
   if (e.data.type === 'start') {
-    startProcessing(e.data.track, e.data.consumerDelay, e.data.forceSimulation);
+    self._delay = e.data.consumerDelay || 0;
+    drain(e.data.readable);
   } else if (e.data.type === 'delay') {
-    self._consumerDelay = e.data.value;
+    self._delay = e.data.value;
   }
 };
 
-function startProcessing(track, initDelay, forceSimulation) {
-  self._consumerDelay = initDelay || 0;
-
-  var supported = !forceSimulation
-    && (typeof MediaStreamTrackProcessor !== 'undefined')
-    && ('totalFrames' in MediaStreamTrackProcessor.prototype);
-
-  self.postMessage({ type: 'supported', value: supported });
-
-  if (!supported) {
-    simulateFallback();
-    return;
-  }
-
-  var processor = new MediaStreamTrackProcessor({ track: track });
-  var reader = processor.readable.getReader();
-
-  var statsInterval = setInterval(function() {
-    self.postMessage({
-      type: 'stats',
-      totalFrames: processor.totalFrames,
-      discardedFrames: processor.discardedFrames,
-    });
-  }, 1000);
-
+function drain(readable) {
+  var reader = readable.getReader();
+  var processed = 0;
   function loop() {
     reader.read().then(function(result) {
-      if (result.done) { clearInterval(statsInterval); return; }
+      if (result.done) { self.postMessage({ type: 'done', processed: processed }); return; }
       var frame = result.value;
-      var delay = self._consumerDelay;
+      processed++;
+      // simulate heavy per-frame work here; report drain progress ~ every 0.5 s
+      if (processed % 15 === 0) self.postMessage({ type: 'progress', processed: processed });
+      var delay = self._delay || 0;
       if (delay > 0) {
         setTimeout(function() { frame.close(); loop(); }, delay);
       } else {
@@ -255,27 +231,10 @@ function startProcessing(track, initDelay, forceSimulation) {
         loop();
       }
     }).catch(function(err) {
-      clearInterval(statsInterval);
       self.postMessage({ type: 'error', message: String(err) });
     });
   }
   loop();
-}
-
-var _simTotal = 0, _simDiscard = 0;
-function simulateFallback() {
-  var last = Date.now();
-  setInterval(function() {
-    var now = Date.now(), elapsed = (now - last) / 1000;
-    last = now;
-    var produced = Math.round(30 * elapsed);
-    var delay = self._consumerDelay || 0;
-    var frameTime = 1000 / 30;
-    var discarded = delay > frameTime ? Math.round(produced * Math.min(0.95, delay / 33.3 - 0.8)) : 0;
-    _simTotal += produced;
-    _simDiscard += Math.max(0, discarded);
-    self.postMessage({ type: 'stats', totalFrames: _simTotal, discardedFrames: _simDiscard, simulated: true });
-  }, 1000);
 }
 `.trim();
 
@@ -286,6 +245,10 @@ function simulateFallback() {
   let prevTotal = 0, prevDiscard = 0;
   let consumerDelay = 0;
   let supported = null;
+  let statsTimer = null;
+  let simTimer = null;
+  let currentProcessor = null;
+  let currentTrack = null;
 
   /* ── canvas source ── */
   const canvas = document.getElementById('source-canvas');
@@ -350,6 +313,59 @@ function simulateFallback() {
   btnStart.addEventListener('click', start);
   btnStop.addEventListener('click', stop);
 
+  function reportStats(total, discarded, simulated) {
+    const dTotal   = total - prevTotal;
+    const dDiscard = discarded - prevDiscard;
+    prevTotal   = total;
+    prevDiscard = discarded;
+
+    statTotal.textContent   = total.toLocaleString();
+    statDiscard.textContent = discarded.toLocaleString();
+    deltaTotal.textContent  = '+' + dTotal + '/s';
+    deltaDiscard.textContent= '+' + dDiscard + '/s';
+    statRate.textContent    = dTotal;
+
+    const pct = total > 0 ? (discarded / total * 100) : 0;
+    discardPct.textContent = 'Discard rate: ' + pct.toFixed(1) + '%';
+    discardBar.style.width = Math.min(100, pct) + '%';
+    const isWarn = pct > 10;
+    discardBar.classList.toggle('ok', !isWarn);
+    boxDiscard.classList.toggle('warn', isWarn);
+    statHealth.textContent = pct < 5 ? 'Good' : pct < 20 ? 'Fair' : 'Poor';
+
+    addLog(
+      'total=' + total + ' discarded=' + discarded +
+      ' Δtotal=+' + dTotal + ' Δdiscarded=+' + dDiscard + (simulated ? ' (sim)' : ''),
+      'msg-worker'
+    );
+  }
+
+  function resetIdle() {
+    running = false;
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+  }
+
+  function startSimulation() {
+    let simTotal = 0, simDiscard = 0, last = Date.now();
+    let asserted = false;
+    simTimer = setInterval(() => {
+      const now = Date.now(), elapsed = (now - last) / 1000;
+      last = now;
+      const produced = Math.round(30 * elapsed);
+      const delay = consumerDelay || 0;
+      const frameTime = 1000 / 30;
+      const discarded = delay > frameTime ? Math.round(produced * Math.min(0.95, delay / 33.3 - 0.8)) : 0;
+      simTotal += produced;
+      simDiscard += Math.max(0, discarded);
+      reportStats(simTotal, simDiscard, true);
+      if (!asserted) {
+        asserted = true;
+        window.showcaseTelemetry?.assert('mstp-worker-fallback', true, { reason: 'totalFrames not exposed; labelled simulation' });
+      }
+    }, 1000);
+  }
+
   function start() {
     if (running) return;
     running = true;
@@ -364,18 +380,31 @@ function simulateFallback() {
     // Start canvas draw
     drawFrame();
 
+    supported = (typeof MediaStreamTrackProcessor !== 'undefined')
+      && ('totalFrames' in MediaStreamTrackProcessor.prototype);
+
+    if (!supported) {
+      addLog('MediaStreamTrackProcessor.totalFrames not available — running main-thread simulation', 'msg-warn');
+      statusEl.textContent = 'Worker: simulated — exact frame-counter capability is not exposed';
+      startSimulation();
+      return;
+    }
+
     // Capture stream
     let stream;
     try {
       stream = canvas.captureStream(PROD_FPS);
     } catch (e) {
       addLog('captureStream() failed: ' + e.message, 'msg-warn');
-      running = false;
-      btnStart.disabled = false;
-      btnStop.disabled = true;
+      resetIdle();
       return;
     }
     const track = stream.getVideoTracks()[0];
+    currentTrack = track;
+
+    // Build the processor on the MAIN thread and keep the handle for the counters.
+    const processor = new MediaStreamTrackProcessor({ track });
+    currentProcessor = processor;
 
     // Create worker from blob
     const blob = new Blob([WORKER_SRC], { type: 'application/javascript' });
@@ -384,44 +413,10 @@ function simulateFallback() {
     URL.revokeObjectURL(url);
 
     worker.onmessage = ({ data }) => {
-      if (data.type === 'supported') {
-        supported = data.value;
-        if (!supported) {
-          addLog('MediaStreamTrackProcessor.totalFrames not available — running simulation', 'msg-warn');
-          statusEl.textContent = 'Worker: simulated — exact frame-counter capability is not exposed';
-        } else {
-          addLog('Worker capability confirmed: totalFrames + discardedFrames supported', 'msg-worker');
-          statusEl.textContent = 'Worker: running (real API)';
-        }
-      } else if (data.type === 'stats') {
-        const dTotal   = data.totalFrames - prevTotal;
-        const dDiscard = data.discardedFrames - prevDiscard;
-        prevTotal   = data.totalFrames;
-        prevDiscard = data.discardedFrames;
-
-        statTotal.textContent   = data.totalFrames.toLocaleString();
-        statDiscard.textContent = data.discardedFrames.toLocaleString();
-        deltaTotal.textContent  = '+' + dTotal + '/s';
-        deltaDiscard.textContent= '+' + dDiscard + '/s';
-        statRate.textContent    = dTotal;
-
-        const pct = data.totalFrames > 0
-          ? (data.discardedFrames / data.totalFrames * 100)
-          : 0;
-        const pctStr = pct.toFixed(1) + '%';
-        discardPct.textContent = 'Discard rate: ' + pctStr;
-        discardBar.style.width = Math.min(100, pct) + '%';
-        const isWarn = pct > 10;
-        discardBar.classList.toggle('ok', !isWarn);
-        boxDiscard.classList.toggle('warn', isWarn);
-        statHealth.textContent = pct < 5 ? 'Good' : pct < 20 ? 'Fair' : 'Poor';
-
-        const simNote = data.simulated ? ' (sim)' : '';
-        addLog(
-          'total=' + data.totalFrames + ' discarded=' + data.discardedFrames +
-          ' Δtotal=+' + dTotal + ' Δdiscarded=+' + dDiscard + simNote,
-          'msg-worker'
-        );
+      if (data.type === 'progress') {
+        addLog('worker drained ' + data.processed + ' frames', 'msg-info');
+      } else if (data.type === 'done') {
+        addLog('worker stream ended (' + data.processed + ' frames)', 'msg-main');
       } else if (data.type === 'error') {
         addLog('Worker error: ' + data.message, 'msg-warn');
         statusEl.textContent = 'Worker: error';
@@ -432,24 +427,35 @@ function simulateFallback() {
       addLog('Worker uncaught: ' + e.message, 'msg-warn');
     };
 
-    // Transfer track to worker (transferable)
-    try {
-      worker.postMessage({ type: 'start', track, consumerDelay }, [track]);
-      addLog('Track transferred to worker', 'msg-info');
-    } catch (transferError) {
-      // Some engines expose the processor but cannot transfer this synthetic
-      // canvas track. Do not attempt to clone the non-cloneable track: ask the
-      // worker to run its clearly labelled counter simulation instead.
-      worker.postMessage({ type: 'start', forceSimulation: true, consumerDelay });
-      addLog(`Track transfer unavailable (${transferError.name}); using simulated worker counters`, 'msg-warn');
-      statusEl.textContent = 'Worker: simulated — synthetic track is not transferable';
-    }
+    // Transfer the processor's readable stream (ReadableStream is transferable).
+    // We never postMessage the CanvasCaptureMediaStreamTrack itself — it is not
+    // cloneable/transferable, which is exactly the DataCloneError we avoid here.
+    const readable = processor.readable;
+    worker.postMessage({ type: 'start', readable, consumerDelay }, [readable]);
+    addLog('Transferred processor.readable to worker (ReadableStream is transferable)', 'msg-info');
+    statusEl.textContent = 'Worker: running (real API)';
+    addLog('Reading totalFrames / discardedFrames from main-thread processor @ 1 Hz', 'msg-worker');
+
+    let asserted = false;
+    statsTimer = setInterval(() => {
+      const total = processor.totalFrames;
+      const discarded = processor.discardedFrames;
+      reportStats(total, discarded, false);
+      if (!asserted && total > 0) {
+        asserted = true;
+        window.showcaseTelemetry?.assert('mstp-worker-real-counters', total > 0, { total, discarded });
+      }
+    }, 1000);
   }
 
   function stop() {
     running = false;
     if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+    if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+    if (simTimer) { clearInterval(simTimer); simTimer = null; }
     if (worker) { worker.terminate(); worker = null; }
+    if (currentTrack) { try { currentTrack.stop(); } catch (e) { /* ignore */ } currentTrack = null; }
+    currentProcessor = null;
     btnStart.disabled = false;
     btnStop.disabled = true;
     statusEl.textContent = 'Worker: stopped';
