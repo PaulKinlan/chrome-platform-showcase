@@ -7,9 +7,15 @@
 ---
 
 You build per-feature demos for the chrome-platform-showcase project. Every run picks up where the
-previous run left off and keeps building features that don't yet have a demo, committing and pushing
-after each one. There is NO small per-run cap; the goal is to eventually have a demo folder for
-every feature across every release that the project knows about.
+previous run left off and keeps building features that are **pending (no demo) OR incomplete (a thin
+demo)**, committing and pushing after each one. There is NO small per-run cap; the goal is to
+eventually have a deep, correct, comprehensive demo for every feature across every release.
+
+**This routine must run correctly standalone — treat every rule below as load-bearing.** It fires
+once a day with no human in the loop, so robustness is the whole point: research each feature deeply
+(Step 5c), build every distinct use case, and pass the full anti-regression gate (Step 8) before you
+push. **Depth beats throughput** — a shallow or wrong demo is worse than an unbuilt one, because the
+site is live. If you can only do two features properly in the budget, do two properly.
 
 This is NOT an issue-first flow. Per-feature work goes straight to code. Only the per-release Uber
 demo uses an issue gate.
@@ -52,6 +58,40 @@ Rules that must never be broken. Each has bitten the project before:
    transition, call `window.showcaseTelemetry?.assert(id, condition, details)` from the page after
    the action. If a user-media, permission, network, policy, or hardware-gated demo cannot complete,
    assert the fallback branch explicitly and do not label it as a pass.
+9. **Research the feature deeply BEFORE writing a probe — most recurring defects are
+   shallow-research defects.** Do not build from the chromestatus summary alone. Before any concept:
+   (a) FOLLOW every link on the chromestatus detail (spec, explainer, initial proposal, docs,
+   samples) and read them — the exact IDL member, CSS grammar, enum vocabulary, and the real
+   use-case list are almost always on those pages, not in the summary. (b) Enumerate the feature's
+   DISTINCT use cases from that reading; that list sets the concept count. (c) Do follow-on searches
+   (MDN, web.dev, WPT) for more use cases and gotchas. (d) Ground it in the REAL implementation —
+   search Chromium source, issues, and open CLs (see Step 5c). The probe you write must call the
+   EXACT surface the spec names; a demo that exercises the wrong API is the single most common
+   review-round bug.
+10. **Do not reproduce these confirmed past regressions (each shipped at least once and was
+    reverted).** A probe MUST be able to return false — no `|| true`, no never-throwing
+    `addEventListener`-as-detection, no treating an ignored unknown dictionary member or a bare
+    constructor as full support; probe the exact method/property the interaction uses. Read the
+    CURRENT capability enum from live docs and log the browser's ACTUAL returned value — never
+    bucket a new value (e.g. `available`) into an old unsupported branch (e.g. a page that only
+    knows `readily`). Never derive behaviour/support from the `navigator.userAgent` version, and
+    never tell the user to "upgrade to Chrome N" without ruling out flag / origin-trial /
+    model-or-language download / hardware / permission / secure-context / policy. Never let an
+    unsupported fallback look like native success (especially gradient/content fill). Avoid
+    host-global collisions (`top`, `animate`, …) and quote/`</script>` breakage — syntax-check every
+    inline script AND load the page. Normalise documented return shapes before chaining
+    `.then()/.catch()` or iterating (return-shape drift). Guard async init (DB/worker/model/adapter)
+    so controls can't run before ready (init races). Re-check accessible names after every rerender.
+    The full catalogue is the "Mandatory anti-regression cases" list in the showcase-auto-research
+    SKILL — treat it as build rules, not just review rules.
+11. **Verify VISUALLY and with FRESH evidence, not just DOM/console text.** Capture a full-page
+    screenshot before and after the primary interaction (plus mobile width when layout changes) and
+    inspect geometry: popover/tooltip adjacency to its invoker, `shape-outside` text wrapping on the
+    promised side, no gradient/content bleed, no clipped/overlapping controls, and computed
+    foreground/background contrast on every code/status/output surface. Clicks, DOM snapshots, and a
+    clean console cannot see wrong geometry or low contrast. Reload from disk after your FINAL edit
+    and repeat the whole control sequence — evidence captured before the last source change is
+    invalid.
 
 Every time you decide to write a folder, the path MUST be `v<N>/<slug(listing_name)>` where N is the
 milestone whose listing returned the feature.
@@ -65,8 +105,9 @@ git config user.email 'paul.kinlan@gmail.com'
 git config user.name 'Paul Kinlan'
 ```
 
-Note Unix time at start. Soft 90-minute budget. The cron fires every 2 hours; the next run
-continues. Better to leave 4 features behind than to corrupt a half-written folder.
+Note Unix time at start. Soft 90-minute budget. The cron fires once a day; the next run continues
+where this one stops. Better to leave features behind (deeply-researched, correct demos) than to
+corrupt a half-written folder or ship shallow ones — depth beats throughput.
 
 ## Step 2: Get current channels
 
@@ -80,9 +121,10 @@ Within each, prefer features with the richest reference material.
 ## Step 2b: Backfill scope (v130 → prev_stable - 1)
 
 After exhausting fresh work in the current channels, do **backfill** for older releases too. Iterate
-milestones from `prev_stable - 1` down to `130`. Within each, list candidates the same way as Step 3
-and skip any that already have a folder. No per-run cap on backfill — just do the work until the
-90-minute soft budget is up. The whole point is to clear the gap.
+milestones from `prev_stable - 1` down to `130`. Within each, classify with Step 3's three states
+and pick up **pending AND incomplete** features (do not skip a folder just because it exists — a
+thin demo is unfinished work). No per-run cap on backfill — just do the work until the 90-minute
+soft budget is up. The whole point is to clear the gap and deepen thin demos.
 
 ## Step 3: List candidates per milestone
 
@@ -90,9 +132,24 @@ and skip any that already have a folder. No per-run cap on backfill — just do 
 curl -s "https://chromestatus.com/api/v0/features?milestone=N" | tail -c +6 > /tmp/features-N.json
 ```
 
-Iterate every category in `features_by_type`. For each feature, save the milestone N and the listing
-`name`. Slug from that name (lowercase, NFD-normalise, drop combining marks, runs of non-[a-z0-9] →
-`-`, strip ends, truncate to 80). Skip if `v<N>/<slug>/index.html` exists. Skip Removed/Deprecated.
+Iterate every category in `features_by_type`. **Deduplicate by chromestatus feature ID** (a feature
+can appear in more than one status section; one demo satisfies the ID). For each unique feature,
+save the milestone N and the listing `name`. Slug from that name (lowercase, NFD-normalise, drop
+combining marks, runs of non-[a-z0-9] → `-`, strip ends, truncate to 80). Skip Removed/Deprecated.
+
+**Classify each feature into one of three states — folder-existence is NOT enough** (this is how the
+routine runs standalone and stops leaving thin demos behind):
+
+- **implemented** — `v<N>/<slug>/index.html` exists AND it has ≥2 interactive concept subfolders AND
+  the mandatory `chromestatus.com/feature/<id>` link. Skip these.
+- **pending** — no `v<N>/<slug>/index.html`. Build from scratch.
+- **incomplete** — folder exists but is thin: only 1 concept (or fewer than the Step 5c use-case
+  list found), a static code-card with no real interaction, a missing chromestatus link, or an open
+  `major`/`moderate` question in a sibling `_questions.json`. **Treat incomplete the same as
+  pending: add the missing concepts / fix the gap in place.** Do not skip a folder just because it
+  exists.
+
+Both pending and incomplete features go in the build queue.
 
 ## Step 4: Build budget
 
@@ -142,6 +199,42 @@ When adding or changing a demo:
 - keep telemetry payloads privacy-safe: no typed field values, tokens, exact user content, or large
   blobs.
 
+## Step 5c: Deep feature research — follow the links, read the source (do this before Step 6)
+
+The chromestatus summary is a starting point, not the spec. Robust demos come from reading the real
+material. For each feature, spend the research budget here so the concepts are comprehensive and the
+probes are exact:
+
+1. **Follow every reference.** Fetch and read each `spec_link` / `standards.spec`, every
+   `explainer_links` / initial proposal, every `doc_links`, and every `sample_links`. Then follow
+   the onward links those pages contain (MDN, web.dev, WPT, GitHub explainer repos). The exact IDL
+   member, CSS grammar/values, the capability enum vocabulary, and the enumerated use-case list
+   usually live on these pages — not in the summary.
+2. **Enumerate distinct use cases.** From that reading, write down the feature's distinct use cases
+   and edge/failure modes. This list sets how many concept folders to build (Step 4: no ceiling). If
+   the spec describes five distinct capabilities, that is five concepts.
+3. **Search for more.** Run follow-on web searches ("<feature> use case", "<feature> MDN",
+   "<feature> web.dev", "<feature> example") to find real-world uses and gotchas the spec omits.
+4. **Read the actual Chromium implementation.** Ground the demo in how Chrome really behaves:
+   - Code search: `https://source.chromium.org/search?q=<term>` (search the IDL name, the CSS
+     keyword, the `blink_components` value from the detail). This reveals the real behaviour and
+     edge cases.
+   - Issues: `https://issues.chromium.org/issues?q=<term>` — known bugs, intended behaviour, status.
+   - Open CLs / tests: `https://chromium-review.googlesource.com/q/status:open+-is:wip` and, for the
+     web-platform-tests that pin the exact contract,
+     `https://chromium-review.googlesource.com/q/status:open+-is:wip+<term>+test`. The WPT/CL tests
+     are the most precise statement of what the feature must do — mirror those expectations in the
+     demo and in any conformance suite.
+5. **Get the EXACT flag name** (needed for Step 6 flag handling and the user banner). If the
+   detail's `browsers.chrome.flag` is set, or the feature is experimental, find the real runtime
+   flag in `third_party/blink/renderer/platform/runtime_enabled_features.json5` via
+   source.chromium.org (search the feature name). That `name:` value is what goes in
+   `--enable-blink-features=<Name>` and what the banner tells the user. Do not guess the flag; look
+   it up.
+
+Record, in the feature index or a comment, the use-case list and the exact API surface / flag you
+found, so the reviewer and the next run can see the research that grounded the demo.
+
 ## Step 6: Design demos — interactive only, no exceptions
 
 **Every concept demo must be interactive.** A static code-card (snippet + blurb + no UI) is NOT a
@@ -169,10 +262,18 @@ state diagrams second.
   demos, generate the feature index + concept page using the path you'd want, and add a one-line
   TODO in the feature index referencing the route name + behaviour so the human reviewer can wire it
   in `server.ts`. Do NOT skip the feature and do NOT downgrade to a static card.
-- **Origin trial / behind-a-flag features** → ship the interactive demo, plus a visible warning
-  banner at the top: "To run this for real, enable chrome://flags/#X or join the origin trial."
-  Don't skip. Don't downgrade. If the API is absent, show "not available" and the attempted call
-  payload; do not run a fake success path.
+- **Origin trial / behind-a-flag features** → ship the interactive demo, and prefer the FLAG path
+  over origin-trial framing, because a flag lets anyone (and you) run the demo for real today. In
+  the banner, give the EXACT, copyable enable steps you found in Step 5c — in priority order:
+  1. the specific `chrome://flags/#<id>` entry if one exists;
+  2. else `--enable-blink-features=<Name>` using the real `runtime_enabled_features.json5` name;
+  3. else `--enable-features=<Name>` for a Chromium (non-Blink) feature;
+  4. `--enable-experimental-web-platform-features` as the catch-all;
+  5. and, only additionally, "or join the origin trial" with the OT link. Then actually TEST behind
+     the flag: relaunch Chrome/Canary via `chrome-devtools-mcp` with the flag enabled and verify the
+     real success path, not just the fallback. If the API is still absent, show "not available" plus
+     the attempted call payload and the exact missing prerequisite — never a fake success path, and
+     never blame it on browser age alone (rule 10).
 - **OS-specific / device-specific features** → feature-detection probe AND a before-vs-after
   rendered comparison where the difference is visual.
 - **Removals / deprecations** → feature-detection probe ("X removed in this browser? yes/no") paired
@@ -269,7 +370,27 @@ Before committing, start the local server and verify each new concept with `chro
 - For unsupported, origin-trial, flag-gated, OS-specific, or device-specific features, verify the
   fallback clearly states the missing capability and never reports fake success.
 
-Do not push a feature without this verification evidence.
+**Anti-regression gate (all must pass before you push — these ARE the standalone-robustness bar):**
+
+1. **Exact-API check** — evaluate the exact advertised probe/API call in the page context and
+   compare its real return/exception with the banner and enabled controls. UI claim and real API
+   must agree (rules 4, 10).
+2. **Visual + geometry** — capture full-page before/after screenshots (plus mobile when layout
+   changes) and inspect: popover/tooltip adjacent to invoker, `shape-outside` on the promised side,
+   no gradient/content bleed, no clipped/overlapping controls (rule 11).
+3. **Contrast** — inspect computed foreground/background on every code/status/output surface; WCAG
+   AA (rule 11, invariant 5).
+4. **Probe can return false** — no `|| true`, no never-throwing detector, no stale enum catch-all,
+   no "upgrade to Chrome N" without ruling out flag/OT/download/hardware/permission/policy (rule
+   10).
+5. **No crashes** — syntax-check inline scripts, avoid host-global collisions (`top`, `animate`),
+   normalise return shapes before chaining, guard async init (rule 10).
+6. **Fresh evidence** — reload from disk after your FINAL edit and repeat the whole control
+   sequence; evidence from before the last edit is invalid (rule 11).
+
+If any gate fails, fix the demo and re-run the gate. Do not push a feature without passing all six.
+The full catalogue is the showcase-auto-research SKILL "Mandatory anti-regression cases" — every
+item there is a build rule now, not just a review rule.
 
 ```bash
 git add v<N>/<feature-slug>/

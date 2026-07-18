@@ -85,6 +85,23 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
   milestone needs it. If `chrome-devtools-mcp` is unavailable, report the blocker and do not claim a
   browser-tested result.
 - Build every distinct use case identified for an API. Two or three concepts is a floor, not a cap.
+- **Research before building.** Follow every chromestatus reference (spec, explainer, docs, samples)
+  and their onward links, enumerate the distinct use cases (that count sets the concepts), search
+  MDN/web.dev/WPT for more, and read the real implementation in Chromium source
+  (`source.chromium.org`), issues (`issues.chromium.org`), and open CLs/tests
+  (`chromium-review.googlesource.com`). The probe must call the exact surface the spec names. See
+  `.claude/routine-prompt.md` Step 5c.
+- **Flags are first-class.** Find the real flag in `runtime_enabled_features.json5`, give exact
+  enable steps in the banner (`chrome://flags/#id`, `--enable-blink-features=<Name>`,
+  `--enable-features`, `--enable-experimental-web-platform-features`), test behind the flag with
+  `chrome-devtools-mcp`, and never blame a missing API on browser age without ruling out
+  flag/OT/download/hardware/permission/ policy.
+- **The "Mandatory anti-regression cases" in the showcase-auto-research SKILL are build rules, not
+  only review rules.** Prevent them at build time (probe-can-return-false, current enum vocabulary,
+  no fake fallback, correct geometry, readable contrast, no host-global collisions, return-shape
+  normalisation, guarded async init, fresh reload-after-edit evidence).
+- **Coverage is by feature ID, not folder existence.** Classify implemented / pending / incomplete;
+  pick up incomplete (thin) demos, do not skip a folder just because it exists.
 - Automated routine-style work should normally stay inside `v<N>/`. Top-level files are only edited
   for explicit maintenance tasks, route support, shared fixes, or user-directed changes.
 

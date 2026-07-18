@@ -11,7 +11,8 @@ This is not the remote Claude routine.
 ## First Steps
 
 1. Read `CLAUDE.md`, `AGENTS.md`, `.claude/routine-prompt.md`, and `.claude/auto-research.md`.
-2. Read `lib/chromestatus.ts` and the milestone renderer in `server.ts` so coverage uses the same ChromeStatus listing and slug rules as the site.
+2. Read `lib/chromestatus.ts` and the milestone renderer in `server.ts` so coverage uses the same
+   ChromeStatus listing and slug rules as the site.
 3. Read `lib/critique.ts` for critique shape when writing `_questions.json`.
 4. Read `lib/conformance.ts` for conformance shape when writing `conformance.json`.
 5. Start from a current checkout:
@@ -25,16 +26,21 @@ git status --short
 
 Infer the mode from the user prompt:
 
-- `coverage`, `pending`, or `build`: inventory the milestone and build missing feature and uber demos.
+- `coverage`, `pending`, or `build`: inventory the milestone and build missing feature and uber
+  demos.
 - `critique`: write missing `_questions.json` files for demos that exist.
 - `conformance`: write missing `conformance.json` files for features that exist.
-- `all` or `auto-research`: **coverage/build first**, then critique and conformance. Never treat critique + conformance coverage as release coverage.
+- `all` or `auto-research`: **coverage/build first**, then critique and conformance. Never treat
+  critique + conformance coverage as release coverage.
 - `validate`: exercise every implemented concept and conformance route in the requested scope.
+- `triage`: pull `/telemetry/demo/triage`, fix the demos throwing the most real-visitor errors.
 - `goals` or `goal-setting`: fix one concrete open question and re-critique.
 
 If the user provides milestones, use those. If not:
 
-- Coverage/build and `all`: inspect the newest two tracked milestones and select those with pending demos. At the time of execution, derive this from ChromeStatus and the rendered milestone pages; do not rely on hard-coded milestone numbers.
+- Coverage/build and `all`: inspect the newest two tracked milestones and select those with pending
+  demos. At the time of execution, derive this from ChromeStatus and the rendered milestone pages;
+  do not rely on hard-coded milestone numbers.
 - Critique fallback, only when the newest releases have no pending demos: `v138`, `v150`.
 - Conformance fallback, only when the newest releases have no pending demos: `v140`, `v130`.
 - Goal-setting: choose one actionable `major` or `moderate` open question.
@@ -50,14 +56,21 @@ Run this pass before critique or conformance in `all` / `auto-research` mode.
 
 For each target milestone:
 
-1. Fetch the ChromeStatus milestone listing used by the server. Use `features_by_type` membership for the milestone; never infer the milestone from a feature detail response.
-2. Deduplicate cards by ChromeStatus feature ID. A feature can appear in more than one status section, but one implementation satisfies that feature ID.
-3. Derive each slug from the milestone listing name with the same slug function as `server.ts`. Do not use the feature-detail name.
+1. Fetch the ChromeStatus milestone listing used by the server. Use `features_by_type` membership
+   for the milestone; never infer the milestone from a feature detail response.
+2. Deduplicate cards by ChromeStatus feature ID. A feature can appear in more than one status
+   section, but one implementation satisfies that feature ID.
+3. Derive each slug from the milestone listing name with the same slug function as `server.ts`. Do
+   not use the feature-detail name.
 4. Compare the complete unique feature-ID set with disk and with the rendered milestone page:
-   - implemented feature: `v<N>/<slug>/index.html` exists and the milestone card links to `/v<N>/<slug>/`;
-   - pending feature: the card links only to ChromeStatus, says `demo pending`, or the canonical feature folder/index is absent;
-   - incomplete feature: the feature index exists but has no interactive concept pages, lacks the mandatory ChromeStatus link, or only contains static code/reference cards;
-   - pending uber demo: `/v<N>/uber-demo/index.html` is absent or the milestone page says it has not been built.
+   - implemented feature: `v<N>/<slug>/index.html` exists and the milestone card links to
+     `/v<N>/<slug>/`;
+   - pending feature: the card links only to ChromeStatus, says `demo pending`, or the canonical
+     feature folder/index is absent;
+   - incomplete feature: the feature index exists but has no interactive concept pages, lacks the
+     mandatory ChromeStatus link, or only contains static code/reference cards;
+   - pending uber demo: `/v<N>/uber-demo/index.html` is absent or the milestone page says it has not
+     been built.
 5. Print and preserve an exact inventory before building:
 
 ```text
@@ -68,55 +81,103 @@ incomplete: <incomplete>
 uber demo: implemented | pending
 ```
 
-The denominator is the unique ChromeStatus feature-ID set, not the number of folders already on disk. Never report a milestone as complete after inspecting only implemented folders.
+The denominator is the unique ChromeStatus feature-ID set, not the number of folders already on
+disk. Never report a milestone as complete after inspecting only implemented folders.
 
 ### Build every pending item in scope
 
 For each pending or incomplete feature:
 
-1. Read `.claude/routine-prompt.md`, the milestone listing entry, ChromeStatus detail, linked spec, and existing neighboring demos.
-2. Build `v<N>/<canonical-slug>/index.html` plus interactive concept pages for **every distinct use case**. Two or three concepts are a floor, not a cap.
-3. Follow all project invariants: real interaction, exact feature probes, graceful unsupported/flag/device fallbacks, CSS variables, WCAG AA, keyboard/accessibility semantics, and a `chromestatus.com/feature/<id>` link on every page.
-4. For HTTP/header/cache/redirect behavior, add the required server route as a manual top-level change; do not fake the contract in client-side text.
-5. Use `chrome-devtools-mcp` on every new concept. Exercise every visible control, inspect the accessibility tree where needed, inspect console/network/telemetry, and verify the fallback path when the current browser lacks the feature. For every API demo, also invoke the exact advertised API directly in the page context and compare its real return value or exception with the banner, enabled controls, and resulting output. UI state and direct API evidence must agree.
-6. **Visually inspect the rendered result, not only DOM text or console state.** Capture a full-page screenshot before and after the primary interaction at desktop width, plus a mobile screenshot when layout changes. Reject pages with detached popovers, wrong float/shape sides, text crossing shapes, gradient/content bleed, clipped controls, unreadable code, low contrast, overlap, or an unsupported fallback that looks like the feature worked.
-7. For text and code surfaces, inspect computed foreground/background colors and run a contrast audit. A clean console does not make unreadable output valid.
-8. Treat capability enums and API signatures as versioned contracts. Read current documentation and log the actual value returned by the test browser. Do not hard-code only an obsolete vocabulary (for example, treating a new `available` result as unavailable because the page only recognizes `readily`). Unknown non-error values must be displayed honestly, not collapsed into a false unsupported state.
-9. Reload from disk after the final edit and repeat the complete control sequence. Evidence captured before the last source change is invalid.
+1. Read `.claude/routine-prompt.md`, the milestone listing entry, ChromeStatus detail, linked spec,
+   and existing neighboring demos.
+2. Build `v<N>/<canonical-slug>/index.html` plus interactive concept pages for **every distinct use
+   case**. Two or three concepts are a floor, not a cap.
+3. Follow all project invariants: real interaction, exact feature probes, graceful
+   unsupported/flag/device fallbacks, CSS variables, WCAG AA, keyboard/accessibility semantics, and
+   a `chromestatus.com/feature/<id>` link on every page.
+4. For HTTP/header/cache/redirect behavior, add the required server route as a manual top-level
+   change; do not fake the contract in client-side text.
+5. Use `chrome-devtools-mcp` on every new concept. Exercise every visible control, inspect the
+   accessibility tree where needed, inspect console/network/telemetry, and verify the fallback path
+   when the current browser lacks the feature. For every API demo, also invoke the exact advertised
+   API directly in the page context and compare its real return value or exception with the banner,
+   enabled controls, and resulting output. UI state and direct API evidence must agree.
+6. **Visually inspect the rendered result, not only DOM text or console state.** Capture a full-page
+   screenshot before and after the primary interaction at desktop width, plus a mobile screenshot
+   when layout changes. Reject pages with detached popovers, wrong float/shape sides, text crossing
+   shapes, gradient/content bleed, clipped controls, unreadable code, low contrast, overlap, or an
+   unsupported fallback that looks like the feature worked.
+7. For text and code surfaces, inspect computed foreground/background colors and run a contrast
+   audit. A clean console does not make unreadable output valid.
+8. Treat capability enums and API signatures as versioned contracts. Read current documentation and
+   log the actual value returned by the test browser. Do not hard-code only an obsolete vocabulary
+   (for example, treating a new `available` result as unavailable because the page only recognizes
+   `readily`). Unknown non-error values must be displayed honestly, not collapsed into a false
+   unsupported state.
+9. Reload from disk after the final edit and repeat the complete control sequence. Evidence captured
+   before the last source change is invalid.
 10. Commit and push one feature at a time, staging only that feature and any route code it requires:
 
 ```bash
 git add v<N>/<feature>/ server.ts && git commit -m "add v<N> <feature> demos" && git push
 ```
 
-Omit `server.ts` when it was not changed. Build the uber demo after the per-feature batch and commit it separately.
+Omit `server.ts` when it was not changed. Build the uber demo after the per-feature batch and commit
+it separately.
 
 ### Prove the coverage gap closed
 
-After building, regenerate the inventory from ChromeStatus, disk, and the rendered local milestone page. A target milestone is complete only when:
+After building, regenerate the inventory from ChromeStatus, disk, and the rendered local milestone
+page. A target milestone is complete only when:
 
 - every unique tracked feature ID maps to its canonical local demo link;
 - no card says `demo pending` or links only to ChromeStatus because its demo is absent;
 - each feature has interactive concept coverage and the mandatory ChromeStatus reference;
 - the requested uber demo exists;
 - local routes return 200 and were exercised through `chrome-devtools-mcp`;
-- desktop/mobile screenshots show correct geometry, anchoring, clipping, fallback rendering, and readable contrast;
-- after push/deploy, the live `/v<N>/` page links every implemented card locally and no longer labels those cards `demo pending`. If deployment has not updated yet, report `live verification: deployment pending` rather than claiming the live gap is closed.
+- desktop/mobile screenshots show correct geometry, anchoring, clipping, fallback rendering, and
+  readable contrast;
+- after push/deploy, the live `/v<N>/` page links every implemented card locally and no longer
+  labels those cards `demo pending`. If deployment has not updated yet, report
+  `live verification: deployment pending` rather than claiming the live gap is closed.
 
-If time or quota stops the batch, report `implemented/total` and list every remaining feature ID + canonical slug. Do not say “complete,” “clean,” or “all” when pending items remain.
+If time or quota stops the batch, report `implemented/total` and list every remaining feature ID +
+canonical slug. Do not say “complete,” “clean,” or “all” when pending items remain.
 
 ## Uber Demo Design And Integrity
 
 An uber demo is a believable product experience, not a feature checklist arranged in a grid.
 
-1. Start with one user goal and select milestone features only when each one materially improves that goal. It is acceptable—and usually necessary—to use stable features from earlier Chrome releases as connective tissue. Never distort the information architecture just to place every new feature on the same screen.
-2. Give behavior APIs real work. A scroll-promise demo needs a genuinely scrollable journey with a visible start and destination; cancellation needs an operation that can still be in flight; gap decoration needs a real gap; shape clipping must improve a deliberate visual rather than mutilating a card border. If removing the API would not change the experience, choose a better use case.
-3. Keep decorative and structural responsibilities separate. Do not clip the element whose border or reading surface must remain intact. Apply experimental shape/paint effects to an inner illustration, pseudo-element, or dedicated layer, then inspect the resulting geometry at desktop and mobile sizes.
-4. Treat feature APIs as versioned inputs at the integration boundary. Normalize documented return shapes (string, iterable, array, promise, or void) before array methods, iteration, optional chaining, or promise chaining. Report the observed shape and degraded behavior; never turn a compatibility difference into a generic parse error or a false success.
-5. Derive all counts and summaries from the rendered implementation. If an index links four demos, its heading and prose must say four. Verify card/link counts, named feature counts, code snippets, and “features at work” tables against the DOM after the final edit.
-6. Syntax-check every inline script, including sample HTML/JavaScript strings containing quotes, `</script>`, keyboard key names, event-handler attributes, and template literals. Then load the real URL—the extracted script passing a parser is necessary but not sufficient.
-7. Validate the feature demos used by the uber demo as well as the uber route itself. Initial-load console warnings and errors are failures, including browser diagnostics for invalid experimental attribute tokens. Exercise every control and inspect console/network again after each state-changing sequence.
-8. Prefer two focused experiences over one incoherent “everything” page when a release spans unrelated surfaces. If a release has multiple uber concepts, label the exact count and explain each concept's distinct job; do not leave stale “one/two demos” copy after adding more routes.
+1. Start with one user goal and select milestone features only when each one materially improves
+   that goal. It is acceptable—and usually necessary—to use stable features from earlier Chrome
+   releases as connective tissue. Never distort the information architecture just to place every new
+   feature on the same screen.
+2. Give behavior APIs real work. A scroll-promise demo needs a genuinely scrollable journey with a
+   visible start and destination; cancellation needs an operation that can still be in flight; gap
+   decoration needs a real gap; shape clipping must improve a deliberate visual rather than
+   mutilating a card border. If removing the API would not change the experience, choose a better
+   use case.
+3. Keep decorative and structural responsibilities separate. Do not clip the element whose border or
+   reading surface must remain intact. Apply experimental shape/paint effects to an inner
+   illustration, pseudo-element, or dedicated layer, then inspect the resulting geometry at desktop
+   and mobile sizes.
+4. Treat feature APIs as versioned inputs at the integration boundary. Normalize documented return
+   shapes (string, iterable, array, promise, or void) before array methods, iteration, optional
+   chaining, or promise chaining. Report the observed shape and degraded behavior; never turn a
+   compatibility difference into a generic parse error or a false success.
+5. Derive all counts and summaries from the rendered implementation. If an index links four demos,
+   its heading and prose must say four. Verify card/link counts, named feature counts, code
+   snippets, and “features at work” tables against the DOM after the final edit.
+6. Syntax-check every inline script, including sample HTML/JavaScript strings containing quotes,
+   `</script>`, keyboard key names, event-handler attributes, and template literals. Then load the
+   real URL—the extracted script passing a parser is necessary but not sufficient.
+7. Validate the feature demos used by the uber demo as well as the uber route itself. Initial-load
+   console warnings and errors are failures, including browser diagnostics for invalid experimental
+   attribute tokens. Exercise every control and inspect console/network again after each
+   state-changing sequence.
+8. Prefer two focused experiences over one incoherent “everything” page when a release spans
+   unrelated surfaces. If a release has multiple uber concepts, label the exact count and explain
+   each concept's distinct job; do not leave stale “one/two demos” copy after adding more routes.
 
 ## Critique Pass
 
@@ -156,41 +217,100 @@ git add <file> && git commit -m "conformance: v<N>/<feature>" && git push
 
 ## Validation Pass
 
-A validation request is exhaustive within its stated scope unless the user explicitly asks for sampling. Validation is an attempt to falsify the demo, not to collect enough green signals to call it good.
+A validation request is exhaustive within its stated scope unless the user explicitly asks for
+sampling. Validation is an attempt to falsify the demo, not to collect enough green signals to call
+it good.
 
-1. Build an exact route manifest from disk for every `v<N>/<feature>/<concept>/index.html` in scope. Report `tested/total`; never call a sample a full sweep.
-2. Open every concept through `chrome-devtools-mcp`. Record the exact browser build, URL, and initial visible state. A milestone label such as v148/v150 is not evidence of runtime support.
-3. Exercise **every visible control**, including repeated clicks, reset/new-session/abort/stop paths, boundary slider/select values, keyboard activation, Escape/light-dismiss, and controls used in sequences. After each action, inspect both the visual result and the accessibility snapshot; verify that labels, expanded/pressed/disabled state, status text, and output all describe what actually happened.
-4. For API demos, evaluate the exact advertised feature probe and primary API call in the same page context. Record returned enum/property values and exceptions. Compare these with the page banner and whether the real or simulated path ran. A page fails if the API call succeeds while the page says unavailable, if simulation is labelled as native, or if a stale initial warning remains after successful use.
-5. Run the feature's conformance route, but never use a passing suite as proof that the demo UI or interaction works. Conformance, runtime, accessibility, and visual geometry are independent gates.
-6. Capture and inspect a full-page desktop screenshot before interaction and after every visually distinct state; add a narrow/mobile screenshot for responsive layouts. Scroll through the entire capture. Automated clicks, DOM snapshots, and console logs cannot detect wrong visual anchoring, float geometry, overlap, bleed, or contrast on their own.
-7. Check geometry deliberately: popovers/tooltips must be adjacent to their invokers and remain onscreen; `shape-outside` text must wrap without crossing the shape and the shape must be on the promised side; gradients/fallbacks must not fill protected content; scrolling/animation stop controls must stop at the state they name rather than jump to a later terminal state.
-8. Inspect computed foreground/background colors for every code, status, and output surface and run a contrast audit. Do not accept inherited colors without checking the effective rendered pair.
-9. Inspect console and network after the full interaction sequence, not just initial load. Uncaught exceptions, failed resources, duplicate requests, action timeouts, or controls that never settle are failures—not warnings to omit from the denominator.
-10. Treat capability/version messages as claims that need proof. Detect the exact API/property/value; do not tell a Chrome 150 user to “upgrade to 146” or equate a missing flag, origin trial, language pack, model download, hardware capability, permission, secure context, or enterprise policy with an old browser.
-11. Treat capability enums and dictionary members precisely. Consult current docs, accept documented old/new aliases only when intentionally supporting both, and never infer support because an API silently ignores an unknown dictionary member. Probe the corresponding instance/static property or perform the real operation.
-12. For unsupported APIs, verify that the fallback is visually coherent, is clearly labelled as fallback/simulation, and names the exact missing capability and selected inputs. Never make an unsupported fallback visually indistinguishable from native output.
-13. Save per-route evidence and verdicts. A route counts as tested only after all applicable gates above complete. A milestone is complete only when `tested === total`; list failures, timeouts, blocked/device-only routes, and zero-control reference pages separately.
-14. For every confirmed bug, reproduce the exact live URL before editing, preserve before evidence, fix the demo rather than immutable conformance assertions, reload after the final edit, repeat every control, regenerate the concept critique, and capture repaired evidence. Then verify the deployed live URL; if it has not updated, say `live verification: deployment pending`.
+1. Build an exact route manifest from disk for every `v<N>/<feature>/<concept>/index.html` in scope.
+   Report `tested/total`; never call a sample a full sweep.
+2. Open every concept through `chrome-devtools-mcp`. Record the exact browser build, URL, and
+   initial visible state. A milestone label such as v148/v150 is not evidence of runtime support.
+3. Exercise **every visible control**, including repeated clicks, reset/new-session/abort/stop
+   paths, boundary slider/select values, keyboard activation, Escape/light-dismiss, and controls
+   used in sequences. After each action, inspect both the visual result and the accessibility
+   snapshot; verify that labels, expanded/pressed/disabled state, status text, and output all
+   describe what actually happened.
+4. For API demos, evaluate the exact advertised feature probe and primary API call in the same page
+   context. Record returned enum/property values and exceptions. Compare these with the page banner
+   and whether the real or simulated path ran. A page fails if the API call succeeds while the page
+   says unavailable, if simulation is labelled as native, or if a stale initial warning remains
+   after successful use.
+5. Run the feature's conformance route, but never use a passing suite as proof that the demo UI or
+   interaction works. Conformance, runtime, accessibility, and visual geometry are independent
+   gates.
+6. Capture and inspect a full-page desktop screenshot before interaction and after every visually
+   distinct state; add a narrow/mobile screenshot for responsive layouts. Scroll through the entire
+   capture. Automated clicks, DOM snapshots, and console logs cannot detect wrong visual anchoring,
+   float geometry, overlap, bleed, or contrast on their own.
+7. Check geometry deliberately: popovers/tooltips must be adjacent to their invokers and remain
+   onscreen; `shape-outside` text must wrap without crossing the shape and the shape must be on the
+   promised side; gradients/fallbacks must not fill protected content; scrolling/animation stop
+   controls must stop at the state they name rather than jump to a later terminal state.
+8. Inspect computed foreground/background colors for every code, status, and output surface and run
+   a contrast audit. Do not accept inherited colors without checking the effective rendered pair.
+9. Inspect console and network after the full interaction sequence, not just initial load. Uncaught
+   exceptions, failed resources, duplicate requests, action timeouts, or controls that never settle
+   are failures—not warnings to omit from the denominator.
+10. Treat capability/version messages as claims that need proof. Detect the exact
+    API/property/value; do not tell a Chrome 150 user to “upgrade to 146” or equate a missing flag,
+    origin trial, language pack, model download, hardware capability, permission, secure context, or
+    enterprise policy with an old browser.
+11. Treat capability enums and dictionary members precisely. Consult current docs, accept documented
+    old/new aliases only when intentionally supporting both, and never infer support because an API
+    silently ignores an unknown dictionary member. Probe the corresponding instance/static property
+    or perform the real operation.
+12. For unsupported APIs, verify that the fallback is visually coherent, is clearly labelled as
+    fallback/simulation, and names the exact missing capability and selected inputs. Never make an
+    unsupported fallback visually indistinguishable from native output.
+13. Save per-route evidence and verdicts. A route counts as tested only after all applicable gates
+    above complete. A milestone is complete only when `tested === total`; list failures, timeouts,
+    blocked/device-only routes, and zero-control reference pages separately.
+14. For every confirmed bug, reproduce the exact live URL before editing, preserve before evidence,
+    fix the demo rather than immutable conformance assertions, reload after the final edit, repeat
+    every control, regenerate the concept critique, and capture repaired evidence. Then verify the
+    deployed live URL; if it has not updated, say `live verification: deployment pending`.
 
 ### Mandatory anti-regression cases
 
-The validation report must explicitly mark each applicable item pass/fail/not-applicable. These are based on confirmed showcase regressions and may not be silently skipped:
+The validation report must explicitly mark each applicable item pass/fail/not-applicable. These are
+based on confirmed showcase regressions and may not be silently skipped:
 
-- **Contradictory capability state:** direct API creation/use succeeds while the banner says unavailable, upgrade, or simulated.
-- **Stale capability vocabulary:** current enum values fall into an old catch-all unsupported branch.
-- **Misleading upgrade copy:** a missing API/property is blamed on browser age without ruling out flags, origin trial, model/language-pack download, hardware, permission, policy, or context requirements.
-- **Fake feature fallback:** unsupported CSS/API output looks like successful native behavior (including gradient content fill).
-- **Detached overlay:** popover, tooltip, menu, or hint opens at a viewport corner or away from its invoker.
-- **Broken shape geometry:** float/shape appears on the wrong side or text overlaps the exclusion shape.
-- **Broken cancellation:** stop/abort/reset advances to a later state, leaves stale output, or fails to restore controls.
-- **Unreadable effective colors:** code/status text has insufficient contrast after inheritance and computed styles.
-- **False support probe:** an ignored unknown option/dictionary member, constructor alone, or partial interface exposure is treated as full feature support. Probe the exact method/property used by the interaction.
-- **Host-language collisions:** a global binding or inline handler name collides with browser globals/platform methods (for example `top` or `animate`), or hostile sample strings terminate `<script>` parsing or break quote boundaries. Syntax-check extracted inline scripts and load the actual page.
-- **Stale generated controls:** a control captured before a rerender writes into a removed row/label/model entry. Repeatedly add/remove/rebuild controls and ensure delayed handlers guard stale nodes and indexes.
-- **Return-shape drift:** code unconditionally chains `.then()`/`.catch()` or iterates an API result whose documented return shape differs across browser revisions. Record and handle the actual value without hiding real errors.
-- **Initialization races:** controls can run before databases, workers, crash contexts, models, or adapters are ready. Exercise controls immediately after load and require an explicit initializing state or safe queue/guard.
-- **Hidden accessibility leaks:** offscreen probe elements remain focusable or named controls are generated without programmatic labels. Count accessible names after every rerender, not only initial markup.
+- **Contradictory capability state:** direct API creation/use succeeds while the banner says
+  unavailable, upgrade, or simulated.
+- **Stale capability vocabulary:** current enum values fall into an old catch-all unsupported
+  branch.
+- **Misleading upgrade copy:** a missing API/property is blamed on browser age without ruling out
+  flags, origin trial, model/language-pack download, hardware, permission, policy, or context
+  requirements.
+- **Fake feature fallback:** unsupported CSS/API output looks like successful native behavior
+  (including gradient content fill).
+- **Detached overlay:** popover, tooltip, menu, or hint opens at a viewport corner or away from its
+  invoker.
+- **Broken shape geometry:** float/shape appears on the wrong side or text overlaps the exclusion
+  shape.
+- **Broken cancellation:** stop/abort/reset advances to a later state, leaves stale output, or fails
+  to restore controls.
+- **Unreadable effective colors:** code/status text has insufficient contrast after inheritance and
+  computed styles.
+- **False support probe:** an ignored unknown option/dictionary member, constructor alone, or
+  partial interface exposure is treated as full feature support. Probe the exact method/property
+  used by the interaction.
+- **Host-language collisions:** a global binding or inline handler name collides with browser
+  globals/platform methods (for example `top` or `animate`), or hostile sample strings terminate
+  `<script>` parsing or break quote boundaries. Syntax-check extracted inline scripts and load the
+  actual page.
+- **Stale generated controls:** a control captured before a rerender writes into a removed
+  row/label/model entry. Repeatedly add/remove/rebuild controls and ensure delayed handlers guard
+  stale nodes and indexes.
+- **Return-shape drift:** code unconditionally chains `.then()`/`.catch()` or iterates an API result
+  whose documented return shape differs across browser revisions. Record and handle the actual value
+  without hiding real errors.
+- **Initialization races:** controls can run before databases, workers, crash contexts, models, or
+  adapters are ready. Exercise controls immediately after load and require an explicit initializing
+  state or safe queue/guard.
+- **Hidden accessibility leaks:** offscreen probe elements remain focusable or named controls are
+  generated without programmatic labels. Count accessible names after every rerender, not only
+  initial markup.
 - **Stale evidence:** the page was not freshly reloaded and fully re-exercised after the last edit.
 
 ## Goal-Setting Pass
@@ -208,6 +328,26 @@ Use critique output as the work list:
 
 Default to one coherent fix per invocation unless the user explicitly asks for a batch.
 
+## Telemetry Triage Pass
+
+Real-visitor errors are captured to Deno KV but are only useful if something reads them. This pass
+turns them into fixes (it is the telemetry half of the weekly hardening routine):
+
+1. Pull the ranked triage: `GET /telemetry/demo/triage?scan=2000` with HTTP Basic auth using
+   `showcase_password` (locally: start `deno task start`, ensure `showcase_password` is set, and
+   curl `-u :$showcase_password`). It flattens batched events, ranks demos worst-first by failure
+   count, and clusters errors by normalised signature across visitors.
+2. Take the top offending demos. For each, open the exact route with `chrome-devtools-mcp`,
+   reproduce the error signature, and fix the demo (never the immutable conformance assertions).
+   Distinguish a real runtime error from an expected unsupported/flag/permission fallback — the
+   latter is not a bug.
+3. Re-validate the repaired route (full anti-regression gate), regenerate the touched
+   `_questions.json`, and commit one demo at a time.
+4. If a signature points at a genuine platform/spec change rather than a demo bug, note it for a
+   human instead of masking it.
+
+Report the top failing demos, what was fixed, and the failure count before/after.
+
 ## Parallelism And Git Safety
 
 Use subagents or background threads if available, one per milestone, with at most four running at
@@ -218,7 +358,8 @@ inside the fan-out. If a push races, pull/rebase and retry the push for the alre
 
 ## Completion Rules
 
-Do not use critique counts or conformance counts as evidence that a release's demos are implemented. These are separate axes:
+Do not use critique counts or conformance counts as evidence that a release's demos are implemented.
+These are separate axes:
 
 ```text
 coverage: <implemented>/<unique tracked> feature demos; uber: implemented | pending
@@ -227,7 +368,9 @@ conformance: <suites>/<implemented features>
 validation: <exercised>/<implemented concepts>
 ```
 
-For `all`, report all four axes. A no-op is valid only when coverage has zero pending/incomplete features, the uber demo exists, and critique/conformance have no gaps. Check the rendered `/v<N>/` page itself before making that claim.
+For `all`, report all four axes. A no-op is valid only when coverage has zero pending/incomplete
+features, the uber demo exists, and critique/conformance have no gaps. Check the rendered `/v<N>/`
+page itself before making that claim.
 
 ## After Each Batch
 
@@ -239,7 +382,8 @@ deno check server.ts
 git status --short
 ```
 
-If `deno fmt` changed generated JSON, commit and push only those relevant formatting changes. Report:
+If `deno fmt` changed generated JSON, commit and push only those relevant formatting changes.
+Report:
 
 - coverage before and after (`implemented/unique tracked`, incomplete, uber status);
 - every built feature and commit;
@@ -247,4 +391,5 @@ If `deno fmt` changed generated JSON, commit and push only those relevant format
 - pushed refs and routes to inspect (`/v<N>/`, `/critiques`, `/conformance`);
 - every pending feature or blocked milestone.
 
-The final check is visual and literal: open each target `/v<N>/` page and confirm there are no `demo pending` cards left in the requested scope.
+The final check is visual and literal: open each target `/v<N>/` page and confirm there are no
+`demo pending` cards left in the requested scope.
