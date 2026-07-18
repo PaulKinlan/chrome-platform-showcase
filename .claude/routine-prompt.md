@@ -39,12 +39,13 @@ Rules that must never be broken. Each has bitten the project before:
    expose the real header/network behavior, or if a real feature-detection probe can show the
    outcome. A fallback may explain unsupported/flag-required state, but it must be labelled as a
    fallback and must not report "success" as if the platform feature ran.
-5. **Browser verification must be DevTools-backed**: Before pushing a demo, use
-   `chrome-devtools-mcp` to open the local route in Chrome or Chrome Canary, click/type/drag every
-   visible control, verify the DOM/live readout changes, and inspect console/network failures. Do
-   not substitute Playwright, the in-app browser, screenshots from another tool, or generic browser
-   automation. If `chrome-devtools-mcp` is unavailable, stop and report that the feature is blocked
-   on browser verification rather than claiming it was tested.
+5. **Browser verification, with a real fallback**: Before pushing a demo, verify it in a real
+   Chrome. In a LOCAL session use `chrome-devtools-mcp` (open the route, click/type/drag every
+   control, verify the DOM/live readout changes, inspect console/network). In the CLOUD routine (no
+   chrome-devtools-mcp) use headless Chrome via Bash + `Read` the screenshot — see "Toolset &
+   verification environment" above. Either way, actually load the page and inspect the rendered
+   result and console; never claim a browser-verified result you did not produce, and never
+   substitute a mere DOM dump for the visual gate.
 6. **Accessibility is a release goal**: Every demo must be keyboard-operable and expose meaningful
    semantics. Controls need accessible names/labels, visible focus, native elements where possible,
    correct roles/states when ARIA is needed, and text or live-region equivalents for visual state
@@ -95,6 +96,34 @@ Rules that must never be broken. Each has bitten the project before:
 
 Every time you decide to write a folder, the path MUST be `v<N>/<slug(listing_name)>` where N is the
 milestone whose listing returned the feature.
+
+## Toolset & verification environment (READ — this is how you run standalone in the cloud)
+
+The remote cron routine runs with a limited toolset: **Bash, Read, Write, Edit, Glob, Grep** — NO
+`chrome-devtools-mcp`, NO WebFetch, NO WebSearch. Historically this meant the routine built blind
+and a later manual sweep caught the defects. That ends here: do the research and verification with
+the tools you DO have.
+
+- **Research (Step 5c) via `curl`.** The chromestatus detail gives you the reference URLs — `curl`
+  each one. For Chromium source, use gitiles raw (curl-able), e.g. the real flag list:
+  `curl -s "https://chromium.googlesource.com/chromium/src/+/main/third_party/blink/renderer/platform/runtime_enabled_features.json5?format=TEXT" | base64 -d | grep -i "<Name>"`.
+  Search code/issues/CLs via their URLs where curl returns useful text; when a page is a JS app that
+  curl can't render, fall back to the spec/explainer/MDN text you can fetch. Best-effort is fine —
+  the point is to ground the demo in real material, not to hit every source.
+- **Verification via headless Chrome + Read.** You have no `chrome-devtools-mcp`, so drive Chrome
+  from Bash: `deno task start` in the background, then a headless run to capture DOM and a
+  SCREENSHOT, e.g.
+  `google-chrome --headless=new --screenshot=/tmp/shot.png --window-size=1280,2000 --dump-dom "http://localhost:3000/v<N>/<feature>/<concept>/" > /tmp/dom.html`
+  (use `chromium`/`chromium-browser` if that's the binary; Canary when the milestone needs it). Then
+  **`Read /tmp/shot.png`** to inspect geometry/contrast visually and grep `/tmp/dom.html` for the
+  expected state. For interaction, script it with a small headless Puppeteer/`deno`+CDP snippet run
+  via Bash, or at minimum load the post- interaction state via a URL param / autorun hook and
+  screenshot that. Reading the screenshot image IS your visual gate (rule 11) — a clean DOM dump is
+  not enough.
+- **If a step's tool genuinely isn't in the environment**, do the best-available check via Bash and
+  say so in the summary — do NOT silently skip verification, and do NOT claim a browser-verified
+  result you didn't produce. When run from a LOCAL session that DOES have `chrome-devtools-mcp`,
+  prefer it over headless Bash.
 
 ## Step 1: Setup
 
