@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ML-KEM Key Encapsulation — WebCrypto Algorithm Updates — Chrome 151 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .flagnote { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; font-size: 0.9rem; }
+    .flagnote code { background: var(--bg-stone); padding: 0 4px; font-size: 0.85rem; }
+    .flagnote ol { margin: var(--space-2) 0 0; padding-left: 1.4em; }
+    .controls { display: flex; gap: var(--space-4); flex-wrap: wrap; align-items: end; margin: var(--space-4) 0; }
+    .controls label { display: flex; flex-direction: column; gap: var(--space-1); font-family: var(--font-mono); font-size: 0.76rem; color: var(--text-muted); }
+    select { font: inherit; font-family: var(--font-mono); font-size: 0.85rem; padding: var(--space-2); border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .status { font-family: var(--font-mono); font-size: 0.8rem; padding: var(--space-1) var(--space-3); border: 2px solid var(--border-black); display: inline-block; margin: var(--space-2) 0; }
+    .status.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .status.bad { background: var(--accent-rose); color: var(--bg-ivory); }
+    .status.idle { background: var(--bg-stone); color: var(--text-charcoal); }
+    .flow { display: grid; grid-template-columns: 1fr; gap: var(--space-3); margin: var(--space-4) 0; }
+    @media (min-width: 820px) { .flow { grid-template-columns: 1fr 1fr; } }
+    .card { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3) var(--space-4); }
+    .card h3 { margin: 0 0 var(--space-2); font-family: var(--font-mono); font-size: 0.85rem; }
+    .hex { font-family: var(--font-mono); font-size: 0.72rem; word-break: break-all; color: var(--text-charcoal); background: var(--bg-stone); padding: var(--space-2); border: 1px solid var(--border-black); min-height: 2.4em; }
+    .match { font-family: var(--font-mono); font-size: 0.95rem; padding: var(--space-2) var(--space-3); border: 2px solid var(--border-black); display: inline-block; margin: var(--space-3) 0; }
+    .match.yes { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .match.no { background: var(--accent-rose); color: var(--bg-ivory); }
+    pre.code { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-4); overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebCrypto Algorithm Updates</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v151 · security · post-quantum</p>
+    <h1>ML-KEM Key Encapsulation</h1>
+    <p class="lede">ML-KEM (FIPS 203) is a lattice-based key-encapsulation mechanism. Instead of both sides agreeing on a secret, the sender <em>encapsulates</em> a fresh random secret against the recipient's public key, producing a ciphertext; the recipient <em>decapsulates</em> that ciphertext with their private key to recover the identical secret. This demo runs the real <code>crypto.subtle.encapsulateBits</code> / <code>decapsulateBits</code> methods end to end.</p>
+  </header>
+
+  <div class="flagnote" id="flagnote" hidden>
+    <strong>Experimental — behind a flag.</strong> The post-quantum WebCrypto algorithms are gated on the <code>WebCryptoPQC</code> runtime feature. To run this for real:
+    <ol>
+      <li>Quit Chrome, then relaunch with <code>--enable-blink-features=WebCryptoPQC</code> (a fresh Chrome/Canary that ships the feature), or</li>
+      <li>Join the <code>WebCryptoAdditionalAlgorithms202606</code> origin trial and add its token to your page.</li>
+    </ol>
+    Until then the buttons below will attempt the real call and report exactly what the browser returns — no simulated success.
+  </div>
+
+  <div class="controls">
+    <label for="param">ML-KEM parameter set
+      <select id="param">
+        <option value="ML-KEM-768">ML-KEM-768</option>
+        <option value="ML-KEM-1024">ML-KEM-1024</option>
+      </select>
+    </label>
+    <button id="run" type="button">Generate keys, encapsulate &amp; decapsulate</button>
+  </div>
+
+  <div id="status" class="status idle" role="status" aria-live="polite">checking support…</div>
+
+  <div class="flow">
+    <div class="card">
+      <h3>sender → encapsulateBits(publicKey)</h3>
+      <p class="note" style="margin:0 0 var(--space-2)">shared secret derived by the sender</p>
+      <div class="hex" id="enc-secret">—</div>
+      <p class="note" style="margin:var(--space-3) 0 var(--space-2)">ciphertext sent to the recipient</p>
+      <div class="hex" id="enc-ct">—</div>
+    </div>
+    <div class="card">
+      <h3>recipient → decapsulateBits(privateKey, ciphertext)</h3>
+      <p class="note" style="margin:0 0 var(--space-2)">shared secret recovered by the recipient</p>
+      <div class="hex" id="dec-secret">—</div>
+    </div>
+  </div>
+
+  <div id="match" class="match no" hidden>secrets not compared yet</div>
+
+  <section>
+    <h2>the code</h2>
+    <pre class="code"><code>// 1. Recipient generates an ML-KEM key pair
+const { publicKey, privateKey } = await crypto.subtle.generateKey(
+  { name: "ML-KEM-768" }, true, ["encapsulateBits", "decapsulateBits"]);
+
+// 2. Sender encapsulates a fresh shared secret against the public key
+const { sharedKey, ciphertext } =
+  await crypto.subtle.encapsulateBits("ML-KEM-768", publicKey);
+
+// 3. Recipient decapsulates the ciphertext to recover the same secret
+const recovered =
+  await crypto.subtle.decapsulateBits("ML-KEM-768", privateKey, ciphertext);
+
+// sharedKey === recovered, byte for byte
+</code></pre>
+    <p>Unlike Diffie-Hellman, encapsulation is one-directional: only the recipient's public key is needed, and only the recipient can recover the secret. That shared secret then seeds a symmetric cipher (like the ChaCha20-Poly1305 demo) for the actual data.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../ml-dsa-signatures/">ML-DSA Post-Quantum Signatures</a></li>
+      <li><a href="../algorithm-support-probe/">Algorithm Support Probe</a> — detect ML-KEM before you call it.</li>
+      <li><a href="../chacha20-poly1305-aead/">ChaCha20-Poly1305 AEAD</a> — encrypt with the derived secret.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5198951632470016" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://wicg.github.io/webcrypto-modern-algos/#ml-kem" target="_blank" rel="noopener">Spec — ML-KEM</a></li>
+      <li><a href="https://csrc.nist.gov/pubs/fips/203/final" target="_blank" rel="noopener">NIST FIPS 203 — ML-KEM</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(function () {
+  const runBtn = document.getElementById("run");
+  const paramSel = document.getElementById("param");
+  const statusEl = document.getElementById("status");
+  const flagNote = document.getElementById("flagnote");
+  const encSecret = document.getElementById("enc-secret");
+  const encCt = document.getElementById("enc-ct");
+  const decSecret = document.getElementById("dec-secret");
+  const matchEl = document.getElementById("match");
+
+  function setStatus(t, cls) { statusEl.textContent = t; statusEl.className = "status " + cls; }
+
+  function toHex(buf) {
+    const b = new Uint8Array(buf);
+    let s = "";
+    for (let i = 0; i < b.length; i++) s += b[i].toString(16).padStart(2, "0");
+    return s;
+  }
+  function short(hex) { return hex.length > 96 ? hex.slice(0, 96) + "… (" + (hex.length / 2) + " bytes)" : hex + " (" + (hex.length / 2) + " bytes)"; }
+
+  const subtle = (self.crypto && self.crypto.subtle) || null;
+  const hasEncapsulate = !!(subtle && typeof subtle.encapsulateBits === "function" && typeof subtle.decapsulateBits === "function");
+
+  function supportsAlg(op, alg) {
+    // supports() is a STATIC method on the SubtleCrypto interface object (per spec).
+    try {
+      if (typeof SubtleCrypto !== "undefined" && typeof SubtleCrypto.supports === "function") {
+        return SubtleCrypto.supports(op, alg) === true;
+      }
+    } catch (_) {}
+    return null; // unknown
+  }
+
+  function refreshSupport() {
+    if (!subtle) {
+      setStatus("crypto.subtle is unavailable (needs a secure context).", "bad");
+      runBtn.disabled = true;
+      return;
+    }
+    const alg = paramSel.value;
+    const sup = supportsAlg("encapsulateBits", alg);
+    if (hasEncapsulate && sup !== false) {
+      setStatus("encapsulateBits present" + (sup === true ? " · supports(\"encapsulateBits\", \"" + alg + "\") = true" : "") + " — ready", "ok");
+      flagNote.hidden = true;
+    } else {
+      setStatus("encapsulateBits" + (hasEncapsulate ? " present but " + alg + " not supported" : " not exposed") + " in this browser — enable the flag to run for real", "bad");
+      flagNote.hidden = false;
+    }
+  }
+
+  async function run() {
+    if (!subtle) return;
+    runBtn.disabled = true;
+    const alg = paramSel.value;
+    encSecret.textContent = encCt.textContent = decSecret.textContent = "…";
+    matchEl.hidden = true;
+    setStatus("generating " + alg + " key pair…", "idle");
+    try {
+      const kp = await subtle.generateKey({ name: alg }, true, ["encapsulateBits", "decapsulateBits"]);
+      setStatus("encapsulating shared secret…", "idle");
+      const enc = await subtle.encapsulateBits(alg, kp.publicKey);
+      const encHex = toHex(enc.sharedKey);
+      encSecret.textContent = short(encHex);
+      encCt.textContent = short(toHex(enc.ciphertext));
+
+      setStatus("decapsulating on the recipient…", "idle");
+      const recovered = await subtle.decapsulateBits(alg, kp.privateKey, enc.ciphertext);
+      const decHex = toHex(recovered);
+      decSecret.textContent = short(decHex);
+
+      const same = encHex === decHex && encHex.length > 0;
+      matchEl.hidden = false;
+      matchEl.className = "match " + (same ? "yes" : "no");
+      matchEl.textContent = same
+        ? "✓ shared secrets match (" + (encHex.length / 2) + " bytes) — encapsulation round-trip verified"
+        : "✗ shared secrets differ — this should never happen for a correct implementation";
+      setStatus(same ? "done — " + alg + " round-trip verified" : "mismatch — investigate", same ? "ok" : "bad");
+      window.showcaseTelemetry?.assert("mlkem-roundtrip", same, { alg });
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      setStatus("real call failed: " + msg + " — the algorithm is likely not enabled in this browser", "bad");
+      encSecret.textContent = encCt.textContent = decSecret.textContent = "—";
+      flagNote.hidden = false;
+      window.showcaseTelemetry?.assert("mlkem-roundtrip", false, { alg, error: msg });
+    } finally {
+      runBtn.disabled = false;
+    }
+  }
+
+  paramSel.addEventListener("change", refreshSupport);
+  runBtn.addEventListener("click", run);
+  refreshSupport();
+})();
+</script>
+</body>
+</html>

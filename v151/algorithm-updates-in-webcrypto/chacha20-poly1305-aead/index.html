@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChaCha20-Poly1305 AEAD — WebCrypto Algorithm Updates — Chrome 151 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .flagnote { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; font-size: 0.9rem; }
+    .flagnote code { background: var(--bg-stone); padding: 0 4px; font-size: 0.85rem; }
+    .flagnote ol { margin: var(--space-2) 0 0; padding-left: 1.4em; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: var(--space-3); margin: var(--space-4) 0; }
+    @media (min-width: 720px) { .grid { grid-template-columns: 1fr 1fr; } }
+    label.f { display: flex; flex-direction: column; gap: var(--space-1); font-family: var(--font-mono); font-size: 0.76rem; color: var(--text-muted); }
+    textarea, input[type=text] { font: inherit; font-family: var(--font-mono); font-size: 0.85rem; padding: var(--space-2); border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); box-sizing: border-box; width: 100%; }
+    textarea { min-height: 3.4em; }
+    .controls { display: flex; gap: var(--space-4); flex-wrap: wrap; align-items: center; margin: var(--space-4) 0; }
+    .status { font-family: var(--font-mono); font-size: 0.8rem; padding: var(--space-1) var(--space-3); border: 2px solid var(--border-black); display: inline-block; margin: var(--space-2) 0; }
+    .status.ok { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .status.bad { background: var(--accent-rose); color: var(--bg-ivory); }
+    .status.idle { background: var(--bg-stone); color: var(--text-charcoal); }
+    .hex { font-family: var(--font-mono); font-size: 0.72rem; word-break: break-all; color: var(--text-charcoal); background: var(--bg-stone); padding: var(--space-2); border: 1px solid var(--border-black); min-height: 2.4em; margin: var(--space-2) 0; }
+    .verdict { font-family: var(--font-mono); font-size: 0.95rem; padding: var(--space-2) var(--space-3); border: 2px solid var(--border-black); display: inline-block; margin: var(--space-3) 0; }
+    .verdict.valid { background: var(--accent-emerald); color: var(--bg-ivory); }
+    .verdict.invalid { background: var(--accent-rose); color: var(--bg-ivory); }
+    pre.code { background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-4); overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebCrypto Algorithm Updates</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v151 · security · aead</p>
+    <h1>ChaCha20-Poly1305 AEAD</h1>
+    <p class="lede">ChaCha20-Poly1305 (RFC 8439) is an authenticated cipher: a single operation both encrypts your data and produces a Poly1305 tag that detects any tampering. This demo runs the real <code>crypto.subtle.encrypt</code> / <code>decrypt</code> with the new <code>ChaCha20-Poly1305</code> algorithm, including an <em>additional authenticated data</em> field, and lets you corrupt the ciphertext, nonce, or AAD to watch authentication fail.</p>
+  </header>
+
+  <div class="flagnote" id="flagnote" hidden>
+    <strong>Experimental — behind a flag.</strong> The modern WebCrypto algorithms are gated on the <code>WebCryptoPQC</code> runtime feature. To run this for real:
+    <ol>
+      <li>Quit Chrome, then relaunch with <code>--enable-blink-features=WebCryptoPQC</code> (a fresh Chrome/Canary that ships the feature), or</li>
+      <li>Join the <code>WebCryptoAdditionalAlgorithms202606</code> origin trial and add its token to your page.</li>
+    </ol>
+    Until then the buttons attempt the real call and report exactly what the browser returns — no simulated success.
+  </div>
+
+  <div class="grid">
+    <label class="f">plaintext
+      <textarea id="plain" aria-label="plaintext">Attack at dawn — ChaCha20-Poly1305 keeps this confidential and tamper-evident.</textarea>
+    </label>
+    <label class="f">additional authenticated data (not encrypted, but authenticated)
+      <textarea id="aad" aria-label="additional authenticated data">msg-id: 42; from: alice</textarea>
+    </label>
+  </div>
+
+  <div class="controls">
+    <button id="enc" type="button">Generate key &amp; encrypt</button>
+    <span id="status" class="status idle" role="status" aria-live="polite">checking support…</span>
+  </div>
+
+  <p class="note" style="margin-bottom:var(--space-1)">nonce (12 bytes) · ciphertext + 16-byte Poly1305 tag</p>
+  <div class="hex" id="ct">—</div>
+
+  <div class="controls">
+    <button id="dec" type="button" disabled>Decrypt (clean)</button>
+    <button id="tamper-ct" type="button" disabled>Corrupt ciphertext, then decrypt</button>
+    <button id="tamper-aad" type="button" disabled>Change AAD, then decrypt</button>
+    <button id="tamper-nonce" type="button" disabled>Change nonce, then decrypt</button>
+  </div>
+
+  <div id="verdict" class="verdict invalid" hidden>nothing decrypted yet</div>
+  <p class="note" style="margin-bottom:var(--space-1)">recovered plaintext</p>
+  <div class="hex" id="out">—</div>
+
+  <section>
+    <h2>the code</h2>
+    <pre class="code"><code>const key = await crypto.subtle.generateKey(
+  { name: "ChaCha20-Poly1305" }, true, ["encrypt", "decrypt"]);
+
+const nonce = crypto.getRandomValues(new Uint8Array(12)); // 96-bit nonce
+const params = { name: "ChaCha20-Poly1305", iv: nonce, additionalData: aad };
+
+const ciphertext = await crypto.subtle.encrypt(params, key, plaintext);
+// ciphertext ends with a 16-byte Poly1305 authentication tag
+
+const recovered = await crypto.subtle.decrypt(params, key, ciphertext);
+// throws OperationError if the ciphertext, nonce, OR aad was altered
+</code></pre>
+    <p>Because it is <em>authenticated</em> encryption, decryption is all-or-nothing: change a single byte of the ciphertext, reuse the wrong nonce, or feed different associated data, and <code>decrypt()</code> rejects with an <code>OperationError</code> instead of returning corrupted plaintext. Never reuse a nonce with the same key.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../ml-kem-encapsulation/">ML-KEM Key Encapsulation</a> — derive a shared secret to key this cipher.</li>
+      <li><a href="../algorithm-support-probe/">Algorithm Support Probe</a></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5198951632470016" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://wicg.github.io/webcrypto-modern-algos/#chacha20-poly1305" target="_blank" rel="noopener">Spec — ChaCha20-Poly1305</a></li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc8439" target="_blank" rel="noopener">RFC 8439 — ChaCha20 &amp; Poly1305</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+(function () {
+  const encBtn = document.getElementById("enc");
+  const decBtn = document.getElementById("dec");
+  const tamperCtBtn = document.getElementById("tamper-ct");
+  const tamperAadBtn = document.getElementById("tamper-aad");
+  const tamperNonceBtn = document.getElementById("tamper-nonce");
+  const plainEl = document.getElementById("plain");
+  const aadEl = document.getElementById("aad");
+  const statusEl = document.getElementById("status");
+  const flagNote = document.getElementById("flagnote");
+  const ctEl = document.getElementById("ct");
+  const outEl = document.getElementById("out");
+  const verdictEl = document.getElementById("verdict");
+
+  const ALG = "ChaCha20-Poly1305";
+  const subtle = (self.crypto && self.crypto.subtle) || null;
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  let key = null, nonce = null, ciphertext = null, aadBytes = null;
+
+  function setStatus(t, cls) { statusEl.textContent = t; statusEl.className = "status " + cls; }
+  function toHex(u8) { let s = ""; for (let i = 0; i < u8.length; i++) s += u8[i].toString(16).padStart(2, "0"); return s; }
+  function showCt() {
+    const n = toHex(nonce);
+    const c = toHex(new Uint8Array(ciphertext));
+    ctEl.textContent = "nonce " + n + "\n" + (c.length > 120 ? c.slice(0, 120) + "… (" + (ciphertext.byteLength) + " bytes)" : c);
+  }
+
+  function supportsAlg(op) {
+    // supports() is a STATIC method on the SubtleCrypto interface object (per spec).
+    try {
+      if (typeof SubtleCrypto !== "undefined" && typeof SubtleCrypto.supports === "function") {
+        return SubtleCrypto.supports(op, ALG) === true;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function refreshSupport() {
+    if (!subtle) { setStatus("crypto.subtle unavailable (needs secure context).", "bad"); encBtn.disabled = true; return; }
+    const sup = supportsAlg("encrypt");
+    // Definitive test: try to generate a key for the algorithm.
+    subtle.generateKey({ name: ALG }, true, ["encrypt", "decrypt"]).then(() => {
+      setStatus("ChaCha20-Poly1305 available" + (sup === true ? " · supports() = true" : "") + " — ready", "ok");
+      flagNote.hidden = true;
+    }).catch((err) => {
+      setStatus("ChaCha20-Poly1305 not available: " + (err && err.name ? err.name : "unsupported") + " — enable the flag to run for real", "bad");
+      flagNote.hidden = false;
+    });
+  }
+
+  function setDecryptControls(on) {
+    decBtn.disabled = !on;
+    tamperCtBtn.disabled = !on;
+    tamperAadBtn.disabled = !on;
+    tamperNonceBtn.disabled = !on;
+  }
+
+  async function encrypt() {
+    if (!subtle) return;
+    encBtn.disabled = true;
+    setDecryptControls(false);
+    verdictEl.hidden = true;
+    outEl.textContent = "—";
+    setStatus("generating key & encrypting…", "idle");
+    try {
+      key = await subtle.generateKey({ name: ALG }, true, ["encrypt", "decrypt"]);
+      nonce = crypto.getRandomValues(new Uint8Array(12));
+      aadBytes = enc.encode(aadEl.value);
+      const params = { name: ALG, iv: nonce, additionalData: aadBytes };
+      ciphertext = await subtle.encrypt(params, key, enc.encode(plainEl.value));
+      showCt();
+      setStatus("encrypted (" + ciphertext.byteLength + " bytes incl. tag) — now decrypt or tamper", "ok");
+      setDecryptControls(true);
+      window.showcaseTelemetry?.assert("chacha-encrypt", true, { bytes: ciphertext.byteLength });
+    } catch (err) {
+      const m = err && err.message ? err.message : String(err);
+      setStatus("real call failed: " + m + " — algorithm likely not enabled", "bad");
+      flagNote.hidden = false;
+      ctEl.textContent = "—";
+      window.showcaseTelemetry?.assert("chacha-encrypt", false, { error: m });
+    } finally {
+      encBtn.disabled = false;
+    }
+  }
+
+  async function decryptWith(ctBuf, useNonce, useAad, expectOk, note) {
+    try {
+      const params = { name: ALG, iv: useNonce, additionalData: useAad };
+      const recovered = await subtle.decrypt(params, key, ctBuf);
+      outEl.textContent = dec.decode(recovered);
+      verdictEl.hidden = false;
+      verdictEl.className = "verdict valid";
+      verdictEl.textContent = "✓ authenticated & decrypted — " + note;
+      setStatus("decrypt succeeded", expectOk ? "ok" : "bad");
+      window.showcaseTelemetry?.assert("chacha-decrypt", expectOk === true, { got: "ok", note });
+    } catch (err) {
+      outEl.textContent = "—";
+      verdictEl.hidden = false;
+      verdictEl.className = "verdict invalid";
+      verdictEl.textContent = "✗ rejected (" + (err && err.name ? err.name : "OperationError") + ") — " + note;
+      setStatus("decrypt threw — authentication failed as expected", expectOk ? "bad" : "ok");
+      window.showcaseTelemetry?.assert("chacha-decrypt", expectOk === false, { got: "throw", note });
+    }
+  }
+
+  decBtn.addEventListener("click", () => decryptWith(ciphertext, nonce, aadBytes, true, "clean round-trip"));
+  tamperCtBtn.addEventListener("click", () => {
+    const bad = ciphertext.slice(0);
+    const v = new Uint8Array(bad); v[0] ^= 0x01;
+    decryptWith(bad, nonce, aadBytes, false, "one ciphertext byte corrupted");
+  });
+  tamperAadBtn.addEventListener("click", () => decryptWith(ciphertext, nonce, enc.encode(aadEl.value + " (changed)"), false, "AAD changed after encryption"));
+  tamperNonceBtn.addEventListener("click", () => {
+    const badNonce = nonce.slice(0); badNonce[0] ^= 0x01;
+    decryptWith(ciphertext, badNonce, aadBytes, false, "nonce changed");
+  });
+
+  encBtn.addEventListener("click", encrypt);
+  refreshSupport();
+})();
+</script>
+</body>
+</html>
