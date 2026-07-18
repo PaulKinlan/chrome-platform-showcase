@@ -71,22 +71,31 @@ working commits for all features. You can also inspect the current quality snaps
 
 ## The routine
 
-Cron `0 6 * * *` (once a day, 06:00 UTC). Runs in Anthropic's cloud as a Claude Code session against
-a fresh checkout of `main`. Soft 90-minute budget per run. Picks up where the last run left off.
+Cron `17 6 * * *` (once a day, 06:17 UTC), trigger `trig_01GtXjwvzEM5mhsktARhGeSx`. Runs in
+Anthropic's cloud as a Claude Code session against a fresh checkout of `main`. Soft 90-minute budget
+per run. Picks up where the last run left off. **Toolset is Bash/Read/Write/Edit/Glob/Grep (+
+WebFetch/WebSearch) — no `chrome-devtools-mcp`.** It verifies with headless Chrome via Bash and
+`Read`-the-screenshot (see `.claude/routine-prompt.md` → "Toolset & verification environment").
 
 Cadence history: hourly → every-2-hours (2026-05-30, routines-per-day cap) → **once a day
 (2026-07-18)**, when the routine was re-enabled after a period disabled and its prompt was hardened
 with a deep-research phase and the anti-regression build rules. If you change the cadence, also push
 it to the live trigger via `RemoteTrigger` and watch the daily routines cap.
 
-A separate **weekly hardening routine** runs the manual `showcase-auto-research` skill end-to-end
-(coverage/build → critique → conformance → validate → goals) plus a production-telemetry triage
-pass. That is where thin/incomplete demos get caught and where real-visitor errors from KV drive
-fixes. See "Weekly hardening routine" below.
+A separate **weekly hardening routine** (`trig_01ShfGDEQYwDRsoisCRXhZBT`, cron `43 6 * * 0`, Sunday
+06:43 UTC) runs the manual `showcase-auto-research` skill end-to-end (coverage/build → critique →
+conformance → validate → goals) plus a production-telemetry triage pass. That is where
+thin/incomplete demos get caught and where real-visitor errors from KV drive fixes. See "Weekly
+hardening routine" below.
 
-Routine prompt lives in `.claude/routine-prompt.md`. When you update the file, also push the new
-prompt to the live routine via the `RemoteTrigger` MCP tool (action `update`). Live and repo can
-drift if you forget.
+### The live prompts are bootstrap pointers — the repo is the source of truth
+
+Both routines' live prompts are now short bootstraps that say "read `.claude/routine-prompt.md` (+
+CLAUDE.md/AGENTS.md) from your fresh checkout and follow it." So **to change how the routines
+behave, just edit `.claude/routine-prompt.md` (or this file) and push — no live-prompt update
+needed**; the next run reads the new file. This permanently fixes the old live-vs-repo drift. Only
+touch the live trigger (via `RemoteTrigger`) to change cadence, enable/disable, tools, or the
+bootstrap itself.
 
 ### Triggering a manual run
 
@@ -338,14 +347,18 @@ If you changed the design system (`public/styles.css`):
 
 ## How to update the routine prompt
 
-1. Edit `.claude/routine-prompt.md` in the repo.
-2. Open the routine in the Claude Code routines UI:
-   https://claude.ai/code/routines/trig_01GtXjwvzEM5mhsktARhGeSx
-3. Paste the new prompt as the routine's event message content.
-4. Trigger a one-off run to confirm the change works before relying on the next cron tick.
+1. Edit `.claude/routine-prompt.md` in the repo and push. **That's it** — both routines' live
+   bootstraps read this file from a fresh checkout each run, so the change takes effect on the next
+   cron tick with no live-prompt edit. (This replaced the old paste-the-whole-prompt flow, which
+   kept drifting out of date.)
+2. Only use `RemoteTrigger` (action `update`) when you need to change cadence, enable/disable, the
+   allowed tools, the model, or the bootstrap message itself. Trigger IDs: build
+   `trig_01GtXjwvzEM5mhsktARhGeSx`, weekly hardening `trig_01ShfGDEQYwDRsoisCRXhZBT`.
+3. To smoke-test a prompt change, run the routine once via `RemoteTrigger` (action `run`) before
+   relying on the next cron tick.
 
-The prompt is large (~5KB). The most-bitten parts are the "Critical Rules" block at the top — if
-you're tightening a rule, put it there, not buried in a numbered step.
+The most-bitten parts are the "Critical Rules" block at the top of `routine-prompt.md` — if you're
+tightening a rule, put it there, not buried in a numbered step.
 
 ## Recovery: fixing slug / milestone errors
 
