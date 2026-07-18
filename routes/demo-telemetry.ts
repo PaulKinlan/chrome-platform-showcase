@@ -15,7 +15,7 @@ interface DemoTelemetryEvent {
 }
 
 interface MinimalKv {
-  set(key: unknown[], value: unknown): Promise<unknown>;
+  set(key: unknown[], value: unknown, options?: { expireIn?: number }): Promise<unknown>;
   list<T = unknown>(
     options: { prefix: unknown[]; reverse?: boolean; limit?: number },
   ): AsyncIterable<{
@@ -23,6 +23,10 @@ interface MinimalKv {
     value: T;
   }>;
 }
+
+// KV events self-expire so the store does not grow unbounded (there is no reader that would
+// otherwise prune it). 90 days is plenty for weekly triage while keeping a month-plus of trend.
+const TELEMETRY_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
 const recentDemoTelemetry: DemoTelemetryEvent[] = [];
 const allowedSeverities = new Set(["info", "warning", "error"]);
@@ -219,7 +223,9 @@ async function storeTelemetryEvent(event: DemoTelemetryEvent): Promise<void> {
   const kv = await getDemoKv();
   if (!kv) return;
   const day = event.receivedAt.slice(0, 10);
-  await kv.set(["demo-telemetry", day, event.receivedAt, event.id], event);
+  await kv.set(["demo-telemetry", day, event.receivedAt, event.id], event, {
+    expireIn: TELEMETRY_TTL_MS,
+  });
 }
 
 async function readRecentEvents(
@@ -252,12 +258,181 @@ function summarize(events: DemoTelemetryEvent[]): {
   };
 }
 
+interface FlatEvent {
+  receivedAt: string;
+  kind: string;
+  severity: string | null;
+  page: string;
+  release: string | null;
+  featureSlug: string | null;
+  conceptSlug: string | null;
+  signature: string;
+}
+
+// Client telemetry arrives batched: a stored `demo.batch` event carries the real console/runtime/
+// assert events in `payload.events[]`. Flatten so triage sees the individual signals, not the wrapper.
+function flattenEvents(stored: DemoTelemetryEvent[]): FlatEvent[] {
+  const flat: FlatEvent[] = [];
+  const push = (
+    kind: string,
+    severity: string | null,
+    page: string,
+    receivedAt: string,
+    payload: JsonRecord,
+  ) => {
+    const parts = parsePageParts(page);
+    flat.push({
+      receivedAt,
+      kind,
+      severity,
+      page,
+      release: parts.release,
+      featureSlug: parts.featureSlug,
+      conceptSlug: parts.conceptSlug,
+      signature: eventSignature(kind, payload),
+    });
+  };
+  for (const event of stored) {
+    if (event.kind === "demo.batch" && Array.isArray(event.payload.events)) {
+      for (const raw of event.payload.events as unknown[]) {
+        const inner = objectValue(raw);
+        const kind = stringValue(inner.kind, 80) ?? "demo.telemetry";
+        const page = stringValue(inner.page, 1000) || event.page;
+        push(kind, stringValue(inner.severity, 40), page, event.receivedAt, inner);
+      }
+    } else {
+      push(event.kind, event.severity, event.page, event.receivedAt, event.payload);
+    }
+  }
+  return flat;
+}
+
+// A stable, human-readable label for grouping like errors across many visitors.
+function eventSignature(kind: string, payload: JsonRecord): string {
+  const candidate = stringValue(payload.message, 300) ??
+    stringValue(payload.reason, 300) ??
+    stringValue(payload.id, 300) ??
+    stringValue(payload.detail, 300) ??
+    stringValue(payload.text, 300) ??
+    stringValue(payload.url, 300) ??
+    "";
+  // Collapse volatile bits (numbers, hex ids, urls' query) so the same error clusters together.
+  const normalized = candidate
+    .replace(/https?:\/\/[^\s)]+/g, (u) => u.split("?")[0])
+    .replace(/0x[0-9a-f]+/gi, "0x…")
+    .replace(/\b\d[\d.,:]*\b/g, "#")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized ? `${kind}: ${normalized}`.slice(0, 200) : kind;
+}
+
+function isFailure(event: FlatEvent): boolean {
+  return event.severity === "error" ||
+    event.kind.includes("error") ||
+    event.kind === "assert.fail" ||
+    event.kind === "runtime.unhandledrejection" ||
+    event.kind === "resource.error";
+}
+
+interface TriageGroup {
+  key: string;
+  release: string | null;
+  featureSlug: string | null;
+  conceptSlug: string | null;
+  failures: number;
+  kinds: Record<string, number>;
+  topSignatures: { signature: string; count: number }[];
+}
+
+function buildTriage(stored: DemoTelemetryEvent[]): {
+  scanned: number;
+  failures: number;
+  demos: TriageGroup[];
+  signatures: { signature: string; count: number; demos: string[] }[];
+} {
+  const flat = flattenEvents(stored);
+  const failures = flat.filter(isFailure);
+  const byDemo = new Map<string, {
+    group: TriageGroup;
+    sigs: Map<string, number>;
+  }>();
+  const bySignature = new Map<string, { count: number; demos: Set<string> }>();
+
+  for (const f of failures) {
+    const demoKey = f.release
+      ? [f.release, f.featureSlug ?? "", f.conceptSlug ?? ""].join("/")
+      : f.page || "(unknown)";
+    let entry = byDemo.get(demoKey);
+    if (!entry) {
+      entry = {
+        group: {
+          key: demoKey,
+          release: f.release,
+          featureSlug: f.featureSlug,
+          conceptSlug: f.conceptSlug,
+          failures: 0,
+          kinds: {},
+          topSignatures: [],
+        },
+        sigs: new Map(),
+      };
+      byDemo.set(demoKey, entry);
+    }
+    entry.group.failures++;
+    entry.group.kinds[f.kind] = (entry.group.kinds[f.kind] ?? 0) + 1;
+    entry.sigs.set(f.signature, (entry.sigs.get(f.signature) ?? 0) + 1);
+
+    const sig = bySignature.get(f.signature) ?? { count: 0, demos: new Set<string>() };
+    sig.count++;
+    sig.demos.add(demoKey);
+    bySignature.set(f.signature, sig);
+  }
+
+  const demos = [...byDemo.values()]
+    .map(({ group, sigs }) => {
+      group.topSignatures = [...sigs.entries()]
+        .map(([signature, count]) => ({ signature, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5);
+      return group;
+    })
+    .sort((a, b) => b.failures - a.failures);
+
+  const signatures = [...bySignature.entries()]
+    .map(([signature, v]) => ({ signature, count: v.count, demos: [...v.demos].slice(0, 10) }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 50);
+
+  return { scanned: flat.length, failures: failures.length, demos, signatures };
+}
+
 function renderAdminDashboard(
   events: DemoTelemetryEvent[],
   storage: "kv" | "memory",
   limit: number,
 ): string {
   const summary = summarize(events);
+  const triage = buildTriage(events);
+  const triageRows = triage.demos.slice(0, 15).map((d) => {
+    const label = d.release
+      ? `${d.release}/${d.featureSlug ?? ""}${d.conceptSlug ? "/" + d.conceptSlug : ""}`
+      : d.key;
+    const href = d.release
+      ? `/${d.release}/${d.featureSlug ?? ""}${d.conceptSlug ? "/" + d.conceptSlug : ""}/`
+      : "#";
+    const sigs = d.topSignatures.map((s) => `${escapeHTML(s.signature)} ×${s.count}`).join("<br>");
+    return `<tr>
+      <td><a href="${escapeHTML(href)}">${escapeHTML(label)}</a></td>
+      <td>${d.failures}</td>
+      <td>${sigs || "&mdash;"}</td>
+    </tr>`;
+  }).join("");
+  const triagePanel = triage.failures === 0
+    ? '<p class="lede">No failures in this window. 🎉</p>'
+    : `<table aria-label="Top failing demos">
+    <thead><tr><th>demo (worst first)</th><th>failures</th><th>top signatures</th></tr></thead>
+    <tbody>${triageRows}</tbody>
+  </table>`;
   const rows = events.map((event) => {
     const payload = JSON.stringify(event.payload, null, 2);
     const severityClass = event.severity === "error"
@@ -319,9 +494,15 @@ function renderAdminDashboard(
   </div>
   <div class="tools">
     <a class="button-like" href="/telemetry/demo/events?limit=${limit}">JSON events</a>
+    <a class="button-like" href="/telemetry/demo/triage">JSON triage</a>
     <a class="button-like" href="/telemetry/demo/admin?limit=50">50</a>
     <a class="button-like" href="/telemetry/demo/admin?limit=200">200</a>
   </div>
+  <section>
+    <h2>Triage — failing demos (worst first)</h2>
+    <p class="updated-line">${triage.failures} failure signals across ${triage.scanned} flattened events in this window. Full ranking + error-signature clusters: <code>/telemetry/demo/triage?scan=2000</code>.</p>
+    ${triagePanel}
+  </section>
   <table aria-label="Demo telemetry events">
     <thead><tr><th>received</th><th>severity</th><th>kind</th><th>page</th><th>user agent</th><th>payload</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="6">No telemetry events recorded yet.</td></tr>'}</tbody>
@@ -346,6 +527,14 @@ export async function handleDemoTelemetryRoute(req: Request): Promise<Response |
     const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 1000);
     const { storage, events } = await readRecentEvents(limit);
     return htmlResponse(renderAdminDashboard(events, storage, limit));
+  }
+
+  if (url.pathname === "/telemetry/demo/triage" && req.method === "GET") {
+    if (!isAuthorized(req)) return unauthorizedResponse();
+    const scan = Math.min(Number(url.searchParams.get("scan") ?? 2000), 5000);
+    const { storage, events } = await readRecentEvents(scan);
+    const triage = buildTriage(events);
+    return jsonResponse({ storage, window: events.length, ...triage });
   }
 
   if (url.pathname === "/telemetry/demo/reset" && req.method === "POST") {
@@ -397,6 +586,8 @@ export async function handleDemoTelemetryRoute(req: Request): Promise<Response |
       post: "POST a JSON telemetry payload from /public/demo-telemetry.js.",
       admin: "/telemetry/demo/admin",
       events: "GET /telemetry/demo/events with HTTP Basic auth using showcase_password.",
+      triage:
+        "GET /telemetry/demo/triage (Basic auth) — flattens batched events, ranks failing demos and error-signature clusters. ?scan=<n> sets the window (default 2000, max 5000).",
       passwordConfigured: Boolean(configuredPassword()),
     });
   }
