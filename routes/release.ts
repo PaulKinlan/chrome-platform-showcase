@@ -3877,6 +3877,42 @@ async function renderV151DelayedEcho(req: Request): Promise<Response> {
   });
 }
 
+// v151: cross-origin redirect timing opt-in.
+// Issues a real redirect chain so PerformanceResourceTiming.redirectStart/
+// redirectEnd/redirectCount are populated by an actual navigation, and lets the
+// demo toggle the `Timing-Allow-Origin` opt-in header that gates that timing for
+// cross-origin hops. Same-origin hops always expose redirect timing; the header
+// (surfaced on the final response) is what unlocks it across origins.
+function renderV151RedirectChain(req: Request): Response {
+  const url = new URL(req.url);
+  const tao = url.searchParams.get("tao") === "1";
+  const hops = Math.min(Math.max(Number(url.searchParams.get("hops") ?? 2), 0), 5);
+  const taoHeader: Record<string, string> = tao ? { "timing-allow-origin": "*" } : {};
+
+  if (hops > 0) {
+    const next = new URL(url.href);
+    next.searchParams.set("hops", String(hops - 1));
+    return new Response(null, {
+      status: 302,
+      headers: {
+        location: next.pathname + next.search,
+        "cache-control": "no-store",
+        ...taoHeader,
+      },
+    });
+  }
+
+  return jsonResponse({
+    finalHop: true,
+    timingAllowOrigin: tao ? "*" : "(absent)",
+    note: tao
+      ? "Every hop in this chain sent Timing-Allow-Origin: *, so a cross-origin caller would see redirectStart/redirectEnd in its PerformanceResourceTiming entry."
+      : "No Timing-Allow-Origin header was sent, so a cross-origin caller would see redirectStart/redirectEnd zeroed. Same-origin callers still see them.",
+  }, {
+    headers: { "cache-control": "no-store", ...taoHeader },
+  });
+}
+
 function renderV151PolicyEcho(req: Request): Response {
   const url = new URL(req.url);
   const local = url.searchParams.get("local") ?? "self";
@@ -4732,6 +4768,12 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
     sub === "/renewed-html-insertion-streaming-methods/html-stream"
   ) {
     return renderV151HtmlStream(req);
+  }
+  if (
+    release === "v151" &&
+    sub === "/cross-origin-redirect-timing-opt-in/redirect-chain"
+  ) {
+    return renderV151RedirectChain(req);
   }
 
   return (await readReleaseAsset(release, sub)) ??

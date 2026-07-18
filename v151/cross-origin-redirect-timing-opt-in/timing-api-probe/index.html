@@ -33,7 +33,8 @@
     <p>The Chrome 151 change is specifically about <strong>navigation</strong> redirect timing. Previously, <code>PerformanceResourceTiming</code> for subresources (fetch, img, script) had TAO — but <code>PerformanceNavigationTiming</code> redirect fields were always zeroed for cross-origin redirects. This opt-in lets the destination server expose them.</p>
   </div>
 
-  <button class="btn" id="sub-btn">Test subresource timing (fetch)</button>
+  <button class="btn" id="sub-btn">Fetch redirect chain (with Timing-Allow-Origin)</button>
+  <button class="btn alt" id="notao-btn">Fetch redirect chain (no Timing-Allow-Origin)</button>
   <button class="btn alt" id="nav-btn">Read current navigation timing</button>
   <table aria-label="Timing table" class="timing-table" id="table">
     <tr><th>Field</th><th>Value</th><th>Status</th></tr>
@@ -64,35 +65,65 @@ for (const entry of navEntries) {
 (function () {
   var table = document.getElementById("table");
 
-  function renderEntry(entry, label) {
+  function renderEntry(entry, label, tao) {
     table.innerHTML = '<tr><th>Field</th><th>Value</th><th>Status</th></tr>';
-    var fields = ["redirectStart", "redirectEnd", "fetchStart", "domainLookupStart", "connectStart", "responseEnd", "transferSize", "type"];
+    var timed = entry.redirectStart > 0 && entry.redirectEnd >= entry.redirectStart;
+    var fields = ["redirectStart", "redirectEnd", "fetchStart", "responseEnd", "transferSize", "type"];
     fields.forEach(function (f) {
       var val = entry[f];
-      var isZero = val === 0;
-      var status = "—";
-      if (f === "type") { status = ""; }
-      else if (isZero) { status = "hidden (cross-origin or no redirect)"; }
-      else { status = "visible"; }
-      table.innerHTML += '<tr><td>' + label + '.' + f + '</td><td>' + val + '</td><td class="' + (isZero && f !== "type" ? "zeroed" : "visible") + '">' + status + "</td></tr>";
+      if (typeof val === "number" && f !== "transferSize") val = Math.round(val * 100) / 100;
+      var isTiming = (f === "redirectStart" || f === "redirectEnd");
+      var status = "";
+      if (isTiming) {
+        status = entry[f] === 0
+          ? "zeroed — this is what a cross-origin caller without Timing-Allow-Origin sees"
+          : "exposed (same-origin request, or Timing-Allow-Origin present)";
+      }
+      table.innerHTML += '<tr><td>' + label + '.' + f + '</td><td>' + val +
+        '</td><td class="' + (isTiming && entry[f] === 0 ? "zeroed" : "visible") + '">' + status + "</td></tr>";
     });
+    table.innerHTML += '<tr><td>redirect timing measured</td><td>' + (timed ? "yes" : "no") +
+      '</td><td class="' + (timed ? "visible" : "zeroed") + '">' +
+      (timed ? "the redirect hops contributed real time to the entry" : "no redirect interval recorded") + "</td></tr>";
+    table.innerHTML += '<tr><td>Timing-Allow-Origin sent by chain</td><td>' + (tao ? "*" : "(absent)") +
+      '</td><td class="' + (tao ? "visible" : "zeroed") + '">' +
+      (tao ? "opts cross-origin callers in to redirect timing" : "cross-origin callers would see redirect timing zeroed") + "</td></tr>";
   }
 
-  // Subresource timing test (pre-existing TAO behavior for comparison)
-  document.getElementById("sub-btn").addEventListener("click", async function () {
-    table.innerHTML = '<tr><th>Field</th><th>Value</th><th>Status</th></tr><tr><td colspan="3">Fetching cross-origin resource…</td></tr>';
-    var url = "https://httpbin.org/redirect-to?url=https://example.com/image.png&status_code=302&_=" + Date.now();
-    try { await fetch(url, { mode: "no-cors" }); } catch (e) {}
-    setTimeout(function () {
-      var entries = performance.getEntriesByType("resource");
-      var matching = entries.filter(function (e) { return e.name.indexOf("httpbin") >= 0; });
-      if (!matching.length) {
-        table.innerHTML = '<tr><th>Field</th><th>Value</th><th>Status</th></tr><tr><td colspan="3">No matching resource timing entry found (httpbin may be unavailable).</td></tr>';
-        return;
-      }
-      renderEntry(matching[matching.length - 1], "resource");
-    }, 500);
-  });
+  // Real same-origin redirect chain served by /redirect-chain (server route).
+  // Same-origin callers always see redirect timing; the tao flag controls the
+  // Timing-Allow-Origin header that would unlock the same values cross-origin.
+  async function probeRedirectChain(tao) {
+    table.innerHTML = '<tr><th>Field</th><th>Value</th><th>Status</th></tr><tr><td colspan="3">Following a 3-hop redirect chain…</td></tr>';
+    var base = "/v151/cross-origin-redirect-timing-opt-in/redirect-chain";
+    var url = base + "?hops=3&tao=" + (tao ? "1" : "0") + "&_=" + Date.now();
+    try {
+      var resp = await fetch(url, { cache: "no-store" });
+      await resp.text(); // consume the body so the resource timing entry finalizes
+    } catch (e) {}
+    await new Promise(function (r) { setTimeout(r, 250); });
+    var entries = performance.getEntriesByType("resource").filter(function (e) {
+      return e.name.indexOf("/redirect-chain") >= 0;
+    });
+    var entry = entries[entries.length - 1];
+    if (!entry) {
+      table.innerHTML = '<tr><th>Field</th><th>Value</th><th>Status</th></tr><tr><td colspan="3">No PerformanceResourceTiming entry captured for the redirect chain.</td></tr>';
+      window.showcaseTelemetry && window.showcaseTelemetry.assert("redirect-timing-entry", false, { tao: tao });
+      return;
+    }
+    renderEntry(entry, "resource", tao);
+    // Contract: a same-origin redirect chain exposes a non-zero redirectStart and
+    // a redirectEnd no earlier than it (PerformanceResourceTiming has no
+    // redirectCount — that field lives on PerformanceNavigationTiming).
+    window.showcaseTelemetry && window.showcaseTelemetry.assert(
+      "redirect-timing-exposed",
+      entry.redirectStart > 0 && entry.redirectEnd >= entry.redirectStart,
+      { tao: tao, redirectStart: Math.round(entry.redirectStart) },
+    );
+  }
+
+  document.getElementById("sub-btn").addEventListener("click", function () { probeRedirectChain(true); });
+  document.getElementById("notao-btn").addEventListener("click", function () { probeRedirectChain(false); });
 
   // Navigation timing test (the Chrome 151 feature)
   document.getElementById("nav-btn").addEventListener("click", function () {
