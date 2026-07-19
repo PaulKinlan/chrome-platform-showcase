@@ -55,6 +55,38 @@ export function loadMigrations(root = REPO_ROOT) {
   return parsed;
 }
 
+// Responsive support sidecar (mobile + desktop parity invariant): a git-tracked
+// `responsive-support.json` keyed by feature-demo id. Merged into each manifest
+// entry as `support`. ADDITIVE — absence yields the honest untested default so
+// the gate/coverage never crash on an un-seeded tree.
+const DEFAULT_SUPPORT = { desktop: "untested", mobile: "untested" };
+
+export function loadSupportSidecar(root = REPO_ROOT) {
+  const file = join(root, "responsive-support.json");
+  if (!existsSync(file)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function loadSupportSidecarFromRef(ref, root = REPO_ROOT) {
+  try {
+    const raw = execFileSync("git", ["show", `${ref}:responsive-support.json`], {
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 // Aliases keyed by the CURRENT (destination) id: which old routes should still
 // resolve to it. Derived from `move`/`alias` migration records.
 export function aliasesByDestinationId(migrations) {
@@ -106,6 +138,7 @@ function conceptsForDisk(root, id) {
 export function buildFromDisk(root = REPO_ROOT) {
   const migrations = loadMigrations(root);
   const aliasMap = aliasesByDestinationId(migrations);
+  const support = loadSupportSidecar(root);
   const entries = [];
 
   for (const dirent of readdirSync(root, { withFileTypes: true })) {
@@ -126,6 +159,7 @@ export function buildFromDisk(root = REPO_ROOT) {
         status: statusForDisk(root, id),
         aliases: (aliasMap.get(id) ?? []).slice().sort(),
         concepts: conceptsForDisk(root, id),
+        support: support[id] ?? { ...DEFAULT_SUPPORT },
       });
     }
   }
@@ -139,6 +173,7 @@ export function buildFromDisk(root = REPO_ROOT) {
 export function buildFromGitRef(ref, root = REPO_ROOT) {
   const migrations = loadMigrations(root);
   const aliasMap = aliasesByDestinationId(migrations);
+  const support = loadSupportSidecarFromRef(ref, root);
 
   const files = git(["ls-tree", "-r", "--name-only", ref], { cwd: root })
     .split("\n").filter(Boolean);
@@ -203,6 +238,7 @@ export function buildFromGitRef(ref, root = REPO_ROOT) {
       status: statusById.get(id) ?? "built",
       aliases: (aliasMap.get(id) ?? []).slice().sort(),
       concepts: (conceptsById.get(id) ?? []).slice().sort(),
+      support: support[id] ?? { ...DEFAULT_SUPPORT },
     });
   }
   entries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
