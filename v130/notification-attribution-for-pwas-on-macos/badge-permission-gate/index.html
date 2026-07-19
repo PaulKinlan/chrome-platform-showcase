@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Badge permission gate — Notification attribution for PWAs on macOS — Chrome 130</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; align-items: center; }
+    .toolbar input[type="number"] { width: 6rem; font-family: var(--font-mono); padding: 0.3rem 0.5rem; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .log { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-charcoal); white-space: pre-line; min-height: 6em; }
+    .note { border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v130/">&larr; v130</a> &middot; <a href="../">Notification attribution for PWAs on macOS</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v130</p>
+    <h1>Badge permission gate</h1>
+    <p class="lede">The Badging API promise <em>resolves</em> whether or not a badge appears — that's why the
+    macOS change is sneaky. With app attribution, the dock badge is part of the per-app notification grant:
+    no notification permission, no badge, <strong>silently</strong>. This page makes the real
+    <code>navigator.setAppBadge()</code> / <code>clearAppBadge()</code> calls and pairs each result with the
+    live <code>Notification.permission</code> so the gate is visible.</p>
+  </header>
+
+  <div class="note">Badges only render on an <em>installed</em> app's icon (dock/taskbar). In a browser tab the
+  calls still exercise the real API surface — the log reports exactly what resolved or threw.</div>
+
+  <div class="toolbar">
+    <label for="badge-count" style="font-family: var(--font-mono); font-size: 0.85rem;">count</label>
+    <input type="number" id="badge-count" value="7" min="0" max="9999">
+    <button id="set-btn">navigator.setAppBadge(count)</button>
+    <button id="flag-btn">setAppBadge() — dot only</button>
+    <button id="clear-btn">navigator.clearAppBadge()</button>
+    <button id="perm-btn">request notification permission</button>
+  </div>
+
+  <div class="log" id="log" role="log" aria-live="polite">no badge call attempted yet.</div>
+
+  <section>
+    <h2>the gate, in code</h2>
+<pre><code>// resolves fine either way — the OS decides whether anything renders
+await navigator.setAppBadge(7);
+
+// on macOS with attributed PWAs (Chrome 130 trial → 152 stable):
+//   Notification.permission === "granted"  → badge renders
+//   anything else                          → silently nothing
+// so pair the two:
+if (Notification.permission !== "granted") {
+  await Notification.requestPermission();
+}
+await navigator.setAppBadge(unreadCount);</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../attribution-preview/">Attribution before &amp; after</a></li>
+      <li><a href="https://chromestatus.com/feature/5863296436666368" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  (() => {
+    const log = document.getElementById("log");
+    const lines = [];
+    const write = (msg) => {
+      lines.push(msg);
+      log.textContent = lines.slice(-8).join("\n");
+    };
+    const permNote = () => {
+      const p = ("Notification" in window) ? Notification.permission : "n/a (no Notification API)";
+      return "Notification.permission: “" + p + "”" +
+        (p === "granted" ? " → on macOS the badge may render." : " → on macOS the badge silently does nothing.");
+    };
+
+    const hasBadging = "setAppBadge" in navigator;
+    if (!hasBadging) {
+      write("navigator.setAppBadge is not available in this browser — the Badging API surface itself is " +
+        "missing, so the macOS gate cannot be exercised here.");
+      for (const id of ["set-btn", "flag-btn", "clear-btn"]) document.getElementById(id).disabled = true;
+      window.showcaseTelemetry?.assert("badge-gate-unsupported", true, { reason: "no setAppBadge" });
+    } else {
+      write("navigator.setAppBadge present. " + permNote());
+    }
+
+    async function call(label, fn, assertId) {
+      try {
+        await fn();
+        write(label + " resolved. " + permNote());
+        window.showcaseTelemetry?.assert(assertId, true,
+          { permission: ("Notification" in window) ? Notification.permission : "n/a" });
+      } catch (err) {
+        write(label + " rejected: " + err.message + " (common outside installed-app contexts)");
+        window.showcaseTelemetry?.assert(assertId, false, { error: String(err) });
+      }
+    }
+
+    document.getElementById("set-btn").addEventListener("click", () => {
+      const count = Math.max(0, Number(document.getElementById("badge-count").value) || 0);
+      call("setAppBadge(" + count + ")", () => navigator.setAppBadge(count), "badge-gate-set");
+    });
+    document.getElementById("flag-btn").addEventListener("click", () =>
+      call("setAppBadge()", () => navigator.setAppBadge(), "badge-gate-flag"));
+    document.getElementById("clear-btn").addEventListener("click", () =>
+      call("clearAppBadge()", () => navigator.clearAppBadge(), "badge-gate-clear"));
+    document.getElementById("perm-btn").addEventListener("click", async () => {
+      if (!("Notification" in window)) { write("no Notification API — cannot request permission."); return; }
+      const result = await Notification.requestPermission();
+      write("requestPermission() → “" + result + "”. " + permNote());
+    });
+  })();
+</script>
+</body>
+</html>
