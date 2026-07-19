@@ -22,6 +22,57 @@ git pull --rebase
 git status --short
 ```
 
+## Durable demo compatibility contract — stable URLs · additive evolution · non-destructive
+
+Every **published** demo's identity is a durable compatibility contract. "Published" means it is
+live to users: it has a real route/URL and a catalogue entry (for this repo: a `built` demo, and any
+`blocked`/unsupported entry that is honestly recorded). A published demo's contract covers its
+**route/URL, its slug/ID, the model or platform feature it showcases, its core behavior, its
+controls, its use-case intent, and all inbound links.** Routine and agent waves MUST preserve these.
+
+- **Append-only identities.** Published slugs/IDs/routes are append-only. NEVER rename, repurpose,
+  replace, merge, or delete an existing published demo because a new wave has a different design
+  idea. (Catalogue entries that were never published — e.g. `pending` placeholders with no route —
+  are not under contract and may be repointed.)
+- **Additive evolution.** A newly discovered use case, interaction concept, model/feature
+  composition, presentation approach, or a substantially different demo is added as a NEW page with
+  a NEW stable slug + catalogue entry. Do NOT overwrite or repurpose an existing demo to make room.
+  Existing basic/practical/wild demos stay available after more ambitious ones are added.
+- **In-place fixes only when justified.** Change an existing published demo in place ONLY for a
+  demonstrated bug, accessibility/runtime/security issue, factual error, compatibility problem, or
+  clear quality improvement. Retain prior behavior/identity unless changing it is necessary; state
+  the reason + evidence in the commit message; regression-test the change. Default to the SMALLEST
+  patch — never regenerate a working page from scratch when a targeted edit suffices.
+- **Moves need a tested alias.** If a URL absolutely must move, keep the old route working via a
+  tested permanent redirect/alias recorded in the route manifest. Never silently break a route.
+- **Blocked stays recorded.** Unsupported/blocked entries remain honestly recorded (status
+  `blocked`), never deleted.
+- **Read before editing.** Before editing, read the existing implementation, its history/rationale,
+  and the route manifest, then make the smallest change that satisfies the goal.
+- **Removals/moves are exceptional.** Any removal, rename, route move, or identity change requires
+  an explicit reviewed **migration record** (`MIGRATIONS`/`migrations.json`) and must pass the route
+  regression gate. Stable does NOT mean frozen — improve existing demos when justified, and add new
+  demos/use cases freely; just never replace an old one merely to present a new idea.
+
+**Gate before every push:** run the route regression gate (`deno task check-routes`). It compares
+the previously published manifest against the working tree and fails on any missing published ID,
+deleted route, renamed/repurposed slug, changed published identity, or unexplained concept-count
+reduction — while allowing additive entries, honest `blocked` records, and in-place fixes.
+Exceptional removals/moves must be listed in the migration record with reason + evidence.
+
+**In chrome-platform-showcase specifically:** the catalogue is the `v<N>/<feature-slug>/` filesystem
+tree — every `v<N>/<feature-slug>/index.html` is a published feature demo whose stable identity is
+the ChromeStatus feature id linked from its index (concept demos live in
+`v<N>/<feature-slug>/<concept-slug>/`; a `blocked` feature carries a `_status.json` marker). Emit
+the route manifest with `deno task route-manifest` (or `node scripts/route-manifest.mjs`) and run
+the gate with `deno task check-routes` (or `node scripts/check-routes.mjs`) before every push.
+Record any exceptional removal/rename/move/identity-change in `migrations.json`
+(`{ id, action, from, to, reason, evidence, date }`); a `move`/`alias` there also keeps the old URL
+alive via the 301 redirect in `routes/aliases.ts`, and the committed `.route-manifest.baseline.json`
+is the offline fallback baseline. Before editing any existing demo in the critique/goal-setting/
+triage passes, read its implementation + git history + the manifest first, patch the smallest thing,
+and never regenerate a working demo from scratch.
+
 ## Modes
 
 Infer the mode from the user prompt:
@@ -379,8 +430,14 @@ Run:
 ```bash
 deno fmt
 deno check server.ts
+deno task check-routes
 git status --short
 ```
+
+`deno task check-routes` is the route regression gate — run it before every push. It must PASS (exit
+0); a failure means a published demo route/slug/identity was destructively changed. Fix the change
+to be additive, or record an intentional removal/rename/move in `migrations.json`. When new demos
+land, refresh the baseline snapshot with `deno task route-manifest --write`.
 
 If `deno fmt` changed generated JSON, commit and push only those relevant formatting changes.
 Report:

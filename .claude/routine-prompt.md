@@ -97,6 +97,58 @@ Rules that must never be broken. Each has bitten the project before:
 Every time you decide to write a folder, the path MUST be `v<N>/<slug(listing_name)>` where N is the
 milestone whose listing returned the feature.
 
+## Durable demo compatibility contract — stable URLs · additive evolution · non-destructive
+
+Every **published** demo's identity is a durable compatibility contract. "Published" means it is
+live to users: it has a real route/URL and a catalogue entry (for this repo: a `built` demo, and any
+`blocked`/unsupported entry that is honestly recorded). A published demo's contract covers its
+**route/URL, its slug/ID, the model or platform feature it showcases, its core behavior, its
+controls, its use-case intent, and all inbound links.** Routine and agent waves MUST preserve these.
+
+- **Append-only identities.** Published slugs/IDs/routes are append-only. NEVER rename, repurpose,
+  replace, merge, or delete an existing published demo because a new wave has a different design
+  idea. (Catalogue entries that were never published — e.g. `pending` placeholders with no route —
+  are not under contract and may be repointed.)
+- **Additive evolution.** A newly discovered use case, interaction concept, model/feature
+  composition, presentation approach, or a substantially different demo is added as a NEW page with
+  a NEW stable slug + catalogue entry. Do NOT overwrite or repurpose an existing demo to make room.
+  Existing basic/practical/wild demos stay available after more ambitious ones are added.
+- **In-place fixes only when justified.** Change an existing published demo in place ONLY for a
+  demonstrated bug, accessibility/runtime/security issue, factual error, compatibility problem, or
+  clear quality improvement. Retain prior behavior/identity unless changing it is necessary; state
+  the reason + evidence in the commit message; regression-test the change. Default to the SMALLEST
+  patch — never regenerate a working page from scratch when a targeted edit suffices.
+- **Moves need a tested alias.** If a URL absolutely must move, keep the old route working via a
+  tested permanent redirect/alias recorded in the route manifest. Never silently break a route.
+- **Blocked stays recorded.** Unsupported/blocked entries remain honestly recorded (status
+  `blocked`), never deleted.
+- **Read before editing.** Before editing, read the existing implementation, its history/rationale,
+  and the route manifest, then make the smallest change that satisfies the goal.
+- **Removals/moves are exceptional.** Any removal, rename, route move, or identity change requires
+  an explicit reviewed **migration record** (`MIGRATIONS`/`migrations.json`) and must pass the route
+  regression gate. Stable does NOT mean frozen — improve existing demos when justified, and add new
+  demos/use cases freely; just never replace an old one merely to present a new idea.
+
+**Gate before every push:** run the route regression gate (`deno task check-routes`). It compares
+the previously published manifest against the working tree and fails on any missing published ID,
+deleted route, renamed/repurposed slug, changed published identity, or unexplained concept-count
+reduction — while allowing additive entries, honest `blocked` records, and in-place fixes.
+Exceptional removals/moves must be listed in the migration record with reason + evidence.
+
+**In chrome-platform-showcase specifically:** the catalogue is the `v<N>/<feature-slug>/` filesystem
+tree — every `v<N>/<feature-slug>/index.html` is a published feature demo whose stable identity is
+the ChromeStatus feature id linked from its index (concept demos live in
+`v<N>/<feature-slug>/<concept-slug>/`; a `blocked` feature carries a `_status.json` marker). Emit
+the route manifest with `deno task route-manifest` (or `node scripts/route-manifest.mjs`) and run
+the gate with `deno task check-routes` (or `node scripts/check-routes.mjs`) before every push.
+Record any exceptional removal/rename/move/identity-change in `migrations.json`
+(`{ id, action, from, to, reason, evidence, date }`); a `move`/`alias` there also keeps the old URL
+alive via the 301 redirect in `routes/aliases.ts`, and the committed `.route-manifest.baseline.json`
+is the offline fallback baseline. This matters most for **incomplete** features (Step 3): you are
+fixing an existing published demo in place — read its implementation, its git history, and the
+manifest first, then add the missing concepts as NEW slugs; never rename or regenerate the existing
+published route/concepts to make room.
+
 ## Toolset & verification environment (READ — this is how you run standalone in the cloud)
 
 The remote cron routine runs with a limited toolset: **Bash, Read, Write, Edit, Glob, Grep** — NO
@@ -417,9 +469,18 @@ Before committing, start the local server and verify each new concept with `chro
 6. **Fresh evidence** — reload from disk after your FINAL edit and repeat the whole control
    sequence; evidence from before the last edit is invalid (rule 11).
 
-If any gate fails, fix the demo and re-run the gate. Do not push a feature without passing all six.
-The full catalogue is the showcase-auto-research SKILL "Mandatory anti-regression cases" — every
-item there is a build rule now, not just a review rule.
+7. **Route regression gate** — run `deno task check-routes` (or `node scripts/check-routes.mjs`). It
+   compares the previously published route manifest (origin/main, falling back to
+   `.route-manifest.baseline.json`) against the working tree and must PASS (exit 0). It fails if
+   this run deleted/renamed a published route, repurposed a slug's identity, or dropped a feature's
+   concept count. New demos are additive and pass automatically; an incomplete-feature fix must keep
+   every existing route/concept and only ADD. If you had to intentionally move/remove a published
+   route, record it in `migrations.json` with `{ id, action, from, to, reason, evidence, date }`
+   before pushing.
+
+If any gate fails, fix the demo and re-run the gate. Do not push a feature without passing all
+seven. The full catalogue is the showcase-auto-research SKILL "Mandatory anti-regression cases" —
+every item there is a build rule now, not just a review rule.
 
 ```bash
 git add v<N>/<feature-slug>/
@@ -447,6 +508,8 @@ Log channels, per-milestone counts, features built (SHA + live URL), stop reason
 
 - Never overwrite existing `v<N>/<slug>/`.
 - Never edit outside `v<N>/` and `/tmp`. `server.ts`, `lib/`, `public/` are off-limits.
+- Run `deno task check-routes` (read-only) before every push; it must PASS. Never destructively
+  replace a published route/slug/identity — add new slugs, patch existing demos in the smallest way.
 - Pushes go to main. No branches.
 - Issues only for Uber demos.
 - Respect the 90-minute deadline.

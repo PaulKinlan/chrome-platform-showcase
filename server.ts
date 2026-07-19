@@ -2,6 +2,7 @@
 // Deno HTTP entry. Route implementations live in ./routes so each URL group
 // can evolve independently while this file stays as the dispatcher.
 
+import { handleAliasRoute } from "./routes/aliases.ts";
 import { handleCategoriesRoute } from "./routes/categories.ts";
 import { handleConformanceRoute } from "./routes/conformance.ts";
 import { handleCritiquesRoute } from "./routes/critiques.ts";
@@ -19,6 +20,7 @@ const PORT = Number(Deno.env.get("PORT") ?? 3000);
 type RouteHandler = (req: Request) => Response | Promise<Response | null> | null;
 
 const routes: RouteHandler[] = [
+  handleAliasRoute,
   handleIndexRoute,
   handleFeaturesRoute,
   handleConformanceRoute,
