@@ -81,14 +81,58 @@ export interface CritiqueReport {
     // Is the demo accessible: keyboard-operable controls, useful semantics,
     // accessible names/labels, non-visual state, and clear live updates?
     accessibility: Verdict;
+    // ADDITIVE (cross-project mobile+desktop parity invariant): is the demo a
+    // usable, polished experience on BOTH a narrow mobile viewport (≈360×740,
+    // touch, DPR≈3) and desktop (≈1280×800, mouse+keyboard) — no unintended
+    // horizontal overflow / clipped controls, legible text, ≈44px tap targets,
+    // correct focus order + visible focus, dialogs/popovers/menus that open,
+    // position, dismiss and trap focus, dynamic-viewport/safe-area where
+    // relevant, and loading/progress/error/retry states — OR honestly recorded
+    // as unsupported on one class WITH evidence (never left unfinished)?
+    // Optional so the ~2000 legacy critiques stay valid; a critique written
+    // after this dimension shipped should score it. `scoreVerdicts` and the
+    // renderers iterate whatever keys are present, so absence is backward
+    // compatible.
+    mobile_desktop_parity?: Verdict;
   };
 
   // Open questions / work items derived from the rubric. Empty list means the
   // page passes the bar with nothing follow-up worth.
   openQuestions: OpenQuestion[];
 
+  // ADDITIVE (mandatory modern-web-guidance invariant): which modern-web-guidance
+  // recommendations the frontend work consulted, and how each was applied or why
+  // excepted. A frontend-touching critique with an EMPTY `guidanceConsulted` is
+  // INCOMPLETE — the validator/gate treats an empty-but-present array on a
+  // touched demo as a failed completion (see scripts/check-routes.mjs and
+  // `guidanceComplete` below). Left optional so the ~2000 legacy critiques stay
+  // valid; every critique written after this field shipped must populate it for
+  // any frontend change. Query the SPECIFIC task (e.g. "responsive control panel
+  // without horizontal overflow"), not a generic memory.
+  guidanceConsulted?: GuidanceConsulted[];
+
   // Optional one-paragraph summary the reviewer writes in their own words.
   summary?: string;
+}
+
+// A single modern-web-guidance consultation recorded on a critique.
+export interface GuidanceConsulted {
+  // The guidance recommendation id (preferred) OR the search query used.
+  id?: string;
+  query?: string;
+  // The recommendation in one line (what the guidance says to do).
+  recommendation: string;
+  // How it was applied, or a justified exception with evidence.
+  appliedOrException: string;
+  // Optional supporting evidence (URL, measurement, screenshot path).
+  evidence?: string;
+}
+
+// A frontend-touching critique is complete only when it identifies at least one
+// guidance consultation. A present-but-empty array is an explicit incomplete
+// signal; an absent array is a legacy critique the gate does not fail on.
+export function guidanceComplete(report: CritiqueReport): boolean {
+  return Array.isArray(report.guidanceConsulted) && report.guidanceConsulted.length > 0;
 }
 
 // On-disk shape for the per-concept file. We write the report verbatim.

@@ -169,6 +169,21 @@ export function renderCritiqueDetail(c: CritiqueReport): string {
     ? `${c.release} · ${c.featureSlug} / ${c.conceptSlug}`
     : `${c.release} · ${c.featureSlug}`;
 
+  const guidance = Array.isArray(c.guidanceConsulted) && c.guidanceConsulted.length
+    ? `<section>
+    <h2>modern-web-guidance consulted (${c.guidanceConsulted.length})</h2>
+    <table><thead><tr><th>id / query</th><th>recommendation</th><th>applied / exception</th></tr></thead><tbody>${
+      c.guidanceConsulted.map((g) =>
+        `<tr><th>${escapeHTML(g.id ?? g.query ?? "—")}</th><td>${
+          escapeHTML(g.recommendation)
+        }</td><td>${escapeHTML(g.appliedOrException)}${
+          g.evidence ? ` <span class="updated-line">(${escapeHTML(g.evidence)})</span>` : ""
+        }</td></tr>`
+      ).join("")
+    }</tbody></table>
+  </section>`
+    : "";
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -215,6 +230,8 @@ export function renderCritiqueDetail(c: CritiqueReport): string {
     <h2>open questions (${c.openQuestions.length})</h2>
     ${questions}
   </section>
+
+  ${guidance}
 
   <p><a href="https://chromestatus.com/feature/${c.chromestatusId}" target="_blank" rel="noopener">ChromeStatus #${c.chromestatusId}</a> · <a href="/${
     escapeHTML(c.release)

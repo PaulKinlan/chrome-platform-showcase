@@ -149,6 +149,96 @@ fixing an existing published demo in place — read its implementation, its git 
 manifest first, then add the missing concepts as NEW slugs; never rename or regenerate the existing
 published route/concepts to make room.
 
+## Mobile + desktop parity — every demo usable on both, or honestly unsupported with recorded evidence
+
+Every existing and future published demo MUST be a usable, polished experience on BOTH mobile and
+desktop, unless the underlying platform feature / model / runtime is genuinely unavailable on that
+class of device. This sits alongside the durable-demo contract: fix responsiveness in place with
+targeted compatibility fixes — never a destructive rewrite, never a new slug to "redo" a demo.
+
+- **Validate a mobile+desktop MATRIX, not just "it loads."** Every autonomous build or fix must
+  exercise the demo at, at minimum, one representative **narrow mobile** viewport (≈360×740, touch/
+  pointer + DPR≈3) and one **desktop** viewport (≈1280×800, mouse + keyboard), driving every visible
+  control and state. Check, on each class: responsive layout with **no unintended horizontal
+  overflow or clipped controls/text**; legible font sizes; adequate **tap targets** (≈44px min);
+  **focus order
+  - visible focus**; dialogs/popovers/menus open, position, dismiss, and trap focus correctly;
+    orientation, **dynamic viewport** (dvh/svh, not 100vh traps) and **safe-area** insets where
+    relevant; loading / progress / error / **retry** states; **zero console errors**; **no failed
+    network requests**; and honest capability handling.
+- **Web AI — respect mobile memory/download/storage/backend limits.** Account for constrained
+  devices. Do **NOT** auto-download an absent large model just to make a test pass; an
+  already-local, current, validated model still auto-initialises per the existing auto-init rule.
+  When a device can't run a model, degrade honestly (labelled needs-WebGPU / needs-more-memory /
+  too-large-for-this- device) with the requirements — never a blank panel or a faked result.
+- **A single-class outcome needs EVIDENCE.** A desktop-only or mobile-only demo is allowed ONLY with
+  direct evidence that the API, hardware capability, browser runtime, or model requirement genuinely
+  makes the other class unavailable — never because the layout or interaction was left unfinished.
+  Then: preserve the stable URL; show a useful, accessible, explicit **unsupported/degraded
+  explanation** (requirements + a fallback/alternative where possible); NEVER blank UI, faked
+  output, or a hidden/disabled-without-explanation control. Record the **unsupported class +
+  evidence** in the catalogue/manifest.
+- **Coverage is reported and gated.** Track exact **mobile/desktop tested-vs-total** coverage. A
+  build/fix action's completion FAILS when a device class the demo is supposed to support is left
+  untested or is broken. The route gate additionally FAILS if any demo is recorded broken on a class
+  it claims to support. Apply this to existing demos during audits with targeted compatibility
+  fixes, wave by wave — the coverage number is the backlog burn-down, and it never regresses.
+
+**Run the responsive matrix before every push** with `deno task responsive-check` and record each
+touched demo's result in `responsive-support.json` (`ok` / `unsupported`+evidence per class).
+
+## modern-web-guidance is mandatory for all frontend work
+
+Before ANY HTML, CSS, or client-side JavaScript implementation or modification — new pages AND
+targeted fixes — run/consult the **`modern-web-guidance`** skill FIRST for the specific UI/API
+topic, then apply its recommendations (or explicitly justify any exception with evidence). This is
+required whenever the change involves: layout, responsive mobile+desktop behavior, forms/controls,
+dialogs/popovers/menus, loading/progress/error/retry states, animations/transitions, accessibility
+interactions, performance / Core Web Vitals, image/model loading + caching, modern CSS, or browser
+APIs.
+
+- **Query the SPECIFIC task, not a generic memory.** A past or generic lookup does NOT count. Search
+  the actual thing you're building/fixing (e.g. "responsive control panel without horizontal
+  overflow", "accessible popover dismissal", "stream progress without INP regressions"), retain the
+  relevant recommendation ids + evidence, and apply them — or record a justified exception.
+- **Canonical source, no stale fork.** Invoke the canonical skill; if the repo needs a scripted
+  call, use the published package (`npx -y modern-web-guidance@latest search "<query>"` /
+  `retrieve "<id>"`) rather than copying guide text into the repo. Record the skill **source +
+  version / update path** in the repo (so routines stay current) — do NOT vendor a stale copy.
+- **Process validation — missing guidance is an INCOMPLETE build/critique, not a pass.** Every
+  frontend change must identify which guidance was consulted (ids/queries) and how it was applied or
+  why excepted. Record this in the demo's critique artifact (`guidanceConsulted`) and enforce it: a
+  frontend change with no identified guidance fails completion. Feed the relevant guidance into the
+  critique/questions and the immutable conformance assertions — especially responsive UI, control
+  semantics, progressive enhancement, and performance.
+- **Use guidance intelligently, not to chase novelty.** Prefer supported, progressive, accessible
+  solutions; preserve existing stable URLs + demo identities (durable-demo contract); make targeted
+  upgrades, not rewrites. chrome-platform-showcase may intentionally demo EXPERIMENTAL Chrome
+  features — but the surrounding shell, fallbacks, and controls still follow current guidance +
+  capability detection. web-ai-showcase must account for mobile memory/storage/download/performance
+  constraints. gendn must keep reference content readable, resilient, and fast. Audit the shared
+  shell/design system first, then apply additive or narrowly-scoped improvements backed by
+  mobile+desktop browser evidence.
+
+> **How this is wired in chrome-platform-showcase (additive — existing `conformance.json` suites
+> stay immutable):** the critique rubric gains a `mobile_desktop_parity` verdict and a
+> `guidanceConsulted` array (`lib/critique.ts`); a frontend critique with an empty
+> `guidanceConsulted` is INCOMPLETE and the route gate fails a touched demo whose critique records
+> one. The two invariants ship as NEW immutable cross-project conformance suites under
+> `conformance/cross-project/` (`mobile-desktop-parity.json`, `modern-web-guidance.json`) — no
+> existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
+> Per-demo support lives in the git-tracked `responsive-support.json` sidecar (keyed by
+> `v<N>/<feature-slug>`, defaulting existing demos to `untested`), merged into the route manifest.
+> Validate with `deno task responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800;
+> asserts no horizontal overflow + console/network clean and screenshots both classes; a
+> genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
+> `deno task overflow-scan` (cheap seed → `needs-review`, never `ok`). Report coverage with
+> `deno task responsive-support report`; the gate (`deno task check-routes`) reports the
+> mobile/desktop denominators and enforces the rules above before every push. The
+> modern-web-guidance skill source + version + update path is recorded in `MODERN_WEB_GUIDANCE.md`
+> (canonical skill `modern-web-guidance`, scripted fallback `npx -y modern-web-guidance@latest`; no
+> vendored copy).
+
 ## Toolset & verification environment (READ — this is how you run standalone in the cloud)
 
 The remote cron routine runs with a limited toolset: **Bash, Read, Write, Edit, Glob, Grep** — NO
@@ -478,9 +568,25 @@ Before committing, start the local server and verify each new concept with `chro
    route, record it in `migrations.json` with `{ id, action, from, to, reason, evidence, date }`
    before pushing.
 
-If any gate fails, fix the demo and re-run the gate. Do not push a feature without passing all
-seven. The full catalogue is the showcase-auto-research SKILL "Mandatory anti-regression cases" —
-every item there is a build rule now, not just a review rule.
+8. **Mobile + desktop parity gate** — run the responsive matrix for every demo you built or fixed
+   (`deno task responsive-check <id> --merge`): mobile ≈360×740 DPR3 touch AND desktop ≈1280×800. It
+   asserts no horizontal overflow + console/network clean and screenshots both classes; `Read` both
+   screenshots and judge legibility, tap targets, focus, and dialogs. Record each touched demo's
+   result in `responsive-support.json` (`ok`, or `unsupported`+evidence when a class is genuinely
+   unavailable — a genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass, and
+   you must NOT auto-download an absent large model to force a pass). The route gate (item 7) now
+   also FAILS if a touched demo is left untested/broken on a supported class, or if any demo is
+   recorded broken on a class it claims to support, and it reports mobile/desktop coverage
+   denominators.
+
+9. **modern-web-guidance gate** — you consulted `modern-web-guidance` FIRST for the specific UI/API
+   topics before writing/fixing any HTML/CSS/JS (see the mandate above), and the touched demo's
+   critique records the consultation in `guidanceConsulted`. The gate fails a touched demo whose
+   critique has an empty `guidanceConsulted`.
+
+If any gate fails, fix the demo and re-run the gate. Do not push a feature without passing all nine.
+The full catalogue is the showcase-auto-research SKILL "Mandatory anti-regression cases" — every
+item there is a build rule now, not just a review rule.
 
 ```bash
 git add v<N>/<feature-slug>/
@@ -507,7 +613,12 @@ Log channels, per-milestone counts, features built (SHA + live URL), stop reason
 ## Safety
 
 - Never overwrite existing `v<N>/<slug>/`.
-- Never edit outside `v<N>/` and `/tmp`. `server.ts`, `lib/`, `public/` are off-limits.
+- Never edit outside `v<N>/` and `/tmp`. `server.ts`, `lib/`, `public/` are off-limits. The ONLY
+  top-level exception is the generated catalogue data the parity workflow records:
+  `responsive-support.json` (support record for demos you touched, via
+  `deno task responsive-check <id> --merge`) and `reports/responsive/` (screenshots). These are
+  data, not code — you may write them; you still may not touch `server.ts`, `lib/`, `public/`,
+  `deno.json`, `scripts/`, `CLAUDE.md`, or the conformance suites.
 - Run `deno task check-routes` (read-only) before every push; it must PASS. Never destructively
   replace a published route/slug/identity — add new slugs, patch existing demos in the smallest way.
 - Pushes go to main. No branches.

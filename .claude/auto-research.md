@@ -146,6 +146,43 @@ not one big "does it exist" check.
 
 ---
 
+## 4b. Cross-project invariants (ADDITIVE — existing suites stay immutable)
+
+Two cross-project invariants layer on top WITHOUT editing any existing `v<N>/**/conformance.json`
+(those stay byte-for-byte immutable — you only ever ADD new suites/assertions, never edit/weaken/
+delete existing ones):
+
+- **Mobile + desktop parity** and **mandatory modern-web-guidance** — the canonical policies are
+  embedded verbatim in `CLAUDE.md` / `AGENTS.md` / the SKILL / the routine prompt.
+- **Rubric (`lib/critique.ts`):** the critique rubric gains an optional `mobile_desktop_parity`
+  verdict, and `CritiqueReport` gains an optional `guidanceConsulted[]`
+  (`{ id|query, recommendation, appliedOrException, evidence }`). Legacy critiques omit both (fine);
+  a critique written for a frontend change MUST populate `guidanceConsulted` — an empty array is
+  INCOMPLETE and the route gate fails a touched demo whose critique records one.
+- **New immutable cross-project suites:** `conformance/cross-project/mobile-desktop-parity.json` and
+  `conformance/cross-project/modern-web-guidance.json` (schema `lib/cross-conformance.ts`, kinds
+  `device-class` / `responsive` / `build-process`, evaluated by the harness/gate — NOT the in-page
+  css-supports runner, which only scans `v<N>/`). These are ADDED suites, so no existing suite array
+  changes.
+- **Per-demo support sidecar:** `responsive-support.json` (git-tracked, keyed by
+  `v<N>/<feature-slug>`, existing demos default to `untested`), merged into the route manifest by
+  `scripts/lib/manifest.mjs`.
+- **Harness + gate commands:**
+  - `deno task responsive-check <id|--sample N|--milestone vN> --merge` — mobile ≈360×740 DPR3
+    touch + desktop ≈1280×800; asserts no horizontal overflow + console/network clean, screenshots
+    both classes, writes `ok`/`broken` (device-unavailable = `blocked`, never a pass) into the
+    sidecar.
+  - `deno task overflow-scan --sample N --merge` — cheap mobile-overflow seed → `needs-review`
+    (never `ok`).
+  - `deno task responsive-support report` — mobile/desktop coverage denominators.
+  - `deno task check-routes` — route + parity gate: reports coverage and FAILS on a demo recorded
+    broken on a supported class, a touched demo left untested/broken on a supported class, a
+    non-monotonic support regression, or a touched demo with an empty `guidanceConsulted`.
+- **Guidance source of record:** `MODERN_WEB_GUIDANCE.md` (canonical skill `modern-web-guidance`,
+  scripted fallback `npx -y modern-web-guidance@latest`; no vendored copy).
+
+---
+
 ## 5. Re-running the passes (the orchestration)
 
 This is a fan-out: one subagent per milestone, each looping over that milestone's concept pages.
