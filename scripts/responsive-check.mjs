@@ -40,15 +40,19 @@ const CLASSES = {
 };
 
 const args = [...Deno.args];
-function flag(name) {
+function flag(name, { boolean = false } = {}) {
   const i = args.indexOf(name);
   if (i < 0) return null;
+  if (boolean) {
+    args.splice(i, 1);
+    return true;
+  }
   const v = args[i + 1];
   args.splice(i, v && !v.startsWith("--") ? 2 : 1);
   return v && !v.startsWith("--") ? v : true;
 }
-const doMerge = Boolean(flag("--merge"));
-const noServer = Boolean(flag("--no-server"));
+const doMerge = Boolean(flag("--merge", { boolean: true }));
+const noServer = Boolean(flag("--no-server", { boolean: true }));
 let base = flag("--base") ?? "http://localhost:3000";
 const sampleN = Number(flag("--sample") ?? 0);
 const milestone = flag("--milestone");
