@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Preload timing lab — Optional browser optimization for Service Workers — Chrome 140</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .lab-toolbar { display: flex; gap: var(--space-3); margin: var(--space-4) 0; flex-wrap: wrap; align-items: center; }
+    .lab-toolbar label { font-family: var(--font-mono); font-size: 0.85rem; display: flex; gap: 0.4rem; align-items: center; }
+    .lab-toolbar input[type="range"] { accent-color: var(--text-black); flex: 1 1 160px; }
+    .lab-toolbar select { font-family: var(--font-mono); font-size: 0.85rem; padding: 0.3rem 0.5rem; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .readout { border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; }
+    .readout h3 { font-family: var(--font-mono); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: var(--space-3); }
+    .readout table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.85rem; }
+    .readout td, .readout th { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--bg-stone); }
+    .readout td.num { text-align: right; font-weight: 600; }
+    .verdict { font-family: var(--font-mono); font-size: 0.85rem; margin-top: var(--space-3); padding: var(--space-3); border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-charcoal); }
+    .status-line { font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-charcoal); margin: var(--space-3) 0; }
+    iframe.probe { width: 100%; height: 72px; border: 1px dashed var(--border-black); background: var(--bg-ivory); }
+    .note { border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v140/">&larr; v140</a> &middot; <a href="../">Optional browser optimization for Service Workers</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">demo · v140</p>
+    <h1>Preload timing lab</h1>
+    <p class="lede">This page registers a <strong>real service worker</strong> whose fetch handler adds a delay you
+    control, then navigates a controlled iframe and reads the navigation's real
+    <code>PerformanceNavigationTiming</code>. With ServiceWorkerAutoPreload (default since Chrome&nbsp;140) the
+    network request starts in parallel with the handler, so <code>responseStart</code> stops paying the
+    handler-delay + network sum — the two legs overlap.</p>
+  </header>
+
+  <div class="note" id="support-note" hidden></div>
+
+  <div class="lab-toolbar">
+    <button id="register-btn">1 · register worker</button>
+    <label for="mode-select">handler mode
+      <select id="mode-select">
+        <option value="respondwith">respondWith(fetch(event.request))</option>
+        <option value="fallback">fallback (no respondWith)</option>
+      </select>
+    </label>
+    <label for="delay-range">handler delay
+      <input type="range" id="delay-range" min="0" max="800" step="50" value="300">
+      <span id="delay-value" aria-hidden="true">300ms</span>
+    </label>
+    <button id="run-btn" disabled>2 · load probe &amp; measure</button>
+    <button id="unregister-btn" disabled>unregister</button>
+  </div>
+
+  <p class="status-line" id="status" role="status" aria-live="polite">worker not registered yet.</p>
+
+  <iframe class="probe" id="probe-frame" title="service-worker-controlled probe page"></iframe>
+
+  <div class="readout">
+    <h3>real navigation timing of the probe page</h3>
+    <table>
+      <thead><tr><th scope="col">metric</th><th scope="col" class="num">ms (relative to nav start)</th></tr></thead>
+      <tbody id="timing-body">
+        <tr><td>controlled by service worker</td><td class="num" id="t-controlled">—</td></tr>
+        <tr><td>workerStart</td><td class="num" id="t-worker">—</td></tr>
+        <tr><td>fetchStart</td><td class="num" id="t-fetch">—</td></tr>
+        <tr><td>requestStart</td><td class="num" id="t-request">—</td></tr>
+        <tr><td>responseStart (TTFB)</td><td class="num" id="t-response">—</td></tr>
+        <tr><td>responseEnd</td><td class="num" id="t-end">—</td></tr>
+      </tbody>
+    </table>
+    <p class="verdict" id="verdict" aria-live="polite">Run a measurement to see the verdict. The auto-preload
+    behaviour has no direct JS probe — the honest signal is whether TTFB tracks
+    <em>max(handler&nbsp;delay,&nbsp;network)</em> (overlapped) or <em>handler&nbsp;delay&nbsp;+&nbsp;network</em>
+    (serialised). This is a heuristic inference, not a feature flag readout.</p>
+  </div>
+
+  <section>
+    <h2>what the worker does</h2>
+<pre><code>self.addEventListener("fetch", (event) =&gt; {
+  const url = new URL(event.request.url);
+  const mode = url.searchParams.get("mode");
+  const delay = Number(url.searchParams.get("delay") || "0");
+  if (mode === "fallback") {
+    // No respondWith(): the browser falls back to the network. With
+    // ServiceWorkerAutoPreload the already-in-flight response is used directly.
+    return;
+  }
+  event.respondWith((async () =&gt; {
+    if (delay) await new Promise((r) =&gt; setTimeout(r, delay));
+    // With auto-preload this fetch() consumes the parallel request
+    // instead of starting a new one after the delay.
+    return fetch(event.request);
+  })());
+});</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../cache-first-tradeoff/">Cache-first trade-off</a></li>
+      <li><a href="https://chromestatus.com/feature/5194817700364288" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/WICG/service-worker-auto-preload" target="_blank" rel="noopener">Explainer</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+
+<script>
+  (() => {
+    const statusEl = document.getElementById("status");
+    const registerBtn = document.getElementById("register-btn");
+    const runBtn = document.getElementById("run-btn");
+    const unregisterBtn = document.getElementById("unregister-btn");
+    const modeSelect = document.getElementById("mode-select");
+    const delayRange = document.getElementById("delay-range");
+    const delayValue = document.getElementById("delay-value");
+    const frame = document.getElementById("probe-frame");
+    const verdictEl = document.getElementById("verdict");
+    const supportNote = document.getElementById("support-note");
+
+    const setStatus = (msg) => { statusEl.textContent = msg; };
+    const fmt = (n) => (typeof n === "number" && isFinite(n)) ? n.toFixed(1) : "—";
+
+    if (!("serviceWorker" in navigator)) {
+      supportNote.hidden = false;
+      supportNote.textContent = "navigator.serviceWorker is not available in this browser/context, so the " +
+        "lab cannot run. Service workers need a secure context (https: or localhost).";
+      registerBtn.disabled = true;
+      window.showcaseTelemetry?.assert("sw-autopreload-lab-unsupported", true,
+        { reason: "serviceWorker missing" });
+      return;
+    }
+
+    delayRange.addEventListener("input", () => {
+      delayValue.textContent = delayRange.value + "ms";
+    });
+
+    let registration = null;
+
+    registerBtn.addEventListener("click", async () => {
+      try {
+        setStatus("registering worker (scope: this concept folder)…");
+        registration = await navigator.serviceWorker.register("./sw.js");
+        await navigator.serviceWorker.ready;
+        setStatus("worker registered and active. Now load the probe.");
+        runBtn.disabled = false;
+        unregisterBtn.disabled = false;
+        window.showcaseTelemetry?.assert("sw-autopreload-lab-registered",
+          Boolean(registration.active || registration.waiting || registration.installing),
+          { scope: registration.scope });
+      } catch (err) {
+        setStatus("registration failed: " + err.message);
+        window.showcaseTelemetry?.assert("sw-autopreload-lab-registered", false,
+          { error: String(err) });
+      }
+    });
+
+    unregisterBtn.addEventListener("click", async () => {
+      if (!registration) return;
+      const ok = await registration.unregister();
+      registration = null;
+      runBtn.disabled = true;
+      unregisterBtn.disabled = true;
+      setStatus(ok ? "worker unregistered. Register again to re-run." : "unregister failed.");
+    });
+
+    let pendingRun = null;
+
+    window.addEventListener("message", (event) => {
+      const d = event.data;
+      if (!d || d.kind !== "autopreload-probe" || !pendingRun) return;
+      const run = pendingRun;
+      pendingRun = null;
+      document.getElementById("t-controlled").textContent = d.controlled ? "yes" : "no";
+      document.getElementById("t-worker").textContent = fmt(d.workerStart);
+      document.getElementById("t-fetch").textContent = fmt(d.fetchStart);
+      document.getElementById("t-request").textContent = fmt(d.requestStart);
+      document.getElementById("t-response").textContent = fmt(d.responseStart);
+      document.getElementById("t-end").textContent = fmt(d.responseEnd);
+
+      if (!d.controlled) {
+        verdictEl.textContent = "The probe page was NOT service-worker-controlled on this load (first " +
+          "load after registration can race the controller claim). Run the measurement again.";
+        setStatus("probe loaded uncontrolled — measure again.");
+        window.showcaseTelemetry?.assert("sw-autopreload-lab-measured", false,
+          { reason: "uncontrolled probe load" });
+        return;
+      }
+      const ttfb = d.responseStart;
+      const delayMs = run.delay;
+      if (run.mode === "fallback") {
+        verdictEl.textContent = "Fallback path: the handler returned without respondWith(), TTFB was " +
+          fmt(ttfb) + " ms. With auto-preload the parallel network response is handed straight to the page, " +
+          "so fallback costs no second network round-trip.";
+      } else if (delayMs > 0) {
+        const overlapped = ttfb < delayMs + Math.max(20, delayMs * 0.5);
+        verdictEl.textContent = "respondWith path with a " + delayMs + " ms handler delay: TTFB was " +
+          fmt(ttfb) + " ms. " + (ttfb <= delayMs + 60
+            ? "TTFB ≈ the handler delay, i.e. the network leg overlapped the delay — consistent with " +
+              "ServiceWorkerAutoPreload consuming the parallel request (heuristic inference)."
+            : "TTFB noticeably exceeds the handler delay, i.e. the network request appears to have been " +
+              "issued after the delay — consistent with auto-preload being off in this browser " +
+              "(heuristic inference).");
+        void overlapped;
+      } else {
+        verdictEl.textContent = "respondWith path with no added delay: TTFB was " + fmt(ttfb) +
+          " ms. Add handler delay to separate the overlapped and serialised interpretations.";
+      }
+      setStatus("measurement complete (" + run.mode + ", delay " + delayMs + " ms).");
+      window.showcaseTelemetry?.assert("sw-autopreload-lab-measured",
+        typeof ttfb === "number" && ttfb >= 0,
+        { mode: run.mode, delay: delayMs, ttfb: Math.round(ttfb) });
+    });
+
+    runBtn.addEventListener("click", () => {
+      const mode = modeSelect.value;
+      const delay = Number(delayRange.value);
+      pendingRun = { mode, delay };
+      setStatus("loading probe page through the worker (" + mode + ", delay " + delay + " ms)…");
+      frame.src = "./probe-page.html?mode=" + encodeURIComponent(mode) + "&delay=" + delay +
+        "&bust=" + Date.now();
+    });
+  })();
+</script>
+</body>
+</html>
