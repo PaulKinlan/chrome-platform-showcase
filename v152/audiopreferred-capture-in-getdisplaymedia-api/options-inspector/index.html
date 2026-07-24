@@ -46,8 +46,8 @@
     A key honesty point: <code>audioSelection</code> is a <em>dictionary member</em>, and unknown dictionary members are
     silently dropped — there is no <code>getSupportedConstraints().audioSelection</code> and nothing on
     <code>navigator</code> to sniff. So you cannot feature-detect it in JS. The right pattern is to always pass it (older
-    browsers ignore it harmlessly) and design for the case where audio simply does not arrive. To actually exercise the
-    hint, enable it in Chrome 152+: <code>chrome://flags/#enable-experimental-web-platform-features</code> or
+    browsers ignore that member rather than rejecting for that reason) and design for the case where audio does not arrive. To test Chromium's runtime-gated
+    hint, use a suitable build with <code>chrome://flags/#enable-experimental-web-platform-features</code> or
     <code>--enable-blink-features=GetDisplayMediaAudioSelection</code>.
   </div>
 
@@ -109,8 +109,8 @@
   <section>
     <h2>the resulting call</h2>
 <pre class="code"><code>await navigator.mediaDevices.getDisplayMedia(options);
-// unknown members (e.g. audioSelection on an old browser)
-// are dropped silently — the call still succeeds.</code></pre>
+// An unknown member alone does not cause rejection.
+// Capture may still reject, stall, or return video only for other reasons.</code></pre>
   </section>
 
   <section>
@@ -132,6 +132,7 @@
   var meta = document.getElementById("meta");
   var jsonEl = document.getElementById("json");
   var runBtn = document.getElementById("run");
+  var requestId = 0, requestState = null;
   var audio = document.getElementById("audio");
   var selects = ["audioSelection", "systemAudio", "windowAudio", "monitorTypeSurfaces"].map(function (id) { return document.getElementById(id); });
 
@@ -156,19 +157,41 @@
 
   runBtn.addEventListener("click", async function () {
     var options = buildOptions();
-    meta.textContent = "→ getDisplayMedia(" + JSON.stringify(options) + ")";
+    var state = { id: ++requestId, ignored: false };
+    requestState = state;
+    runBtn.disabled = true;
+    meta.textContent = "→ getDisplayMedia(" + JSON.stringify(options) + ")\nPicker pending. Only browser UI can complete or dismiss it; duplicate requests stay disabled until it settles.";
     try {
       var stream = await navigator.mediaDevices.getDisplayMedia(options);
+      if (state.ignored) {
+        stream.getTracks().forEach(function (track) { track.stop(); });
+        meta.textContent += "\nA stream resolved after pagehide; every track was stopped immediately.";
+        return;
+      }
       var at = stream.getAudioTracks()[0];
       var vt = stream.getVideoTracks()[0];
       meta.textContent += "\nvideo: " + (vt ? vt.label : "(none)");
       meta.textContent += "\naudio: " + (at ? at.label + " · " + JSON.stringify(at.getSettings()) : "(none)");
-      stream.getTracks().forEach(function (t) { t.stop(); });
+      stream.getTracks().forEach(function (track) { track.stop(); });
+      meta.textContent += "\nall returned tracks stopped.";
       window.showcaseTelemetry && window.showcaseTelemetry.assert("inspector-run-resolved", true, { hasAudio: !!at, sentAudioSelection: !!options.audioSelection });
     } catch (e) {
+      if (state.ignored) {
+        meta.textContent += "\nBrowser picker settled after pagehide: " + e.name + ".";
+        return;
+      }
       meta.textContent += "\nrejected: " + e.name + " — " + e.message;
       window.showcaseTelemetry && window.showcaseTelemetry.assert("inspector-run-fallback", true, { error: e.name });
+    } finally {
+      if (requestState === state) {
+        requestState = null;
+        runBtn.disabled = !callable;
+      }
     }
+  });
+
+  addEventListener("pagehide", function () {
+    if (requestState) requestState.ignored = true;
   });
 })();
 </script>

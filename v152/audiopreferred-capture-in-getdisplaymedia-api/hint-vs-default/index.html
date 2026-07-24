@@ -37,15 +37,15 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v152 · media capture</p>
     <h1>Hint vs Default</h1>
-    <p class="lede">Run the same capture two ways — once <em>with</em> <code>audioSelection: "preferred"</code>, once without — and record what each returned. The hint's whole job is to raise the odds that audio comes along, without ever forcing it. This table is where you'd see that difference on a browser that implements the hint.</p>
+    <p class="lede">Run two separately user-mediated captures — one <em>with</em> <code>audioSelection: "preferred"</code>, one without — and record what each returned. This is an outcome log, not a controlled proof of hint effect: source choice, audio consent, browser policy, and OS state can differ between runs.</p>
   </header>
 
   <div class="note">
-    On a browser without the flag both rows behave identically — the unknown <code>audioSelection</code> member is
-    ignored, so each call is just <code>getDisplayMedia({ video, audio: true })</code>. Enable it in Chrome 152+ via
+    An implementation that does not recognize <code>audioSelection</code> ignores that dictionary member rather than
+    rejecting for that reason, but JavaScript cannot determine whether this happened. To test Chromium's implementation, use a suitable build with
     <code>chrome://flags/#enable-experimental-web-platform-features</code> or
     <code>--enable-blink-features=GetDisplayMediaAudioSelection</code> to exercise the real hint. Either way the picker
-    still decides — this compares <em>outcomes</em>, it does not claim the hint fired.
+    still decides. Use the same source and audio choice across repeated trials before comparing rates; one pair of rows cannot establish causation.
   </div>
 
   <div class="stage">
@@ -80,7 +80,7 @@ await navigator.mediaDevices.getDisplayMedia({
   video: true, audio: true
 });
 
-// Compare: did an audio track come back? getAudioTracks().length</code></pre>
+// Observe track presence; do not attribute one-run differences to the hint.</code></pre>
   </section>
 
   <section>
@@ -102,6 +102,7 @@ await navigator.mediaDevices.getDisplayMedia({
   var runHint = document.getElementById("run-hint");
   var runPlain = document.getElementById("run-plain");
   var reset = document.getElementById("reset");
+  var requestId = 0, requestState = null;
 
   var callable = !!(navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === "function");
   probe.innerHTML = callable
@@ -122,20 +123,46 @@ await navigator.mediaDevices.getDisplayMedia({
     }
   }
 
+  function setBusy(busy) {
+    runHint.disabled = busy || !callable;
+    runPlain.disabled = busy || !callable;
+    reset.disabled = busy;
+  }
+
   async function run(prefix, options) {
     var detail = document.getElementById(prefix + "-detail");
-    detail.textContent = "requesting…";
+    var cell = document.getElementById(prefix + "-audio");
+    var state = { id: ++requestId, prefix: prefix, ignored: false };
+    requestState = state;
+    setBusy(true);
+    cell.innerHTML = '<span class="pill pending">picker pending</span>';
+    detail.textContent = "Only browser UI can complete or dismiss this picker; duplicate requests and reset stay disabled until it settles.";
     try {
       var stream = await navigator.mediaDevices.getDisplayMedia(options);
+      if (state.ignored) {
+        stream.getTracks().forEach(function (track) { track.stop(); });
+        cell.innerHTML = '<span class="pill pending">ignored</span>';
+        detail.textContent = "A stream resolved after pagehide; every track was stopped immediately.";
+        return;
+      }
       var at = stream.getAudioTracks()[0];
       setCell(prefix, at, options);
-      stream.getTracks().forEach(function (t) { t.stop(); });  // stop immediately; we only sampled the outcome
+      stream.getTracks().forEach(function (track) { track.stop(); });
       window.showcaseTelemetry && window.showcaseTelemetry.assert("hintvs-" + prefix + "-resolved", true, { hasAudio: !!at });
     } catch (e) {
-      var cell = document.getElementById(prefix + "-audio");
-      cell.innerHTML = '<span class="pill no">cancelled</span>';
+      if (state.ignored) {
+        cell.innerHTML = '<span class="pill pending">ignored</span>';
+        detail.textContent = "Browser picker settled after pagehide: " + e.name + ".";
+        return;
+      }
+      cell.innerHTML = '<span class="pill no">rejected</span>';
       detail.textContent = e.name + " — " + e.message;
       window.showcaseTelemetry && window.showcaseTelemetry.assert("hintvs-" + prefix + "-fallback", true, { error: e.name });
+    } finally {
+      if (requestState === state) {
+        requestState = null;
+        setBusy(false);
+      }
     }
   }
 
@@ -147,6 +174,9 @@ await navigator.mediaDevices.getDisplayMedia({
       document.getElementById(p + "-audio").className = "";
       document.getElementById(p + "-detail").textContent = "—";
     });
+  });
+  addEventListener("pagehide", function () {
+    if (requestState) requestState.ignored = true;
   });
 })();
 </script>
