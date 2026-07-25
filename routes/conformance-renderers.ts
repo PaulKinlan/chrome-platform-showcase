@@ -75,7 +75,8 @@ export function renderConformancePage(s: ConformanceSuite): string {
   <title>conformance — ${escapeHTML(label)}</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    main { max-width: 1000px; }
+    main { max-width: 1000px; overflow-x: clip; }
+    .table-scroll { width: 100%; min-width: 0; max-width: 100%; overflow-x: auto; contain: inline-size; box-sizing: border-box; }
     .meta { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); display: flex; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-3) 0; }
     .summary { display: flex; gap: var(--space-4); flex-wrap: wrap; margin: var(--space-3) 0 var(--space-5); }
     .stat { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-3) var(--space-4); min-width: 120px; }
@@ -88,6 +89,7 @@ export function renderConformancePage(s: ConformanceSuite): string {
     .verdict { padding: 0.15rem 0.55rem; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; border: 1px solid var(--border-black); }
     .verdict-pass { background: color-mix(in srgb, var(--accent-emerald) 14%, var(--bg-paper)); color: var(--accent-emerald); border-color: var(--accent-emerald); }
     .verdict-fail { background: color-mix(in srgb, var(--accent-rose) 14%, var(--bg-paper)); color: var(--accent-rose); border-color: var(--accent-rose); }
+    .verdict-blocked { background: color-mix(in srgb, var(--accent-amber) 16%, var(--bg-paper)); color: var(--text-black); border-color: var(--accent-amber); }
     .verdict-na { background: var(--bg-stone); color: var(--text-muted); }
     .detail-cell { font-size: 0.78rem; color: var(--text-muted); max-width: 260px; word-break: break-word; }
     .spec-link { font-size: 0.78rem; color: var(--accent-blue); }
@@ -102,7 +104,7 @@ export function renderConformancePage(s: ConformanceSuite): string {
     <h1>${escapeHTML(label)} — conformance probe</h1>
     <p class="lede">${s.assertions.length} assertion${
     s.assertions.length === 1 ? "" : "s"
-  } drawn from the spec. Each is a single contract the spec text makes; the verdict reflects what THIS browser does right now. Open the page in Chrome stable / canary / Firefox / Safari to see the matrix manually.</p>
+  } drawn from the spec. Each is a single contract the spec text makes. Pass/fail reflects what this browser executed; blocked means the contract was not run because it needs user mediation, hardware, or another unavailable precondition. Open the page in Chrome stable / canary / Firefox / Safari to compare.</p>
     <div class="meta">
       <span>browser: <strong id="ua">…</strong></span>
       ${
@@ -120,9 +122,11 @@ export function renderConformancePage(s: ConformanceSuite): string {
   <div class="summary">
     <div class="stat"><div class="n" id="n-pass">0</div><div class="label">pass</div></div>
     <div class="stat"><div class="n" id="n-fail">0</div><div class="label">fail</div></div>
+    <div class="stat"><div class="n" id="n-blocked">0</div><div class="label">blocked</div></div>
     <div class="stat"><div class="n">${s.assertions.length}</div><div class="label">total</div></div>
   </div>
 
+  <div class="table-scroll" tabindex="0" role="region" aria-label="Conformance assertion results">
   <table>
     <thead>
       <tr>
@@ -135,6 +139,7 @@ export function renderConformancePage(s: ConformanceSuite): string {
     </thead>
     <tbody id="rows">${rows}</tbody>
   </table>
+  </div>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
@@ -143,7 +148,7 @@ export function renderConformancePage(s: ConformanceSuite): string {
 (async () => {
   document.getElementById("ua").textContent = navigator.userAgent;
   const rows = document.querySelectorAll("#rows tr");
-  let pass = 0, fail = 0;
+  let pass = 0, fail = 0, blocked = 0;
 
   async function runAssertion(kind, test, expect) {
     try {
@@ -202,7 +207,10 @@ export function renderConformancePage(s: ConformanceSuite): string {
         // eslint-disable-next-line no-new-func
         const result = new Function("return (" + test + ")")();
         const resolved = (result instanceof Promise) ? await result : result;
-        return { ok: !!resolved, detail: String(resolved) };
+        return { ok: !!resolved, blocked: false, detail: String(resolved) };
+      }
+      if (kind === "manual") {
+        return { ok: false, blocked: true, detail: test };
       }
       if (kind === "throws") {
         try {
@@ -224,16 +232,17 @@ export function renderConformancePage(s: ConformanceSuite): string {
     const kind = row.dataset.kind;
     const test = row.dataset.test;
     const expect = row.dataset.expect;
-    const { ok, detail } = await runAssertion(kind, test, expect);
+    const { ok, blocked: isBlocked = false, detail } = await runAssertion(kind, test, expect);
     const cell = row.querySelector("[data-verdict]");
     cell.classList.remove("verdict-na");
-    cell.classList.add(ok ? "verdict-pass" : "verdict-fail");
-    cell.textContent = ok ? "pass" : "fail";
+    cell.classList.add(isBlocked ? "verdict-blocked" : ok ? "verdict-pass" : "verdict-fail");
+    cell.textContent = isBlocked ? "blocked" : ok ? "pass" : "fail";
     if (detail) row.querySelector("[data-detail]").textContent = detail;
-    if (ok) pass++; else fail++;
+    if (isBlocked) blocked++; else if (ok) pass++; else fail++;
   }
   document.getElementById("n-pass").textContent = pass;
   document.getElementById("n-fail").textContent = fail;
+  document.getElementById("n-blocked").textContent = blocked;
 })();
 </script>
 </body>
@@ -317,6 +326,7 @@ export function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
     .verdict { padding: 0.15rem 0.55rem; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; border: 1px solid var(--border-black); display: inline-block; }
     .verdict-pass { background: color-mix(in srgb, var(--accent-emerald) 14%, var(--bg-paper)); color: var(--accent-emerald); border-color: var(--accent-emerald); }
     .verdict-fail { background: color-mix(in srgb, var(--accent-rose) 14%, var(--bg-paper)); color: var(--accent-rose); border-color: var(--accent-rose); }
+    .verdict-blocked { background: color-mix(in srgb, var(--accent-amber) 16%, var(--bg-paper)); color: var(--text-black); border-color: var(--accent-amber); }
     .verdict-na { background: var(--bg-stone); color: var(--text-muted); }
     
     .detail-cell { font-size: 0.78rem; color: var(--text-muted); max-width: 320px; word-break: break-all; }
@@ -356,7 +366,8 @@ export function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
   <div class="summary">
     <div class="stat"><div class="n" id="n-pass">0</div><div class="label">pass</div></div>
     <div class="stat"><div class="n" id="n-fail">0</div><div class="label">fail</div></div>
-    <div class="stat"><div class="n" id="n-pct">0%</div><div class="label">pass rate</div></div>
+    <div class="stat"><div class="n" id="n-blocked">0</div><div class="label">blocked</div></div>
+    <div class="stat"><div class="n" id="n-pct">0%</div><div class="label">pass rate (executed)</div></div>
     <div class="stat"><div class="n">${totalAssertions}</div><div class="label">total probes</div></div>
     <div class="stat"><div class="n">${all.length}</div><div class="label">suites</div></div>
   </div>
@@ -380,9 +391,10 @@ export function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
     <div class="filter-group">
       <label for="filter-verdict">Status</label>
       <select id="filter-verdict">
-        <option value="all">All (Pass & Fail)</option>
+        <option value="all">All statuses</option>
         <option value="pass">Pass Only</option>
         <option value="fail">Fail Only</option>
+        <option value="blocked">Blocked Only</option>
       </select>
     </div>
     <div class="actions">
@@ -539,7 +551,10 @@ export function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
       if (kind === "script") {
         const result = new Function("return (" + test + ")")();
         const resolved = (result instanceof Promise) ? await result : result;
-        return { ok: !!resolved, detail: String(resolved) };
+        return { ok: !!resolved, blocked: false, detail: String(resolved) };
+      }
+      if (kind === "manual") {
+        return { ok: false, blocked: true, detail: test };
       }
       if (kind === "throws") {
         try {
@@ -563,6 +578,7 @@ export function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
     
     let passed = 0;
     let failed = 0;
+    let blocked = 0;
     const total = results.length;
     
     console.group("🚀 Starting Platform Showcase Conformance Probes Run");
@@ -591,30 +607,35 @@ export function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
         continue;
       }
       
-      const { ok, detail } = await runAssertion(res.kind, res.test, res.expect);
-      res.ok = ok;
+      const { ok, blocked: isBlocked = false, detail } = await runAssertion(res.kind, res.test, res.expect);
+      res.ok = isBlocked ? null : ok;
+      res.blocked = isBlocked;
       res.detail = detail;
       
       // Update UI
       const badge = row.querySelector("[data-verdict-badge]");
-      badge.className = \`verdict \${ok ? 'verdict-pass' : 'verdict-fail'}\`;
-      badge.textContent = ok ? "pass" : "fail";
-      row.dataset.verdict = ok ? "pass" : "fail";
+      badge.className = \`verdict \${isBlocked ? 'verdict-blocked' : ok ? 'verdict-pass' : 'verdict-fail'}\`;
+      badge.textContent = isBlocked ? "blocked" : ok ? "pass" : "fail";
+      row.dataset.verdict = isBlocked ? "blocked" : ok ? "pass" : "fail";
       
       const detailCell = row.querySelector("[data-detail-cell]");
       detailCell.textContent = detail || "—";
       
-      if (ok) passed++; else failed++;
+      if (isBlocked) blocked++; else if (ok) passed++; else failed++;
       
       // Stats
       document.getElementById("n-pass").textContent = passed;
       document.getElementById("n-fail").textContent = failed;
-      document.getElementById("n-pct").textContent = ((passed / (passed + failed)) * 100).toFixed(0) + "%";
+      document.getElementById("n-blocked").textContent = blocked;
+      const executed = passed + failed;
+      document.getElementById("n-pct").textContent = executed ? (passed / executed * 100).toFixed(0) + "%" : "—";
       
       // Progress
       progressBar.style.width = ((i + 1) / total * 100) + "%";
       
-      if (!ok) {
+      if (isBlocked) {
+        console.info(\`⏸ [\${res.release}] \${res.featureSlug} / \${res.id} (\${res.kind}): \${detail}\`);
+      } else if (!ok) {
         console.warn(\`❌ [\${res.release}] \${res.featureSlug} / \${res.id} (\${res.kind}): \${detail || "failed"}\`);
       }
       
@@ -625,7 +646,8 @@ export function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
     }
     
     console.groupEnd();
-    console.log(\`✅ Done! Passed: \${passed}, Failed: \${failed}, Pass Rate: \${((passed / total) * 100).toFixed(1)}%\`);
+    const executed = passed + failed;
+    console.log(\`✅ Done! Passed: \${passed}, Failed: \${failed}, Blocked: \${blocked}, Executed Pass Rate: \${executed ? ((passed / executed) * 100).toFixed(1) + "%" : "n/a"}\`);
     
     progressContainer.style.display = "none";
     document.getElementById("btn-run").disabled = false;
@@ -675,6 +697,7 @@ export function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
       assertion: r.id,
       kind: r.kind,
       ok: r.ok,
+      blocked: !!r.blocked,
       detail: r.detail
     }));
     navigator.clipboard.writeText(JSON.stringify(data, null, 2));

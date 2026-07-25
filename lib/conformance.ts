@@ -24,6 +24,10 @@ export type AssertionKind =
   // global scope; the result is coerced to boolean. The expression should
   // be a single statement or an IIFE; throwing is treated as fail.
   | "script"
+  // A target contract that cannot run automatically because it requires
+  // user-mediated permission, hardware, or another unavailable precondition.
+  // `test` is the human-readable blocked reason; it is never evaluated.
+  | "manual"
   // The expression must throw (`test` is a JS expression). Used for
   // "this should now be removed / blocked" checks.
   | "throws";
