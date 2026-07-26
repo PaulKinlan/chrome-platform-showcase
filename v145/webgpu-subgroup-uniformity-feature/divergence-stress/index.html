@@ -8,7 +8,7 @@
   <style>
     .stage { border: 1px solid var(--border-black); background: var(--bg-paper); padding: 0.75rem; margin-bottom: 1rem; }
     .stats { display:grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }
-    .stat { background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.55rem 0.7rem; font-family: monospace; font-size: 0.78rem; color: var(--text-charcoal); }
+    .stat { background: var(--bg-stone); border: 1px solid var(--border-black); padding: 0.55rem 0.7rem; font-family: monospace; font-size: 0.78rem; color: var(--text-charcoal); overflow-wrap: anywhere; min-width: 0; }
     .stat .lbl { display: block; font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
     .ctl-row { display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom: 1rem; align-items: center; }
     .ctl-row label { font-size:0.8rem; display:flex; align-items:center; gap:0.35rem; }
@@ -34,7 +34,7 @@
       <label>workload size <input type="range" id="w" min="64" max="4096" step="64" value="1024"> <span id="w-v">1024</span></label>
       <button id="btn-run">Dispatch compute</button>
     </div>
-    <div class="verdict" id="verdict">Press Dispatch to benchmark.</div>
+    <div class="verdict" id="verdict" aria-live="polite">Press Dispatch to benchmark.</div>
     <div class="stats" id="stats"></div>
   </section>
   <section><h2>code</h2><pre><code>// Shader pseudo (the live page uses CPU fallback if WebGPU is unavailable):
@@ -48,39 +48,162 @@
 }
 // Chrome 145 ships the subgroup uniformity feature so the compiler
 // can prove uniformity and emit faster subgroup intrinsics.</code></pre></section>
-  <section><h2>see also</h2><ul><li><a href="../subgroup-demo/">Subgroup Demo</a></li><li><a href="../wgsl-reference/">WGSL Reference</a></li></ul></section>
+  <section><h2>see also</h2><ul><li><a href="../subgroup-demo/">Subgroup Demo</a></li><li><a href="../wgsl-reference/">WGSL Reference</a></li><li><a href="https://chromestatus.com/feature/5673998232977408" target="_blank" rel="noopener">ChromeStatus entry</a></li></ul></section>
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 <script>
-  function setStat(stats,items){stats.innerHTML='';for(const i of items){const d=document.createElement('div');d.className='stat';d.innerHTML=`<span class="lbl">${i.lbl}</span>${i.v}`;stats.appendChild(d);}}
-  document.getElementById('div').oninput=()=>document.getElementById('div-v').textContent=document.getElementById('div').value+'%';
-  document.getElementById('w').oninput=()=>document.getElementById('w-v').textContent=document.getElementById('w').value;
-  async function run(){
-    const div=parseInt(document.getElementById('div').value,10);
-    const wl=parseInt(document.getElementById('w').value,10);
-    const stats=document.getElementById('stats');
-    const verdict=document.getElementById('verdict');
-    if(!navigator.gpu){
-      verdict.className='verdict warn';verdict.textContent='WebGPU not available — falling back to CPU simulation.';
-      const t0=performance.now();let buf=new Float32Array(wl);for(let i=0;i<wl;i++)buf[i]=Math.random()*((i%100<div)?5:1);const ms=performance.now()-t0;
-      setStat(stats,[{lbl:'mode',v:'CPU sim'},{lbl:'work items',v:wl},{lbl:'divergence',v:div+'%'},{lbl:'ms',v:ms.toFixed(2)},{lbl:'uniform speedup',v:'n/a (no GPU)'}]);return;
+  function setStat(stats, items) {
+    stats.innerHTML = '';
+    for (const i of items) {
+      const d = document.createElement('div');
+      d.className = 'stat';
+      d.innerHTML = `<span class="lbl">${i.lbl}</span>`;
+      d.appendChild(document.createTextNode(String(i.v)));
+      stats.appendChild(d);
     }
-    try{
-      const adapter=await navigator.gpu.requestAdapter();
-      if(!adapter)throw new Error('no adapter');
-      const features=Array.from(adapter.features||[]);
-      const has=features.includes('subgroups')||features.includes('subgroup-uniformity');
-      const device=await adapter.requestDevice();
-      const t0=performance.now();
-      const buf=device.createBuffer({size:wl*4,usage:GPUBufferUsage.STORAGE});
-      buf.destroy();
-      const ms=performance.now()-t0;
-      verdict.className='verdict '+(has?'ok':'warn');
-      verdict.innerHTML=has?'subgroup feature present — uniform branches can use intrinsics.':'subgroup feature NOT exposed; the demo runs but cannot showcase uniform speedup.';
-      setStat(stats,[{lbl:'mode',v:'WebGPU'},{lbl:'features',v:features.join(', ')||'(none listed)'},{lbl:'work items',v:wl},{lbl:'divergence',v:div+'%'},{lbl:'setup ms',v:ms.toFixed(2)}]);
-    }catch(e){verdict.className='verdict warn';verdict.textContent='WebGPU init failed: '+e.message;}
   }
-  document.getElementById('btn-run').onclick=run;
-</script role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
+  document.getElementById('div').oninput = () => document.getElementById('div-v').textContent = document.getElementById('div').value + '%';
+  document.getElementById('w').oninput = () => document.getElementById('w-v').textContent = document.getElementById('w').value;
+
+  // Honest probes of the real surfaces (never invented feature names):
+  // - adapter.features 'subgroups' (device-side capability)
+  // - navigator.gpu.wgslLanguageFeatures (WGSL language extension set)
+  function wgslSubgroupEntries() {
+    const set = ('gpu' in navigator) && navigator.gpu.wgslLanguageFeatures;
+    if (!set) return { listed: 'unavailable', hits: [] };
+    const all = Array.from(set);
+    return { listed: all.length ? all.join(', ') : '(empty set)', hits: all.filter((f) => f.includes('subgroup')) };
+  }
+
+  // Same branchy workload as the GPU shader, run on the CPU. Used whenever
+  // WebGPU is missing, the adapter is null, or device/pipeline setup fails.
+  function cpuFallback(div, wl, reason) {
+    const stats = document.getElementById('stats');
+    const verdict = document.getElementById('verdict');
+    const t0 = performance.now();
+    const buf = new Uint32Array(wl);
+    for (let i = 0; i < wl; i++) {
+      let v = (i ^ 0x9e3779b9) >>> 0;
+      if (i % 100 < div) {
+        for (let j = 0; j < 256; j++) v = (Math.imul(v, 1664525) + 1013904223) >>> 0;
+      } else {
+        for (let j = 0; j < 32; j++) v = (v ^ (v << 13)) >>> 0;
+      }
+      buf[i] = v;
+    }
+    const ms = performance.now() - t0;
+    let checksum = 0;
+    for (let i = 0; i < wl; i++) checksum = (checksum ^ buf[i]) >>> 0;
+    verdict.className = 'verdict warn';
+    verdict.textContent = reason + ' — ran the same branchy workload on the CPU instead. (A CPU has no subgroups, so there is no divergence penalty to observe here; this fallback only proves the workload.)';
+    const wgsl = wgslSubgroupEntries();
+    setStat(stats, [
+      { lbl: 'mode', v: 'CPU fallback' },
+      { lbl: 'work items', v: wl },
+      { lbl: 'divergence', v: div + '%' },
+      { lbl: 'ms', v: ms.toFixed(2) },
+      { lbl: 'checksum', v: '0x' + checksum.toString(16) },
+      { lbl: 'wgslLanguageFeatures', v: wgsl.listed },
+    ]);
+    window.showcaseTelemetry?.assert('divergence-stress-cpu-fallback', buf.some((v) => v !== 0), { reason, ms });
+  }
+
+  async function run() {
+    const div = parseInt(document.getElementById('div').value, 10);
+    const wl = parseInt(document.getElementById('w').value, 10);
+    const stats = document.getElementById('stats');
+    const verdict = document.getElementById('verdict');
+    verdict.className = 'verdict';
+    verdict.textContent = 'Running…';
+
+    if (!navigator.gpu) return cpuFallback(div, wl, 'WebGPU not available (navigator.gpu missing)');
+
+    let device = null;
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) return cpuFallback(div, wl, 'WebGPU adapter unavailable (requestAdapter() returned null — flag, driver, or headless environment)');
+
+      const hasSubgroups = adapter.features.has('subgroups');
+      device = await adapter.requestDevice();
+
+      // Real dispatch: every invocation takes one of two branches chosen by
+      // its global id — DIV% of lanes take the expensive branch, so lanes in
+      // the same subgroup diverge and serialise.
+      const code = `
+@group(0) @binding(0) var<storage, read_write> data: array<u32>;
+
+@compute @workgroup_size(64)
+fn cs(@builtin(global_invocation_id) id: vec3u) {
+  let n = arrayLength(&data);
+  let x = min(id.x, n - 1u);
+  var v = data[x] ^ 0x9e3779b9u;
+  if (x % 100u < ${div}u) {
+    for (var j = 0u; j < 256u; j++) { v = v * 1664525u + 1013904223u; }
+  } else {
+    for (var j = 0u; j < 32u; j++) { v = v ^ (v << 13u); }
+  }
+  data[x] = v;
+}`;
+      const module = device.createShaderModule({ code });
+      const pipeline = await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'cs' } });
+
+      const init = new Uint32Array(wl);
+      for (let i = 0; i < wl; i++) init[i] = i;
+      const storage = device.createBuffer({ size: wl * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+      device.queue.writeBuffer(storage, 0, init);
+      const readback = device.createBuffer({ size: wl * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+
+      const bind = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [{ binding: 0, resource: { buffer: storage } }],
+      });
+
+      const t0 = performance.now();
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bind);
+      pass.dispatchWorkgroups(Math.ceil(wl / 64));
+      pass.end();
+      enc.copyBufferToBuffer(storage, 0, readback, 0, wl * 4);
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      const ms = performance.now() - t0;
+
+      await readback.mapAsync(GPUMapMode.READ);
+      const out = new Uint32Array(readback.getMappedRange().slice(0));
+      readback.unmap();
+      let checksum = 0;
+      for (let i = 0; i < wl; i++) checksum = (checksum ^ out[i]) >>> 0;
+      const mutated = out.some((v, i) => v !== init[i]);
+
+      const wgsl = wgslSubgroupEntries();
+      verdict.className = 'verdict ' + (hasSubgroups ? 'ok' : 'warn');
+      verdict.textContent = hasSubgroups
+        ? "adapter feature 'subgroups' present — uniform branches can use subgroup intrinsics; sweep the divergence slider and re-dispatch to compare timings."
+        : "adapter feature 'subgroups' NOT exposed by this GPU — the divergent dispatch still runs, but subgroup intrinsics (what the uniformity feature governs) are unavailable here.";
+      setStat(stats, [
+        { lbl: 'mode', v: 'WebGPU compute dispatch' },
+        { lbl: "adapter feature 'subgroups'", v: hasSubgroups ? 'yes' : 'no' },
+        { lbl: 'wgslLanguageFeatures', v: wgsl.listed },
+        { lbl: 'work items', v: wl },
+        { lbl: 'divergence', v: div + '%' },
+        { lbl: 'dispatch+readback ms', v: ms.toFixed(2) },
+        { lbl: 'checksum', v: '0x' + checksum.toString(16) },
+      ]);
+      window.showcaseTelemetry?.assert('divergence-stress-gpu-dispatch', mutated, { wl, div, ms, hasSubgroups });
+    } catch (e) {
+      cpuFallback(div, wl, 'WebGPU init failed (' + (e && e.message ? e.message : String(e)) + ')');
+    } finally {
+      if (device) { try { device.destroy(); } catch (e) {} }
+    }
+  }
+  document.getElementById('btn-run').onclick = run;
+
+  // Verification hook: ?autorun=1 dispatches once on load.
+  if (new URLSearchParams(location.search).get('autorun') === '1') {
+    setTimeout(run, 300);
+  }
+</script>
 </body>
 </html>
