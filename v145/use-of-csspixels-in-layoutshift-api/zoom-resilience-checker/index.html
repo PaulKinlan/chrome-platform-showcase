@@ -30,7 +30,10 @@
       <label>simulated zoom <select id="z"><option>1</option><option>1.5</option><option>2</option></select></label>
       <button id="btn-shift">Inject 80px shift</button>
       <button id="btn-clear">Reset</button>
+      <span id="shift-status" style="font-family:monospace;font-size:0.75rem;color:var(--text-charcoal);min-height:1.2em;"></span>
+      <span id="shift-announce" aria-live="polite" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);"></span>
     </div>
+    <p style="font-size:0.8rem;color:var(--text-muted);margin:0 0 1rem;">The injected shift fires <strong>0.7&nbsp;s after the click</strong> — a shift within 500&nbsp;ms of user input is flagged <code>hadRecentInput</code> and excluded from CLS, so an immediate one would never register below.</p>
     <div class="stats" id="stats"></div>
     <div class="stage" id="stage">
       <div class="shifter" id="anchor">Anchor block (will be pushed down by the shift)</div>
@@ -45,19 +48,102 @@ new PerformanceObserver(list =&gt; {
     console.log({ value: entry.value, hadRecentInput: entry.hadRecentInput });
   }
 }).observe({ type: 'layout-shift', buffered: true });</code></pre></section>
-  <section><h2>see also</h2><ul><li><a href="../cls-demo/">CLS Demo</a></li><li><a href="../pixel-units/">Pixel Units</a></li></ul></section>
+  <section><h2>see also</h2><ul><li><a href="../cls-demo/">CLS Demo</a></li><li><a href="../pixel-units/">Pixel Units</a></li><li><a href="https://chromestatus.com/feature/5155103518228480" target="_blank" rel="noopener">ChromeStatus entry</a></li></ul></section>
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 <script>
-  let cls=0;
-  function fmt(n){return n.toFixed(4);}
-  function update(){const s=document.getElementById('stats');s.innerHTML='';function add(lbl,v){const d=document.createElement('div');d.className='stat';d.innerHTML=`<span class="lbl">${lbl}</span>${v}`;s.appendChild(d);}add('cumulative CLS',fmt(cls));add('simulated zoom',document.getElementById('z').value+'x');add('reported in',navigator.userAgent.match(/Chrome\/14[5-9]/)?'CSS pixels (Chrome 145+)':'device pixels (likely);');}
-  if(typeof PerformanceObserver==='undefined'||!PerformanceObserver.supportedEntryTypes||!PerformanceObserver.supportedEntryTypes.includes('layout-shift')){update();document.body.querySelector('.stage').insertAdjacentHTML('afterbegin','<p style="color:var(--accent-rose);">layout-shift entries not supported here.</p>');}
-  else{const obs=new PerformanceObserver(list=>{for(const e of list.getEntries())if(!e.hadRecentInput){cls+=e.value;update();}});try{obs.observe({type:'layout-shift',buffered:true});}catch(e){}}
-  document.getElementById('z').onchange=()=>{const z=parseFloat(document.getElementById('z').value);document.getElementById('stage').style.zoom=z;update();};
-  document.getElementById('btn-shift').onclick=()=>{const t=document.getElementById('shift-target');t.style.height='0px';t.offsetHeight;t.style.transition='height 0.05s';t.style.height='80px';};
-  document.getElementById('btn-clear').onclick=()=>{cls=0;document.getElementById('shift-target').style.height='0';update();};
+  let cls = 0;
+  let skipped = 0;
+  let pendingShift = false;
+  // Determined by MEASUREMENT (never UA sniffing): compare the entry's
+  // currentRect against the shifted node's getBoundingClientRect (CSS px).
+  let reportedUnit = 'not yet measured — inject a shift';
+  const statusEl = document.getElementById('shift-status');
+  const announceEl = document.getElementById('shift-announce');
+
+  function fmt(n) { return n.toFixed(4); }
+  function update() {
+    const s = document.getElementById('stats');
+    s.innerHTML = '';
+    function add(lbl, v) { const d = document.createElement('div'); d.className = 'stat'; d.innerHTML = `<span class="lbl">${lbl}</span>`; d.appendChild(document.createTextNode(v)); s.appendChild(d); }
+    add('cumulative CLS', fmt(cls));
+    add('input-attributed skipped', String(skipped));
+    add('simulated zoom', document.getElementById('z').value + 'x');
+    add('reported in', reportedUnit);
+  }
+
+  function measureUnit(entry) {
+    // Real feature check: pick an attribution source whose node is still in
+    // the document and compare the reported currentRect (viewport coords)
+    // with the node's live getBoundingClientRect, which is defined in CSS px.
+    for (const src of entry.sources || []) {
+      const node = src.node;
+      if (!node || !node.isConnected || !node.getBoundingClientRect) continue;
+      const dom = node.getBoundingClientRect();
+      const rep = src.currentRect;
+      if (!rep || dom.width === 0) continue;
+      const dpr = window.devicePixelRatio || 1;
+      if (Math.abs(rep.width - dom.width) <= 2 && Math.abs(rep.top - dom.top) <= 2) {
+        reportedUnit = dpr === 1
+          ? 'CSS pixels (measured; note DPR=1 — CSS px and device px coincide here)'
+          : 'CSS pixels (measured: currentRect matches getBoundingClientRect)';
+        return;
+      }
+      if (dpr !== 1 && Math.abs(rep.width - dom.width * dpr) <= 2 * dpr) {
+        reportedUnit = 'device pixels (measured: currentRect is DPR-scaled — pre-145 behaviour)';
+        return;
+      }
+      reportedUnit = 'inconclusive (rects moved between report and measurement)';
+    }
+  }
+
+  if (typeof PerformanceObserver === 'undefined' || !PerformanceObserver.supportedEntryTypes || !PerformanceObserver.supportedEntryTypes.includes('layout-shift')) {
+    reportedUnit = 'n/a — layout-shift entries unsupported';
+    update();
+    document.body.querySelector('.stage').insertAdjacentHTML('afterbegin', '<p style="color:var(--accent-rose);">layout-shift entries not supported here.</p>');
+  } else {
+    const obs = new PerformanceObserver(list => {
+      for (const e of list.getEntries()) {
+        if (e.hadRecentInput) { skipped++; update(); continue; }
+        cls += e.value;
+        measureUnit(e);
+        update();
+        announceEl.textContent = 'Layout shift recorded. Cumulative CLS ' + fmt(cls) + '.';
+        window.showcaseTelemetry?.assert('zoom-checker-shift-recorded', e.value > 0, { value: e.value });
+      }
+    });
+    try { obs.observe({ type: 'layout-shift', buffered: true }); } catch (e) {}
+  }
+
+  document.getElementById('z').onchange = () => { const z = parseFloat(document.getElementById('z').value); document.getElementById('stage').style.zoom = z; update(); };
+
+  document.getElementById('btn-shift').onclick = () => {
+    if (pendingShift) return;
+    pendingShift = true;
+    // Fire 700 ms after the click so the shift escapes the 500 ms
+    // hadRecentInput window and actually counts toward CLS.
+    announceEl.textContent = 'Shift scheduled; it fires in zero point seven seconds.';
+    const fireAt = performance.now() + 700;
+    const countdown = setInterval(() => {
+      statusEl.textContent = 'firing in ' + (Math.max(0, fireAt - performance.now()) / 1000).toFixed(1) + ' s…';
+    }, 100);
+    setTimeout(() => {
+      clearInterval(countdown);
+      const t = document.getElementById('shift-target');
+      t.style.transition = 'none'; // jump, not animate: one clean entry
+      t.style.height = t.style.height === '80px' ? '0px' : '80px';
+      statusEl.textContent = 'shift fired';
+      pendingShift = false;
+    }, 700);
+  };
+
+  document.getElementById('btn-clear').onclick = () => { cls = 0; skipped = 0; document.getElementById('shift-target').style.height = '0'; update(); statusEl.textContent = ''; };
   update();
+
+  // Verification hook: ?autorun=1 injects the delayed shift on load.
+  if (new URLSearchParams(location.search).get('autorun') === '1') {
+    setTimeout(() => document.getElementById('btn-shift').onclick(), 300);
+  }
 </script>
 </body>
 </html>

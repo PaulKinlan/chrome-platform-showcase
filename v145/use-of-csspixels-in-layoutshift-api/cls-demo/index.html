@@ -27,7 +27,15 @@
       font-family: monospace;
       font-size: 0.72rem;
       color: var(--bg-ivory);
-      transition: top 0.3s;
+      /* No transition: an animated move emits many per-frame micro-shifts;
+         a plain jump produces one clean LayoutShift entry to inspect. */
+    }
+    .shift-status {
+      font-family: monospace;
+      font-size: 0.78rem;
+      color: var(--text-charcoal);
+      margin: 0 0 1.5rem;
+      min-height: 1.2em;
     }
 
     .info-card {
@@ -76,7 +84,7 @@
   </header>
 
   <div class="note">
-    Click "Trigger shift" to move the blue element — a <code>PerformanceObserver</code> watching <code>layout-shift</code> entries will capture the event. The rects are reported in CSS pixels in Chrome 145+.
+    Click "Trigger shift" — the move is scheduled <strong>0.7&nbsp;s after your click</strong>, because a shift within 500&nbsp;ms of user input is flagged <code>hadRecentInput:&nbsp;true</code> and excluded from CLS (and from this page's readout). The delayed shift lands outside that window, so the <code>PerformanceObserver</code> captures it. The rects are reported in CSS pixels in Chrome 145+.
   </div>
 
   <section>
@@ -89,6 +97,8 @@
       <button id="btn-shift">Trigger shift</button>
       <button id="btn-reset">Reset</button>
     </div>
+    <p class="shift-status" id="shift-status"></p>
+    <span id="shift-announce" aria-live="polite" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);"></span>
   </section>
 
   <section>
@@ -96,6 +106,8 @@
     <div class="info-card">
       <div class="info-row"><span class="info-label">LayoutShift API</span><span class="info-value" id="st-api">—</span></div>
       <div class="info-row"><span class="info-label">entry.value (shift score)</span><span class="info-value" id="st-value">—</span></div>
+      <div class="info-row"><span class="info-label">entry.hadRecentInput</span><span class="info-value" id="st-hri">—</span></div>
+      <div class="info-row"><span class="info-label">input-attributed entries skipped</span><span class="info-value" id="st-skipped">0</span></div>
       <div class="info-row"><span class="info-label">previousRect (CSS px)</span><span class="info-value" id="st-prev">—</span></div>
       <div class="info-row"><span class="info-label">currentRect (CSS px)</span><span class="info-value" id="st-curr">—</span></div>
       <div class="info-row"><span class="info-label">window.devicePixelRatio</span><span class="info-value" id="st-dpr">—</span></div>
@@ -149,8 +161,12 @@ observer.observe({ type: 'layout-shift', buffered: true });</code></pre>
   setVal('st-vp', window.innerWidth + ' × ' + window.innerHeight);
 
   const box = document.getElementById('shift-box');
+  const statusEl = document.getElementById('shift-status');
+  const announceEl = document.getElementById('shift-announce');
+  function announce(msg) { announceEl.textContent = msg; }
   let shifted = false;
-  let lastEntry = null;
+  let pendingTimer = null;
+  let skipped = 0;
 
   if (!('PerformanceObserver' in window)) {
     setVal('st-api', 'Not supported', 'err');
@@ -158,9 +174,14 @@ observer.observe({ type: 'layout-shift', buffered: true });</code></pre>
     setVal('st-api', 'Supported', 'ok');
     const obs = new PerformanceObserver(list => {
       for (const entry of list.getEntries()) {
-        if (entry.hadRecentInput) continue;
-        lastEntry = entry;
+        if (entry.hadRecentInput) {
+          // Honest accounting: input-attributed shifts are excluded from CLS.
+          skipped++;
+          setVal('st-skipped', String(skipped) + ' (hadRecentInput: true — excluded from CLS)');
+          continue;
+        }
         setVal('st-value', entry.value.toFixed(6), 'ok');
+        setVal('st-hri', 'false — counts toward CLS', 'ok');
         const src = entry.sources && entry.sources[0];
         if (src) {
           const p = src.previousRect;
@@ -168,25 +189,51 @@ observer.observe({ type: 'layout-shift', buffered: true });</code></pre>
           setVal('st-prev', `top:${Math.round(p.top)} left:${Math.round(p.left)} ${Math.round(p.width)}×${Math.round(p.height)}px`);
           setVal('st-curr', `top:${Math.round(c.top)} left:${Math.round(c.left)} ${Math.round(c.width)}×${Math.round(c.height)}px`);
         }
+        statusEl.textContent = 'LayoutShift entry captured — value ' + entry.value.toFixed(6) + '.';
+        announce('LayoutShift entry captured with value ' + entry.value.toFixed(6) + ', hadRecentInput false.');
+        window.showcaseTelemetry?.assert('cls-demo-entry-captured', entry.value > 0, { value: entry.value });
       }
     });
     obs.observe({ type: 'layout-shift', buffered: true });
   }
 
   document.getElementById('btn-shift').addEventListener('click', () => {
-    if (!shifted) {
+    if (shifted || pendingTimer) return;
+    // Fire the mutation 700 ms after the click: shifts within 500 ms of input
+    // are flagged hadRecentInput and excluded, so we wait out that window.
+    const fireAt = performance.now() + 700;
+    statusEl.textContent = 'Shift scheduled — firing after the 500 ms input-attribution window…';
+    announce('Shift scheduled. It fires in zero point seven seconds, after the input attribution window.');
+    const countdown = setInterval(() => {
+      const left = Math.max(0, fireAt - performance.now());
+      statusEl.textContent = 'Shift firing in ' + (left / 1000).toFixed(1) + ' s (waiting out the hadRecentInput window)…';
+    }, 100);
+    pendingTimer = setTimeout(() => {
+      clearInterval(countdown);
+      pendingTimer = null;
       box.style.top = '3.5rem';
       shifted = true;
-    }
+      statusEl.textContent = 'Shift fired — waiting for the LayoutShift entry…';
+      announce('Shift fired.');
+    }, 700);
   });
 
   document.getElementById('btn-reset').addEventListener('click', () => {
+    if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
     box.style.top = '1rem';
     shifted = false;
     setVal('st-value', '—');
+    setVal('st-hri', '—');
     setVal('st-prev', '—');
     setVal('st-curr', '—');
+    statusEl.textContent = 'Reset. (The reset jump itself is input-attributed, so it lands in the skipped counter.)';
+    announce('Stage reset.');
   });
+
+  // Verification hook: ?autorun=1 performs the delayed shift on load.
+  if (new URLSearchParams(location.search).get('autorun') === '1') {
+    setTimeout(() => document.getElementById('btn-shift').click(), 300);
+  }
 </script>
 </body>
 </html>
