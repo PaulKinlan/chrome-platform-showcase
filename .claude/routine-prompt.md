@@ -331,6 +331,21 @@ surface, different real-world use case, or different failure mode / edge case). 
 comprehensive and inspire developers (Paul, 2026-05-30) — not to tick a box. 1 concept is a
 regression. 2 is the floor. Build them all.
 
+**Use-case portfolio check (required before “implemented”).** Do not satisfy the floor with two
+near-duplicate playgrounds. For each feature, explicitly consider and record these angles:
+
+1. **basic/canonical** — the smallest real use of the exact shipped surface;
+2. **configuration/inspection tool** — controls that expose meaningful values, states, or tradeoffs;
+3. **practical product use case** — why a developer would use the feature in an application;
+4. **edge/failure/migration** — unsupported, invalid, lifecycle, compatibility, or upgrade behavior;
+5. **novel/advanced composition** — an inspiring use with another relevant platform capability.
+
+Build every applicable angle as a distinct additive route. Mark an angle not applicable only with a
+source-backed reason in the feature's research record. A syntax probe plus a simulation is not a
+complete portfolio, and two demos explaining the same behavior from the same angle still count as
+one use case. Before editing, inventory every existing route and its angle; after editing, prove the
+set is a strict superset. Never delete an older basic demo when adding a more ambitious one.
+
 ## Step 5: Fetch full detail
 
 ```bash

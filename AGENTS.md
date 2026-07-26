@@ -87,6 +87,10 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
   milestone needs it. If `chrome-devtools-mcp` is unavailable, report the blocker and do not claim a
   browser-tested result.
 - Build every distinct use case identified for an API. Two or three concepts is a floor, not a cap.
+- Require a deliberate use-case portfolio rather than counting near-duplicate pages: evaluate
+  basic/canonical usage, configuration or inspection tooling, a practical product use case,
+  edge/failure/migration behavior, and a novel or advanced composition. Build every applicable angle
+  additively, document why any angle is inapplicable, and preserve every existing route and angle.
 - **Research before building.** Follow every chromestatus reference (spec, explainer, docs, samples)
   and their onward links, enumerate the distinct use cases (that count sets the concepts), search
   MDN/web.dev/WPT for more, and read the real implementation in Chromium source

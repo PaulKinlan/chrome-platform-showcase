@@ -414,6 +414,24 @@ hits a distinct angle (different API surface, different real-world use case, or 
 mode / edge case). Bug history: 2026-05-30, the rebuilt v130-v144 backfill came out with exactly 1
 concept per feature; when I followed up I capped at 2-3. Paul flagged both. Don't cap. Don't skip.
 
+**A complete feature needs a deliberate use-case portfolio, not merely a concept count.** For every
+feature, explicitly evaluate: (1) basic/canonical usage, (2) configuration or inspection tooling,
+(3) a practical product use case, (4) edge/failure/migration behavior, and (5) a novel or advanced
+composition. Build every applicable angle on its own additive stable route; record a source-backed
+reason for any non-applicable angle. Two near-duplicate playgrounds do not satisfy two angles. A
+syntax probe plus a simulation is not a complete portfolio. Inventory all existing routes and their
+angles before editing, and require the result to be a strict superset — older basic demos remain
+when more ambitious demos arrive.
+
+### 7c. Conformance checks are visible learning material
+
+Every served feature or concept page with a `conformance.json` suite (concept-level first, otherwise
+its feature suite) receives the shared **What this browser supports** panel. It must show every
+assertion, its exact description, live pass/fail/blocked result, execution detail, and source/spec
+link; it must state that a pass proves only the listed contract. Never replace this with a single
+support badge or hide failed/blocked checks. Keep the panel runner semantically aligned with the
+full `/conformance/` route and unit-test its assertion kinds.
+
 ### 8. Routine never edits top-level files
 
 The routine prompt is constrained to writing inside `v<N>/`. `server.ts`, `lib/`, `public/`,

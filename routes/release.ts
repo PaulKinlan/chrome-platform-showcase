@@ -38,6 +38,46 @@ function injectDemoTelemetry(html: string): string {
     : `${html}\n${script}`;
 }
 
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    return (await Deno.stat(path)).isFile;
+  } catch {
+    return false;
+  }
+}
+
+async function injectConformancePanel(
+  html: string,
+  release: string,
+  key: string,
+): Promise<string> {
+  if (!key.endsWith("index.html") || html.includes("/public/conformance-panel.js")) return html;
+
+  const segments = key.replace(/\/index\.html$/, "").split("/").filter(Boolean);
+  if (segments.length === 0 || segments.length > 2) return html;
+
+  const feature = segments[0];
+  const concept = segments[1];
+  const conceptPath = concept ? `${release}/${feature}/${concept}/conformance.json` : "";
+  const featurePath = `${release}/${feature}/conformance.json`;
+  const suitePath = conceptPath && await fileExists(conceptPath)
+    ? conceptPath
+    : await fileExists(featurePath)
+    ? featurePath
+    : "";
+  if (!suitePath) return html;
+
+  const suiteUrl = `/${suitePath}`;
+  const conformancePage = `/${suitePath.replace(/\/conformance\.json$/, "/conformance/")}`;
+  const scope = conceptPath === suitePath ? "concept" : "feature";
+  const script = `<script type="module" src="/public/conformance-panel.js" data-suite-url="${
+    escapeHTML(suiteUrl)
+  }" data-conformance-page="${escapeHTML(conformancePage)}" data-suite-scope="${scope}"></script>`;
+  return html.includes("</head>")
+    ? html.replace("</head>", `  ${script}\n</head>`)
+    : `${html}\n${script}`;
+}
+
 function headingText(html: string): string {
   const heading = html.match(/<h1(?:\s[^>]*)?>([\s\S]*?)<\/h1>/i)?.[1] ?? "";
   return heading
@@ -135,7 +175,8 @@ async function readReleaseAssetFromDisk(
     if (ext === "html") {
       const html = new TextDecoder().decode(file);
       const withBreadcrumbs = await injectReleaseBreadcrumbs(html, release, key, origin);
-      return new Response(injectDemoTelemetry(withBreadcrumbs), {
+      const withConformance = await injectConformancePanel(withBreadcrumbs, release, key);
+      return new Response(injectDemoTelemetry(withConformance), {
         headers: demoTelemetryHeaders({ "content-type": MIME[ext] }),
       });
     }
