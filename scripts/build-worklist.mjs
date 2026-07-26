@@ -15,9 +15,9 @@ const ID_RE = /chromestatus\.com\/feature\/(\d+)/;
 const PORTFOLIO = {
   basic: /(^|[-])(basic|quickstart|starter|minimal|hello|feature-detect|playground)([-]|$)/,
   tool:
-    /(^|[-])(builder|inspector|explorer|visualizer|lab|studio|config|tester|debug|matrix|calculator|generator|editor|monitor|profiler|tracer)([-]|$)/,
+    /(^|[-])(builder|inspector|explorer|visualizer|lab|studio|config|tester|debug|matrix|calculator|generator|editor|monitor|profiler|tracer|controller)([-]|$)/,
   practical:
-    /(^|[-])(checkout|gallery|map|dashboard|meeting|caption|workflow|upload|chat|reader|recorder|player|navigation|form|print|session|payment|camera|microphone|timeline|chart|game|search)([-]|$)/,
+    /(^|[-])(checkout|gallery|map|dashboard|meeting|caption|workflow|upload|chat|reader|recorder|player|navigation|form|print|session|payment|camera|microphone|timeline|chart|game|search|zoom)([-]|$)/,
   edge:
     /(^|[-])(fallback|compat|migration|error|failure|threat|security|privacy|denied|unsupported|edge|stress|race|conflict|recovery)([-]|$)/,
   novel: /(^|[-])(advanced|wild|composition|creative|experiment|art|synth|mashup)([-]|$)/,
