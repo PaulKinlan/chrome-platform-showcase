@@ -46,6 +46,40 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+let gendnRoutesPromise: Promise<Set<string>> | undefined;
+
+function gendnRoutes(): Promise<Set<string>> {
+  if (!gendnRoutesPromise) {
+    gendnRoutesPromise = Deno.readTextFile("./gendn-links.json")
+      .then((text) => new Set<string>((JSON.parse(text).routes ?? []) as string[]))
+      .catch(() => new Set<string>());
+  }
+  return gendnRoutesPromise;
+}
+
+async function injectGendnReference(
+  html: string,
+  release: string,
+  key: string,
+): Promise<string> {
+  if (!key.endsWith("index.html") || html.includes('class="gendn-reference"')) return html;
+  const segments = key.replace(/\/index\.html$/, "").split("/").filter(Boolean);
+  if (segments.length === 0 || segments.length > 2) return html;
+  const featureRoute = `/${release}/${segments[0]}/`;
+  if (!(await gendnRoutes()).has(featureRoute)) return html;
+
+  const referenceUrl = `https://gendn.paulkinlan-ea.deno.net${featureRoute}`;
+  const block = `<section class="gendn-reference" aria-labelledby="gendn-reference-title">
+    <h2 id="gendn-reference-title">implementation reference</h2>
+    <p>Need the exact API surface, compatibility boundaries, errors, lifecycle, and source links? <a href="${
+    escapeHTML(referenceUrl)
+  }" target="_blank" rel="noopener">Read the matching gendn reference ↗</a></p>
+  </section>`;
+  return /<footer\s+class=["']byline["']/i.test(html)
+    ? html.replace(/<footer\s+class=["']byline["']/i, `${block}\n  <footer class="byline"`)
+    : html.replace("</main>", `${block}\n</main>`);
+}
+
 async function injectConformancePanel(
   html: string,
   release: string,
@@ -175,7 +209,8 @@ async function readReleaseAssetFromDisk(
     if (ext === "html") {
       const html = new TextDecoder().decode(file);
       const withBreadcrumbs = await injectReleaseBreadcrumbs(html, release, key, origin);
-      const withConformance = await injectConformancePanel(withBreadcrumbs, release, key);
+      const withGendn = await injectGendnReference(withBreadcrumbs, release, key);
+      const withConformance = await injectConformancePanel(withGendn, release, key);
       return new Response(injectDemoTelemetry(withConformance), {
         headers: demoTelemetryHeaders({ "content-type": MIME[ext] }),
       });
