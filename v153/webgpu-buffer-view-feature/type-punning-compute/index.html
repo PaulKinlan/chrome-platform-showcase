@@ -1,0 +1,170 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Type punning without copies — WebGPU: `buffer_view` feature — Chrome 153</title><link rel="stylesheet" href="/public/styles.css">
+<style>
+  code { overflow-wrap:anywhere; }
+  .lab { display:grid; gap:1rem; }
+  .controls { display:flex; flex-wrap:wrap; gap:.65rem; align-items:end; }
+  .controls label { display:grid; gap:.3rem; font-weight:700; }
+  .controls input { min-height:2.75rem; padding:.45rem; border:1px solid var(--border-black); background:var(--bg-ivory); color:var(--text-black); width:8.5rem; max-width:100%; font-family:monospace; box-sizing:border-box; }
+  .status { min-height:2.5rem; padding:.75rem; border-left:5px solid var(--accent-blue); background:var(--bg-stone); color:var(--text-black); overflow-wrap:anywhere; }
+  .flagnote { border:2px dashed var(--border-black); background:var(--bg-stone); color:var(--text-black); padding:1rem; overflow-wrap:anywhere; }
+  .unsupported { border:2px solid var(--border-black); border-left:8px solid var(--accent-rose); background:var(--bg-paper); padding:1rem; overflow-wrap:anywhere; }
+  .unsupported h3 { margin-top:0; }
+  .tablewrap { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; min-width:520px; }
+  caption { text-align:left; font-weight:700; padding-bottom:.4rem; }
+  th, td { border:1px solid var(--border-black); padding:.45rem .6rem; text-align:left; font-family:monospace; font-size:.85rem; overflow-wrap:anywhere; }
+  th { background:var(--bg-stone); color:var(--text-black); }
+  td.match { background:var(--accent-emerald); color:var(--text-black); font-weight:700; }
+  td.mismatch { background:var(--accent-rose); color:var(--bg-ivory); font-weight:700; }
+  pre { overflow-x:auto; background:var(--text-black); color:var(--bg-ivory); padding:1rem; }
+  button:focus-visible,input:focus-visible,a:focus-visible { outline:3px solid var(--accent-blue); outline-offset:3px; }
+  @media (max-width:640px){ .controls>* { width:100%; } .controls input, .controls button { width:100%; } }
+</style></head><body><main><p class="crumbs"><a href="/v153/webgpu-buffer-view-feature/">&larr; WebGPU: `buffer_view` feature</a></p><header class="lede-block"><p class="eyebrow">v153 · interactive demo</p><h1>Type punning without copies</h1><p class="lede">The explainer's first use case: reinterpret the bytes of one bound variable as several types. Enter four floats — they are written once into a single 16-byte storage buffer, then a compute shader reads those same bytes twice via <code>bufferView&lt;vec4f&gt;</code> and <code>bufferView&lt;vec4u&gt;</code> and writes back the raw bit patterns. The readback is compared bit-for-bit against a CPU <code>DataView</code> reference, so a wrong reinterpretation cannot pass silently.</p></header>
+<section class="demo-card lab">
+  <div class="flagnote">Needs <code>buffer_view</code> in <code>navigator.gpu.wgslLanguageFeatures</code>. If missing: <strong>chrome://flags/#enable-unsafe-webgpu</strong> + relaunch, or <code>--enable-unsafe-webgpu</code> (headless: add <code>--enable-features=Vulkan</code>). The CPU reference column always works; the GPU column reports honestly.</div>
+  <div class="controls">
+    <label>float 0 <input id="f0" type="number" step="any" value="1"></label>
+    <label>float 1 <input id="f1" type="number" step="any" value="-2.5"></label>
+    <label>float 2 <input id="f2" type="number" step="any" value="3.14159"></label>
+    <label>float 3 <input id="f3" type="number" step="any" value="0.1"></label>
+    <button id="runBtn">Pack &amp; dispatch</button>
+  </div>
+  <output class="status" id="status" aria-live="polite">Not dispatched yet.</output>
+  <div class="unsupported" id="unsupported" hidden><h3>GPU path unavailable</h3><p id="unsupportedWhy"></p></div>
+  <div class="tablewrap"><table id="resultTable">
+    <caption>Same 16 bytes, read as f32 (CPU DataView) vs read back from the GPU's vec4u view</caption>
+    <thead><tr><th scope="col">lane</th><th scope="col">input (f32)</th><th scope="col">CPU bits (DataView)</th><th scope="col">GPU bits (bufferView&lt;vec4u&gt;)</th><th scope="col">match</th></tr></thead>
+    <tbody id="resultBody"></tbody>
+  </table></div>
+</section>
+<section><h2>the shader</h2><pre><code id="shaderView"></code></pre><p>Without <code>buffer_view</code> this needs either two bindings over the same <code>GPUBuffer</code> range (each padded to 256-byte storage alignment) or a <code>bitcast</code> per scalar after loading through a single declared type. The view built-ins reinterpret the memory itself, which also works for aggregates that <code>bitcast</code> cannot express. The shader additionally sums the float view and returns <code>bufferLength(&amp;src)</code>, both checked below the table.</p></section>
+<section><h2>see also</h2><ul><li><a href="/v153/webgpu-buffer-view-feature/">Feature page</a></li><li><a href="https://chromestatus.com/feature/5094091886034944" target="_blank" rel="noopener">ChromeStatus entry</a></li><li><a href="https://github.com/gpuweb/gpuweb/blob/main/proposals/buffer-view.md" target="_blank" rel="noopener">Buffer View proposal</a></li></ul></section>
+<footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer></main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const SHADER = 'requires buffer_view;\n\n@group(0) @binding(0) var<storage, read> src : buffer<16>;\n@group(0) @binding(1) var<storage, read_write> result : array<u32, 6>;\n\n@compute @workgroup_size(1) fn main() {\n  let as_uints  = *bufferView<vec4u>(&src, 0u);\n  let as_floats = *bufferView<vec4f>(&src, 0u);\n  result[0] = as_uints.x;\n  result[1] = as_uints.y;\n  result[2] = as_uints.z;\n  result[3] = as_uints.w;\n  result[4] = bitcast<u32>(as_floats.x + as_floats.y + as_floats.z + as_floats.w);\n  result[5] = bufferLength(&src);\n}';
+  $('shaderView').textContent = SHADER;
+
+  const hex = (u) => '0x' + (u >>> 0).toString(16).padStart(8, '0');
+  const f32bits = (v) => { const dv = new DataView(new ArrayBuffer(4)); dv.setFloat32(0, v, true); return dv.getUint32(0, true); };
+
+  function readInputs() {
+    return [0, 1, 2, 3].map((i) => {
+      const raw = parseFloat($('f' + i).value);
+      return Number.isFinite(raw) ? Math.fround(raw) : 0;
+    });
+  }
+
+  function renderCPU(values, gpuBits) {
+    const body = $('resultBody');
+    body.textContent = '';
+    values.forEach((v, i) => {
+      const tr = document.createElement('tr');
+      const cpu = f32bits(v);
+      const gpu = gpuBits ? gpuBits[i] : null;
+      const cells = [
+        String(i), String(v), hex(cpu),
+        gpu === null ? '— (GPU path unavailable)' : hex(gpu),
+      ];
+      for (const c of cells) { const td = document.createElement('td'); td.textContent = c; tr.append(td); }
+      const verdict = document.createElement('td');
+      if (gpu === null) { verdict.textContent = 'n/a'; }
+      else if ((gpu >>> 0) === (cpu >>> 0)) { verdict.textContent = 'match'; verdict.className = 'match'; }
+      else { verdict.textContent = 'MISMATCH'; verdict.className = 'mismatch'; }
+      tr.append(verdict);
+      body.append(tr);
+    });
+    return values.map(f32bits);
+  }
+
+  const supported = () => { try { return !!navigator.gpu?.wgslLanguageFeatures?.has('buffer_view'); } catch { return false; } };
+
+  let devicePromise = null;
+  function getDevice() {
+    devicePromise ??= (async () => {
+      if (!('gpu' in navigator)) throw new Error('navigator.gpu is not exposed — WebGPU itself is unavailable here');
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) throw new Error('requestAdapter() returned null — no adapter in this environment (headless usually needs --enable-features=Vulkan)');
+      return adapter.requestDevice();
+    })();
+    devicePromise.catch(() => { devicePromise = null; });
+    return devicePromise;
+  }
+
+  let pipelinePromise = null;
+  async function getPipeline(device) {
+    pipelinePromise ??= (async () => {
+      device.pushErrorScope('validation');
+      const module = device.createShaderModule({ code: SHADER, label: 'buffer_view type punning' });
+      const info = await module.getCompilationInfo();
+      device.popErrorScope().catch(() => {}); // captured so the honest failure does not spam the console
+      const errors = info.messages.filter((m) => m.type === 'error');
+      if (errors.length) {
+        const first = errors[0];
+        throw new Error(`createShaderModule reported ${errors.length} error(s); first: line ${first.lineNum}: ${first.message}`);
+      }
+      return device.createComputePipelineAsync({ layout: 'auto', compute: { module } });
+    })();
+    pipelinePromise.catch(() => { pipelinePromise = null; });
+    return pipelinePromise;
+  }
+
+  let busy = false;
+  async function run() {
+    if (busy) return;
+    busy = true;
+    const status = $('status');
+    const unsupported = $('unsupported');
+    const values = readInputs();
+    const cpuBits = renderCPU(values, null);
+    const cpuSum = values.reduce((a, b) => Math.fround(a + b), 0);
+    status.textContent = 'Dispatching…';
+    try {
+      const device = await getDevice();
+      const pipeline = await getPipeline(device);
+      const src = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      device.queue.writeBuffer(src, 0, new Float32Array(values));
+      const result = device.createBuffer({ size: 24, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const staging = device.createBuffer({ size: 24, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [ { binding: 0, resource: { buffer: src } }, { binding: 1, resource: { buffer: result } } ],
+      });
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(1);
+      pass.end();
+      encoder.copyBufferToBuffer(result, 0, staging, 0, 24);
+      device.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const out = Array.from(new Uint32Array(staging.getMappedRange().slice(0)));
+      staging.unmap();
+      src.destroy(); result.destroy(); staging.destroy();
+      renderCPU(values, out.slice(0, 4));
+      const lanesMatch = cpuBits.every((b, i) => (b >>> 0) === (out[i] >>> 0));
+      const sumMatch = (f32bits(cpuSum) >>> 0) === (out[4] >>> 0);
+      const lenMatch = out[5] === 16;
+      unsupported.hidden = true;
+      status.textContent = `GPU readback complete. Bit patterns: ${lanesMatch ? 'all 4 lanes match the CPU DataView' : 'LANE MISMATCH'}. Float-view sum ${sumMatch ? 'matches' : 'differs from'} the CPU f32 sum (${cpuSum} = ${hex(f32bits(cpuSum))}, GPU ${hex(out[4])}). bufferLength(&src) returned ${out[5]} (expected 16${lenMatch ? '' : ' — MISMATCH'}).`;
+      window.showcaseTelemetry?.assert('bufferview-punning-match', lanesMatch && sumMatch && lenMatch, { out, cpuBits, cpuSum });
+    } catch (e) {
+      const why = String(e && e.message ? e.message : e);
+      unsupported.hidden = false;
+      $('unsupportedWhy').textContent = supported()
+        ? `This browser lists buffer_view, but the GPU path still failed: ${why}`
+        : `This browser does not list buffer_view in navigator.gpu.wgslLanguageFeatures, so the shader cannot compile. Real error: ${why}. Enable steps are in the banner above. The CPU DataView column above is the reference the GPU would have to match.`;
+      status.textContent = 'GPU path unavailable — CPU reference shown, GPU column honestly marked n/a.';
+      window.showcaseTelemetry?.assert('bufferview-punning-fallback', !supported() || why.length > 0, { why, supported: supported() });
+    } finally {
+      busy = false;
+    }
+  }
+
+  $('runBtn').addEventListener('click', run);
+  for (let i = 0; i < 4; i++) $('f' + i).addEventListener('change', () => renderCPU(readInputs(), null));
+  run();
+})();
+</script></body></html>
