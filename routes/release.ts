@@ -4851,7 +4851,144 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
   ) {
     return renderV151RedirectChain(req);
   }
+  if (release === "v151") {
+    const dpoResponse = await renderDeclarativePerformanceObserverRoute(req, sub);
+    if (dpoResponse) return dpoResponse;
+  }
 
   return (await readReleaseAsset(release, sub)) ??
     new Response("Not found", { status: 404 });
+}
+
+// ── Declarative Performance Observer (v151, chromestatus 6594955352080384) ──
+// The proposal is a declarative HTTP response header (`Performance-Observer`)
+// integrated with the Reporting API. Nothing ships in Chrome yet, so the demo
+// exercises the two REAL server-side halves the explainer defines: a route
+// that emits a syntactically-valid header pair, and a Reporting-API-shaped
+// endpoint that stores anything a (future) browser actually delivers.
+
+const DPO_PREFIX = "/declarative-performance-observer";
+
+// entry-types values mirror PerformanceObserver.supportedEntryTypes; the
+// explainer names navigation / mark / visibility-state explicitly.
+const DPO_ENTRY_TYPES = new Set([
+  "navigation",
+  "mark",
+  "measure",
+  "visibility-state",
+  "resource",
+  "paint",
+  "event",
+  "longtask",
+  "largest-contentful-paint",
+  "first-input",
+  "layout-shift",
+]);
+
+const DPO_MARK_NAME = /^[A-Za-z0-9_.:-]{1,64}$/;
+const DPO_MAX_REPORTS = 20;
+const dpoReceivedReports: Array<{
+  receivedAt: string;
+  contentType: string | null;
+  byteLength: number;
+  body: unknown;
+}> = [];
+
+async function renderDeclarativePerformanceObserverRoute(
+  req: Request,
+  sub: string,
+): Promise<Response | null> {
+  if (sub === `${DPO_PREFIX}/header-echo`) {
+    const url = new URL(req.url);
+    const requestedEntryTypes = url.searchParams.getAll("entry").flatMap((v) =>
+      v.split(",").map((t) => t.trim()).filter(Boolean)
+    );
+    const acceptedEntryTypes = [
+      ...new Set(requestedEntryTypes.filter((t) => DPO_ENTRY_TYPES.has(t))),
+    ].slice(0, 8);
+    const rejectedEntryTypes = [
+      ...new Set(requestedEntryTypes.filter((t) => !DPO_ENTRY_TYPES.has(t))),
+    ];
+    const requestedMarks = url.searchParams.getAll("mark").flatMap((v) =>
+      v.split(",").map((t) => t.trim()).filter(Boolean)
+    );
+    const acceptedMarks = [...new Set(requestedMarks.filter((m) => DPO_MARK_NAME.test(m)))]
+      .slice(0, 8);
+    const rejectedMarks = [...new Set(requestedMarks.filter((m) => !DPO_MARK_NAME.test(m)))];
+    const captureEarlyFailures = url.searchParams.get("early") === "1";
+
+    const directives = ['report-to="telemetry"'];
+    if (acceptedEntryTypes.length) {
+      directives.push(`entry-types=(${acceptedEntryTypes.map((t) => `"${t}"`).join(" ")})`);
+    }
+    if (acceptedMarks.length) {
+      directives.push(`include-user-timing=(${acceptedMarks.map((m) => `"${m}"`).join(" ")})`);
+    }
+    if (captureEarlyFailures) directives.push("capture-early-failures=?1");
+    const headerValue = directives.join(", ");
+    const reportingEndpoints = `telemetry="${url.origin}/v151${DPO_PREFIX}/report"`;
+
+    return jsonResponse({
+      endpoint: url.pathname,
+      status: 200,
+      receivedAt: new Date().toISOString(),
+      responseHeaders: {
+        "performance-observer": headerValue,
+        "reporting-endpoints": reportingEndpoints,
+      },
+      accepted: {
+        entryTypes: acceptedEntryTypes,
+        includeUserTiming: acceptedMarks,
+        captureEarlyFailures,
+      },
+      rejected: { entryTypes: rejectedEntryTypes, includeUserTiming: rejectedMarks },
+      note: "The Performance-Observer header on this response is real and follows the " +
+        "explainer's structured-field syntax, but no shipping Chrome processes it yet — " +
+        "the proposal is pre-incubation. If a browser ever acts on it, its report will " +
+        "surface at the /report endpoint below.",
+    }, {
+      headers: {
+        "performance-observer": headerValue,
+        "reporting-endpoints": reportingEndpoints,
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  if (sub === `${DPO_PREFIX}/report`) {
+    if (req.method === "POST") {
+      const contentType = req.headers.get("content-type");
+      let body: unknown = null;
+      let byteLength = 0;
+      try {
+        const raw = await req.arrayBuffer();
+        byteLength = raw.byteLength;
+        if (byteLength > 32 * 1024) {
+          return jsonResponse({ error: "Report payload too large." }, { status: 413 });
+        }
+        body = JSON.parse(new TextDecoder().decode(raw));
+      } catch {
+        return jsonResponse({ error: "Report payload was not valid JSON." }, { status: 400 });
+      }
+      dpoReceivedReports.push({
+        receivedAt: new Date().toISOString(),
+        contentType,
+        byteLength,
+        body,
+      });
+      if (dpoReceivedReports.length > DPO_MAX_REPORTS) dpoReceivedReports.shift();
+      return jsonResponse({ stored: true, totalStored: dpoReceivedReports.length });
+    }
+    return jsonResponse({
+      count: dpoReceivedReports.length,
+      note: dpoReceivedReports.length === 0
+        ? "No reports have been delivered to this endpoint. That is the expected state " +
+          "until a browser implements the Performance-Observer header (or something " +
+          "POSTs a Reporting-API-shaped payload here, e.g. the journey-recorder demo)."
+        : "Reports below were POSTed to this Reporting-API-shaped endpoint.",
+      reports: dpoReceivedReports.slice(-5),
+    });
+  }
+
+  return null;
 }
