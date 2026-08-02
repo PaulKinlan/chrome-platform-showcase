@@ -5108,6 +5108,13 @@ Reporting-Endpoints: ${esc(reportingEndpoints)}</code></pre></section>
       const bucket = await dpoReadBucket(token);
       bucket.push({ receivedAt: new Date().toISOString(), contentType, byteLength, body });
       while (bucket.length > DPO_MAX_REPORTS_PER_TOKEN) bucket.shift();
+      // Deno KV caps values at 64 KiB; several near-32 KiB reports in one
+      // bucket would exceed it and make kv.set fail after we already claimed
+      // storage. Trim oldest reports until the serialized bucket fits with
+      // margin, so the newest report is always durably stored.
+      while (bucket.length > 1 && JSON.stringify(bucket).length > 48 * 1024) {
+        bucket.shift();
+      }
       await dpoWriteBucket(token, bucket);
       return jsonResponse({ stored: true, scoped: true, totalStored: bucket.length });
     }
