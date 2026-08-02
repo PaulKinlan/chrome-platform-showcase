@@ -4901,9 +4901,14 @@ async function renderDeclarativePerformanceObserverRoute(
     const requestedEntryTypes = url.searchParams.getAll("entry").flatMap((v) =>
       v.split(",").map((t) => t.trim()).filter(Boolean)
     );
-    const acceptedEntryTypes = [
+    const validEntryTypes = [
       ...new Set(requestedEntryTypes.filter((t) => DPO_ENTRY_TYPE.test(t))),
-    ].slice(0, 12);
+    ];
+    const acceptedEntryTypes = validEntryTypes.slice(0, 32);
+    // Never silently drop a valid selection: anything over the cap is
+    // reported back explicitly so the emitted header always matches what the
+    // client can see was negotiated.
+    const overCapEntryTypes = validEntryTypes.slice(32);
     const rejectedEntryTypes = [
       ...new Set(requestedEntryTypes.filter((t) => !DPO_ENTRY_TYPE.test(t))),
     ];
@@ -4978,7 +4983,11 @@ Reporting-Endpoints: ${esc(reportingEndpoints)}</code></pre></section>
         includeUserTiming: acceptedMarks,
         captureEarlyFailures,
       },
-      rejected: { entryTypes: rejectedEntryTypes, includeUserTiming: rejectedMarks },
+      rejected: {
+        entryTypes: rejectedEntryTypes,
+        entryTypesOverCap: overCapEntryTypes,
+        includeUserTiming: rejectedMarks,
+      },
       note: "The Performance-Observer header on this response is real and follows the " +
         "explainer's structured-field syntax, but no shipping Chrome processes it yet — " +
         "the proposal is pre-incubation. If a browser ever acts on it, its report will " +
