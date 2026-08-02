@@ -4869,21 +4869,12 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
 
 const DPO_PREFIX = "/declarative-performance-observer";
 
-// entry-types values mirror PerformanceObserver.supportedEntryTypes; the
-// explainer names navigation / mark / visibility-state explicitly.
-const DPO_ENTRY_TYPES = new Set([
-  "navigation",
-  "mark",
-  "measure",
-  "visibility-state",
-  "resource",
-  "paint",
-  "event",
-  "longtask",
-  "largest-contentful-paint",
-  "first-input",
-  "layout-shift",
-]);
+// entry-types values mirror PerformanceObserver.supportedEntryTypes, which
+// grows over time (element, long-animation-frame, …), so validation is a
+// syntax check rather than a fixed allowlist: the client seeds its controls
+// from the browser's real supportedEntryTypes and this stays compatible with
+// vocabulary this server has never heard of.
+const DPO_ENTRY_TYPE = /^[a-z][a-z0-9-]{0,40}$/;
 
 const DPO_MARK_NAME = /^[A-Za-z0-9_.:-]{1,64}$/;
 // Reports are scoped by a per-visitor token so one visitor's payload is never
@@ -4905,16 +4896,16 @@ async function renderDeclarativePerformanceObserverRoute(
   req: Request,
   sub: string,
 ): Promise<Response | null> {
-  if (sub === `${DPO_PREFIX}/header-echo`) {
+  if (sub === `${DPO_PREFIX}/header-echo` || sub === `${DPO_PREFIX}/navigate`) {
     const url = new URL(req.url);
     const requestedEntryTypes = url.searchParams.getAll("entry").flatMap((v) =>
       v.split(",").map((t) => t.trim()).filter(Boolean)
     );
     const acceptedEntryTypes = [
-      ...new Set(requestedEntryTypes.filter((t) => DPO_ENTRY_TYPES.has(t))),
-    ].slice(0, 8);
+      ...new Set(requestedEntryTypes.filter((t) => DPO_ENTRY_TYPE.test(t))),
+    ].slice(0, 12);
     const rejectedEntryTypes = [
-      ...new Set(requestedEntryTypes.filter((t) => !DPO_ENTRY_TYPES.has(t))),
+      ...new Set(requestedEntryTypes.filter((t) => !DPO_ENTRY_TYPE.test(t))),
     ];
     const requestedMarks = url.searchParams.getAll("mark").flatMap((v) =>
       v.split(",").map((t) => t.trim()).filter(Boolean)
@@ -4937,6 +4928,42 @@ async function renderDeclarativePerformanceObserverRoute(
     const reportUrl = `${url.origin}/v151${DPO_PREFIX}/report` +
       (token && DPO_TOKEN.test(token) ? `?t=${token}` : "");
     const reportingEndpoints = `telemetry="${reportUrl}"`;
+
+    if (sub === `${DPO_PREFIX}/navigate`) {
+      // A real DOCUMENT NAVIGATION response carrying the configured header
+      // pair — the activation model the explainer defines. In a browser that
+      // implements the proposal, loading this page starts browser-side
+      // recording for this session; its report would land at the token-scoped
+      // /report endpoint.
+      const esc = (s: string) =>
+        s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+      const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Navigation response — Declarative Performance Observer — chrome platform showcase</title><link rel="stylesheet" href="/public/styles.css"></head>
+<body><main>
+  <p class="crumbs"><a href="/v151${DPO_PREFIX}/header-anatomy/">&larr; Header anatomy</a></p>
+  <header class="lede-block"><p class="eyebrow">v151 · performance · navigation response</p><h1>This navigation carried the header</h1><p class="lede">The document you are reading arrived with the <code>Performance-Observer</code> and <code>Reporting-Endpoints</code> response headers below — the navigation-time activation the explainer describes, not a post-load subresource fetch.</p></header>
+  <div class="note">In a browser that implements the proposal, loading this page has just activated browser-side recording for this session; the consolidated report will be delivered to the (token-scoped) report endpoint when the session ends. In today's browsers nothing is recorded — that absence is the honest current state.</div>
+  <section><h2>headers on this navigation response</h2><pre tabindex="0"><code>Performance-Observer: ${
+        esc(headerValue)
+      }
+Reporting-Endpoints: ${esc(reportingEndpoints)}</code></pre></section>
+  <section><h2>check for a delivered report</h2><p>${
+        token && DPO_TOKEN.test(token)
+          ? "After leaving this page, use the journey-recorder page&#39;s &quot;Check what the endpoint has stored&quot; button (same visitor token) to look for a browser-delivered report."
+          : "No visitor token was included, so any browser-delivered report will be counted but not stored. Re-open this page from the header-anatomy builder to include your token."
+      }</p></section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main></body></html>`;
+      return new Response(html, {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "performance-observer": headerValue,
+          "reporting-endpoints": reportingEndpoints,
+          "cache-control": "no-store",
+        },
+      });
+    }
 
     return jsonResponse({
       endpoint: url.pathname,

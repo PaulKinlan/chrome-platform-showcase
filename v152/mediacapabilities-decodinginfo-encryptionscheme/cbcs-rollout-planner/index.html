@@ -51,6 +51,25 @@ const [cenc, cbcs] = await Promise.all([ask('cenc'), ask('cbcs')]);
   const raw = document.getElementById('raw');
   const planHeading = document.getElementById('plan-heading');
   const planBody = document.getElementById('plan-body');
+  // Pre-v152 browsers silently ignore encryptionScheme, which would make the
+  // cenc and cbcs queries identical unscoped calls — never base a packaging
+  // recommendation on that. Run the impossible-scheme litmus inline first.
+  const LITMUS_VIDEOS = [
+    { contentType: 'video/mp4; codecs="avc1.64001F"', width: 1280, height: 720, bitrate: 2500000, framerate: 30 },
+    { contentType: 'video/webm; codecs="vp09.00.10.08"', width: 1280, height: 720, bitrate: 2500000, framerate: 30 },
+    { contentType: 'video/mp4; codecs="av01.0.04M.08"', width: 1280, height: 720, bitrate: 2500000, framerate: 30 },
+  ];
+  async function schemeMemberConsulted() {
+    for (const v of LITMUS_VIDEOS) {
+      try {
+        const base = await navigator.mediaCapabilities.decodingInfo({ type: 'media-source', video: v, keySystemConfiguration: { keySystem: 'org.w3.clearkey', video: {} } });
+        if (!base.supported) continue;
+        const bogus = await navigator.mediaCapabilities.decodingInfo({ type: 'media-source', video: v, keySystemConfiguration: { keySystem: 'org.w3.clearkey', video: { encryptionScheme: 'showcase-nonexistent-scheme' } } });
+        return bogus.supported === false ? 'consulted' : 'ignored';
+      } catch { /* try next codec */ }
+    }
+    return 'inconclusive';
+  }
   document.getElementById('plan-btn').addEventListener('click', async () => {
     if (!navigator.mediaCapabilities?.decodingInfo) {
       planHeading.textContent = 'Cannot plan here';
@@ -61,6 +80,17 @@ const [cenc, cbcs] = await Promise.all([ask('cenc'), ask('cbcs')]);
     const keySystem = document.getElementById('ks').value;
     const contentType = document.getElementById('codec').value;
     const robustness = document.getElementById('rob').value;
+    raw.textContent = 'Checking whether encryptionScheme is consulted, then querying cenc and cbcs…';
+    const litmus = await schemeMemberConsulted();
+    if (litmus !== 'consulted') {
+      planHeading.textContent = 'No recommendation possible on this browser';
+      planBody.textContent = litmus === 'ignored'
+        ? 'This browser IGNORES the encryptionScheme member (it accepted an impossible scheme), so a cenc query and a cbcs query are the same unscoped call — any per-scheme recommendation from it would be untrustworthy. Use a Chrome 152+ build, and see the ignored-member detector for the proof.'
+        : 'The impossible-scheme litmus was inconclusive here (no decodable baseline codec), so per-scheme answers cannot be validated and no packaging recommendation is made.';
+      raw.textContent = 'litmus → ' + litmus + ' (per-scheme queries skipped: their answers would not be scheme-scoped)';
+      window.showcaseTelemetry?.assert('mc-planner-ran', true, { litmus, refused: true });
+      return;
+    }
     raw.textContent = 'Querying cenc and cbcs…';
     const video = { contentType, width: 1280, height: 720, bitrate: 2500000, framerate: 30 };
     async function ask(encryptionScheme) {
@@ -86,7 +116,7 @@ const [cenc, cbcs] = await Promise.all([ask('cenc'), ask('cbcs')]);
       planHeading.textContent = 'No encrypted playback for this configuration';
       planBody.textContent = 'Neither scheme is supported for ' + contentType + ' under ' + keySystem + (robustness ? ' at ' + robustness : '') + '. Try a lower robustness or a different codec — the answers above are the browser’s real refusals, not simulated.';
     }
-    window.showcaseTelemetry?.assert('mc-planner-ran', raw.textContent.includes('cenc'), { cenc, cbcs, keySystem, robustness });
+    window.showcaseTelemetry?.assert('mc-planner-ran', raw.textContent.includes('cenc'), { cenc, cbcs, keySystem, robustness, litmus });
   });
 })();
 </script></body></html>
