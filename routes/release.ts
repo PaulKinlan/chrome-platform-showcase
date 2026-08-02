@@ -4905,6 +4905,7 @@ interface DpoMinimalKv {
   get(key: unknown[]): Promise<{ value: unknown }>;
   set(key: unknown[], value: unknown, options?: { expireIn?: number }): Promise<unknown>;
   list(selector: { prefix: unknown[] }): AsyncIterable<{ key: unknown[]; value: unknown }>;
+  delete(key: unknown[]): Promise<void>;
 }
 let dpoKvPromise: Promise<DpoMinimalKv | null> | null = null;
 function getDpoKv(): Promise<DpoMinimalKv | null> {
@@ -4943,13 +4944,29 @@ async function dpoStoreReport(token: string, report: DpoStoredReport): Promise<b
   const kv = await getDpoKv();
   if (kv) {
     try {
+      // timestamp + per-process seq keep delivery order; the random UUID
+      // component makes keys globally unique even when two isolates write the
+      // same token in the same millisecond with equal seq counters.
       const key = [
         "dpo-report",
         token,
         Date.now().toString().padStart(16, "0"),
         (dpoReportSeq++).toString().padStart(6, "0"),
+        crypto.randomUUID(),
       ];
       await kv.set(key, report, { expireIn: DPO_REPORT_TTL_MS });
+      // Enforce retention at STORAGE time, not just in the response: delete
+      // everything older than the newest DPO_MAX_REPORTS_PER_TOKEN keys so a
+      // flood of POSTs cannot accumulate unbounded 32 KiB values per token
+      // or make later reads increasingly expensive.
+      const keys: unknown[][] = [];
+      for await (const entry of kv.list({ prefix: ["dpo-report", token] })) {
+        keys.push(entry.key);
+      }
+      const excess = keys.slice(0, Math.max(0, keys.length - DPO_MAX_REPORTS_PER_TOKEN));
+      for (const staleKey of excess) {
+        await kv.delete(staleKey).catch(() => {});
+      }
       return true;
     } catch {
       return false; // surfaced to the caller as stored:false

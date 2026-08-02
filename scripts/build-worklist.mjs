@@ -83,7 +83,14 @@ async function localInventory() {
       const indexUrl = new URL("index.html", featureUrl);
       if (!(await exists(indexUrl))) continue;
       const html = await Deno.readTextFile(indexUrl);
-      const identity = Number(html.match(ID_RE)?.[1] || 0);
+      // A feature index can link more than one ChromeStatus ID — the original
+      // identity plus "current listing" links added when ChromeStatus refiles
+      // a feature under a new ID. Index them all so a refiled ID matches the
+      // existing demo instead of being scheduled as missing-demo again.
+      const identities = [
+        ...new Set([...html.matchAll(new RegExp(ID_RE, "g"))].map((m) => Number(m[1]))),
+      ];
+      const identity = identities[0] ?? 0;
       const concepts = [];
       for await (const concept of Deno.readDir(featureUrl)) {
         if (
@@ -102,6 +109,7 @@ async function localInventory() {
         slug: feature.name,
         route: `/${release}/${feature.name}/`,
         identity,
+        identities,
         concepts: concepts.sort(),
         conceptCount: concepts.length,
         portfolio,
@@ -125,9 +133,14 @@ const responsive = await readJson(new URL("responsive-support.json", ROOT), {});
 const gendn = await readJson(new URL("gendn-links.json", ROOT), { routes: [] });
 const gendnRoutes = new Set(gendn.routes || []);
 const inventory = await localInventory();
-const byMilestoneAndId = new Map(
-  inventory.map((record) => [`${record.milestone}:${record.identity}`, record]),
-);
+const byMilestoneAndId = new Map();
+for (const record of inventory) {
+  for (const id of record.identities ?? [record.identity]) {
+    if (!byMilestoneAndId.has(`${record.milestone}:${id}`)) {
+      byMilestoneAndId.set(`${record.milestone}:${id}`, record);
+    }
+  }
+}
 const expected = [];
 
 for (let milestone = minMilestone; milestone <= maxMilestone; milestone++) {
