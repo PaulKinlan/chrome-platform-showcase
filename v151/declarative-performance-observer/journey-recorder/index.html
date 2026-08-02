@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Journey recorder — Declarative Performance Observer — Chrome 151 — chrome platform showcase</title><link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font-weight: 700; min-block-size: 44px; }
+    .entry-log { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: 0; margin: 0; list-style: none; max-block-size: 16rem; overflow-y: auto; }
+    .entry-log li { padding: var(--space-2) var(--space-3); border-block-end: 1px solid var(--border-black); font-family: var(--font-mono); font-size: 0.85rem; overflow-wrap: anywhere; }
+    .entry-log li:last-child { border-block-end: 0; }
+    .payload, .result { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.8rem; max-block-size: 22rem; overflow-y: auto; }
+  </style>
+</head><body><main>
+  <p class="crumbs"><a href="../">&larr; Declarative Performance Observer</a></p>
+  <header class="lede-block"><p class="eyebrow">v151 · performance · reporting api</p><h1>Journey recorder</h1><p class="lede">The proposal asks the browser to record the same journey a page can capture today with <code>PerformanceObserver</code> — so this page does exactly that, live, and then assembles the explainer's <code>application/reports+json</code> payload from the entries it really observed and POSTs it to the real reporting endpoint.</p></header>
+  <div class="note">Everything below runs the shipped APIs: <code>PerformanceObserver</code> with <code>navigation</code>, <code>mark</code>, <code>measure</code>, and <code>visibility-state</code> entry types, and a real POST to this site's Reporting-API-shaped endpoint. Only the final <code>session-end</code> entry is synthesized — it is the one entry today's JavaScript can never truly record for itself, which is the proposal's point. Switch tabs or minimise the window to watch real <code>visibility-state</code> entries arrive.</div>
+  <section class="stage" aria-labelledby="rec-title"><h2 id="rec-title">Live journey</h2>
+    <div class="controls">
+      <button type="button" id="mark-hero">performance.mark('hero-image-loaded')</button>
+      <button type="button" id="mark-click">performance.mark('next-link-clicked')</button>
+      <button type="button" id="measure">measure('hero-to-click')</button>
+    </div>
+    <p style="margin:0;" id="observer-state" role="status">Starting observers…</p>
+    <ol class="entry-log" id="log" aria-label="Observed performance entries" aria-live="polite"></ol>
+  </section>
+  <section class="stage" aria-labelledby="payload-title"><h2 id="payload-title">Consolidated report</h2>
+    <p style="margin:0;">Built from the entries above in the explainer's report format, with a synthesized <code>session-end</code> entry appended (clearly labelled — the browser cannot produce it today):</p>
+    <output class="payload" id="payload">No entries captured yet.</output>
+    <div class="controls"><button type="button" id="deliver">POST the report to ../report (real endpoint)</button><button type="button" id="check">Check what the endpoint has stored</button></div>
+    <div class="result" id="deliver-result" role="status">Not delivered yet.</div>
+  </section>
+  <section><h2>code path</h2><pre tabindex="0"><code>const po = new PerformanceObserver((list) => render(list.getEntries()));
+po.observe({ type: 'mark', buffered: true });
+po.observe({ type: 'measure', buffered: true });
+po.observe({ type: 'navigation', buffered: true });
+po.observe({ type: 'visibility-state', buffered: true }); // Chrome 129+
+
+// the explainer's delivery format (application/reports+json)
+[{ type: 'performance-observer', age, url, user_agent,
+   body: { entries: [ PerformanceNavigationTiming, PerformanceMark, …,
+                      { entryType: 'session-end', … } ] } }]</code></pre></section>
+  <section><h2>see also</h2><ul><li><a href="https://chromestatus.com/feature/6594955352080384" target="_blank" rel="noopener">ChromeStatus entry</a></li><li><a href="https://github.com/explainers-by-googlers/declarative-performance-observer#report-format" target="_blank" rel="noopener">Explainer — report format</a></li><li><a href="https://developer.mozilla.org/en-US/docs/Web/API/VisibilityStateEntry" target="_blank" rel="noopener">MDN — VisibilityStateEntry</a></li><li><a href="../">Feature overview</a></li></ul></section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main><script>
+(() => {
+  const log = document.getElementById('log');
+  const payloadOut = document.getElementById('payload');
+  const stateOut = document.getElementById('observer-state');
+  const deliverResult = document.getElementById('deliver-result');
+  const captured = [];
+  const seen = new Set();
+  // Per-visitor scope for the report endpoint: bodies are stored and read back
+  // only under this token, so deliveries never leak across visitors. Kept in
+  // localStorage so the reliability-gap page's fetchLater beacon lands in the
+  // same bucket and survives a leave-and-return check.
+  let reportToken = null;
+  try {
+    reportToken = localStorage.getItem('dpo-report-token');
+    if (!reportToken) {
+      reportToken = crypto.randomUUID();
+      localStorage.setItem('dpo-report-token', reportToken);
+    }
+  } catch {
+    reportToken = crypto.randomUUID();
+  }
+  function entrySummary(e) {
+    // Serialize the COMPLETE entry the observer delivered: toJSON() carries
+    // every subtype field (the full PerformanceNavigationTiming timings, mark
+    // metadata, …) so the posted report contains the actual entry
+    // representations the explainer format describes. mark/measure `detail`
+    // is not part of toJSON() and is re-attached when serializable.
+    let base;
+    try {
+      base = typeof e.toJSON === 'function' ? e.toJSON() : { name: e.name, entryType: e.entryType, startTime: e.startTime, duration: e.duration };
+    } catch {
+      base = { name: e.name, entryType: e.entryType, startTime: e.startTime, duration: e.duration };
+    }
+    if ((e.entryType === 'mark' || e.entryType === 'measure') && e.detail !== undefined && e.detail !== null) {
+      try { base.detail = JSON.parse(JSON.stringify(e.detail)); } catch { /* non-serializable detail */ }
+    }
+    return base;
+  }
+  const seenObjects = new WeakSet();
+  function renderEntry(e) {
+    // observe({buffered: true}) per type can replay already-buffered entries.
+    // Dedupe by OBJECT identity so replayed deliveries of the same entry show
+    // once while genuinely distinct entries with equal fields (e.g. the same
+    // measure() run twice) are all preserved. The navigation entry needs a
+    // value key too because its updating duration can surface as re-wrapped
+    // deliveries — there is only ever one navigation entry per document.
+    if (seenObjects.has(e)) return;
+    seenObjects.add(e);
+    if (e.entryType === 'navigation') {
+      const key = e.entryType + '|' + e.name;
+      if (seen.has(key)) return;
+      seen.add(key);
+    }
+    captured.push(entrySummary(e));
+    const li = document.createElement('li');
+    li.textContent = e.entryType + ' — ' + e.name + ' @ ' + (Math.round(e.startTime * 10) / 10) + 'ms';
+    log.append(li);
+    log.scrollTop = log.scrollHeight;
+    renderPayload();
+  }
+  function buildReport() {
+    return [{
+      type: 'performance-observer',
+      age: 0,
+      url: location.href,
+      user_agent: navigator.userAgent,
+      body: {
+        entries: [
+          ...captured,
+          { name: 'session-end-event', entryType: 'session-end', startTime: Math.round(performance.now() * 10) / 10, duration: 0, synthesized: 'this entry is simulated by the page — no browser emits session-end today' },
+        ],
+      },
+    }];
+  }
+  function renderPayload() {
+    payloadOut.textContent = JSON.stringify(buildReport(), null, 2);
+  }
+  // The telemetry shim loads via a DEFERRED script, so at inline-script time
+  // window.showcaseTelemetry does not exist yet and an optional-chained call
+  // would silently drop these load-time probes. Defer them until the shim ran.
+  function assertWhenTelemetryReady(id, ok, details) {
+    const emit = () => window.showcaseTelemetry?.assert(id, ok, details);
+    if (window.showcaseTelemetry) emit();
+    else if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', emit, { once: true });
+    else emit();
+  }
+  if (typeof PerformanceObserver === 'undefined') {
+    stateOut.textContent = 'PerformanceObserver is not available in this browser, so the live journey cannot be recorded here.';
+    assertWhenTelemetryReady('dpo-journey-observer-fallback', true, { supported: false });
+  } else {
+    const supported = PerformanceObserver.supportedEntryTypes ?? [];
+    const wanted = ['navigation', 'mark', 'measure', 'visibility-state'];
+    const active = [];
+    const po = new PerformanceObserver((list) => list.getEntries().forEach(renderEntry));
+    for (const type of wanted) {
+      if (!supported.includes(type)) continue;
+      try { po.observe({ type, buffered: true }); active.push(type); } catch { /* type rejected */ }
+    }
+    const missing = wanted.filter((t) => !active.includes(t));
+    stateOut.textContent = 'Observing: ' + active.join(', ') + (missing.length ? ' — not supported here: ' + missing.join(', ') : '') + '. Interact below, or hide and re-show this tab.';
+    assertWhenTelemetryReady('dpo-journey-observer-active', active.length >= 2, { active, missing });
+  }
+  document.getElementById('mark-hero').addEventListener('click', () => performance.mark('hero-image-loaded', { detail: { source: 'journey-recorder' } }));
+  document.getElementById('mark-click').addEventListener('click', () => performance.mark('next-link-clicked'));
+  document.getElementById('measure').addEventListener('click', () => {
+    const marks = performance.getEntriesByName('hero-image-loaded', 'mark');
+    if (!marks.length || !performance.getEntriesByName('next-link-clicked', 'mark').length) {
+      deliverResult.textContent = 'measure needs both marks first — click the two mark buttons, then measure.';
+      return;
+    }
+    try { performance.measure('hero-to-click', 'hero-image-loaded', 'next-link-clicked'); } catch (err) { deliverResult.textContent = 'measure failed: ' + err; }
+  });
+  const deliverBtn = document.getElementById('deliver');
+  const checkBtn = document.getElementById('check');
+  // Serialize delivery and readback: overlapping requests would race on the
+  // shared result panel and could show a stale count or overwrite a newer
+  // readback with an older completion.
+  function setReportBusy(busy) {
+    deliverBtn.disabled = busy;
+    checkBtn.disabled = busy;
+  }
+  deliverBtn.addEventListener('click', async () => {
+    setReportBusy(true);
+    deliverResult.textContent = 'POSTing report…';
+    try {
+      const res = await fetch('../report?t=' + encodeURIComponent(reportToken), { method: 'POST', headers: { 'content-type': 'application/reports+json' }, body: JSON.stringify(buildReport()) });
+      const body = await res.json();
+      deliverResult.textContent = 'HTTP ' + res.status + ' — ' + JSON.stringify(body);
+      window.showcaseTelemetry?.assert('dpo-journey-report-post', res.ok, { status: res.status });
+    } catch (err) {
+      deliverResult.textContent = 'Report POST failed: ' + err;
+      window.showcaseTelemetry?.assert('dpo-journey-report-post', false, { error: String(err) });
+    } finally {
+      setReportBusy(false);
+    }
+  });
+  checkBtn.addEventListener('click', async () => {
+    setReportBusy(true);
+    deliverResult.textContent = 'Fetching stored reports…';
+    try {
+      const res = await fetch('../report?t=' + encodeURIComponent(reportToken));
+      const body = await res.json();
+      if (!res.ok) {
+        deliverResult.textContent = 'Endpoint returned HTTP ' + res.status + ': ' + (body.error ?? JSON.stringify(body)) + '\nThis is the store reporting its own failure honestly — retry shortly.';
+        return;
+      }
+      deliverResult.textContent = 'Endpoint has stored ' + body.count + ' report(s) for this visitor token.\n' + body.note + (body.reports.length ? '\n\nMost recent:\n' + JSON.stringify(body.reports[body.reports.length - 1], null, 2) : '');
+    } catch (err) {
+      deliverResult.textContent = 'Endpoint check failed: ' + err;
+    } finally {
+      setReportBusy(false);
+    }
+  });
+  renderPayload();
+})();
+</script></body></html>

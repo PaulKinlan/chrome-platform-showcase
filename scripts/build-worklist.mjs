@@ -83,7 +83,25 @@ async function localInventory() {
       const indexUrl = new URL("index.html", featureUrl);
       if (!(await exists(indexUrl))) continue;
       const html = await Deno.readTextFile(indexUrl);
-      const identity = Number(html.match(ID_RE)?.[1] || 0);
+      // Identity comes from the EXPLICIT "ChromeStatus entry" reference links
+      // (the skeleton's convention), not from any ID that happens to appear in
+      // prose — pages legitimately mention related features' IDs in context
+      // (e.g. interest-invokers discusses Popover Hint before its own entry).
+      // Multiple labeled links are the original identity plus "current
+      // listing" links added when ChromeStatus refiles a feature; index them
+      // all so a refiled ID matches the existing demo. Pages without a
+      // labeled link (uber demos) fall back to the first bare ID, matching
+      // the previous behavior.
+      const labeled = [
+        ...new Set(
+          [...html.matchAll(/chromestatus\.com\/feature\/(\d+)"[^>]*>\s*ChromeStatus entry/g)]
+            .map((m) => Number(m[1])),
+        ),
+      ];
+      const identities = labeled.length ? labeled : [
+        ...new Set([...html.matchAll(new RegExp(ID_RE, "g"))].map((m) => Number(m[1]))),
+      ].slice(0, 1);
+      const identity = identities[0] ?? 0;
       const concepts = [];
       for await (const concept of Deno.readDir(featureUrl)) {
         if (
@@ -102,6 +120,7 @@ async function localInventory() {
         slug: feature.name,
         route: `/${release}/${feature.name}/`,
         identity,
+        identities,
         concepts: concepts.sort(),
         conceptCount: concepts.length,
         portfolio,
@@ -125,9 +144,26 @@ const responsive = await readJson(new URL("responsive-support.json", ROOT), {});
 const gendn = await readJson(new URL("gendn-links.json", ROOT), { routes: [] });
 const gendnRoutes = new Set(gendn.routes || []);
 const inventory = await localInventory();
-const byMilestoneAndId = new Map(
-  inventory.map((record) => [`${record.milestone}:${record.identity}`, record]),
-);
+const byMilestoneAndId = new Map();
+// Primary identities (the first ID in each index) always win, deterministically.
+// Aggregate pages are excluded here too: an uber demo carries no labeled
+// identity link, so its fallback "identity" is just the first feature ID it
+// happens to mention — inserting it would collide with that feature's real
+// demo record, with the winner decided by directory iteration order.
+for (const record of inventory) {
+  if (/^uber-demo/.test(record.slug)) continue;
+  byMilestoneAndId.set(`${record.milestone}:${record.identity}`, record);
+}
+// Secondary IDs only fill remaining gaps, and never from aggregate pages:
+// an uber demo intentionally links many unrelated features' ChromeStatus IDs,
+// which must not become identity aliases for those features.
+for (const record of inventory) {
+  if (/^uber-demo/.test(record.slug)) continue;
+  for (const id of record.identities ?? []) {
+    const key = `${record.milestone}:${id}`;
+    if (!byMilestoneAndId.has(key)) byMilestoneAndId.set(key, record);
+  }
+}
 const expected = [];
 
 for (let milestone = minMilestone; milestone <= maxMilestone; milestone++) {

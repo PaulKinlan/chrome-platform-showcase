@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>The reliability gap — Declarative Performance Observer — Chrome 151 — chrome platform showcase</title><link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font-weight: 700; min-block-size: 44px; }
+    .result { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.85rem; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.9rem; }
+    /* accent-emerald alone is ~3.9:1 on white at 0.9rem — darken to pass AA */
+    .yes { color: color-mix(in srgb, var(--accent-emerald) 75%, var(--text-black)); font-weight: 700; }
+    .no { color: var(--accent-rose); font-weight: 700; }
+  </style>
+</head><body><main>
+  <p class="crumbs"><a href="../">&larr; Declarative Performance Observer</a></p>
+  <header class="lede-block"><p class="eyebrow">v151 · performance · resilience</p><h1>The reliability gap</h1><p class="lede">Three live experiments on the gap the proposal exists to close: whether this browser exposes the proposed <code>session-end</code> entry type, proof that an abruptly-terminated context loses its final message, and the shipped API that narrows the gap today — <code>fetchLater()</code>.</p></header>
+  <section class="stage" aria-labelledby="probe-title"><h2 id="probe-title">1 · Probe the proposed surface</h2>
+    <p style="margin:0;">The explainer defines a new <code>PerformanceSessionEndTiming</code> entry (<code>entryType: "session-end"</code>). If Chrome ever ships it, it must appear in <code>PerformanceObserver.supportedEntryTypes</code> — the exact list this button reads.</p>
+    <div class="controls"><button type="button" id="probe">Probe supportedEntryTypes for "session-end"</button></div>
+    <div class="result" id="probe-result" role="status">Not probed yet.</div>
+  </section>
+  <section class="stage" aria-labelledby="loss-title"><h2 id="loss-title">2 · Watch a final beacon get lost</h2>
+    <p style="margin:0;">A worker stands in for a page whose renderer is killed. Its final telemetry is a <strong>real network POST</strong> to this site's reporting endpoint: graceful shutdown lets that beacon reach the server, while <code>worker.terminate()</code> — like an OOM kill — destroys the context <em>before the send is ever reached</em>, so the endpoint provably never receives it (the table's verdict comes from querying the endpoint, not from the worker's own claims). That is precisely how real OOM kills lose telemetry: the code that would have sent the beacon simply never runs, and JavaScript cannot report its own death.</p>
+    <div class="controls"><button type="button" id="graceful">Run worker, graceful shutdown</button><button type="button" id="abrupt">Run worker, terminate() mid-task</button></div>
+    <div class="result" id="loss-result" role="status">No run yet.</div>
+    <table aria-label="Beacon delivery results"><thead><tr><th scope="col">Run</th><th scope="col">Progress messages</th><th scope="col">Final beacon at the endpoint?</th></tr></thead><tbody id="loss-rows"><tr><td colspan="3">No runs recorded.</td></tr></tbody></table>
+  </section>
+  <section class="stage" aria-labelledby="today-title"><h2 id="today-title">3 · Today's best answer: fetchLater()</h2>
+    <p style="margin:0;">Until the header ships, <code>fetchLater()</code> is the most reliable way to get end-of-session data out: the browser owns the deferred request and sends it even if the tab is closed. This button feature-detects and schedules a real deferred beacon to this site's reporting endpoint (it is delivered when you leave this page).</p>
+    <div class="controls"><button type="button" id="fl">Schedule a deferred beacon with fetchLater()</button></div>
+    <div class="result" id="fl-result" role="status">Not scheduled. fetchLater support has not been probed yet.</div>
+  </section>
+  <section><h2>code path</h2><pre tabindex="0"><code>// 1 — the future probe (can flip to true when Chrome ships the proposal)
+PerformanceObserver.supportedEntryTypes.includes('session-end');
+
+// 3 — the shipped mitigation (check for the NATIVE API: a page shim or
+// polyfill assigned to window.fetchLater is not browser-owned delivery)
+if (typeof fetchLater === 'function' &amp;&amp; String(fetchLater).includes('[native code]')) {
+  fetchLater('../report', { method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'fetchlater-session-beacon', … }) });
+}</code></pre></section>
+  <section><h2>see also</h2><ul><li><a href="https://chromestatus.com/feature/6594955352080384" target="_blank" rel="noopener">ChromeStatus entry</a></li><li><a href="https://github.com/explainers-by-googlers/declarative-performance-observer#use-cases" target="_blank" rel="noopener">Explainer — use cases</a></li><li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/fetchLater" target="_blank" rel="noopener">MDN — fetchLater()</a></li><li><a href="../">Feature overview</a></li></ul></section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main><script>
+(() => {
+  const probeResult = document.getElementById('probe-result');
+  document.getElementById('probe').addEventListener('click', () => {
+    if (typeof PerformanceObserver === 'undefined' || !Array.isArray(PerformanceObserver.supportedEntryTypes)) {
+      probeResult.textContent = 'PerformanceObserver.supportedEntryTypes is not exposed in this browser.';
+      window.showcaseTelemetry?.assert('dpo-session-end-probe-ran', true, { exposed: false });
+      return;
+    }
+    const types = PerformanceObserver.supportedEntryTypes;
+    const has = types.includes('session-end');
+    probeResult.textContent = (has
+      ? 'session-end IS in supportedEntryTypes — this browser exposes the proposed entry type!'
+      : 'session-end is not in supportedEntryTypes (expected: the proposal is pre-incubation).') +
+      '\n\nActual supportedEntryTypes reported by this browser:\n' + types.join(', ');
+    window.showcaseTelemetry?.assert('dpo-session-end-probe-ran', true, { sessionEnd: has, count: types.length });
+  });
+
+  // Per-visitor scope token shared with the journey-recorder page: the worker
+  // beacon, the fetchLater beacon, and later checks all use the same bucket.
+  // When storage is blocked the token lives only in this page, so any
+  // cross-page readback instruction must be withheld (tokenPersisted).
+  let reportToken = null;
+  let tokenPersisted = false;
+  try {
+    reportToken = localStorage.getItem('dpo-report-token');
+    if (!reportToken) {
+      reportToken = crypto.randomUUID();
+      localStorage.setItem('dpo-report-token', reportToken);
+    }
+    tokenPersisted = true;
+  } catch {
+    reportToken = crypto.randomUUID();
+  }
+
+  const lossResult = document.getElementById('loss-result');
+  const lossRows = document.getElementById('loss-rows');
+  const gracefulBtn = document.getElementById('graceful');
+  const abruptBtn = document.getElementById('abrupt');
+  // Serialize runs: overlapping workers would race their endpoint checks on
+  // the shared verdict panel, leaving it describing an earlier experiment.
+  function setLossBusy(busy) {
+    gracefulBtn.disabled = busy;
+    abruptBtn.disabled = busy;
+  }
+  let firstRun = true;
+  const workerSrc = `
+    onmessage = (e) => {
+      const { endpoint, runId } = e.data;
+      let progress = 0;
+      const tick = () => {
+        progress++;
+        postMessage({ kind: 'progress', progress });
+        if (progress >= 5) {
+          // The final telemetry is a REAL network POST — if this worker is
+          // terminated before reaching here, the endpoint never receives it.
+          fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'worker-final-beacon', runId }) })
+            .then(() => postMessage({ kind: 'final', progress }))
+            .catch(() => postMessage({ kind: 'final', progress }));
+          return;
+        }
+        setTimeout(tick, 200);
+      };
+      tick();
+    };`;
+  function runWorker(mode) {
+    if (typeof Worker === 'undefined') {
+      lossResult.textContent = 'Web Workers are not available here, so the termination experiment cannot run.';
+      window.showcaseTelemetry?.assert('dpo-loss-experiment-fallback', true, { supported: false });
+      return;
+    }
+    setLossBusy(true);
+    const blobUrl = URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' }));
+    const worker = new Worker(blobUrl);
+    const runId = crypto.randomUUID();
+    let progressCount = 0;
+    lossResult.textContent = mode === 'graceful' ? 'Worker running to completion…' : 'Worker running — will be terminated after ~500ms…';
+    worker.onmessage = (e) => {
+      if (e.data.kind === 'progress') progressCount = e.data.progress;
+    };
+    // The worker runs from a blob: URL, where relative paths cannot resolve —
+    // hand it the absolute endpoint URL.
+    worker.postMessage({ endpoint: new URL('../report?t=' + encodeURIComponent(reportToken), location.href).href, runId });
+    const killTimer = mode === 'abrupt' ? setTimeout(() => worker.terminate(), 500) : null;
+    setTimeout(async () => {
+      try {
+      if (killTimer) clearTimeout(killTimer);
+      worker.terminate();
+      URL.revokeObjectURL(blobUrl);
+      // Ground truth comes from the ENDPOINT, not the worker's own messages:
+      // ask the report store whether this run's beacon actually arrived.
+      let delivered = false;
+      let endpointChecked = false;
+      try {
+        const res = await fetch('../report?t=' + encodeURIComponent(reportToken));
+        if (res.ok) {
+          const data = await res.json();
+          endpointChecked = true;
+          delivered = (data.reports ?? []).some((r) => r?.body?.runId === runId);
+        }
+      } catch { /* endpoint unreachable — endpointChecked stays false */ }
+      if (firstRun) { lossRows.innerHTML = ''; firstRun = false; }
+      const tr = document.createElement('tr');
+      // Verdicts come from what the ENDPOINT actually received, never from
+      // the timer or the worker's own messages: an unreachable endpoint, a
+      // graceful run whose beacon has not landed, or an abrupt run where the
+      // worker never even progressed is inconclusive — not proof.
+      const conclusive = endpointChecked &&
+        (mode === 'graceful' ? delivered : (progressCount > 0 && !delivered));
+      const tdMode = document.createElement('td');
+      tdMode.textContent = mode === 'graceful' ? 'graceful shutdown' : 'terminate() mid-task';
+      const tdProg = document.createElement('td');
+      tdProg.textContent = String(progressCount);
+      const tdFinal = document.createElement('td');
+      if (!conclusive) {
+        tdFinal.textContent = 'inconclusive — see note';
+      } else {
+        tdFinal.textContent = delivered ? 'yes — endpoint received it' : 'NO — never sent, never received';
+        tdFinal.className = delivered ? 'yes' : 'no';
+      }
+      tr.append(tdMode, tdProg, tdFinal);
+      lossRows.append(tr);
+      if (!conclusive) {
+        lossResult.textContent = mode === 'graceful'
+          ? (endpointChecked ? 'Inconclusive graceful run: the endpoint has not received this run\u2019s beacon within the observation window (' + progressCount + ' progress messages). The worker may have started late on a busy device — run it again; this is not evidence of loss.' : 'Inconclusive: the reporting endpoint could not be queried, so beacon delivery cannot be judged either way.')
+          : (endpointChecked ? 'Inconclusive abrupt run: no progress messages were observed before terminate(), so the worker may never have started — the absent beacon proves nothing. Run it again.' : 'Inconclusive: the reporting endpoint could not be queried, so beacon delivery cannot be judged either way.');
+      } else {
+        lossResult.textContent = mode === 'graceful'
+          ? 'Graceful run: ' + progressCount + ' progress messages, and the reporting endpoint confirms the final beacon arrived.'
+          : 'Abrupt run: ' + progressCount + ' progress messages arrived, then terminate() destroyed the worker before it reached its final send — the reporting endpoint confirms no beacon was ever received. This is what an OOM kill does to renderer-side telemetry: the sending code never runs.';
+      }
+      window.showcaseTelemetry?.assert('dpo-loss-experiment-' + mode, conclusive, { progressCount, delivered, endpointChecked });
+      } finally {
+        setLossBusy(false);
+      }
+    }, mode === 'graceful' ? 2400 : 1600);
+  }
+  gracefulBtn.addEventListener('click', () => runWorker('graceful'));
+  abruptBtn.addEventListener('click', () => runWorker('abrupt'));
+
+  const flResult = document.getElementById('fl-result');
+  let flController = null;
+  // This site's telemetry shim (public/demo-telemetry.js) installs a
+  // keepalive-based polyfill on globalThis.fetchLater when the platform API is
+  // absent, so a bare `'fetchLater' in window` check would over-claim. Only a
+  // native implementation counts as browser capability here.
+  function nativeFetchLater() {
+    const fl = window.fetchLater;
+    if (typeof fl !== 'function') return null;
+    if (fl.name === 'fetchLaterPolyfill') return null;
+    try {
+      if (!String(fl).includes('[native code]')) return null;
+    } catch { return null; }
+    return fl;
+  }
+  document.getElementById('fl').addEventListener('click', () => {
+    const fl = nativeFetchLater();
+    if (!fl) {
+      flResult.textContent = typeof window.fetchLater === 'function'
+        ? 'Native fetchLater() is NOT available in this browser — the fetchLater on this page is the showcase telemetry shim’s keepalive-based polyfill, which is a best-effort fallback, not the platform API. The browser does not own deferred delivery here; this is the capability gap the proposal addresses.'
+        : 'fetchLater() is not available in this browser/context. It requires a recent Chrome and a secure or localhost context — this is a capability gap, not an error.';
+      window.showcaseTelemetry?.assert('dpo-fetchlater-fallback', true, { supported: false, polyfillPresent: typeof window.fetchLater === 'function' });
+      return;
+    }
+    try {
+      if (flController) flController.abort();
+      flController = new AbortController();
+      const payload = { type: 'fetchlater-session-beacon', scheduledAt: new Date().toISOString(), pageTimeMs: Math.round(performance.now()), note: 'queued by the reliability-gap demo; the browser delivers this when the page is left' };
+      const result = fl('../report?t=' + encodeURIComponent(reportToken), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: flController.signal });
+      flResult.textContent = 'Deferred beacon scheduled. fetchLater() returned { activated: ' + result.activated + ' } — the browser now owns delivery. ' + (tokenPersisted
+        ? 'Leave this page (navigate away or close the tab), come back, and use the journey-recorder page’s "Check what the endpoint has stored" button to see it arrive.'
+        : 'Storage is blocked in this browser, so the visitor token scoping this beacon exists only in this page and is lost when you leave — the endpoint will still receive the delivery, but the cross-page readback on the journey-recorder page cannot find it. Only this limitation of the demo’s readback is affected; the browser-owned delivery itself still happens.');
+      window.showcaseTelemetry?.assert('dpo-fetchlater-scheduled', typeof result.activated === 'boolean', { activated: result.activated });
+    } catch (err) {
+      flResult.textContent = 'fetchLater() threw: ' + err + ' — quota or argument error; the call was made for real.';
+      window.showcaseTelemetry?.assert('dpo-fetchlater-scheduled', false, { error: String(err) });
+    }
+  });
+})();
+</script></body></html>
