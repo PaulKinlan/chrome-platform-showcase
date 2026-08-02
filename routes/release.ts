@@ -5106,7 +5106,12 @@ async function renderDeclarativePerformanceObserverRoute(
 Reporting-Endpoints: ${esc(reportingEndpoints)}</code></pre></section>
   <section><h2>check for a delivered report</h2><p>${
         token && DPO_TOKEN.test(token)
-          ? "After leaving this page, use the journey-recorder page&#39;s &quot;Check what the endpoint has stored&quot; button (same visitor token) to look for a browser-delivered report."
+          ? (url.searchParams.get("ephemeral") === "1"
+            // The token was minted in a storage-blocked page: it exists only
+            // there, so the journey-recorder page (which mints its own token)
+            // could never find a report delivered under it.
+            ? "The visitor token in this URL was minted in a storage-blocked page and exists only there. A browser-delivered report would be retained under it, but no other page can read it back — the journey-recorder page will mint a different token. Cross-page readback is unavailable in this browser."
+            : "After leaving this page, use the journey-recorder page&#39;s &quot;Check what the endpoint has stored&quot; button (same visitor token) to look for a browser-delivered report.")
           : "No visitor token was included, so any browser-delivered report will be counted but not stored. Re-open this page from the header-anatomy builder to include your token."
       }</p></section>
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
