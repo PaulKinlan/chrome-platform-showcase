@@ -5006,8 +5006,23 @@ async function dpoStoreReport(
         keys.push(entry.key);
       }
       const excess = keys.slice(0, Math.max(0, keys.length - DPO_MAX_REPORTS_PER_TOKEN));
+      let trimFailed = false;
       for (const staleKey of excess) {
-        await kv.delete(staleKey).catch(() => {});
+        try {
+          await kv.delete(staleKey);
+        } catch {
+          trimFailed = true;
+        }
+      }
+      if (trimFailed) {
+        // Retention could not be enforced: a token whose deletes keep failing
+        // while writes succeed would otherwise grow past the per-token cap —
+        // and, being exempt from the new-token capacity refusal, past the
+        // deployment-wide cap — with every POST still reporting success.
+        // Roll the new write back (best-effort; the TTL drains it even if
+        // this delete also fails) and surface the KV failure instead.
+        await kv.delete(key).catch(() => {});
+        return "kv-error";
       }
       return "stored";
     } catch {
@@ -5209,7 +5224,8 @@ Reporting-Endpoints: ${esc(reportingEndpoints)}</code></pre></section>
           stored: false,
           scoped: true,
           error: "The report store rejected this write (transient KV failure). " +
-            "The delivery was NOT retained — retry, or check back without relying on it.",
+            "The delivery was not retained (rolled back where necessary) — retry, " +
+            "or check back without relying on it.",
         }, { status: 503 });
       }
       const current = await dpoReadReports(token);
