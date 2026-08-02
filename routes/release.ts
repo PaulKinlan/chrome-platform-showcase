@@ -4895,9 +4895,9 @@ interface DpoStoredReport {
 // agree. Each report lives under its OWN key — concurrent POSTs for a token
 // never read-modify-write a shared bucket (no lost updates) and no single KV
 // value can approach the 64 KiB limit. The process-local Map is used ONLY
-// when KV is entirely unavailable (local dev); when KV exists but a write
-// fails, the caller reports the failure honestly instead of shadow-writing
-// somewhere reads won't look.
+// when the KV API is entirely absent (local dev without --unstable-kv); when
+// KV exists but opening, reading, or writing fails, the caller reports the
+// failure honestly instead of shadow-writing somewhere reads won't look.
 const dpoReportsByToken = new Map<string, DpoStoredReport[]>();
 let dpoUnscopedReportCount = 0;
 let dpoReportSeq = 0;
@@ -4907,23 +4907,37 @@ interface DpoMinimalKv {
   list(selector: { prefix: unknown[] }): AsyncIterable<{ key: unknown[]; value: unknown }>;
   delete(key: unknown[]): Promise<void>;
 }
-let dpoKvPromise: Promise<DpoMinimalKv | null> | null = null;
-function getDpoKv(): Promise<DpoMinimalKv | null> {
+type DpoKvHandle =
+  | { state: "kv"; kv: DpoMinimalKv }
+  | { state: "absent" }
+  | { state: "open-failed" };
+let dpoKvPromise: Promise<DpoKvHandle> | null = null;
+function getDpoKv(): Promise<DpoKvHandle> {
   if (dpoKvPromise) return dpoKvPromise;
-  dpoKvPromise = (async () => {
+  const attempt = (async (): Promise<DpoKvHandle> => {
     const maybeDeno = Deno as unknown as { openKv?: () => Promise<DpoMinimalKv> };
-    if (typeof maybeDeno.openKv !== "function") return null;
+    if (typeof maybeDeno.openKv !== "function") return { state: "absent" };
     try {
-      return await maybeDeno.openKv();
+      return { state: "kv", kv: await maybeDeno.openKv() };
     } catch {
-      return null;
+      // A rejected open is a transient failure of a PRESENT KV API — never a
+      // license to fall back to the isolate-local map (a shadow store would
+      // acknowledge writes that reads on other isolates cannot see). Do not
+      // cache the failure: the next request re-attempts the open.
+      dpoKvPromise = null;
+      return { state: "open-failed" };
     }
   })();
-  return dpoKvPromise;
+  dpoKvPromise = attempt;
+  return attempt;
 }
 async function dpoReadReports(token: string): Promise<DpoStoredReport[] | null> {
-  const kv = await getDpoKv();
-  if (kv) {
+  const handle = await getDpoKv();
+  if (handle.state === "open-failed") {
+    return null; // KV exists but would not open — surfaced as a 503, not stale memory
+  }
+  if (handle.state === "kv") {
+    const kv = handle.kv;
     try {
       const reports: DpoStoredReport[] = [];
       // Keys sort lexicographically by [timestamp, seq] parts, so iteration
@@ -4945,8 +4959,12 @@ async function dpoStoreReport(
   token: string,
   report: DpoStoredReport,
 ): Promise<"stored" | "kv-error" | "at-capacity"> {
-  const kv = await getDpoKv();
-  if (kv) {
+  const handle = await getDpoKv();
+  if (handle.state === "open-failed") {
+    return "kv-error"; // KV exists but would not open — refuse, never shadow-store
+  }
+  if (handle.state === "kv") {
+    const kv = handle.kv;
     try {
       // Bound token cardinality deployment-wide: any caller can mint tokens,
       // so cap the TOTAL number of stored report keys. Existing tokens keep
