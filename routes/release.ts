@@ -4998,13 +4998,37 @@ Reporting-Endpoints: ${esc(reportingEndpoints)}</code></pre></section>
     const token = rawToken && DPO_TOKEN.test(rawToken) ? rawToken : null;
     if (req.method === "POST") {
       const contentType = req.headers.get("content-type");
+      const REPORT_LIMIT = 32 * 1024;
+      // Enforce the limit BEFORE buffering: reject an oversized declared
+      // length up front, then read the stream bounded so a chunked or lying
+      // client can never make this public endpoint buffer more than the cap.
+      const declaredLength = Number(req.headers.get("content-length") ?? "");
+      if (Number.isFinite(declaredLength) && declaredLength > REPORT_LIMIT) {
+        await req.body?.cancel().catch(() => {});
+        return jsonResponse({ error: "Report payload too large." }, { status: 413 });
+      }
       let body: unknown = null;
       let byteLength = 0;
       try {
-        const raw = await req.arrayBuffer();
-        byteLength = raw.byteLength;
-        if (byteLength > 32 * 1024) {
-          return jsonResponse({ error: "Report payload too large." }, { status: 413 });
+        const chunks: Uint8Array[] = [];
+        if (req.body) {
+          const reader = req.body.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            byteLength += value.byteLength;
+            if (byteLength > REPORT_LIMIT) {
+              await reader.cancel().catch(() => {});
+              return jsonResponse({ error: "Report payload too large." }, { status: 413 });
+            }
+            chunks.push(value);
+          }
+        }
+        const raw = new Uint8Array(byteLength);
+        let offset = 0;
+        for (const chunk of chunks) {
+          raw.set(chunk, offset);
+          offset += chunk.byteLength;
         }
         body = JSON.parse(new TextDecoder().decode(raw));
       } catch {

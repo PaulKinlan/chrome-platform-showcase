@@ -33,8 +33,9 @@
   <section><h2>code path</h2><pre tabindex="0"><code>// 1 — the future probe (can flip to true when Chrome ships the proposal)
 PerformanceObserver.supportedEntryTypes.includes('session-end');
 
-// 3 — the shipped mitigation
-if ('fetchLater' in window) {
+// 3 — the shipped mitigation (check for the NATIVE API: a page shim or
+// polyfill assigned to window.fetchLater is not browser-owned delivery)
+if (typeof fetchLater === 'function' &amp;&amp; String(fetchLater).includes('[native code]')) {
   fetchLater('../report', { method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ type: 'fetchlater-session-beacon', … }) });
@@ -130,17 +131,33 @@ if ('fetchLater' in window) {
   } catch {
     reportToken = crypto.randomUUID();
   }
+  // This site's telemetry shim (public/demo-telemetry.js) installs a
+  // keepalive-based polyfill on globalThis.fetchLater when the platform API is
+  // absent, so a bare `'fetchLater' in window` check would over-claim. Only a
+  // native implementation counts as browser capability here.
+  function nativeFetchLater() {
+    const fl = window.fetchLater;
+    if (typeof fl !== 'function') return null;
+    if (fl.name === 'fetchLaterPolyfill') return null;
+    try {
+      if (!String(fl).includes('[native code]')) return null;
+    } catch { return null; }
+    return fl;
+  }
   document.getElementById('fl').addEventListener('click', () => {
-    if (!('fetchLater' in window)) {
-      flResult.textContent = 'fetchLater() is not available in this browser/context. It requires a recent Chrome and a secure or localhost context — this is a capability gap, not an error.';
-      window.showcaseTelemetry?.assert('dpo-fetchlater-fallback', true, { supported: false });
+    const fl = nativeFetchLater();
+    if (!fl) {
+      flResult.textContent = typeof window.fetchLater === 'function'
+        ? 'Native fetchLater() is NOT available in this browser — the fetchLater on this page is the showcase telemetry shim’s keepalive-based polyfill, which is a best-effort fallback, not the platform API. The browser does not own deferred delivery here; this is the capability gap the proposal addresses.'
+        : 'fetchLater() is not available in this browser/context. It requires a recent Chrome and a secure or localhost context — this is a capability gap, not an error.';
+      window.showcaseTelemetry?.assert('dpo-fetchlater-fallback', true, { supported: false, polyfillPresent: typeof window.fetchLater === 'function' });
       return;
     }
     try {
       if (flController) flController.abort();
       flController = new AbortController();
       const payload = { type: 'fetchlater-session-beacon', scheduledAt: new Date().toISOString(), pageTimeMs: Math.round(performance.now()), note: 'queued by the reliability-gap demo; the browser delivers this when the page is left' };
-      const result = fetchLater('../report?t=' + encodeURIComponent(reportToken), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: flController.signal });
+      const result = fl('../report?t=' + encodeURIComponent(reportToken), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), signal: flController.signal });
       flResult.textContent = 'Deferred beacon scheduled. fetchLater() returned { activated: ' + result.activated + ' } — the browser now owns delivery. Leave this page (navigate away or close the tab), come back, and use the journey-recorder page’s "Check what the endpoint has stored" button to see it arrive.';
       window.showcaseTelemetry?.assert('dpo-fetchlater-scheduled', typeof result.activated === 'boolean', { activated: result.activated });
     } catch (err) {
