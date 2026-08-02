@@ -83,13 +83,24 @@ async function localInventory() {
       const indexUrl = new URL("index.html", featureUrl);
       if (!(await exists(indexUrl))) continue;
       const html = await Deno.readTextFile(indexUrl);
-      // A feature index can link more than one ChromeStatus ID — the original
-      // identity plus "current listing" links added when ChromeStatus refiles
-      // a feature under a new ID. Index them all so a refiled ID matches the
-      // existing demo instead of being scheduled as missing-demo again.
-      const identities = [
-        ...new Set([...html.matchAll(new RegExp(ID_RE, "g"))].map((m) => Number(m[1]))),
+      // Identity comes from the EXPLICIT "ChromeStatus entry" reference links
+      // (the skeleton's convention), not from any ID that happens to appear in
+      // prose — pages legitimately mention related features' IDs in context
+      // (e.g. interest-invokers discusses Popover Hint before its own entry).
+      // Multiple labeled links are the original identity plus "current
+      // listing" links added when ChromeStatus refiles a feature; index them
+      // all so a refiled ID matches the existing demo. Pages without a
+      // labeled link (uber demos) fall back to the first bare ID, matching
+      // the previous behavior.
+      const labeled = [
+        ...new Set(
+          [...html.matchAll(/chromestatus\.com\/feature\/(\d+)"[^>]*>\s*ChromeStatus entry/g)]
+            .map((m) => Number(m[1])),
+        ),
       ];
+      const identities = labeled.length ? labeled : [
+        ...new Set([...html.matchAll(new RegExp(ID_RE, "g"))].map((m) => Number(m[1]))),
+      ].slice(0, 1);
       const identity = identities[0] ?? 0;
       const concepts = [];
       for await (const concept of Deno.readDir(featureUrl)) {
