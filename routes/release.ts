@@ -4892,12 +4892,19 @@ interface DpoStoredReport {
 }
 // Primary store is Deno KV so a deferred POST and a later check can land on
 // different Deno Deploy isolates (or survive isolate recycling) and still
-// agree; the process-local Map is the fallback for local dev without KV.
+// agree. Each report lives under its OWN key — concurrent POSTs for a token
+// never read-modify-write a shared bucket (no lost updates) and no single KV
+// value can approach the 64 KiB limit. The process-local Map is used ONLY
+// when KV is entirely unavailable (local dev); when KV exists but a write
+// fails, the caller reports the failure honestly instead of shadow-writing
+// somewhere reads won't look.
 const dpoReportsByToken = new Map<string, DpoStoredReport[]>();
 let dpoUnscopedReportCount = 0;
+let dpoReportSeq = 0;
 interface DpoMinimalKv {
   get(key: unknown[]): Promise<{ value: unknown }>;
   set(key: unknown[], value: unknown, options?: { expireIn?: number }): Promise<unknown>;
+  list(selector: { prefix: unknown[] }): AsyncIterable<{ key: unknown[]; value: unknown }>;
 }
 let dpoKvPromise: Promise<DpoMinimalKv | null> | null = null;
 function getDpoKv(): Promise<DpoMinimalKv | null> {
@@ -4913,34 +4920,53 @@ function getDpoKv(): Promise<DpoMinimalKv | null> {
   })();
   return dpoKvPromise;
 }
-async function dpoReadBucket(token: string): Promise<DpoStoredReport[]> {
+async function dpoReadReports(token: string): Promise<DpoStoredReport[] | null> {
   const kv = await getDpoKv();
   if (kv) {
     try {
-      const entry = await kv.get(["dpo-report", token]);
-      if (Array.isArray(entry.value)) return entry.value as DpoStoredReport[];
-      return [];
+      const reports: DpoStoredReport[] = [];
+      // Keys sort lexicographically by [timestamp, seq] parts, so iteration
+      // order is delivery order; keep the newest DPO_MAX_REPORTS_PER_TOKEN.
+      for await (const entry of kv.list({ prefix: ["dpo-report", token] })) {
+        if (entry.value && typeof entry.value === "object") {
+          reports.push(entry.value as DpoStoredReport);
+        }
+      }
+      return reports.slice(-DPO_MAX_REPORTS_PER_TOKEN);
     } catch {
-      // fall through to memory
+      return null; // KV present but unreadable — report the failure, not stale memory
     }
   }
-  return dpoReportsByToken.get(token) ?? [];
+  return (dpoReportsByToken.get(token) ?? []).slice(-DPO_MAX_REPORTS_PER_TOKEN);
 }
-async function dpoWriteBucket(token: string, bucket: DpoStoredReport[]): Promise<void> {
+async function dpoStoreReport(token: string, report: DpoStoredReport): Promise<boolean> {
   const kv = await getDpoKv();
   if (kv) {
     try {
-      await kv.set(["dpo-report", token], bucket, { expireIn: DPO_REPORT_TTL_MS });
-      return;
+      const key = [
+        "dpo-report",
+        token,
+        Date.now().toString().padStart(16, "0"),
+        (dpoReportSeq++).toString().padStart(6, "0"),
+      ];
+      await kv.set(key, report, { expireIn: DPO_REPORT_TTL_MS });
+      return true;
     } catch {
-      // fall through to memory
+      return false; // surfaced to the caller as stored:false
     }
   }
-  if (!dpoReportsByToken.has(token) && dpoReportsByToken.size >= DPO_MAX_TOKENS) {
-    const oldest = dpoReportsByToken.keys().next().value;
-    if (oldest !== undefined) dpoReportsByToken.delete(oldest);
+  let bucket = dpoReportsByToken.get(token);
+  if (!bucket) {
+    if (dpoReportsByToken.size >= DPO_MAX_TOKENS) {
+      const oldest = dpoReportsByToken.keys().next().value;
+      if (oldest !== undefined) dpoReportsByToken.delete(oldest);
+    }
+    bucket = [];
+    dpoReportsByToken.set(token, bucket);
   }
-  dpoReportsByToken.set(token, bucket);
+  bucket.push(report);
+  while (bucket.length > DPO_MAX_REPORTS_PER_TOKEN) bucket.shift();
+  return true;
 }
 
 async function renderDeclarativePerformanceObserverRoute(
@@ -5105,18 +5131,22 @@ Reporting-Endpoints: ${esc(reportingEndpoints)}</code></pre></section>
             "is discarded rather than risk echoing it to another visitor.",
         });
       }
-      const bucket = await dpoReadBucket(token);
-      bucket.push({ receivedAt: new Date().toISOString(), contentType, byteLength, body });
-      while (bucket.length > DPO_MAX_REPORTS_PER_TOKEN) bucket.shift();
-      // Deno KV caps values at 64 KiB; several near-32 KiB reports in one
-      // bucket would exceed it and make kv.set fail after we already claimed
-      // storage. Trim oldest reports until the serialized bucket fits with
-      // margin, so the newest report is always durably stored.
-      while (bucket.length > 1 && JSON.stringify(bucket).length > 48 * 1024) {
-        bucket.shift();
+      const stored = await dpoStoreReport(token, {
+        receivedAt: new Date().toISOString(),
+        contentType,
+        byteLength,
+        body,
+      });
+      if (!stored) {
+        return jsonResponse({
+          stored: false,
+          scoped: true,
+          error: "The report store rejected this write (transient KV failure). " +
+            "The delivery was NOT retained — retry, or check back without relying on it.",
+        }, { status: 503 });
       }
-      await dpoWriteBucket(token, bucket);
-      return jsonResponse({ stored: true, scoped: true, totalStored: bucket.length });
+      const current = await dpoReadReports(token);
+      return jsonResponse({ stored: true, scoped: true, totalStored: current?.length ?? 1 });
     }
     if (!token) {
       let total = dpoUnscopedReportCount;
@@ -5129,7 +5159,12 @@ Reporting-Endpoints: ${esc(reportingEndpoints)}</code></pre></section>
         reports: [],
       });
     }
-    const bucket = await dpoReadBucket(token);
+    const bucket = await dpoReadReports(token);
+    if (bucket === null) {
+      return jsonResponse({
+        error: "The report store is temporarily unreadable (KV failure). Retry shortly.",
+      }, { status: 503 });
+    }
     return jsonResponse({
       count: bucket.length,
       note: bucket.length === 0

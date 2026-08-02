@@ -27,9 +27,6 @@
       </select></label>
       <label for="rob">Robustness<select id="rob">
         <option value="">(none)</option>
-        <option value="SW_SECURE_CRYPTO">SW_SECURE_CRYPTO</option>
-        <option value="SW_SECURE_DECODE">SW_SECURE_DECODE</option>
-        <option value="HW_SECURE_ALL">HW_SECURE_ALL</option>
       </select></label>
       <button type="button" id="plan-btn">Query cenc + cbcs and build the plan</button>
     </div>
@@ -51,6 +48,33 @@ const [cenc, cbcs] = await Promise.all([ask('cenc'), ask('cbcs')]);
   const raw = document.getElementById('raw');
   const planHeading = document.getElementById('plan-heading');
   const planBody = document.getElementById('plan-body');
+  // Robustness vocabularies are key-system-specific: Widevine uses the
+  // SW_/HW_ names, PlayReady uses numeric security levels, and Clear Key has
+  // no robustness levels at all. Offering the wrong vocabulary would turn
+  // every query into a configuration rejection rather than a scheme answer.
+  const ROBUSTNESS_BY_KEY_SYSTEM = {
+    'com.widevine.alpha': ['SW_SECURE_CRYPTO', 'SW_SECURE_DECODE', 'HW_SECURE_CRYPTO', 'HW_SECURE_DECODE', 'HW_SECURE_ALL'],
+    'com.microsoft.playready.recommendation': ['150', '2000', '3000'],
+    'org.w3.clearkey': [],
+  };
+  const ksSel = document.getElementById('ks');
+  const robSel = document.getElementById('rob');
+  function refreshRobustnessOptions() {
+    const options = ROBUSTNESS_BY_KEY_SYSTEM[ksSel.value] ?? [];
+    robSel.innerHTML = '';
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = options.length ? '(none)' : '(none — Clear Key defines no robustness levels)';
+    robSel.append(none);
+    for (const value of options) {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = value;
+      robSel.append(opt);
+    }
+  }
+  ksSel.addEventListener('change', refreshRobustnessOptions);
+  refreshRobustnessOptions();
   // Pre-v152 browsers silently ignore encryptionScheme, which would make the
   // cenc and cbcs queries identical unscoped calls — never base a packaging
   // recommendation on that. Run the impossible-scheme litmus inline first.
@@ -111,9 +135,12 @@ const [cenc, cbcs] = await Promise.all([ask('cenc'), ask('cbcs')]);
     if (!cenc.ok && !cbcs.ok) {
       planHeading.textContent = 'This configuration cannot be answered';
       planBody.textContent = 'Both queries rejected — cenc: ' + cenc.error + '; cbcs: ' + cbcs.error + '. A rejection means ' + keySystem + ' refused this exact configuration' + (robustness ? ' (codec ' + contentType + ' at robustness ' + robustness + ')' : '') + ', which can mean the CDM is absent on this device or that this particular codec/robustness combination is unsupported even though the key system exists. Try robustness (none), another codec, or another key system (Clear Key answers everywhere) before concluding the device has no DRM stack. These are the browser’s real refusals, not a demo error.';
-    } else if (cenc.ok && cbcs.ok && cenc.supported && cbcs.supported) {
+    } else if (cenc.ok && cbcs.ok && cenc.supported && cbcs.supported && (cbcs.smooth || !cenc.smooth)) {
       planHeading.textContent = 'Ship cbcs-only';
-      planBody.textContent = 'This device decrypts and decodes both schemes for ' + contentType + ' under ' + keySystem + (robustness ? ' at ' + robustness : '') + '. You can serve a single cbcs (CMAF) package here with no cenc ladder — smooth: ' + cbcs.smooth + ', powerEfficient: ' + cbcs.powerEfficient + '.';
+      planBody.textContent = 'This device decrypts and decodes both schemes for ' + contentType + ' under ' + keySystem + (robustness ? ' at ' + robustness : '') + '. You can serve a single cbcs (CMAF) package here with no cenc ladder — smooth: ' + cbcs.smooth + ', powerEfficient: ' + cbcs.powerEfficient + (!cbcs.smooth ? '. Note: neither scheme reports smooth playback for this configuration, so cbcs is no worse than cenc here — consider a lower-bitrate ladder.' : '.');
+    } else if (cenc.ok && cbcs.ok && cenc.supported && cbcs.supported) {
+      planHeading.textContent = 'cbcs decrypts, but keep the cenc ladder for quality';
+      planBody.textContent = 'Both schemes are supported, but this device reports cbcs playback would NOT be smooth (smooth: false) while cenc is smooth — scheme support can route through a different hardware/decryption path. Recommending cbcs-only here would trade working playback for stutter; keep serving cenc to this device and gate the cbcs migration on the smooth field of this exact query.';
     } else if (cenc.ok && cenc.supported) {
       planHeading.textContent = 'Keep the cenc ladder';
       planBody.textContent = 'cenc is supported but cbcs is ' + (cbcs.ok ? 'reported unsupported' : 'unanswerable (' + cbcs.error + ')') + ' for this configuration. Serve cenc to this device and gate the cbcs migration on this exact query.';
