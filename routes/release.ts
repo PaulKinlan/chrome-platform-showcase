@@ -4886,13 +4886,20 @@ const DPO_ENTRY_TYPES = new Set([
 ]);
 
 const DPO_MARK_NAME = /^[A-Za-z0-9_.:-]{1,64}$/;
-const DPO_MAX_REPORTS = 20;
-const dpoReceivedReports: Array<{
+// Reports are scoped by a per-visitor token so one visitor's payload is never
+// echoed to another on a shared deployment. Without a valid token the endpoint
+// only counts deliveries and never stores or returns bodies.
+const DPO_TOKEN = /^[A-Za-z0-9-]{8,64}$/;
+const DPO_MAX_TOKENS = 50;
+const DPO_MAX_REPORTS_PER_TOKEN = 5;
+interface DpoStoredReport {
   receivedAt: string;
   contentType: string | null;
   byteLength: number;
   body: unknown;
-}> = [];
+}
+const dpoReportsByToken = new Map<string, DpoStoredReport[]>();
+let dpoUnscopedReportCount = 0;
 
 async function renderDeclarativePerformanceObserverRoute(
   req: Request,
@@ -4926,7 +4933,10 @@ async function renderDeclarativePerformanceObserverRoute(
     }
     if (captureEarlyFailures) directives.push("capture-early-failures=?1");
     const headerValue = directives.join(", ");
-    const reportingEndpoints = `telemetry="${url.origin}/v151${DPO_PREFIX}/report"`;
+    const token = url.searchParams.get("t");
+    const reportUrl = `${url.origin}/v151${DPO_PREFIX}/report` +
+      (token && DPO_TOKEN.test(token) ? `?t=${token}` : "");
+    const reportingEndpoints = `telemetry="${reportUrl}"`;
 
     return jsonResponse({
       endpoint: url.pathname,
@@ -4956,6 +4966,9 @@ async function renderDeclarativePerformanceObserverRoute(
   }
 
   if (sub === `${DPO_PREFIX}/report`) {
+    const url = new URL(req.url);
+    const rawToken = url.searchParams.get("t");
+    const token = rawToken && DPO_TOKEN.test(rawToken) ? rawToken : null;
     if (req.method === "POST") {
       const contentType = req.headers.get("content-type");
       let body: unknown = null;
@@ -4970,23 +4983,50 @@ async function renderDeclarativePerformanceObserverRoute(
       } catch {
         return jsonResponse({ error: "Report payload was not valid JSON." }, { status: 400 });
       }
-      dpoReceivedReports.push({
-        receivedAt: new Date().toISOString(),
-        contentType,
-        byteLength,
-        body,
-      });
-      if (dpoReceivedReports.length > DPO_MAX_REPORTS) dpoReceivedReports.shift();
-      return jsonResponse({ stored: true, totalStored: dpoReceivedReports.length });
+      if (!token) {
+        // No visitor token: acknowledge but never store the body, so an
+        // unscoped delivery can't be read back by anyone else.
+        dpoUnscopedReportCount++;
+        return jsonResponse({
+          stored: false,
+          scoped: false,
+          note: "Accepted but not stored: no ?t=<token> scope was provided, so the body " +
+            "is discarded rather than risk echoing it to another visitor.",
+        });
+      }
+      let bucket = dpoReportsByToken.get(token);
+      if (!bucket) {
+        if (dpoReportsByToken.size >= DPO_MAX_TOKENS) {
+          const oldest = dpoReportsByToken.keys().next().value;
+          if (oldest !== undefined) dpoReportsByToken.delete(oldest);
+        }
+        bucket = [];
+        dpoReportsByToken.set(token, bucket);
+      }
+      bucket.push({ receivedAt: new Date().toISOString(), contentType, byteLength, body });
+      if (bucket.length > DPO_MAX_REPORTS_PER_TOKEN) bucket.shift();
+      return jsonResponse({ stored: true, scoped: true, totalStored: bucket.length });
     }
+    if (!token) {
+      let total = dpoUnscopedReportCount;
+      for (const bucket of dpoReportsByToken.values()) total += bucket.length;
+      return jsonResponse({
+        count: total,
+        note: "Report bodies are scoped per visitor token. Pass the ?t=<token> your demo " +
+          "page generated to read back your own deliveries; without it only the total " +
+          "delivery count is exposed.",
+        reports: [],
+      });
+    }
+    const bucket = dpoReportsByToken.get(token) ?? [];
     return jsonResponse({
-      count: dpoReceivedReports.length,
-      note: dpoReceivedReports.length === 0
-        ? "No reports have been delivered to this endpoint. That is the expected state " +
-          "until a browser implements the Performance-Observer header (or something " +
-          "POSTs a Reporting-API-shaped payload here, e.g. the journey-recorder demo)."
-        : "Reports below were POSTed to this Reporting-API-shaped endpoint.",
-      reports: dpoReceivedReports.slice(-5),
+      count: bucket.length,
+      note: bucket.length === 0
+        ? "No reports have been delivered for this token. That is the expected state " +
+          "until a browser implements the Performance-Observer header (or the " +
+          "journey-recorder demo POSTs a Reporting-API-shaped payload with this token)."
+        : "Reports below were delivered with your token to this Reporting-API-shaped endpoint.",
+      reports: bucket,
     });
   }
 
