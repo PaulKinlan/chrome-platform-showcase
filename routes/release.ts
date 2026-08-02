@@ -4952,6 +4952,13 @@ async function dpoStoreReport(
       // so cap the TOTAL number of stored report keys. Existing tokens keep
       // working (their own five-key trim frees space); brand-new tokens are
       // refused once the store is at capacity. TTL expiry drains it.
+      // This is deliberately a SOFT cap: the scan-then-write is not atomic
+      // across isolates, so a concurrent burst of first-time tokens can
+      // overshoot by at most the number of in-flight requests — every value
+      // still expires within DPO_REPORT_TTL_MS and is <= 32 KiB. A strict
+      // registry would need an atomic counter that cannot observe TTL expiry
+      // (permanent lock-out on drift) or a background sweep; for a demo store
+      // the bounded overshoot is the better trade.
       let totalKeys = 0;
       let tokenHasKeys = false;
       for await (const entry of kv.list({ prefix: ["dpo-report"] })) {
