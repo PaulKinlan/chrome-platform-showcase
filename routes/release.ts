@@ -4883,14 +4883,65 @@ const DPO_MARK_NAME = /^[A-Za-z0-9_.:-]{1,64}$/;
 const DPO_TOKEN = /^[A-Za-z0-9-]{8,64}$/;
 const DPO_MAX_TOKENS = 50;
 const DPO_MAX_REPORTS_PER_TOKEN = 5;
+const DPO_REPORT_TTL_MS = 60 * 60 * 1000;
 interface DpoStoredReport {
   receivedAt: string;
   contentType: string | null;
   byteLength: number;
   body: unknown;
 }
+// Primary store is Deno KV so a deferred POST and a later check can land on
+// different Deno Deploy isolates (or survive isolate recycling) and still
+// agree; the process-local Map is the fallback for local dev without KV.
 const dpoReportsByToken = new Map<string, DpoStoredReport[]>();
 let dpoUnscopedReportCount = 0;
+interface DpoMinimalKv {
+  get(key: unknown[]): Promise<{ value: unknown }>;
+  set(key: unknown[], value: unknown, options?: { expireIn?: number }): Promise<unknown>;
+}
+let dpoKvPromise: Promise<DpoMinimalKv | null> | null = null;
+function getDpoKv(): Promise<DpoMinimalKv | null> {
+  if (dpoKvPromise) return dpoKvPromise;
+  dpoKvPromise = (async () => {
+    const maybeDeno = Deno as unknown as { openKv?: () => Promise<DpoMinimalKv> };
+    if (typeof maybeDeno.openKv !== "function") return null;
+    try {
+      return await maybeDeno.openKv();
+    } catch {
+      return null;
+    }
+  })();
+  return dpoKvPromise;
+}
+async function dpoReadBucket(token: string): Promise<DpoStoredReport[]> {
+  const kv = await getDpoKv();
+  if (kv) {
+    try {
+      const entry = await kv.get(["dpo-report", token]);
+      if (Array.isArray(entry.value)) return entry.value as DpoStoredReport[];
+      return [];
+    } catch {
+      // fall through to memory
+    }
+  }
+  return dpoReportsByToken.get(token) ?? [];
+}
+async function dpoWriteBucket(token: string, bucket: DpoStoredReport[]): Promise<void> {
+  const kv = await getDpoKv();
+  if (kv) {
+    try {
+      await kv.set(["dpo-report", token], bucket, { expireIn: DPO_REPORT_TTL_MS });
+      return;
+    } catch {
+      // fall through to memory
+    }
+  }
+  if (!dpoReportsByToken.has(token) && dpoReportsByToken.size >= DPO_MAX_TOKENS) {
+    const oldest = dpoReportsByToken.keys().next().value;
+    if (oldest !== undefined) dpoReportsByToken.delete(oldest);
+  }
+  dpoReportsByToken.set(token, bucket);
+}
 
 async function renderDeclarativePerformanceObserverRoute(
   req: Request,
@@ -5054,17 +5105,10 @@ Reporting-Endpoints: ${esc(reportingEndpoints)}</code></pre></section>
             "is discarded rather than risk echoing it to another visitor.",
         });
       }
-      let bucket = dpoReportsByToken.get(token);
-      if (!bucket) {
-        if (dpoReportsByToken.size >= DPO_MAX_TOKENS) {
-          const oldest = dpoReportsByToken.keys().next().value;
-          if (oldest !== undefined) dpoReportsByToken.delete(oldest);
-        }
-        bucket = [];
-        dpoReportsByToken.set(token, bucket);
-      }
+      const bucket = await dpoReadBucket(token);
       bucket.push({ receivedAt: new Date().toISOString(), contentType, byteLength, body });
-      if (bucket.length > DPO_MAX_REPORTS_PER_TOKEN) bucket.shift();
+      while (bucket.length > DPO_MAX_REPORTS_PER_TOKEN) bucket.shift();
+      await dpoWriteBucket(token, bucket);
       return jsonResponse({ stored: true, scoped: true, totalStored: bucket.length });
     }
     if (!token) {
@@ -5073,12 +5117,12 @@ Reporting-Endpoints: ${esc(reportingEndpoints)}</code></pre></section>
       return jsonResponse({
         count: total,
         note: "Report bodies are scoped per visitor token. Pass the ?t=<token> your demo " +
-          "page generated to read back your own deliveries; without it only the total " +
-          "delivery count is exposed.",
+          "page generated to read back your own deliveries; without it only this " +
+          "process's delivery count is exposed.",
         reports: [],
       });
     }
-    const bucket = dpoReportsByToken.get(token) ?? [];
+    const bucket = await dpoReadBucket(token);
     return jsonResponse({
       count: bucket.length,
       note: bucket.length === 0
