@@ -146,7 +146,12 @@ const gendnRoutes = new Set(gendn.routes || []);
 const inventory = await localInventory();
 const byMilestoneAndId = new Map();
 // Primary identities (the first ID in each index) always win, deterministically.
+// Aggregate pages are excluded here too: an uber demo carries no labeled
+// identity link, so its fallback "identity" is just the first feature ID it
+// happens to mention — inserting it would collide with that feature's real
+// demo record, with the winner decided by directory iteration order.
 for (const record of inventory) {
+  if (/^uber-demo/.test(record.slug)) continue;
   byMilestoneAndId.set(`${record.milestone}:${record.identity}`, record);
 }
 // Secondary IDs only fill remaining gaps, and never from aggregate pages:
