@@ -4940,10 +4940,27 @@ async function dpoReadReports(token: string): Promise<DpoStoredReport[] | null> 
   }
   return (dpoReportsByToken.get(token) ?? []).slice(-DPO_MAX_REPORTS_PER_TOKEN);
 }
-async function dpoStoreReport(token: string, report: DpoStoredReport): Promise<boolean> {
+const DPO_MAX_TOTAL_KV_KEYS = 500;
+async function dpoStoreReport(
+  token: string,
+  report: DpoStoredReport,
+): Promise<"stored" | "kv-error" | "at-capacity"> {
   const kv = await getDpoKv();
   if (kv) {
     try {
+      // Bound token cardinality deployment-wide: any caller can mint tokens,
+      // so cap the TOTAL number of stored report keys. Existing tokens keep
+      // working (their own five-key trim frees space); brand-new tokens are
+      // refused once the store is at capacity. TTL expiry drains it.
+      let totalKeys = 0;
+      let tokenHasKeys = false;
+      for await (const entry of kv.list({ prefix: ["dpo-report"] })) {
+        totalKeys++;
+        if ((entry.key as unknown[])[1] === token) tokenHasKeys = true;
+      }
+      if (totalKeys >= DPO_MAX_TOTAL_KV_KEYS && !tokenHasKeys) {
+        return "at-capacity";
+      }
       // timestamp + per-process seq keep delivery order; the random UUID
       // component makes keys globally unique even when two isolates write the
       // same token in the same millisecond with equal seq counters.
@@ -4967,9 +4984,9 @@ async function dpoStoreReport(token: string, report: DpoStoredReport): Promise<b
       for (const staleKey of excess) {
         await kv.delete(staleKey).catch(() => {});
       }
-      return true;
+      return "stored";
     } catch {
-      return false; // surfaced to the caller as stored:false
+      return "kv-error"; // surfaced to the caller as stored:false
     }
   }
   let bucket = dpoReportsByToken.get(token);
@@ -4983,7 +5000,7 @@ async function dpoStoreReport(token: string, report: DpoStoredReport): Promise<b
   }
   bucket.push(report);
   while (bucket.length > DPO_MAX_REPORTS_PER_TOKEN) bucket.shift();
-  return true;
+  return "stored";
 }
 
 async function renderDeclarativePerformanceObserverRoute(
@@ -5154,7 +5171,15 @@ Reporting-Endpoints: ${esc(reportingEndpoints)}</code></pre></section>
         byteLength,
         body,
       });
-      if (!stored) {
+      if (stored === "at-capacity") {
+        return jsonResponse({
+          stored: false,
+          scoped: true,
+          error: "The demo report store is at capacity for new visitor tokens. " +
+            "Stored reports expire after an hour — retry later.",
+        }, { status: 429 });
+      }
+      if (stored === "kv-error") {
         return jsonResponse({
           stored: false,
           scoped: true,

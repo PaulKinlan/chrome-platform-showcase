@@ -134,11 +134,18 @@ const gendn = await readJson(new URL("gendn-links.json", ROOT), { routes: [] });
 const gendnRoutes = new Set(gendn.routes || []);
 const inventory = await localInventory();
 const byMilestoneAndId = new Map();
+// Primary identities (the first ID in each index) always win, deterministically.
 for (const record of inventory) {
-  for (const id of record.identities ?? [record.identity]) {
-    if (!byMilestoneAndId.has(`${record.milestone}:${id}`)) {
-      byMilestoneAndId.set(`${record.milestone}:${id}`, record);
-    }
+  byMilestoneAndId.set(`${record.milestone}:${record.identity}`, record);
+}
+// Secondary IDs only fill remaining gaps, and never from aggregate pages:
+// an uber demo intentionally links many unrelated features' ChromeStatus IDs,
+// which must not become identity aliases for those features.
+for (const record of inventory) {
+  if (/^uber-demo/.test(record.slug)) continue;
+  for (const id of record.identities ?? []) {
+    const key = `${record.milestone}:${id}`;
+    if (!byMilestoneAndId.has(key)) byMilestoneAndId.set(key, record);
   }
 }
 const expected = [];

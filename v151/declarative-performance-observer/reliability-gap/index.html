@@ -20,10 +20,10 @@
     <div class="result" id="probe-result" role="status">Not probed yet.</div>
   </section>
   <section class="stage" aria-labelledby="loss-title"><h2 id="loss-title">2 · Watch a final beacon get lost</h2>
-    <p style="margin:0;">A worker stands in for a page whose renderer is killed. Graceful shutdown lets it post its final telemetry; <code>worker.terminate()</code> — like an OOM kill — destroys it mid-task, and the final message provably never arrives. JavaScript-side telemetry cannot report its own death.</p>
+    <p style="margin:0;">A worker stands in for a page whose renderer is killed. Its final telemetry is a <strong>real network POST</strong> to this site's reporting endpoint: graceful shutdown lets that beacon reach the server, while <code>worker.terminate()</code> — like an OOM kill — destroys the context mid-task and the endpoint provably never receives it (the table's verdict comes from querying the endpoint, not from the worker's own claims). JavaScript-side telemetry cannot report its own death.</p>
     <div class="controls"><button type="button" id="graceful">Run worker, graceful shutdown</button><button type="button" id="abrupt">Run worker, terminate() mid-task</button></div>
     <div class="result" id="loss-result" role="status">No run yet.</div>
-    <table aria-label="Beacon delivery results"><thead><tr><th scope="col">Run</th><th scope="col">Progress messages</th><th scope="col">Final telemetry delivered?</th></tr></thead><tbody id="loss-rows"><tr><td colspan="3">No runs recorded.</td></tr></tbody></table>
+    <table aria-label="Beacon delivery results"><thead><tr><th scope="col">Run</th><th scope="col">Progress messages</th><th scope="col">Final beacon at the endpoint?</th></tr></thead><tbody id="loss-rows"><tr><td colspan="3">No runs recorded.</td></tr></tbody></table>
   </section>
   <section class="stage" aria-labelledby="today-title"><h2 id="today-title">3 · Today's best answer: fetchLater()</h2>
     <p style="margin:0;">Until the header ships, <code>fetchLater()</code> is the most reliable way to get end-of-session data out: the browser owns the deferred request and sends it even if the tab is closed. This button feature-detects and schedules a real deferred beacon to this site's reporting endpoint (it is delivered when you leave this page).</p>
@@ -60,16 +60,37 @@ if (typeof fetchLater === 'function' &amp;&amp; String(fetchLater).includes('[na
     window.showcaseTelemetry?.assert('dpo-session-end-probe-ran', true, { sessionEnd: has, count: types.length });
   });
 
+  // Per-visitor scope token shared with the journey-recorder page: the worker
+  // beacon, the fetchLater beacon, and later checks all use the same bucket.
+  let reportToken = null;
+  try {
+    reportToken = localStorage.getItem('dpo-report-token');
+    if (!reportToken) {
+      reportToken = crypto.randomUUID();
+      localStorage.setItem('dpo-report-token', reportToken);
+    }
+  } catch {
+    reportToken = crypto.randomUUID();
+  }
+
   const lossResult = document.getElementById('loss-result');
   const lossRows = document.getElementById('loss-rows');
   let firstRun = true;
   const workerSrc = `
     onmessage = (e) => {
+      const { endpoint, runId } = e.data;
       let progress = 0;
       const tick = () => {
         progress++;
         postMessage({ kind: 'progress', progress });
-        if (progress >= 5) { postMessage({ kind: 'final', progress, note: 'final telemetry' }); return; }
+        if (progress >= 5) {
+          // The final telemetry is a REAL network POST — if this worker is
+          // terminated before reaching here, the endpoint never receives it.
+          fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'worker-final-beacon', runId }) })
+            .then(() => postMessage({ kind: 'final', progress }))
+            .catch(() => postMessage({ kind: 'final', progress }));
+          return;
+        }
         setTimeout(tick, 200);
       };
       tick();
@@ -82,26 +103,40 @@ if (typeof fetchLater === 'function' &amp;&amp; String(fetchLater).includes('[na
     }
     const blobUrl = URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' }));
     const worker = new Worker(blobUrl);
+    const runId = crypto.randomUUID();
     let progressCount = 0;
-    let finalDelivered = false;
     lossResult.textContent = mode === 'graceful' ? 'Worker running to completion…' : 'Worker running — will be terminated after ~500ms…';
     worker.onmessage = (e) => {
       if (e.data.kind === 'progress') progressCount = e.data.progress;
-      if (e.data.kind === 'final') finalDelivered = true;
     };
-    worker.postMessage('go');
+    // The worker runs from a blob: URL, where relative paths cannot resolve —
+    // hand it the absolute endpoint URL.
+    worker.postMessage({ endpoint: new URL('../report?t=' + encodeURIComponent(reportToken), location.href).href, runId });
     const killTimer = mode === 'abrupt' ? setTimeout(() => worker.terminate(), 500) : null;
-    setTimeout(() => {
+    setTimeout(async () => {
       if (killTimer) clearTimeout(killTimer);
       worker.terminate();
       URL.revokeObjectURL(blobUrl);
+      // Ground truth comes from the ENDPOINT, not the worker's own messages:
+      // ask the report store whether this run's beacon actually arrived.
+      let delivered = false;
+      let endpointChecked = false;
+      try {
+        const res = await fetch('../report?t=' + encodeURIComponent(reportToken));
+        if (res.ok) {
+          const data = await res.json();
+          endpointChecked = true;
+          delivered = (data.reports ?? []).some((r) => r?.body?.runId === runId);
+        }
+      } catch { /* endpoint unreachable — endpointChecked stays false */ }
       if (firstRun) { lossRows.innerHTML = ''; firstRun = false; }
       const tr = document.createElement('tr');
-      const delivered = finalDelivered;
-      // Verdicts come from what was actually OBSERVED, never from the timer
-      // alone: a graceful run without the final message, or an abrupt run
-      // where the worker never even progressed, is inconclusive — not proof.
-      const conclusive = mode === 'graceful' ? delivered : (progressCount > 0 && !delivered);
+      // Verdicts come from what the ENDPOINT actually received, never from
+      // the timer or the worker's own messages: an unreachable endpoint, a
+      // graceful run whose beacon has not landed, or an abrupt run where the
+      // worker never even progressed is inconclusive — not proof.
+      const conclusive = endpointChecked &&
+        (mode === 'graceful' ? delivered : (progressCount > 0 && !delivered));
       const tdMode = document.createElement('td');
       tdMode.textContent = mode === 'graceful' ? 'graceful shutdown' : 'terminate() mid-task';
       const tdProg = document.createElement('td');
@@ -117,33 +152,21 @@ if (typeof fetchLater === 'function' &amp;&amp; String(fetchLater).includes('[na
       lossRows.append(tr);
       if (!conclusive) {
         lossResult.textContent = mode === 'graceful'
-          ? 'Inconclusive graceful run: the final message did not arrive within the observation window (' + progressCount + ' progress messages). The worker may have started late on a busy device — run it again; this is not evidence of loss.'
-          : 'Inconclusive abrupt run: no progress messages were observed before terminate(), so the worker may never have started — the missing final message proves nothing. Run it again.';
+          ? (endpointChecked ? 'Inconclusive graceful run: the endpoint has not received this run\u2019s beacon within the observation window (' + progressCount + ' progress messages). The worker may have started late on a busy device — run it again; this is not evidence of loss.' : 'Inconclusive: the reporting endpoint could not be queried, so beacon delivery cannot be judged either way.')
+          : (endpointChecked ? 'Inconclusive abrupt run: no progress messages were observed before terminate(), so the worker may never have started — the absent beacon proves nothing. Run it again.' : 'Inconclusive: the reporting endpoint could not be queried, so beacon delivery cannot be judged either way.');
       } else {
         lossResult.textContent = mode === 'graceful'
-          ? 'Graceful run: ' + progressCount + ' progress messages and the final telemetry arrived.'
-          : 'Abrupt run: ' + progressCount + ' progress messages arrived, then terminate() destroyed the worker — the final telemetry never fired. This is exactly what an OOM kill does to page-side beacons.';
+          ? 'Graceful run: ' + progressCount + ' progress messages, and the reporting endpoint confirms the final beacon arrived.'
+          : 'Abrupt run: ' + progressCount + ' progress messages arrived, then terminate() destroyed the worker mid-task — the reporting endpoint confirms its final beacon was never received. This is what an OOM kill does to renderer-side telemetry.';
       }
-      window.showcaseTelemetry?.assert('dpo-loss-experiment-' + mode, conclusive, { progressCount, delivered });
-    }, 1600);
+      window.showcaseTelemetry?.assert('dpo-loss-experiment-' + mode, conclusive, { progressCount, delivered, endpointChecked });
+    }, mode === 'graceful' ? 2400 : 1600);
   }
   document.getElementById('graceful').addEventListener('click', () => runWorker('graceful'));
   document.getElementById('abrupt').addEventListener('click', () => runWorker('abrupt'));
 
   const flResult = document.getElementById('fl-result');
   let flController = null;
-  // Same per-visitor scope token the journey-recorder page uses, so the
-  // deferred beacon lands in this visitor's bucket and only they can read it.
-  let reportToken = null;
-  try {
-    reportToken = localStorage.getItem('dpo-report-token');
-    if (!reportToken) {
-      reportToken = crypto.randomUUID();
-      localStorage.setItem('dpo-report-token', reportToken);
-    }
-  } catch {
-    reportToken = crypto.randomUUID();
-  }
   // This site's telemetry shim (public/demo-telemetry.js) installs a
   // keepalive-based polyfill on globalThis.fetchLater when the platform API is
   // absent, so a bare `'fetchLater' in window` check would over-claim. Only a
