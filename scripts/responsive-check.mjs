@@ -120,10 +120,15 @@ async function bootServer() {
   throw new Error("local server did not become ready");
 }
 
-// The in-page assertion the harness evaluates per class.
-const PROBE = `(() => {
+// The in-page assertion the harness evaluates per class. Comparing
+// scrollWidth against innerWidth alone is blind to content that WIDENS the
+// mobile layout viewport itself (both grow together), so the probe also
+// reports how far innerWidth exceeds the emulated width.
+const probeFor = (expectedWidth) =>
+  `(() => {
   const de = document.documentElement;
   const overflow = de.scrollWidth - window.innerWidth;
+  const widened = window.innerWidth - ${expectedWidth};
   const vw = window.innerWidth;
   const controls = Array.from(document.querySelectorAll(
     'button, a[href], input, select, textarea, [role=button], [tabindex]'
@@ -144,7 +149,7 @@ const PROBE = `(() => {
       else small++;
     }
   }
-  return { overflow, scrollWidth: de.scrollWidth, innerWidth: vw, clipped, small, smallLinks, visible };
+  return { overflow, widened, scrollWidth: de.scrollWidth, innerWidth: vw, clipped, small, smallLinks, visible };
 })()`;
 
 async function checkPage(conn, url, cls) {
@@ -205,6 +210,14 @@ async function checkPage(conn, url, cls) {
   await conn.send("Runtime.enable", {}, sessionId);
   await conn.send("Log.enable", {}, sessionId);
   await conn.send("Network.enable", {}, sessionId);
+  // public/styles.css @imports the font CDN, so a HANGING font request holds
+  // the whole stylesheet back and the probe would measure unstyled layout.
+  // The shell fonts are the declared-optional decoration (system-font
+  // fallback), so the harness blocks them for deterministic styling; their
+  // failures are exempt from counting either way.
+  await conn.send("Network.setBlockedURLs", {
+    urls: ["*fonts.googleapis.com*", "*fonts.gstatic.com*"],
+  }, sessionId).catch(() => {});
   await conn.send("Emulation.setDeviceMetricsOverride", {
     width: spec.width,
     height: spec.height,
@@ -245,7 +258,7 @@ async function checkPage(conn, url, cls) {
       await Promise.race([loaded, new Promise((r) => setTimeout(r, 8000))]);
       await new Promise((r) => setTimeout(r, 1200)); // settle async work
       const evalRes = await conn.send("Runtime.evaluate", {
-        expression: PROBE,
+        expression: probeFor(spec.width),
         returnByValue: true,
       }, sessionId);
       probe = evalRes.result?.value ?? null;
@@ -273,6 +286,11 @@ async function checkPage(conn, url, cls) {
       consoleErrorsAtVerdict = [...consoleErrors];
       netFailuresAtVerdict = [...netFailures];
       const reasons = [];
+      if (probe && probe.widened > 1) {
+        reasons.push(
+          `layout viewport widened to ${probe.innerWidth}px (expected ~${spec.width}px)`,
+        );
+      }
       if (probe && probe.overflow > 1) reasons.push(`h-overflow ${probe.overflow}px`);
       if (probe && probe.clipped > 0) reasons.push(`${probe.clipped} clipped control(s)`);
       if (consoleErrorsAtVerdict.length) {
