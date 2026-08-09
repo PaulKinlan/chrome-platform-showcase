@@ -181,6 +181,12 @@ async function checkPage(conn, url, cls) {
   let outcome = "ok";
   let detail = "";
   let probe = null;
+  // Snapshots taken when the verdict is computed: CDP failure events can keep
+  // arriving during the closeTarget await in the finally block, so slicing the
+  // live arrays at return time lets the reported list disagree with the count
+  // baked into `detail`.
+  let consoleErrorsAtVerdict = null;
+  let netFailuresAtVerdict = null;
   try {
     const loaded = new Promise((res) => {
       const fn = (msg) => {
@@ -221,11 +227,17 @@ async function checkPage(conn, url, cls) {
         // screenshot failure is non-fatal
       }
 
+      consoleErrorsAtVerdict = [...consoleErrors];
+      netFailuresAtVerdict = [...netFailures];
       const reasons = [];
       if (probe && probe.overflow > 1) reasons.push(`h-overflow ${probe.overflow}px`);
       if (probe && probe.clipped > 0) reasons.push(`${probe.clipped} clipped control(s)`);
-      if (consoleErrors.length) reasons.push(`${consoleErrors.length} console error(s)`);
-      if (netFailures.length) reasons.push(`${netFailures.length} network failure(s)`);
+      if (consoleErrorsAtVerdict.length) {
+        reasons.push(`${consoleErrorsAtVerdict.length} console error(s)`);
+      }
+      if (netFailuresAtVerdict.length) {
+        reasons.push(`${netFailuresAtVerdict.length} network failure(s)`);
+      }
       if (reasons.length) {
         outcome = "broken";
         detail = reasons.join("; ");
@@ -247,8 +259,8 @@ async function checkPage(conn, url, cls) {
     outcome,
     detail,
     probe,
-    consoleErrors: consoleErrors.slice(0, 5),
-    netFailures: netFailures.slice(0, 5),
+    consoleErrors: (consoleErrorsAtVerdict ?? consoleErrors).slice(0, 5),
+    netFailures: (netFailuresAtVerdict ?? netFailures).slice(0, 5),
   };
 }
 
