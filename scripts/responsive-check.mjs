@@ -1,8 +1,10 @@
 #!/usr/bin/env -S deno run --allow-read --allow-write --allow-run --allow-net --allow-env
 // Responsive-check harness for the mobile + desktop parity invariant.
 //
-// Exercises each published feature demo at TWO device classes and asserts the
-// runtime invariants the parity policy requires:
+// Exercises each published feature demo — the overview page AND every
+// published concept route — at TWO device classes and asserts the runtime
+// invariants the parity policy requires (per class the worst page outcome
+// becomes the feature's verdict):
 //   - mobile  ≈360×740, deviceScaleFactor 3, touch  (constrained phone)
 //   - desktop ≈1280×800, mouse + keyboard
 // Per class it loads the page, screenshots it, and asserts programmatically:
@@ -308,11 +310,26 @@ async function main() {
   const sidecarUpdate = {};
   let okD = 0, okM = 0, brokenN = 0, blockedN = 0;
   for (const t of targets) {
-    const url = `${base}/${t.id}/`;
+    // A feature's verdict covers its overview page AND every published concept
+    // route — an `ok` merged into the sidecar must not rest on the static
+    // parent page alone. Per class the WORST page outcome wins
+    // (broken > blocked > ok).
+    const pages = [
+      `${base}/${t.id}/`,
+      ...(t.concepts ?? []).map((c) => `${base}/${t.id}/${c}/`),
+    ];
     results[t.id] = {};
     const rec = { source: "harness", lastChecked: new Date().toISOString().slice(0, 10) };
     for (const cls of Object.keys(CLASSES)) {
-      const r = await checkPage(conn, url, cls);
+      let worst = null;
+      for (const url of pages) {
+        const r = await checkPage(conn, url, cls);
+        const rel = url.replace(`${base}/${t.id}/`, "") || "(index)";
+        const labelled = { ...r, detail: pages.length > 1 ? `${rel}: ${r.detail}` : r.detail };
+        const rank = { broken: 2, blocked: 1, ok: 0 };
+        if (!worst || rank[labelled.outcome] > rank[worst.outcome]) worst = labelled;
+      }
+      const r = worst;
       results[t.id][cls] = r;
       if (r.outcome === "ok") {
         rec[cls] = "ok";
@@ -323,7 +340,9 @@ async function main() {
       } else {
         blockedN++; // blocked: leave sidecar class untouched
       }
-      console.log(`  ${t.id} [${cls}] ${r.outcome.toUpperCase()} — ${r.detail}`);
+      console.log(
+        `  ${t.id} [${cls}] ${r.outcome.toUpperCase()} (${pages.length} page(s)) — ${r.detail}`,
+      );
     }
     if (rec.desktop || rec.mobile) sidecarUpdate[t.id] = rec;
   }

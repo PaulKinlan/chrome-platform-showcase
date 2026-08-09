@@ -16,7 +16,7 @@
   <header class="lede-block"><p class="eyebrow">v153 · network · basic</p><h1>Reason relay</h1><p class="lede">One real fetch against a server route that streams its body slowly. Once the headers arrive — so the fetch promise has already resolved — the demo aborts with a <strong>marked custom reason</strong> and inspects exactly what <code>response.text()</code> rejects with. A spec-compliant browser (Chrome 153+, Firefox) relays your reason; older Chromium substitutes a generic <code>AbortError</code>.</p></header>
 
   <section class="stage" aria-labelledby="run-title"><h2 id="run-title">Run the litmus</h2>
-    <p style="margin:0;">The abort reason is <code>new DOMException("showcase-relay: deadline exceeded while reading the body", "TimeoutError")</code> — its name and message are the markers the verdict looks for. The abort fires ~350&nbsp;ms after the headers arrive, mid-stream.</p>
+    <p style="margin:0;">The abort reason is <code>new DOMException("showcase-relay: deadline exceeded while reading the body", "TimeoutError")</code> — its name and message are the markers the verdict looks for. The abort fires as soon as the <em>first</em> chunk has genuinely arrived, and the route holds all further chunks for 6&nbsp;seconds — so the body read is provably still pending when the abort lands, no matter how the transport buffers.</p>
     <div class="controls"><button type="button" id="run">Fetch, then abort mid-body with a custom reason</button></div>
     <div class="result" id="log" role="status" aria-live="polite">Not run yet.</div>
     <div class="verdict" id="verdict" role="status">No verdict yet — run the litmus.</div>
@@ -24,9 +24,11 @@
   </section>
 
   <section><h2>code path</h2><pre tabindex="0"><code>const controller = new AbortController();
-const response = await fetch('../slow-body?chunks=8&amp;delay=250', { signal: controller.signal });
-// headers are in — the fetch promise has RESOLVED; the body is still streaming
+// hold=6000: server sends chunk 1, then holds — the body stays pending
+const response = await fetch('../slow-body?chunks=3&amp;delay=100&amp;hold=6000', { signal: controller.signal });
+const probe = response.clone().body.getReader();
 const pendingText = response.text();
+await probe.read();          // chunk 1 confirmed — text() is provably mid-body
 controller.abort(new DOMException('deadline exceeded while reading the body', 'TimeoutError'));
 try { await pendingText; } catch (err) {
   // Chrome 153+ / Firefox: err IS your TimeoutError, message intact
@@ -65,11 +67,13 @@ try { await pendingText; } catch (err) {
     try {
       const controller = new AbortController();
       const reason = new DOMException(MARKER, 'TimeoutError');
-      log.textContent = 'fetch() dispatched to ../slow-body?chunks=8&delay=250 …';
+      log.textContent = 'fetch() dispatched to ../slow-body?chunks=3&delay=100&hold=6000 …';
       const t0 = performance.now();
       let response;
       try {
-        response = await fetch('../slow-body?chunks=8&delay=250', { signal: controller.signal, cache: 'no-store' });
+        // hold=6000: the server sends chunk 1 immediately, then nothing for 6s
+        // — guaranteeing the text() read below is still pending at abort time.
+        response = await fetch('../slow-body?chunks=3&delay=100&hold=6000', { signal: controller.signal, cache: 'no-store' });
       } catch (err) {
         log.textContent = 'The fetch itself failed before any abort: ' + err + '\nThe litmus needs the streaming route on this site’s server — it could not be reached, so no verdict is possible.';
         verdict.textContent = 'Inconclusive — the streaming route could not be fetched, so the abort behavior was never observed.';
@@ -77,9 +81,12 @@ try { await pendingText; } catch (err) {
         return;
       }
       const headersMs = Math.round(performance.now() - t0);
-      log.textContent = 'Headers arrived after ' + headersMs + 'ms (HTTP ' + response.status + ') — the fetch promise has RESOLVED.\nStarting response.text(), aborting in ~350ms…';
+      log.textContent = 'Headers arrived after ' + headersMs + 'ms (HTTP ' + response.status + ') — the fetch promise has RESOLVED.\nStarting response.text(); aborting once the first chunk is confirmed…';
+      // A cloned reader confirms chunk 1 really arrived; the route's hold
+      // keeps the rest of the body away, so text() cannot have completed.
+      const probe = response.clone().body.getReader();
       const pendingText = response.text();
-      await new Promise((r) => setTimeout(r, 350));
+      await probe.read();
       controller.abort(reason);
       let rejection = null;
       let resolvedBody = null;
@@ -89,7 +96,7 @@ try { await pendingText; } catch (err) {
         rejection = err;
       }
       if (rejection === null) {
-        log.textContent += '\nresponse.text() RESOLVED (' + String(resolvedBody).length + ' chars) — the body finished before the abort landed. Re-run: the stream should outlast 350ms.';
+        log.textContent += '\nresponse.text() RESOLVED (' + String(resolvedBody).length + ' chars) — the body finished before the abort landed, which the held stream should make impossible. Re-run.';
         verdict.textContent = 'Inconclusive — the body completed before the abort; no rejection to inspect.';
         window.showcaseTelemetry?.assert('abort-reason-relay-inconclusive', true, { stage: 'body-completed' });
         return;
