@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Reason relay — Fetch abort-reason forwarding — Chrome 153 — chrome platform showcase</title><link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font-weight: 700; min-block-size: 44px; }
+    button:disabled { opacity: 0.55; }
+    .result { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.85rem; }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-ivory); color: var(--text-black); }
+    .verdict.forwarded { background: var(--text-black); color: var(--bg-ivory); }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head><body><main>
+  <p class="crumbs"><a href="../">&larr; Fetch abort-reason forwarding</a></p>
+  <header class="lede-block"><p class="eyebrow">v153 · network · basic</p><h1>Reason relay</h1><p class="lede">One real fetch against a server route that streams its body slowly. Once the headers arrive — so the fetch promise has already resolved — the demo aborts with a <strong>marked custom reason</strong> and inspects exactly what <code>response.text()</code> rejects with. A spec-compliant browser (Chrome 153+, Firefox) relays your reason; older Chromium substitutes a generic <code>AbortError</code>.</p></header>
+
+  <section class="stage" aria-labelledby="run-title"><h2 id="run-title">Run the litmus</h2>
+    <p style="margin:0;">The abort reason is <code>new DOMException("showcase-relay: deadline exceeded while reading the body", "TimeoutError")</code> — its name and message are the markers the verdict looks for. The abort fires ~350&nbsp;ms after the headers arrive, mid-stream.</p>
+    <div class="controls"><button type="button" id="run">Fetch, then abort mid-body with a custom reason</button></div>
+    <div class="result" id="log" role="status" aria-live="polite">Not run yet.</div>
+    <div class="verdict" id="verdict" role="status">No verdict yet — run the litmus.</div>
+    <table aria-label="Observed rejection details"><thead><tr><th scope="col">Observation</th><th scope="col">Value</th></tr></thead><tbody id="obs"><tr><td colspan="2">No run recorded.</td></tr></tbody></table>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const controller = new AbortController();
+const response = await fetch('../slow-body?chunks=8&amp;delay=250', { signal: controller.signal });
+// headers are in — the fetch promise has RESOLVED; the body is still streaming
+const pendingText = response.text();
+controller.abort(new DOMException('deadline exceeded while reading the body', 'TimeoutError'));
+try { await pendingText; } catch (err) {
+  // Chrome 153+ / Firefox: err IS your TimeoutError, message intact
+  // Chromium &lt;153:        err is a generic AbortError — the reason was dropped
+}</code></pre></section>
+
+  <section><h2>see also</h2><ul><li><a href="https://chromestatus.com/feature/5158507786665984" target="_blank" rel="noopener">ChromeStatus entry</a></li><li><a href="https://fetch.spec.whatwg.org/" target="_blank" rel="noopener">Fetch Standard</a></li><li><a href="../two-phase-timeline/">Two-phase timeline — compare with the pre-headers abort</a></li><li><a href="../">Feature overview</a></li></ul></section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main><script>
+(() => {
+  const runBtn = document.getElementById('run');
+  const log = document.getElementById('log');
+  const verdict = document.getElementById('verdict');
+  const obs = document.getElementById('obs');
+  const MARKER = 'showcase-relay: deadline exceeded while reading the body';
+
+  function addRow(rows, k, v) { rows.push([k, v]); }
+  function renderRows(rows) {
+    obs.innerHTML = '';
+    for (const [k, v] of rows) {
+      const tr = document.createElement('tr');
+      const th = document.createElement('td');
+      th.textContent = k;
+      const td = document.createElement('td');
+      td.textContent = v;
+      tr.append(th, td);
+      obs.append(tr);
+    }
+  }
+
+  runBtn.addEventListener('click', async () => {
+    runBtn.disabled = true;
+    const rows = [];
+    verdict.className = 'verdict';
+    verdict.textContent = 'Running…';
+    try {
+      const controller = new AbortController();
+      const reason = new DOMException(MARKER, 'TimeoutError');
+      log.textContent = 'fetch() dispatched to ../slow-body?chunks=8&delay=250 …';
+      const t0 = performance.now();
+      let response;
+      try {
+        response = await fetch('../slow-body?chunks=8&delay=250', { signal: controller.signal, cache: 'no-store' });
+      } catch (err) {
+        log.textContent = 'The fetch itself failed before any abort: ' + err + '\nThe litmus needs the streaming route on this site’s server — it could not be reached, so no verdict is possible.';
+        verdict.textContent = 'Inconclusive — the streaming route could not be fetched, so the abort behavior was never observed.';
+        window.showcaseTelemetry?.assert('abort-reason-relay-inconclusive', true, { stage: 'fetch', error: String(err) });
+        return;
+      }
+      const headersMs = Math.round(performance.now() - t0);
+      log.textContent = 'Headers arrived after ' + headersMs + 'ms (HTTP ' + response.status + ') — the fetch promise has RESOLVED.\nStarting response.text(), aborting in ~350ms…';
+      const pendingText = response.text();
+      await new Promise((r) => setTimeout(r, 350));
+      controller.abort(reason);
+      let rejection = null;
+      let resolvedBody = null;
+      try {
+        resolvedBody = await pendingText;
+      } catch (err) {
+        rejection = err;
+      }
+      if (rejection === null) {
+        log.textContent += '\nresponse.text() RESOLVED (' + String(resolvedBody).length + ' chars) — the body finished before the abort landed. Re-run: the stream should outlast 350ms.';
+        verdict.textContent = 'Inconclusive — the body completed before the abort; no rejection to inspect.';
+        window.showcaseTelemetry?.assert('abort-reason-relay-inconclusive', true, { stage: 'body-completed' });
+        return;
+      }
+      const name = rejection && rejection.name ? String(rejection.name) : '(no name)';
+      const message = rejection && rejection.message ? String(rejection.message) : '(no message)';
+      const identical = rejection === reason;
+      addRow(rows, 'rejection.name', name);
+      addRow(rows, 'rejection.message', message);
+      addRow(rows, 'rejection === the reason object passed to abort()', String(identical));
+      addRow(rows, 'rejection constructor', rejection && rejection.constructor ? rejection.constructor.name : String(rejection));
+      renderRows(rows);
+      const forwarded = message.includes(MARKER);
+      if (forwarded) {
+        verdict.className = 'verdict forwarded';
+        verdict.textContent = 'FORWARDED — response.text() rejected with your custom reason (' + name + ', marker message intact' + (identical ? ', same object identity' : ', equivalent copy') + '). This browser implements the Chrome 153 behavior.';
+        log.textContent += '\nrejection: ' + name + ' — "' + message + '"';
+      } else if (name === 'AbortError') {
+        verdict.textContent = 'SUBSTITUTED — response.text() rejected with a generic AbortError; the custom TimeoutError reason was dropped. This is the pre-153 Chromium behavior the feature fixes.';
+        log.textContent += '\nrejection: ' + name + ' — "' + message + '" (your marker is absent)';
+      } else {
+        verdict.textContent = 'Unexpected rejection (' + name + ') — neither your custom reason nor the generic AbortError. Observed values are in the table; judge from them.';
+        log.textContent += '\nrejection: ' + name + ' — "' + message + '"';
+      }
+      window.showcaseTelemetry?.assert('abort-reason-relay-ran', true, { forwarded, name, identical });
+    } finally {
+      runBtn.disabled = false;
+    }
+  });
+})();
+</script></body></html>

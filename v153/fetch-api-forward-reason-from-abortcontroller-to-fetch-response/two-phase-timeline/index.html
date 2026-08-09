@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Two-phase timeline — Fetch abort-reason forwarding — Chrome 153 — chrome platform showcase</title><link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font-weight: 700; min-block-size: 44px; }
+    button:disabled { opacity: 0.55; }
+    .timeline { display: grid; gap: 2px; font-family: var(--font-mono); font-size: 0.82rem; }
+    .timeline li { list-style: none; border: 1px solid var(--border-black); background: var(--bg-ivory); color: var(--text-charcoal); padding: var(--space-1) var(--space-2); overflow-wrap: anywhere; }
+    .timeline li.hit { background: var(--text-black); color: var(--bg-ivory); }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.88rem; overflow-wrap: anywhere; }
+    .kept { color: color-mix(in srgb, var(--accent-emerald) 75%, var(--text-black)); font-weight: 700; }
+    .lost { color: var(--accent-rose); font-weight: 700; }
+  </style>
+</head><body><main>
+  <p class="crumbs"><a href="../">&larr; Fetch abort-reason forwarding</a></p>
+  <header class="lede-block"><p class="eyebrow">v153 · network · inspection tool</p><h1>Two-phase timeline</h1><p class="lede">An abort can land in two different windows of a fetch's life: <strong>phase 1</strong>, before the headers arrive (the fetch promise itself rejects — reason forwarding here shipped years ago), and <strong>phase 2</strong>, after the headers but mid-body (the body-read promise rejects — forwarding here is what Chrome 153 fixes). This tool runs both against the same streaming route and shows, per phase, whether your reason survived.</p></header>
+
+  <section class="stage" aria-labelledby="p1-title"><h2 id="p1-title">Phase 1 · abort before the headers resolve the fetch promise</h2>
+    <p style="margin:0;">The abort fires on the very next microtask after <code>fetch()</code> is called — the request never gets a response. The rejection surfaces on the <em>fetch promise itself</em>.</p>
+    <div class="controls"><button type="button" id="run1">Run phase 1</button></div>
+    <ul class="timeline" id="tl1" aria-label="Phase 1 event timeline"><li>No run yet.</li></ul>
+  </section>
+
+  <section class="stage" aria-labelledby="p2-title"><h2 id="p2-title">Phase 2 · abort after the headers, mid-body</h2>
+    <p style="margin:0;">The fetch promise has already resolved with a <code>Response</code>; <code>response.text()</code> is reading the streaming body when the abort fires. The rejection surfaces on the <em>body-read promise</em>.</p>
+    <div class="controls"><button type="button" id="run2">Run phase 2</button></div>
+    <ul class="timeline" id="tl2" aria-label="Phase 2 event timeline"><li>No run yet.</li></ul>
+  </section>
+
+  <section class="stage" aria-labelledby="cmp-title"><h2 id="cmp-title">Verdicts</h2>
+    <table aria-label="Reason survival per phase"><thead><tr><th scope="col">Phase</th><th scope="col">Rejection surfaced on</th><th scope="col">Observed rejection</th><th scope="col">Custom reason kept?</th></tr></thead><tbody id="rows"><tr><td colspan="4">Run both phases to fill this table.</td></tr></tbody></table>
+    <p id="summary" role="status" aria-live="polite" style="margin:0; font-weight:700;">No runs yet.</p>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>// Phase 1 — reason lands on the fetch promise (long-standing behavior)
+const c1 = new AbortController();
+const p1 = fetch(url, { signal: c1.signal });
+c1.abort(new DOMException('phase-1 marker', 'TimeoutError'));
+await p1;                    // rejects with YOUR reason in any modern browser
+
+// Phase 2 — reason lands on the body read (fixed in Chrome 153)
+const c2 = new AbortController();
+const res = await fetch(url, { signal: c2.signal }); // headers in, promise resolved
+const body = res.text();
+c2.abort(new DOMException('phase-2 marker', 'TimeoutError'));
+await body;                  // Chrome 153+/Firefox: YOUR reason · older Chromium: generic AbortError</code></pre></section>
+
+  <section><h2>see also</h2><ul><li><a href="https://chromestatus.com/feature/5158507786665984" target="_blank" rel="noopener">ChromeStatus entry</a></li><li><a href="https://chromestatus.com/feature/5631483679080448" target="_blank" rel="noopener">ChromeStatus — fetch integration of AbortSignal.reason (the phase-1 half)</a></li><li><a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortController/abort" target="_blank" rel="noopener">MDN — AbortController.abort(reason)</a></li><li><a href="../reason-relay/">Reason relay — the single-shot litmus</a></li><li><a href="../">Feature overview</a></li></ul></section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main><script>
+(() => {
+  const run1 = document.getElementById('run1');
+  const run2 = document.getElementById('run2');
+  const tl1 = document.getElementById('tl1');
+  const tl2 = document.getElementById('tl2');
+  const rowsBody = document.getElementById('rows');
+  const summary = document.getElementById('summary');
+  const results = { 1: null, 2: null };
+
+  function timeline(el) {
+    el.innerHTML = '';
+    const t0 = performance.now();
+    return (text, hit) => {
+      const li = document.createElement('li');
+      li.textContent = '+' + String(Math.round(performance.now() - t0)).padStart(4, ' ') + 'ms  ' + text;
+      if (hit) li.className = 'hit';
+      el.append(li);
+    };
+  }
+
+  function describe(err) {
+    if (err == null) return String(err);
+    const name = err.name ? String(err.name) : '(no name)';
+    const message = err.message ? String(err.message) : '(no message)';
+    return name + ' — "' + message + '"';
+  }
+
+  function renderTable() {
+    rowsBody.innerHTML = '';
+    for (const phase of [1, 2]) {
+      const r = results[phase];
+      const tr = document.createElement('tr');
+      const cells = [
+        'phase ' + phase,
+        phase === 1 ? 'the fetch promise' : 'response.text()',
+        r ? r.observed : 'not run yet',
+      ];
+      for (const c of cells) {
+        const td = document.createElement('td');
+        td.textContent = c;
+        tr.append(td);
+      }
+      const td = document.createElement('td');
+      if (!r) {
+        td.textContent = '—';
+      } else if (r.inconclusive) {
+        td.textContent = 'inconclusive';
+      } else {
+        td.textContent = r.kept ? 'yes — forwarded' : 'NO — substituted';
+        td.className = r.kept ? 'kept' : 'lost';
+      }
+      tr.append(td);
+      rowsBody.append(tr);
+    }
+    const r1 = results[1], r2 = results[2];
+    if (r1 && r2 && !r1.inconclusive && !r2.inconclusive) {
+      if (r1.kept && r2.kept) {
+        summary.textContent = 'Both phases forwarded your reason — this browser implements the complete Chrome 153 contract.';
+      } else if (r1.kept && !r2.kept) {
+        summary.textContent = 'Phase 1 forwarded the reason but phase 2 substituted a generic AbortError — exactly the pre-153 Chromium gap this feature closes.';
+      } else {
+        summary.textContent = 'Unusual combination — judge from the observed rejections above.';
+      }
+    } else if (r1 || r2) {
+      summary.textContent = 'Run the other phase to compare the two windows.';
+    }
+  }
+
+  run1.addEventListener('click', async () => {
+    run1.disabled = true;
+    const log = timeline(tl1);
+    try {
+      const controller = new AbortController();
+      const reason = new DOMException('two-phase marker: phase 1', 'TimeoutError');
+      log('fetch() dispatched');
+      const p = fetch('../slow-body?chunks=8&delay=250', { signal: controller.signal, cache: 'no-store' });
+      log('abort(reason) called before any response');
+      controller.abort(reason);
+      try {
+        const res = await p;
+        log('fetch promise RESOLVED (HTTP ' + res.status + ') — abort lost the race; run again', true);
+        results[1] = { observed: 'promise resolved', kept: false, inconclusive: true };
+        window.showcaseTelemetry?.assert('abort-two-phase-1-ran', true, { inconclusive: true });
+      } catch (err) {
+        const kept = !!(err && err.message && err.message.includes('phase 1'));
+        log('fetch promise rejected: ' + describe(err), true);
+        results[1] = { observed: describe(err), kept, inconclusive: false };
+        window.showcaseTelemetry?.assert('abort-two-phase-1-ran', true, { kept });
+      }
+      renderTable();
+    } finally {
+      run1.disabled = false;
+    }
+  });
+
+  run2.addEventListener('click', async () => {
+    run2.disabled = true;
+    const log = timeline(tl2);
+    try {
+      const controller = new AbortController();
+      const reason = new DOMException('two-phase marker: phase 2', 'TimeoutError');
+      log('fetch() dispatched');
+      let res;
+      try {
+        res = await fetch('../slow-body?chunks=8&delay=250', { signal: controller.signal, cache: 'no-store' });
+      } catch (err) {
+        log('fetch itself failed: ' + describe(err), true);
+        results[2] = { observed: 'route unreachable: ' + describe(err), kept: false, inconclusive: true };
+        window.showcaseTelemetry?.assert('abort-two-phase-2-ran', true, { inconclusive: true });
+        renderTable();
+        return;
+      }
+      log('headers arrived (HTTP ' + res.status + ') — fetch promise resolved');
+      const body = res.text();
+      log('response.text() started on the streaming body');
+      await new Promise((r) => setTimeout(r, 350));
+      controller.abort(reason);
+      log('abort(reason) called mid-body');
+      try {
+        const text = await body;
+        log('response.text() RESOLVED (' + text.length + ' chars) — body beat the abort; run again', true);
+        results[2] = { observed: 'body completed first', kept: false, inconclusive: true };
+        window.showcaseTelemetry?.assert('abort-two-phase-2-ran', true, { inconclusive: true });
+      } catch (err) {
+        const kept = !!(err && err.message && err.message.includes('phase 2'));
+        log('response.text() rejected: ' + describe(err), true);
+        results[2] = { observed: describe(err), kept, inconclusive: false };
+        window.showcaseTelemetry?.assert('abort-two-phase-2-ran', true, { kept });
+      }
+      renderTable();
+    } finally {
+      run2.disabled = false;
+    }
+  });
+})();
+</script></body></html>
