@@ -127,6 +127,7 @@ async function checkPage(conn, url, cls) {
   const spec = CLASSES[cls];
   const consoleErrors = [];
   const netFailures = [];
+  const requestUrls = new Map();
   const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
 
@@ -149,8 +150,19 @@ async function checkPage(conn, url, cls) {
       } else if (e.source !== "network") {
         consoleErrors.push(e.text);
       }
+    } else if (msg.method === "Network.requestWillBeSent") {
+      requestUrls.set(msg.params?.requestId, msg.params?.request?.url ?? "");
     } else if (msg.method === "Network.loadingFailed") {
-      netFailures.push(msg.params?.errorText ?? "loadingFailed");
+      // The documented contract is "no failed same-origin demo request": a
+      // cross-origin CDN/font hiccup is not a demo defect, and a canceled
+      // request (e.g. a demo's own deliberate abort) is not a failure.
+      if (msg.params?.canceled) return;
+      const failedUrl = requestUrls.get(msg.params?.requestId) ?? "";
+      if (!failedUrl || failedUrl.includes(new URL(base).host)) {
+        netFailures.push(
+          `${msg.params?.errorText ?? "loadingFailed"}${failedUrl ? ` ${failedUrl}` : ""}`,
+        );
+      }
     } else if (msg.method === "Network.responseReceived") {
       const res = msg.params?.response;
       if (res && res.status >= 400 && String(res.url).includes(new URL(base).host)) {
