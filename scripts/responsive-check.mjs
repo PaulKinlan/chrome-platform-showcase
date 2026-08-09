@@ -170,8 +170,13 @@ async function checkPage(conn, url, cls) {
         `${msg.params?.errorText ?? "loadingFailed"}${failedUrl ? ` ${failedUrl}` : ""}`,
       );
     } else if (msg.method === "Network.responseReceived") {
+      // Same policy as loadingFailed: an HTTP error from ANY host is a demo
+      // failure unless it comes from the optional decoration hosts.
       const res = msg.params?.response;
-      if (res && res.status >= 400 && String(res.url).includes(new URL(base).host)) {
+      if (
+        res && res.status >= 400 &&
+        !OPTIONAL_HOSTS.some((h) => String(res.url).includes(h))
+      ) {
         netFailures.push(`HTTP ${res.status} ${res.url}`);
       }
     }
