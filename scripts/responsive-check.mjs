@@ -38,15 +38,16 @@ import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
 import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
 
 // Only the design system's OWN decorative font requests are exempt from
-// failure counting (public/styles.css imports Joan/Lora/JetBrains Mono via
-// css2, whose woff2 files live under fonts.gstatic.com/s/<family>/). Some
-// demos load OTHER families from these hosts as the feature under test —
-// those must still count, so the exemption matches the exact design-system
-// requests, not the hosts.
-const OPTIONAL_FONT_RE =
-  /fonts\.googleapis\.com\/css2\?family=Joan|fonts\.gstatic\.com\/s\/(joan|lora|jetbrainsmono)\//;
-function isOptionalFontRequest(url) {
-  return OPTIONAL_FONT_RE.test(String(url));
+// failure counting: the css2 stylesheet public/styles.css imports (its
+// family=Joan… query is a unique marker) and any request INITIATED by that
+// stylesheet (its woff2 files). Demos that request fonts themselves — even
+// the same families — have a page/script initiator and still count (e.g.
+// v150's integrity-chain demo fetches a jetbrainsmono woff2 as the feature
+// under test).
+const SHELL_FONT_CSS_MARKER = "fonts.googleapis.com/css2?family=Joan";
+function isShellFontRequest(url, initiatorUrl) {
+  return String(url).includes(SHELL_FONT_CSS_MARKER) ||
+    String(initiatorUrl ?? "").includes(SHELL_FONT_CSS_MARKER);
 }
 
 const CLASSES = {
@@ -127,15 +128,20 @@ const PROBE = `(() => {
   const controls = Array.from(document.querySelectorAll(
     'button, a[href], input, select, textarea, [role=button], [tabindex]'
   ));
-  let clipped = 0, small = 0, visible = 0;
+  let clipped = 0, small = 0, smallLinks = 0, visible = 0;
   for (const el of controls) {
     const r = el.getBoundingClientRect();
     if (r.width === 0 && r.height === 0) continue;
     visible++;
     if (r.right > vw + 1 || r.left < -1) clipped++;
-    if (Math.min(r.width, r.height) > 0 && Math.min(r.width, r.height) < 44) small++;
+    if (Math.min(r.width, r.height) > 0 && Math.min(r.width, r.height) < 44) {
+      // Inline text links fall under WCAG 2.5.8's inline exception — flag
+      // them separately from real controls (buttons/inputs/selects/...).
+      if (el.tagName === 'A') smallLinks++;
+      else small++;
+    }
   }
-  return { overflow, scrollWidth: de.scrollWidth, innerWidth: vw, clipped, small, visible };
+  return { overflow, scrollWidth: de.scrollWidth, innerWidth: vw, clipped, small, smallLinks, visible };
 })()`;
 
 async function checkPage(conn, url, cls) {
@@ -166,23 +172,27 @@ async function checkPage(conn, url, cls) {
         consoleErrors.push(e.text);
       }
     } else if (msg.method === "Network.requestWillBeSent") {
-      requestUrls.set(msg.params?.requestId, msg.params?.request?.url ?? "");
+      requestUrls.set(msg.params?.requestId, {
+        url: msg.params?.request?.url ?? "",
+        initiatorUrl: msg.params?.initiator?.url ?? "",
+      });
     } else if (msg.method === "Network.loadingFailed") {
       // A canceled request (e.g. a demo's own deliberate abort) is not a
       // failure. Beyond that, only the OPTIONAL_HOSTS decoration requests
       // (web fonts) are exempt: demos that genuinely depend on cross-origin
       // media/CDN content must still fail when that content breaks.
       if (msg.params?.canceled) return;
-      const failedUrl = requestUrls.get(msg.params?.requestId) ?? "";
-      if (isOptionalFontRequest(failedUrl)) return;
+      const req = requestUrls.get(msg.params?.requestId) ?? { url: "", initiatorUrl: "" };
+      if (isShellFontRequest(req.url, req.initiatorUrl)) return;
       netFailures.push(
-        `${msg.params?.errorText ?? "loadingFailed"}${failedUrl ? ` ${failedUrl}` : ""}`,
+        `${msg.params?.errorText ?? "loadingFailed"}${req.url ? ` ${req.url}` : ""}`,
       );
     } else if (msg.method === "Network.responseReceived") {
       // Same policy as loadingFailed: an HTTP error from ANY host is a demo
       // failure unless it comes from the optional decoration hosts.
       const res = msg.params?.response;
-      if (res && res.status >= 400 && !isOptionalFontRequest(res.url)) {
+      const req = requestUrls.get(msg.params?.requestId) ?? { initiatorUrl: "" };
+      if (res && res.status >= 400 && !isShellFontRequest(res.url, req.initiatorUrl)) {
         netFailures.push(`HTTP ${res.status} ${res.url}`);
       }
     }
@@ -273,7 +283,10 @@ async function checkPage(conn, url, cls) {
       } else {
         const notes = [];
         if (spec.mobile && probe && probe.small > 0) {
-          notes.push(`${probe.small} sub-44px target(s) — read screenshot`);
+          notes.push(`${probe.small} sub-44px control(s) — read screenshot`);
+        }
+        if (spec.mobile && probe && probe.smallLinks > 0) {
+          notes.push(`${probe.smallLinks} sub-44px inline link(s) (WCAG 2.5.8 inline exception)`);
         }
         detail = notes.join("; ") || "clean";
       }
