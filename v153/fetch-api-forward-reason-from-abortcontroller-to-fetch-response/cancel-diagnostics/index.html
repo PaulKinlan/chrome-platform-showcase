@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Cancel diagnostics — Fetch abort-reason forwarding — Chrome 153 — chrome platform showcase</title><link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font-weight: 700; min-block-size: 44px; }
+    button:disabled { opacity: 0.55; }
+    label { font-weight: 700; display: inline-flex; gap: var(--space-1); align-items: center; }
+    select { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-1) var(--space-2); min-block-size: 44px; font-size: 1rem; }
+    progress { inline-size: 100%; block-size: 1.4rem; accent-color: var(--text-black); }
+    .result { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.85rem; }
+    .user-msg { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-3); font-weight: 700; }
+  </style>
+</head><body><main>
+  <p class="crumbs"><a href="../">&larr; Fetch abort-reason forwarding</a></p>
+  <header class="lede-block"><p class="eyebrow">v153 · network · practical</p><h1>Cancel diagnostics</h1><p class="lede">The product case for reason forwarding: a download with a progress bar, a user cancel button, and a hard deadline from <code>AbortSignal.timeout()</code> — combined into one signal with <code>AbortSignal.any()</code>. The catch handler wants to tell the user <em>why</em> the download stopped. With forwarding, the rejection carries the cause; without it, user-cancel and timeout arrive as the same generic <code>AbortError</code> and the UI can only shrug.</p></header>
+
+  <section class="stage" aria-labelledby="dl-title"><h2 id="dl-title">Download with a deadline</h2>
+    <div class="controls">
+      <label for="deadline">Deadline</label>
+      <select id="deadline">
+        <option value="1200">1200 ms (will fire mid-download)</option>
+        <option value="10000">10 s (won't fire — cancel by hand)</option>
+      </select>
+      <button type="button" id="start">Start download</button>
+      <button type="button" id="cancel" disabled>Cancel download</button>
+    </div>
+    <progress id="prog" max="100" value="0" aria-label="Download progress"></progress>
+    <div class="result" id="log" role="status" aria-live="polite">No download yet. The download reads the streaming body chunk by chunk (~2.5s total).</div>
+    <div class="user-msg" id="usermsg" role="status" aria-live="polite">What the user would be told appears here.</div>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const CANCEL_MARKER = 'You cancelled the download.';
+// Post-header abort reasons are structured-serialized before rejecting the
+// body read — a custom subclass loses its prototype, so match the MESSAGE.
+const user = new AbortController();
+const signal = AbortSignal.any([user.signal, AbortSignal.timeout(deadlineMs)]);
+const response = await fetch(url, { signal });
+const reader = response.body.getReader();
+try {
+  for (;;) { const { done } = await reader.read(); if (done) break; /* progress */ }
+} catch (err) {
+  if (err?.message?.includes(CANCEL_MARKER)) show('Cancelled — resume any time.');
+  else if (err?.name === 'TimeoutError')     show('Too slow — deadline exceeded.');
+  else if (err?.name === 'AbortError')       show('Stopped — but this browser dropped WHY.');
+  else                                       show('Network failure: ' + err);
+}
+// cancel button: user.abort(new Error(CANCEL_MARKER))</code></pre></section>
+
+  <section><h2>see also</h2><ul><li><a href="https://chromestatus.com/feature/5158507786665984" target="_blank" rel="noopener">ChromeStatus entry</a></li><li><a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout_static" target="_blank" rel="noopener">MDN — AbortSignal.timeout()</a></li><li><a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/any_static" target="_blank" rel="noopener">MDN — AbortSignal.any()</a></li><li><a href="../stream-teardown/">Stream teardown — every rejection surface</a></li><li><a href="../">Feature overview</a></li></ul></section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main><script>
+(() => {
+  const startBtn = document.getElementById('start');
+  const cancelBtn = document.getElementById('cancel');
+  const deadlineSel = document.getElementById('deadline');
+  const prog = document.getElementById('prog');
+  const log = document.getElementById('log');
+  const usermsg = document.getElementById('usermsg');
+
+  // Post-header abort reasons are structured-serialized by Fetch before they
+  // reject the body read, which strips a custom subclass's prototype (and can
+  // collapse an unrecognized name) — only the MESSAGE reliably survives, so
+  // diagnosis matches on this marker, not instanceof.
+  const USER_CANCEL_MARKER = 'You cancelled the download.';
+  class UserCancelledError extends Error {
+    constructor() {
+      super(USER_CANCEL_MARKER);
+      this.name = 'UserCancelledError';
+    }
+  }
+  function isUserCancel(err) {
+    if (err instanceof UserCancelledError) return true; // pre-serialization path
+    return !!(err && typeof err.message === 'string' && err.message.includes(USER_CANCEL_MARKER));
+  }
+
+  if (typeof AbortSignal.any !== 'function' || typeof AbortSignal.timeout !== 'function') {
+    log.textContent = 'AbortSignal.any() / AbortSignal.timeout() are not available in this browser, so the combined-signal download cannot run. Both are Baseline APIs in current browsers — this is a capability gap of this environment, not a network error.';
+    startBtn.disabled = true;
+    addEventListener('DOMContentLoaded', () => window.showcaseTelemetry?.assert('abort-diag-signals-missing', true, { any: typeof AbortSignal.any, timeout: typeof AbortSignal.timeout }), { once: true });
+    return;
+  }
+
+  let userController = null;
+
+  startBtn.addEventListener('click', async () => {
+    startBtn.disabled = true;
+    deadlineSel.disabled = true;
+    cancelBtn.disabled = false;
+    prog.value = 0;
+    usermsg.textContent = 'Downloading…';
+    const deadlineMs = Number(deadlineSel.value);
+    userController = new AbortController();
+    const signal = AbortSignal.any([userController.signal, AbortSignal.timeout(deadlineMs)]);
+    // 10 chunks * 250ms ≈ 2.5s of streaming body
+    const TOTAL_CHUNKS = 10;
+    log.textContent = 'fetch() dispatched with AbortSignal.any([user, timeout(' + deadlineMs + 'ms)])…';
+    // Whether the abort landed before or after the headers decides WHICH
+    // platform behavior the rejection demonstrates: pre-header forwarding is
+    // the long-standing phase-1 path, only post-header forwarding is new.
+    let headersArrived = false;
+    try {
+      const response = await fetch('../slow-body?chunks=' + TOTAL_CHUNKS + '&delay=250', { signal, cache: 'no-store' });
+      headersArrived = true;
+      log.textContent += '\nheaders in (HTTP ' + response.status + ') — reading body with progress…';
+      if (!response.ok) {
+        log.textContent += '\nthe route answered an error status; its body is an error page, not the download.';
+        usermsg.textContent = 'The streaming route answered HTTP ' + response.status + ' — a route/server failure, not a download. Nothing was downloaded.';
+        window.showcaseTelemetry?.assert('abort-diag-route-error', true, { status: response.status });
+        return;
+      }
+      if (!response.body || typeof response.body.getReader !== 'function') {
+        log.textContent += '\nResponse.body is not exposed as a readable stream in this browser.';
+        usermsg.textContent = 'This browser does not expose Response.body as a ReadableStream, so the chunk-by-chunk download (and the mid-body abort window this demo observes) cannot run here. This is a capability gap, not a network error.';
+        window.showcaseTelemetry?.assert('abort-diag-body-stream-missing', true, { body: String(response.body) });
+        return;
+      }
+      const reader = response.body.getReader();
+      // Progress comes from the route's application framing (one text line
+      // per server chunk plus a final "body complete" line), not from
+      // reader.read() boundaries — the network may split or coalesce chunks.
+      const TOTAL_LINES = TOTAL_CHUNKS + 1;
+      const decoder = new TextDecoder();
+      let received = 0;
+      let lines = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received += value.byteLength;
+        lines += (decoder.decode(value, { stream: true }).match(/\n/g) || []).length;
+        prog.value = Math.min(100, Math.round((lines / TOTAL_LINES) * 100));
+        log.textContent = log.textContent.replace(/\n?lines so far.*$/, '') + '\nlines so far: ' + lines + '/' + TOTAL_LINES + ' (' + received + ' bytes)';
+      }
+      prog.value = 100;
+      log.textContent += '\nbody complete.';
+      usermsg.textContent = 'Download finished (' + received + ' bytes, ' + lines + ' framed lines). Start again with the 1200 ms deadline, or cancel mid-flight, to see the diagnostics.';
+      window.showcaseTelemetry?.assert('abort-diag-completed', true, { received, lines });
+    } catch (err) {
+      const name = err && err.name ? String(err.name) : '(no name)';
+      const message = err && err.message ? String(err.message) : '';
+      log.textContent += '\nrejected: ' + name + ' — "' + message + '"';
+      if (isUserCancel(err)) {
+        usermsg.textContent = headersArrived
+          ? '“You cancelled the download — resume any time.” (Precise diagnosis: the mid-body rejection WAS the UserCancelledError this page aborted with — the Chrome 153 body-read forwarding worked.)'
+          : '“You cancelled the download — resume any time.” (Precise diagnosis: you cancelled BEFORE the headers arrived, so this rejection came from the fetch promise itself — the long-standing pre-response path every modern browser has, not evidence of the new body-read forwarding.)';
+        window.showcaseTelemetry?.assert('abort-diag-diagnosed', true, { cause: 'user', forwarded: true, headersArrived });
+      } else if (name === 'TimeoutError') {
+        usermsg.textContent = headersArrived
+          ? '“The download was too slow and hit the ' + deadlineMs + ' ms deadline.” (Precise diagnosis: the mid-body rejection carried AbortSignal.timeout()’s TimeoutError — the Chrome 153 body-read forwarding worked.)'
+          : '“The download was too slow and hit the ' + deadlineMs + ' ms deadline.” (Precise diagnosis: the deadline fired BEFORE the headers arrived, so this TimeoutError came from the fetch promise itself — the long-standing pre-response path, not evidence of the new body-read forwarding.)';
+        window.showcaseTelemetry?.assert('abort-diag-diagnosed', true, { cause: 'timeout', forwarded: true, headersArrived });
+      } else if (name === 'AbortError') {
+        usermsg.textContent = '“The download stopped.” — that vague message is the best this browser allows: it substituted a generic AbortError for the real cause (user cancel or timeout), which is exactly the ambiguity Chrome 153 removes. The page cannot tell which one happened, so it will not guess.';
+        window.showcaseTelemetry?.assert('abort-diag-diagnosed', true, { cause: 'ambiguous', forwarded: false });
+      } else {
+        usermsg.textContent = '“The download failed: ' + name + '.” (A real network/route failure, not an abort — see the log.)';
+        window.showcaseTelemetry?.assert('abort-diag-diagnosed', true, { cause: 'error', name });
+      }
+    } finally {
+      startBtn.disabled = false;
+      deadlineSel.disabled = false;
+      cancelBtn.disabled = true;
+      userController = null;
+    }
+  });
+
+  cancelBtn.addEventListener('click', () => {
+    if (userController) userController.abort(new UserCancelledError());
+  });
+})();
+</script></body></html>

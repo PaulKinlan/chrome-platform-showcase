@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Stream teardown — Fetch abort-reason forwarding — Chrome 153 — chrome platform showcase</title><link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font-weight: 700; min-block-size: 44px; }
+    button:disabled { opacity: 0.55; }
+    fieldset { border: 2px solid var(--border-black); padding: var(--space-2) var(--space-3); display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    legend { font-weight: 700; padding: 0 var(--space-1); }
+    label { display: inline-flex; gap: var(--space-1); align-items: center; min-block-size: 44px; }
+    .result { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 0.85rem; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.88rem; overflow-wrap: anywhere; }
+    .kept { color: color-mix(in srgb, var(--accent-emerald) 75%, var(--text-black)); font-weight: 700; }
+    .lost { color: var(--accent-rose); font-weight: 700; }
+  </style>
+</head><body><main>
+  <p class="crumbs"><a href="../">&larr; Fetch abort-reason forwarding</a></p>
+  <header class="lede-block"><p class="eyebrow">v153 · network · edge cases</p><h1>Stream teardown</h1><p class="lede">An aborted body doesn't reject in just one place. This page aborts one streamed response and captures every teardown surface at once — the pending <code>reader.read()</code>, the <code>reader.closed</code> promise, and a parallel <code>clone().arrayBuffer()</code> — for three different kinds of reason: a rich <code>DOMException</code>, a <em>plain string</em> (abort reasons can be any value), and no reason at all (the spec's default <code>AbortError</code>).</p></header>
+
+  <section class="stage" aria-labelledby="run-title"><h2 id="run-title">Abort one response, observe every surface</h2>
+    <fieldset><legend>Abort reason to use</legend>
+      <label><input type="radio" name="reason" value="domexception" checked> <code>DOMException("teardown marker", "TimeoutError")</code></label>
+      <label><input type="radio" name="reason" value="string"> the plain string <code>"teardown marker"</code></label>
+      <label><input type="radio" name="reason" value="none"> none — <code>abort()</code> with no argument</label>
+    </fieldset>
+    <div class="controls"><button type="button" id="run">Fetch, clone, read, then abort</button></div>
+    <div class="result" id="log" role="status" aria-live="polite">Not run yet.</div>
+    <table aria-label="Observed value per teardown surface"><thead><tr><th scope="col">Surface</th><th scope="col">Observed rejection</th><th scope="col">Marker kept?</th></tr></thead><tbody id="rows"><tr><td colspan="3">No run recorded.</td></tr></tbody></table>
+    <p style="margin:0;" id="note">With no reason, every browser rejects with the default <code>AbortError</code> — "marker kept" is shown as <em>n/a</em> because there is no custom marker to lose.</p>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const controller = new AbortController();
+const response = await fetch(url, { signal: controller.signal });
+const clone = response.clone();          // reads the same body in parallel
+const reader = response.body.getReader();
+await reader.read();                     // first chunk arrives
+const surfaces = {
+  read:   reader.read(),                 // now pending mid-stream
+  closed: reader.closed,
+  clone:  clone.arrayBuffer(),
+};
+controller.abort(reason);                // reason: DOMException | string | undefined
+// Chrome 153+: all three reject with `reason` (default: an "AbortError" DOMException)
+// Chromium &lt;153: all three reject with a generic AbortError regardless</code></pre></section>
+
+  <section><h2>see also</h2><ul><li><a href="https://chromestatus.com/feature/5158507786665984" target="_blank" rel="noopener">ChromeStatus entry</a></li><li><a href="https://streams.spec.whatwg.org/" target="_blank" rel="noopener">Streams Standard</a></li><li><a href="https://developer.mozilla.org/en-US/docs/Web/API/ReadableStreamDefaultReader/closed" target="_blank" rel="noopener">MDN — reader.closed</a></li><li><a href="../reason-relay/">Reason relay — the single-surface litmus</a></li><li><a href="../">Feature overview</a></li></ul></section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main><script>
+(() => {
+  const runBtn = document.getElementById('run');
+  const log = document.getElementById('log');
+  const rowsBody = document.getElementById('rows');
+  const MARKER = 'teardown marker';
+
+  function describe(err) {
+    if (err == null) return String(err);
+    if (typeof err === 'string') return 'the string "' + err + '"';
+    const name = err.name ? String(err.name) : '(no name)';
+    const message = err.message ? String(err.message) : '(no message)';
+    return name + ' — "' + message + '"';
+  }
+  function keptMarker(err) {
+    if (typeof err === 'string') return err.includes(MARKER);
+    return !!(err && err.message && String(err.message).includes(MARKER));
+  }
+
+  runBtn.addEventListener('click', async () => {
+    runBtn.disabled = true;
+    try {
+      const mode = document.querySelector('input[name="reason"]:checked').value;
+      const reason = mode === 'domexception'
+        ? new DOMException(MARKER, 'TimeoutError')
+        : mode === 'string'
+        ? MARKER
+        : undefined;
+      const controller = new AbortController();
+      log.textContent = 'fetch() dispatched…';
+      let response;
+      try {
+        // hold=6000: after chunk 1 the server sends nothing for 6s, so the
+        // armed surfaces below are provably still pending at abort time.
+        response = await fetch('../slow-body?chunks=10&delay=250&hold=6000', { signal: controller.signal, cache: 'no-store' });
+      } catch (err) {
+        log.textContent = 'The fetch itself failed before the abort: ' + describe(err) + '\nThe teardown matrix needs the streaming route — no observation possible.';
+        window.showcaseTelemetry?.assert('abort-teardown-inconclusive', true, { stage: 'fetch' });
+        return;
+      }
+      if (!response.ok) {
+        log.textContent = 'The streaming route answered HTTP ' + response.status + ' — a route/server failure; the teardown matrix cannot be armed.';
+        window.showcaseTelemetry?.assert('abort-teardown-inconclusive', true, { stage: 'route-error', status: response.status });
+        return;
+      }
+      if (!response.body || typeof response.body.getReader !== 'function') {
+        log.textContent = 'headers in (HTTP ' + response.status + '), but Response.body is not exposed as a readable stream in this browser — the reader/closed surfaces of this matrix cannot be armed. This is a capability gap, not a network error.';
+        window.showcaseTelemetry?.assert('abort-teardown-inconclusive', true, { stage: 'body-stream-missing' });
+        return;
+      }
+      const clone = response.clone();
+      const reader = response.body.getReader();
+      let first;
+      try {
+        first = await reader.read();
+      } catch (err) {
+        log.textContent = 'The body failed before the first chunk could be read (' + describe(err) + ') — the connection dropped before any abort was sent, so the matrix cannot be armed. Inconclusive; run again.';
+        window.showcaseTelemetry?.assert('abort-teardown-inconclusive', true, { stage: 'first-read', error: String(err && err.name) });
+        return;
+      }
+      log.textContent = 'headers in (HTTP ' + response.status + '), first chunk read (' + (first.value ? first.value.byteLength : 0) + ' bytes).\nArming the three surfaces, aborting in 200ms…';
+      const surfaces = [
+        ['pending reader.read()', reader.read()],
+        ['reader.closed', reader.closed],
+        ['clone().arrayBuffer()', clone.arrayBuffer()],
+      ];
+      // Observe the armed promises IMMEDIATELY so a connection drop during
+      // the delay settles into the matrix instead of an unhandled rejection.
+      const settling = Promise.allSettled(surfaces.map(([, p]) => p));
+      await new Promise((r) => setTimeout(r, 200));
+      controller.abort(reason);
+      const settled = await settling;
+      rowsBody.innerHTML = '';
+      // One outcome PER surface — a fulfilled surface must count against the
+      // all-surface claims, not silently drop out of the tally.
+      const outcomes = settled.map((s) => {
+        if (s.status === 'fulfilled') return 'fulfilled';
+        if (mode === 'none') {
+          return (s.reason && s.reason.name === 'AbortError') ? 'default' : 'unexpected';
+        }
+        if (keptMarker(s.reason)) return 'forwarded';
+        // Only a genuine AbortError is the pre-153 substitution; any other
+        // rejection (e.g. a network TypeError) is unrelated, not evidence.
+        return (s.reason && s.reason.name === 'AbortError') ? 'substituted' : 'unexpected';
+      });
+      settled.forEach((s, i) => {
+        const tr = document.createElement('tr');
+        const tdName = document.createElement('td');
+        tdName.textContent = surfaces[i][0];
+        const tdVal = document.createElement('td');
+        const tdKept = document.createElement('td');
+        if (outcomes[i] === 'fulfilled') {
+          tdVal.textContent = 'RESOLVED (no rejection) — the surface finished before the abort';
+          tdKept.textContent = 'inconclusive';
+        } else {
+          tdVal.textContent = describe(s.reason);
+          if (mode === 'none') {
+            tdKept.textContent = outcomes[i] === 'default' ? 'n/a — default AbortError, as specified' : 'n/a — unexpected: ' + describe(s.reason);
+          } else if (outcomes[i] === 'unexpected') {
+            tdKept.textContent = 'inconclusive — not an abort rejection';
+          } else {
+            const kept = outcomes[i] === 'forwarded';
+            tdKept.textContent = kept ? 'yes — forwarded' : 'NO — substituted';
+            tdKept.className = kept ? 'kept' : 'lost';
+          }
+        }
+        tr.append(tdName, tdVal, tdKept);
+        rowsBody.append(tr);
+      });
+      const all = (kind) => outcomes.length > 0 && outcomes.every((o) => o === kind);
+      const fulfilledCount = outcomes.filter((o) => o === 'fulfilled').length;
+      const unexpectedCount = mode === 'none' ? 0 : outcomes.filter((o) => o === 'unexpected').length;
+      if (all('fulfilled')) {
+        log.textContent += '\nDone, but every surface resolved before the abort landed — run again.';
+      } else if (fulfilledCount > 0) {
+        log.textContent += '\nDone, but ' + fulfilledCount + ' surface(s) finished before the abort landed, so no all-surface verdict is possible — see the table and run again for a full matrix.';
+      } else if (unexpectedCount > 0) {
+        log.textContent += '\nDone, but ' + unexpectedCount + ' surface(s) rejected with something other than an abort (a network failure, most likely) — inconclusive; see the table and run again.';
+      } else if (mode === 'none') {
+        log.textContent += all('default')
+          ? '\nDone. With no reason, the default AbortError DOMException is the SPECIFIED value on every surface — identical before and after Chrome 153.'
+          : '\nDone. At least one surface rejected with something other than the specified default AbortError — see the table.';
+      } else if (all('forwarded')) {
+        log.textContent += '\nDone. Every surface received your ' + (mode === 'string' ? 'plain-string' : 'DOMException') + ' reason — the Chrome 153 contract, on all three surfaces at once.';
+      } else if (all('substituted')) {
+        log.textContent += '\nDone. Every surface substituted a generic AbortError for your reason — the pre-153 Chromium behavior this feature fixes.';
+      } else {
+        log.textContent += '\nDone. Mixed results across surfaces — see the table; this would be a partial implementation.';
+      }
+      window.showcaseTelemetry?.assert('abort-teardown-ran', true, { mode, outcomes });
+    } finally {
+      runBtn.disabled = false;
+    }
+  });
+})();
+</script></body></html>

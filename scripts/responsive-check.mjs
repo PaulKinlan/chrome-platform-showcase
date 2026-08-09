@@ -1,8 +1,10 @@
 #!/usr/bin/env -S deno run --allow-read --allow-write --allow-run --allow-net --allow-env
 // Responsive-check harness for the mobile + desktop parity invariant.
 //
-// Exercises each published feature demo at TWO device classes and asserts the
-// runtime invariants the parity policy requires:
+// Exercises each published feature demo — the overview page AND every
+// published concept route — at TWO device classes and asserts the runtime
+// invariants the parity policy requires (per class the worst page outcome
+// becomes the feature's verdict):
 //   - mobile  ≈360×740, deviceScaleFactor 3, touch  (constrained phone)
 //   - desktop ≈1280×800, mouse + keyboard
 // Per class it loads the page, screenshots it, and asserts programmatically:
@@ -10,7 +12,8 @@
 //   - no off-viewport / clipped interactive controls
 //   - (mobile) primary tap targets ≈44px
 //   - zero uncaught console errors / exceptions
-//   - no failed same-origin demo request
+//   - no failed demo request, same-origin or cross-origin (only the optional
+//     web-font hosts and deliberately canceled requests are exempt)
 // The agent then Reads the screenshots to judge legibility, tap targets, focus,
 // and dialogs — this harness is the programmatic floor, not the whole judgment.
 //
@@ -33,6 +36,19 @@
 
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
 import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
+
+// Only the design system's OWN decorative font requests are exempt from
+// failure counting: the css2 stylesheet public/styles.css imports (its
+// family=Joan… query is a unique marker) and any request INITIATED by that
+// stylesheet (its woff2 files). Demos that request fonts themselves — even
+// the same families — have a page/script initiator and still count (e.g.
+// v150's integrity-chain demo fetches a jetbrainsmono woff2 as the feature
+// under test).
+const SHELL_FONT_CSS_MARKER = "fonts.googleapis.com/css2?family=Joan";
+function isShellFontRequest(url, initiatorUrl) {
+  return String(url).includes(SHELL_FONT_CSS_MARKER) ||
+    String(initiatorUrl ?? "").includes(SHELL_FONT_CSS_MARKER);
+}
 
 const CLASSES = {
   desktop: { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false },
@@ -104,33 +120,47 @@ async function bootServer() {
   throw new Error("local server did not become ready");
 }
 
-// The in-page assertion the harness evaluates per class.
-const PROBE = `(() => {
+// The in-page assertion the harness evaluates per class. Comparing
+// scrollWidth against innerWidth alone is blind to content that WIDENS the
+// mobile layout viewport itself (both grow together), so the probe also
+// reports how far innerWidth exceeds the emulated width.
+const probeFor = (expectedWidth) =>
+  `(() => {
   const de = document.documentElement;
   const overflow = de.scrollWidth - window.innerWidth;
+  const widened = window.innerWidth - ${expectedWidth};
   const vw = window.innerWidth;
   const controls = Array.from(document.querySelectorAll(
     'button, a[href], input, select, textarea, [role=button], [tabindex]'
   ));
-  let clipped = 0, small = 0, visible = 0;
+  let clipped = 0, small = 0, smallLinks = 0, visible = 0;
   for (const el of controls) {
     const r = el.getBoundingClientRect();
     if (r.width === 0 && r.height === 0) continue;
     visible++;
     if (r.right > vw + 1 || r.left < -1) clipped++;
-    if (Math.min(r.width, r.height) > 0 && Math.min(r.width, r.height) < 44) small++;
+    if (Math.min(r.width, r.height) > 0 && Math.min(r.width, r.height) < 44) {
+      // Only anchors that actually flow inline with text fall under WCAG
+      // 2.5.8's inline exception. A button-styled link (inline-block, flex,
+      // block…) is a real control and counts with the buttons.
+      const isInlineProseLink = el.tagName === 'A' &&
+        getComputedStyle(el).display === 'inline';
+      if (isInlineProseLink) smallLinks++;
+      else small++;
+    }
   }
-  return { overflow, scrollWidth: de.scrollWidth, innerWidth: vw, clipped, small, visible };
+  return { overflow, widened, scrollWidth: de.scrollWidth, innerWidth: vw, clipped, small, smallLinks, visible };
 })()`;
 
 async function checkPage(conn, url, cls) {
   const spec = CLASSES[cls];
   const consoleErrors = [];
   const netFailures = [];
+  const requestUrls = new Map();
   const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
 
-  conn.onEvent((msg) => {
+  const offEvents = conn.onEvent((msg) => {
     if (msg.sessionId !== sessionId) return;
     if (msg.method === "Runtime.exceptionThrown") {
       consoleErrors.push(msg.params?.exceptionDetails?.exception?.description ?? "exception");
@@ -149,11 +179,28 @@ async function checkPage(conn, url, cls) {
       } else if (e.source !== "network") {
         consoleErrors.push(e.text);
       }
+    } else if (msg.method === "Network.requestWillBeSent") {
+      requestUrls.set(msg.params?.requestId, {
+        url: msg.params?.request?.url ?? "",
+        initiatorUrl: msg.params?.initiator?.url ?? "",
+      });
     } else if (msg.method === "Network.loadingFailed") {
-      netFailures.push(msg.params?.errorText ?? "loadingFailed");
+      // A canceled request (e.g. a demo's own deliberate abort) is not a
+      // failure. Beyond that, only the OPTIONAL_HOSTS decoration requests
+      // (web fonts) are exempt: demos that genuinely depend on cross-origin
+      // media/CDN content must still fail when that content breaks.
+      if (msg.params?.canceled) return;
+      const req = requestUrls.get(msg.params?.requestId) ?? { url: "", initiatorUrl: "" };
+      if (isShellFontRequest(req.url, req.initiatorUrl)) return;
+      netFailures.push(
+        `${msg.params?.errorText ?? "loadingFailed"}${req.url ? ` ${req.url}` : ""}`,
+      );
     } else if (msg.method === "Network.responseReceived") {
+      // Same policy as loadingFailed: an HTTP error from ANY host is a demo
+      // failure unless it comes from the optional decoration hosts.
       const res = msg.params?.response;
-      if (res && res.status >= 400 && String(res.url).includes(new URL(base).host)) {
+      const req = requestUrls.get(msg.params?.requestId) ?? { initiatorUrl: "" };
+      if (res && res.status >= 400 && !isShellFontRequest(res.url, req.initiatorUrl)) {
         netFailures.push(`HTTP ${res.status} ${res.url}`);
       }
     }
@@ -163,6 +210,16 @@ async function checkPage(conn, url, cls) {
   await conn.send("Runtime.enable", {}, sessionId);
   await conn.send("Log.enable", {}, sessionId);
   await conn.send("Network.enable", {}, sessionId);
+  // public/styles.css @imports the font CDN, so a HANGING font request holds
+  // the whole stylesheet back and the probe would measure unstyled layout.
+  // Block ONLY the shell's own css2 stylesheet request (its failure means an
+  // immediate system-font fallback, and its gstatic children are then never
+  // requested). Demo-owned font loads — any family, either host — proceed,
+  // so feature-under-test fonts (v140 specimens, v131 symbol font) still
+  // load and still count if they fail.
+  await conn.send("Network.setBlockedURLs", {
+    urls: ["*fonts.googleapis.com/css2?family=Joan*"],
+  }, sessionId).catch(() => {});
   await conn.send("Emulation.setDeviceMetricsOverride", {
     width: spec.width,
     height: spec.height,
@@ -181,12 +238,19 @@ async function checkPage(conn, url, cls) {
   let outcome = "ok";
   let detail = "";
   let probe = null;
+  // Snapshots taken when the verdict is computed: CDP failure events can keep
+  // arriving during the closeTarget await in the finally block, so slicing the
+  // live arrays at return time lets the reported list disagree with the count
+  // baked into `detail`.
+  let consoleErrorsAtVerdict = null;
+  let netFailuresAtVerdict = null;
+  let offLoad = () => {};
   try {
     const loaded = new Promise((res) => {
       const fn = (msg) => {
         if (msg.sessionId === sessionId && msg.method === "Page.loadEventFired") res();
       };
-      conn.onEvent(fn);
+      offLoad = conn.onEvent(fn);
     });
     const nav = await conn.send("Page.navigate", { url }, sessionId);
     if (nav.errorText) {
@@ -196,7 +260,7 @@ async function checkPage(conn, url, cls) {
       await Promise.race([loaded, new Promise((r) => setTimeout(r, 8000))]);
       await new Promise((r) => setTimeout(r, 1200)); // settle async work
       const evalRes = await conn.send("Runtime.evaluate", {
-        expression: PROBE,
+        expression: probeFor(spec.width),
         returnByValue: true,
       }, sessionId);
       probe = evalRes.result?.value ?? null;
@@ -221,18 +285,32 @@ async function checkPage(conn, url, cls) {
         // screenshot failure is non-fatal
       }
 
+      consoleErrorsAtVerdict = [...consoleErrors];
+      netFailuresAtVerdict = [...netFailures];
       const reasons = [];
+      if (probe && probe.widened > 1) {
+        reasons.push(
+          `layout viewport widened to ${probe.innerWidth}px (expected ~${spec.width}px)`,
+        );
+      }
       if (probe && probe.overflow > 1) reasons.push(`h-overflow ${probe.overflow}px`);
       if (probe && probe.clipped > 0) reasons.push(`${probe.clipped} clipped control(s)`);
-      if (consoleErrors.length) reasons.push(`${consoleErrors.length} console error(s)`);
-      if (netFailures.length) reasons.push(`${netFailures.length} network failure(s)`);
+      if (consoleErrorsAtVerdict.length) {
+        reasons.push(`${consoleErrorsAtVerdict.length} console error(s)`);
+      }
+      if (netFailuresAtVerdict.length) {
+        reasons.push(`${netFailuresAtVerdict.length} network failure(s)`);
+      }
       if (reasons.length) {
         outcome = "broken";
         detail = reasons.join("; ");
       } else {
         const notes = [];
         if (spec.mobile && probe && probe.small > 0) {
-          notes.push(`${probe.small} sub-44px target(s) — read screenshot`);
+          notes.push(`${probe.small} sub-44px control(s) — read screenshot`);
+        }
+        if (spec.mobile && probe && probe.smallLinks > 0) {
+          notes.push(`${probe.smallLinks} sub-44px inline link(s) (WCAG 2.5.8 inline exception)`);
         }
         detail = notes.join("; ") || "clean";
       }
@@ -241,14 +319,16 @@ async function checkPage(conn, url, cls) {
     outcome = "blocked";
     detail = `harness error: ${e.message}`;
   } finally {
+    offEvents();
+    offLoad();
     await conn.send("Target.closeTarget", { targetId }).catch(() => {});
   }
   return {
     outcome,
     detail,
     probe,
-    consoleErrors: consoleErrors.slice(0, 5),
-    netFailures: netFailures.slice(0, 5),
+    consoleErrors: (consoleErrorsAtVerdict ?? consoleErrors).slice(0, 5),
+    netFailures: (netFailuresAtVerdict ?? netFailures).slice(0, 5),
   };
 }
 
@@ -273,11 +353,31 @@ async function main() {
   const sidecarUpdate = {};
   let okD = 0, okM = 0, brokenN = 0, blockedN = 0;
   for (const t of targets) {
-    const url = `${base}/${t.id}/`;
+    // A feature's verdict covers its overview page AND every published concept
+    // route — an `ok` merged into the sidecar must not rest on the static
+    // parent page alone. Per class the WORST page outcome wins
+    // (broken > blocked > ok).
+    const pages = [
+      `${base}/${t.id}/`,
+      ...(t.concepts ?? []).map((c) => `${base}/${t.id}/${c}/`),
+    ];
     results[t.id] = {};
     const rec = { source: "harness", lastChecked: new Date().toISOString().slice(0, 10) };
     for (const cls of Object.keys(CLASSES)) {
-      const r = await checkPage(conn, url, cls);
+      // Every page's result is kept in the report (auditable concept-level
+      // coverage); the aggregate verdict is the worst outcome across them.
+      const rank = { broken: 2, blocked: 1, ok: 0 };
+      const pageResults = [];
+      let worst = null;
+      for (const url of pages) {
+        const pr = await checkPage(conn, url, cls);
+        const rel = url.replace(`${base}/${t.id}/`, "") || "(index)";
+        pageResults.push({ page: rel, ...pr });
+        if (!worst || rank[pr.outcome] > rank[worst.outcome]) {
+          worst = { ...pr, detail: pages.length > 1 ? `${rel}: ${pr.detail}` : pr.detail };
+        }
+      }
+      const r = { ...worst, pages: pageResults };
       results[t.id][cls] = r;
       if (r.outcome === "ok") {
         rec[cls] = "ok";
@@ -286,9 +386,16 @@ async function main() {
         rec[cls] = "broken";
         brokenN++;
       } else {
-        blockedN++; // blocked: leave sidecar class untouched
+        blockedN++;
+        // blocked never fabricates a pass OR preserves one: if the sidecar
+        // currently claims ok for this class, the claim is stale (a current
+        // route was not verified this run) — downgrade it to needs-review.
+        // Genuine unsupported/broken records stay untouched.
+        if (t.support?.[cls] === "ok") rec[cls] = "needs-review";
       }
-      console.log(`  ${t.id} [${cls}] ${r.outcome.toUpperCase()} — ${r.detail}`);
+      console.log(
+        `  ${t.id} [${cls}] ${r.outcome.toUpperCase()} (${pages.length} page(s)) — ${r.detail}`,
+      );
     }
     if (rec.desktop || rec.mobile) sidecarUpdate[t.id] = rec;
   }

@@ -4856,8 +4856,62 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
     if (dpoResponse) return dpoResponse;
   }
 
+  if (
+    release === "v153" &&
+    sub === "/fetch-api-forward-reason-from-abortcontroller-to-fetch-response/slow-body"
+  ) {
+    return renderV153SlowBody(req);
+  }
+
   return (await readReleaseAsset(release, sub)) ??
     new Response("Not found", { status: 404 });
+}
+
+// ── Fetch abort-reason forwarding (v153, chromestatus 5158507786665984) ──
+// The feature is about what happens when a fetch is aborted AFTER the
+// response headers have arrived but BEFORE the body has been fully read.
+// Observing that window needs a response whose headers land immediately and
+// whose body then trickles in slowly — this route streams `chunks` labelled
+// chunks with `delay` ms between them so the demo pages can abort mid-body.
+function renderV153SlowBody(req: Request): Response {
+  const url = new URL(req.url);
+  const chunks = Math.min(Math.max(Number(url.searchParams.get("chunks") ?? 8) || 8, 1), 24);
+  const delay = Math.min(Math.max(Number(url.searchParams.get("delay") ?? 250) || 0, 0), 1500);
+  // hold: extra ms the server waits after the FIRST chunk before sending any
+  // more. A large hold guarantees the body is still pending when a client
+  // aborts after reading chunk 1, no matter how aggressively the transport
+  // buffers — the conformance suite depends on this to stay race-free.
+  const hold = Math.min(Math.max(Number(url.searchParams.get("hold") ?? 0) || 0, 0), 10000);
+  const encoder = new TextEncoder();
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        for (let i = 1; i <= chunks; i++) {
+          if (cancelled) return;
+          controller.enqueue(
+            encoder.encode(`chunk ${i}/${chunks} after ${(i - 1) * delay}ms\n`),
+          );
+          if (i === 1 && hold > 0) await new Promise((resolve) => setTimeout(resolve, hold));
+          if (i < chunks) await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+        controller.enqueue(encoder.encode("body complete\n"));
+        controller.close();
+      } catch {
+        // Client aborted mid-stream — the controller is already errored.
+      }
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "cache-control": "no-store",
+      "x-accel-buffering": "no",
+    },
+  });
 }
 
 // ── Declarative Performance Observer (v151, chromestatus 6594955352080384) ──
