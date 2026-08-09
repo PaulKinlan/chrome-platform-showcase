@@ -152,7 +152,7 @@ async function checkPage(conn, url, cls) {
   const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
 
-  conn.onEvent((msg) => {
+  const offEvents = conn.onEvent((msg) => {
     if (msg.sessionId !== sessionId) return;
     if (msg.method === "Runtime.exceptionThrown") {
       consoleErrors.push(msg.params?.exceptionDetails?.exception?.description ?? "exception");
@@ -226,12 +226,13 @@ async function checkPage(conn, url, cls) {
   // baked into `detail`.
   let consoleErrorsAtVerdict = null;
   let netFailuresAtVerdict = null;
+  let offLoad = () => {};
   try {
     const loaded = new Promise((res) => {
       const fn = (msg) => {
         if (msg.sessionId === sessionId && msg.method === "Page.loadEventFired") res();
       };
-      conn.onEvent(fn);
+      offLoad = conn.onEvent(fn);
     });
     const nav = await conn.send("Page.navigate", { url }, sessionId);
     if (nav.errorText) {
@@ -295,6 +296,8 @@ async function checkPage(conn, url, cls) {
     outcome = "blocked";
     detail = `harness error: ${e.message}`;
   } finally {
+    offEvents();
+    offLoad();
     await conn.send("Target.closeTarget", { targetId }).catch(() => {});
   }
   return {
@@ -355,7 +358,12 @@ async function main() {
         rec[cls] = "broken";
         brokenN++;
       } else {
-        blockedN++; // blocked: leave sidecar class untouched
+        blockedN++;
+        // blocked never fabricates a pass OR preserves one: if the sidecar
+        // currently claims ok for this class, the claim is stale (a current
+        // route was not verified this run) — downgrade it to needs-review.
+        // Genuine unsupported/broken records stay untouched.
+        if (t.support?.[cls] === "ok") rec[cls] = "needs-review";
       }
       console.log(
         `  ${t.id} [${cls}] ${r.outcome.toUpperCase()} (${pages.length} page(s)) — ${r.detail}`,

@@ -101,5 +101,16 @@ export async function cdpConnection(wsUrl) {
       }, 30000);
     });
   }
-  return { ws, send, onEvent: (fn) => listeners.add(fn), close: () => ws.close() };
+  return {
+    ws,
+    send,
+    // Returns an unsubscribe function — per-page listeners must be removed
+    // when their target closes, or long multi-page runs leak closures and
+    // dispatch every event through dead handlers.
+    onEvent: (fn) => {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
+    close: () => ws.close(),
+  };
 }
