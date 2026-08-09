@@ -86,8 +86,13 @@ try {
     // 10 chunks * 250ms ≈ 2.5s of streaming body
     const TOTAL_CHUNKS = 10;
     log.textContent = 'fetch() dispatched with AbortSignal.any([user, timeout(' + deadlineMs + 'ms)])…';
+    // Whether the abort landed before or after the headers decides WHICH
+    // platform behavior the rejection demonstrates: pre-header forwarding is
+    // the long-standing phase-1 path, only post-header forwarding is new.
+    let headersArrived = false;
     try {
       const response = await fetch('../slow-body?chunks=' + TOTAL_CHUNKS + '&delay=250', { signal, cache: 'no-store' });
+      headersArrived = true;
       log.textContent += '\nheaders in (HTTP ' + response.status + ') — reading body with progress…';
       if (!response.body || typeof response.body.getReader !== 'function') {
         log.textContent += '\nResponse.body is not exposed as a readable stream in this browser.';
@@ -120,11 +125,15 @@ try {
       const message = err && err.message ? String(err.message) : '';
       log.textContent += '\nrejected: ' + name + ' — "' + message + '"';
       if (err instanceof UserCancelledError) {
-        usermsg.textContent = '“You cancelled the download — resume any time.” (Precise diagnosis: the rejection WAS the UserCancelledError this page aborted with — reason forwarding worked.)';
-        window.showcaseTelemetry?.assert('abort-diag-diagnosed', true, { cause: 'user', forwarded: true });
+        usermsg.textContent = headersArrived
+          ? '“You cancelled the download — resume any time.” (Precise diagnosis: the mid-body rejection WAS the UserCancelledError this page aborted with — the Chrome 153 body-read forwarding worked.)'
+          : '“You cancelled the download — resume any time.” (Precise diagnosis: you cancelled BEFORE the headers arrived, so this rejection came from the fetch promise itself — the long-standing pre-response path every modern browser has, not evidence of the new body-read forwarding.)';
+        window.showcaseTelemetry?.assert('abort-diag-diagnosed', true, { cause: 'user', forwarded: true, headersArrived });
       } else if (name === 'TimeoutError') {
-        usermsg.textContent = '“The download was too slow and hit the ' + deadlineMs + ' ms deadline.” (Precise diagnosis: the rejection carried AbortSignal.timeout()’s TimeoutError — reason forwarding worked.)';
-        window.showcaseTelemetry?.assert('abort-diag-diagnosed', true, { cause: 'timeout', forwarded: true });
+        usermsg.textContent = headersArrived
+          ? '“The download was too slow and hit the ' + deadlineMs + ' ms deadline.” (Precise diagnosis: the mid-body rejection carried AbortSignal.timeout()’s TimeoutError — the Chrome 153 body-read forwarding worked.)'
+          : '“The download was too slow and hit the ' + deadlineMs + ' ms deadline.” (Precise diagnosis: the deadline fired BEFORE the headers arrived, so this TimeoutError came from the fetch promise itself — the long-standing pre-response path, not evidence of the new body-read forwarding.)';
+        window.showcaseTelemetry?.assert('abort-diag-diagnosed', true, { cause: 'timeout', forwarded: true, headersArrived });
       } else if (name === 'AbortError') {
         usermsg.textContent = '“The download stopped.” — that vague message is the best this browser allows: it substituted a generic AbortError for the real cause (user cancel or timeout), which is exactly the ambiguity Chrome 153 removes. The page cannot tell which one happened, so it will not guess.';
         window.showcaseTelemetry?.assert('abort-diag-diagnosed', true, { cause: 'ambiguous', forwarded: false });

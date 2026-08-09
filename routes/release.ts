@@ -4877,6 +4877,11 @@ function renderV153SlowBody(req: Request): Response {
   const url = new URL(req.url);
   const chunks = Math.min(Math.max(Number(url.searchParams.get("chunks") ?? 8) || 8, 1), 24);
   const delay = Math.min(Math.max(Number(url.searchParams.get("delay") ?? 250) || 0, 0), 1500);
+  // hold: extra ms the server waits after the FIRST chunk before sending any
+  // more. A large hold guarantees the body is still pending when a client
+  // aborts after reading chunk 1, no matter how aggressively the transport
+  // buffers — the conformance suite depends on this to stay race-free.
+  const hold = Math.min(Math.max(Number(url.searchParams.get("hold") ?? 0) || 0, 0), 10000);
   const encoder = new TextEncoder();
   let cancelled = false;
   const stream = new ReadableStream<Uint8Array>({
@@ -4887,6 +4892,7 @@ function renderV153SlowBody(req: Request): Response {
           controller.enqueue(
             encoder.encode(`chunk ${i}/${chunks} after ${(i - 1) * delay}ms\n`),
           );
+          if (i === 1 && hold > 0) await new Promise((resolve) => setTimeout(resolve, hold));
           if (i < chunks) await new Promise((resolve) => setTimeout(resolve, delay));
         }
         controller.enqueue(encoder.encode("body complete\n"));
