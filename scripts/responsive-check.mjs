@@ -10,7 +10,8 @@
 //   - no off-viewport / clipped interactive controls
 //   - (mobile) primary tap targets ≈44px
 //   - zero uncaught console errors / exceptions
-//   - no failed same-origin demo request
+//   - no failed demo request, same-origin or cross-origin (only the optional
+//     web-font hosts and deliberately canceled requests are exempt)
 // The agent then Reads the screenshots to judge legibility, tap targets, focus,
 // and dialogs — this harness is the programmatic floor, not the whole judgment.
 //
@@ -33,6 +34,11 @@
 
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
 import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
+
+// Purely decorative cross-origin requests whose failure never breaks a demo
+// (the design system's web fonts fall back to system fonts). Everything else
+// — same-origin AND cross-origin media/CDN dependencies — counts as a failure.
+const OPTIONAL_HOSTS = ["fonts.googleapis.com", "fonts.gstatic.com"];
 
 const CLASSES = {
   desktop: { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false },
@@ -153,16 +159,16 @@ async function checkPage(conn, url, cls) {
     } else if (msg.method === "Network.requestWillBeSent") {
       requestUrls.set(msg.params?.requestId, msg.params?.request?.url ?? "");
     } else if (msg.method === "Network.loadingFailed") {
-      // The documented contract is "no failed same-origin demo request": a
-      // cross-origin CDN/font hiccup is not a demo defect, and a canceled
-      // request (e.g. a demo's own deliberate abort) is not a failure.
+      // A canceled request (e.g. a demo's own deliberate abort) is not a
+      // failure. Beyond that, only the OPTIONAL_HOSTS decoration requests
+      // (web fonts) are exempt: demos that genuinely depend on cross-origin
+      // media/CDN content must still fail when that content breaks.
       if (msg.params?.canceled) return;
       const failedUrl = requestUrls.get(msg.params?.requestId) ?? "";
-      if (!failedUrl || failedUrl.includes(new URL(base).host)) {
-        netFailures.push(
-          `${msg.params?.errorText ?? "loadingFailed"}${failedUrl ? ` ${failedUrl}` : ""}`,
-        );
-      }
+      if (OPTIONAL_HOSTS.some((h) => failedUrl.includes(h))) return;
+      netFailures.push(
+        `${msg.params?.errorText ?? "loadingFailed"}${failedUrl ? ` ${failedUrl}` : ""}`,
+      );
     } else if (msg.method === "Network.responseReceived") {
       const res = msg.params?.response;
       if (res && res.status >= 400 && String(res.url).includes(new URL(base).host)) {
