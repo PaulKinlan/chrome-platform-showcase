@@ -135,9 +135,12 @@ const PROBE = `(() => {
     visible++;
     if (r.right > vw + 1 || r.left < -1) clipped++;
     if (Math.min(r.width, r.height) > 0 && Math.min(r.width, r.height) < 44) {
-      // Inline text links fall under WCAG 2.5.8's inline exception — flag
-      // them separately from real controls (buttons/inputs/selects/...).
-      if (el.tagName === 'A') smallLinks++;
+      // Only anchors that actually flow inline with text fall under WCAG
+      // 2.5.8's inline exception. A button-styled link (inline-block, flex,
+      // block…) is a real control and counts with the buttons.
+      const isInlineProseLink = el.tagName === 'A' &&
+        getComputedStyle(el).display === 'inline';
+      if (isInlineProseLink) smallLinks++;
       else small++;
     }
   }
@@ -341,15 +344,20 @@ async function main() {
     results[t.id] = {};
     const rec = { source: "harness", lastChecked: new Date().toISOString().slice(0, 10) };
     for (const cls of Object.keys(CLASSES)) {
+      // Every page's result is kept in the report (auditable concept-level
+      // coverage); the aggregate verdict is the worst outcome across them.
+      const rank = { broken: 2, blocked: 1, ok: 0 };
+      const pageResults = [];
       let worst = null;
       for (const url of pages) {
-        const r = await checkPage(conn, url, cls);
+        const pr = await checkPage(conn, url, cls);
         const rel = url.replace(`${base}/${t.id}/`, "") || "(index)";
-        const labelled = { ...r, detail: pages.length > 1 ? `${rel}: ${r.detail}` : r.detail };
-        const rank = { broken: 2, blocked: 1, ok: 0 };
-        if (!worst || rank[labelled.outcome] > rank[worst.outcome]) worst = labelled;
+        pageResults.push({ page: rel, ...pr });
+        if (!worst || rank[pr.outcome] > rank[worst.outcome]) {
+          worst = { ...pr, detail: pages.length > 1 ? `${rel}: ${pr.detail}` : pr.detail };
+        }
       }
-      const r = worst;
+      const r = { ...worst, pages: pageResults };
       results[t.id][cls] = r;
       if (r.outcome === "ok") {
         rec[cls] = "ok";
