@@ -37,10 +37,17 @@
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
 import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
 
-// Purely decorative cross-origin requests whose failure never breaks a demo
-// (the design system's web fonts fall back to system fonts). Everything else
-// — same-origin AND cross-origin media/CDN dependencies — counts as a failure.
-const OPTIONAL_HOSTS = ["fonts.googleapis.com", "fonts.gstatic.com"];
+// Only the design system's OWN decorative font requests are exempt from
+// failure counting (public/styles.css imports Joan/Lora/JetBrains Mono via
+// css2, whose woff2 files live under fonts.gstatic.com/s/<family>/). Some
+// demos load OTHER families from these hosts as the feature under test —
+// those must still count, so the exemption matches the exact design-system
+// requests, not the hosts.
+const OPTIONAL_FONT_RE =
+  /fonts\.googleapis\.com\/css2\?family=Joan|fonts\.gstatic\.com\/s\/(joan|lora|jetbrainsmono)\//;
+function isOptionalFontRequest(url) {
+  return OPTIONAL_FONT_RE.test(String(url));
+}
 
 const CLASSES = {
   desktop: { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false },
@@ -167,7 +174,7 @@ async function checkPage(conn, url, cls) {
       // media/CDN content must still fail when that content breaks.
       if (msg.params?.canceled) return;
       const failedUrl = requestUrls.get(msg.params?.requestId) ?? "";
-      if (OPTIONAL_HOSTS.some((h) => failedUrl.includes(h))) return;
+      if (isOptionalFontRequest(failedUrl)) return;
       netFailures.push(
         `${msg.params?.errorText ?? "loadingFailed"}${failedUrl ? ` ${failedUrl}` : ""}`,
       );
@@ -175,10 +182,7 @@ async function checkPage(conn, url, cls) {
       // Same policy as loadingFailed: an HTTP error from ANY host is a demo
       // failure unless it comes from the optional decoration hosts.
       const res = msg.params?.response;
-      if (
-        res && res.status >= 400 &&
-        !OPTIONAL_HOSTS.some((h) => String(res.url).includes(h))
-      ) {
+      if (res && res.status >= 400 && !isOptionalFontRequest(res.url)) {
         netFailures.push(`HTTP ${res.status} ${res.url}`);
       }
     }
