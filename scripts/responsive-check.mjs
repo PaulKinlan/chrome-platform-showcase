@@ -212,11 +212,13 @@ async function checkPage(conn, url, cls) {
   await conn.send("Network.enable", {}, sessionId);
   // public/styles.css @imports the font CDN, so a HANGING font request holds
   // the whole stylesheet back and the probe would measure unstyled layout.
-  // The shell fonts are the declared-optional decoration (system-font
-  // fallback), so the harness blocks them for deterministic styling; their
-  // failures are exempt from counting either way.
+  // Block ONLY the shell's own css2 stylesheet request (its failure means an
+  // immediate system-font fallback, and its gstatic children are then never
+  // requested). Demo-owned font loads — any family, either host — proceed,
+  // so feature-under-test fonts (v140 specimens, v131 symbol font) still
+  // load and still count if they fail.
   await conn.send("Network.setBlockedURLs", {
-    urls: ["*fonts.googleapis.com*", "*fonts.gstatic.com*"],
+    urls: ["*fonts.googleapis.com/css2?family=Joan*"],
   }, sessionId).catch(() => {});
   await conn.send("Emulation.setDeviceMetricsOverride", {
     width: spec.width,
