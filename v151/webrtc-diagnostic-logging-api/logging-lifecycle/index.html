@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Logging lifecycle — WebRTC Diagnostic Logging API — Chrome 151</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code { overflow-wrap: anywhere; }
+    .flag-note {
+      padding: 0.85rem 1.1rem; border: 2px solid var(--border-black); background: var(--bg-stone);
+      font-family: var(--font-mono); font-size: 0.82rem; line-height: 1.55;
+      color: var(--text-charcoal); margin-bottom: 1.5rem;
+    }
+    .flag-note strong { color: var(--text-black); }
+    .flag-note code { background: var(--bg-ivory); padding: 0.05rem 0.3rem; }
+    .machine { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    .state {
+      flex: 1 1 8rem; text-align: center; padding: 0.8rem 0.5rem;
+      border: 2px solid var(--border-black); background: var(--bg-ivory);
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700; color: var(--text-charcoal);
+    }
+    .state.active { background: var(--text-black); color: var(--bg-ivory); }
+    .state small { display: block; font-weight: 400; font-size: 0.68rem; margin-top: 0.25rem; opacity: 0.85; }
+    .ctrl-row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.25rem; }
+    .status-line {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700;
+      padding: 0.45rem 0.8rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); margin-bottom: 1.25rem;
+    }
+    .status-line.ok { color: var(--accent-emerald); }
+    .status-line.err { color: var(--accent-rose); }
+    .status-line.warn { color: var(--accent-amber); }
+    .session {
+      border: 2px solid var(--border-black); padding: 0.9rem 1.1rem; background: var(--bg-paper); margin-bottom: 1.5rem;
+    }
+    .session .label, .mono-label {
+      font-family: var(--font-mono); font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.35rem;
+    }
+    .session .id {
+      font-family: var(--font-mono); font-size: 0.95rem; color: var(--text-black); word-break: break-all;
+    }
+    .binding-line {
+      font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-charcoal);
+      margin: -0.75rem 0 1.25rem;
+    }
+    .log {
+      font-family: var(--font-mono); font-size: 0.74rem; line-height: 1.6; padding: 0.7rem 0.9rem;
+      border: 1.5px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal);
+      max-height: 12rem; overflow-y: auto; margin-bottom: 1.5rem; white-space: pre-wrap;
+    }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v151/webrtc-diagnostic-logging-api/">&larr; WebRTC Diagnostic Logging API</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v151 · WebRTC</p>
+    <h1>Logging lifecycle</h1>
+    <p class="lede">A diagnostic-logging session is a tiny state machine. <code>startDiagnosticLogging()</code> begins recording and resolves with a UUID; <code>finishDiagnosticLogging()</code> finalises the local log; <code>cancelDiagnosticLogging()</code> throws the captured data away. The buttons below make the <em>real</em> calls — each is enabled only when it's valid to call. The page resolves whichever binding this browser exposes: Chrome 151's <code>navigator.rtc</code> or the spec draft's <code>RTCPeerConnection</code> statics.</p>
+  </header>
+
+  <div class="flag-note" id="flagNote" hidden>
+    <strong>The diagnostic logging API is not exposed in this browser.</strong><br>
+    Neither <code>navigator.rtc</code> (the Chrome 151 origin-trial binding) nor
+    <code>RTCPeerConnection.startDiagnosticLogging</code> (the current spec draft's static) is present.
+    Launch Chrome 151+ with <code>--enable-blink-features=RTCDiagnosticLogging</code>, enable
+    <code>chrome://flags/#enable-experimental-web-platform-features</code>, or register the origin for the
+    <a href="https://developer.chrome.com/origintrials/#/view_trial/352969620795162625" target="_blank" rel="noopener">origin trial</a>,
+    then reload over HTTPS/localhost. The buttons call the real API and report exactly what it returns.
+  </div>
+
+  <p class="binding-line" id="bindingLine" aria-live="polite">Resolving API binding…</p>
+
+  <div class="machine" aria-hidden="true">
+    <div class="state active" id="stIdle">idle<small>no session</small></div>
+    <div class="state" id="stLogging">logging<small>recording diagnostics</small></div>
+    <div class="state" id="stDone">finalised / discarded<small>back to idle</small></div>
+  </div>
+
+  <div class="ctrl-row">
+    <button id="startBtn" type="button">startDiagnosticLogging()</button>
+    <button id="finishBtn" type="button" disabled>finishDiagnosticLogging()</button>
+    <button id="cancelBtn" type="button" disabled>cancelDiagnosticLogging()</button>
+  </div>
+
+  <div class="status-line" id="status" role="status" aria-live="polite">Idle. Start a logging session.</div>
+
+  <div class="session">
+    <p class="label">Current session ID (all the page ever receives — the logs stay in the browser)</p>
+    <p class="id" id="sessionId" aria-live="polite">—</p>
+  </div>
+
+  <p class="mono-label">Call log</p>
+  <div class="log" id="log" aria-live="polite" role="log">(no calls yet)</div>
+
+  <p class="binding-line">Spec note: while a session is active, another <code>startDiagnosticLogging()</code> call still <em>resolves with a fresh UUID</em> — but no second session starts, and the page cannot tell. This demo state-gates its buttons as an app should; <a href="../loopback-call-capture/">loopback call capture</a> lets you observe the silent-resolve privacy model directly.</p>
+
+  <pre><code>// Resolve whichever binding this browser ships
+const rtc = navigator.rtc ?? RTCPeerConnection;   // OT binding vs spec draft
+
+// Before a call, start capturing WebRTC diagnostics
+const sessionId = await rtc.startDiagnosticLogging();
+// e.g. "530b630f-8b8b-41ae-b239-a3692fbb4970"
+
+// When the call ends normally, finalise the local log
+await rtc.finishDiagnosticLogging();
+
+// …or, if nothing useful happened, discard it
+await rtc.cancelDiagnosticLogging();
+</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5091582546149376" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="../bug-report-companion/">Bug-report companion</a> — <code>allowUpload</code> + start/finish metadata</li>
+      <li><a href="../capability-policy-probe/">Capability &amp; policy probe</a> — both bindings, the full enablement gate</li>
+      <li><a href="../loopback-call-capture/">Loopback call capture</a> — a real call wrapped in a capture session</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $("status");
+  const logEl = $("log");
+
+  // Chrome 151 origin trial binds navigator.rtc; the current WICG draft puts
+  // static methods on RTCPeerConnection. Resolve whichever exists.
+  const binding = (() => {
+    if (navigator.rtc && typeof navigator.rtc.startDiagnosticLogging === "function") {
+      return { api: navigator.rtc, shape: "navigator.rtc (Chrome 151 origin-trial binding)" };
+    }
+    if (typeof RTCPeerConnection !== "undefined" &&
+        typeof RTCPeerConnection.startDiagnosticLogging === "function") {
+      return { api: RTCPeerConnection, shape: "RTCPeerConnection statics (current WICG draft)" };
+    }
+    return null;
+  })();
+  const available = binding !== null;
+  const rtc = binding?.api;
+
+  let logging = false;
+  let logLines = [];
+
+  function setStatus(msg, cls) {
+    statusEl.textContent = msg;
+    statusEl.className = "status-line" + (cls ? " " + cls : "");
+  }
+  function addLog(line) {
+    logLines.push(`${new Date().toLocaleTimeString()}  ${line}`);
+    logEl.textContent = logLines.join("\n");
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function setMachine(state) {
+    $("stIdle").classList.toggle("active", state === "idle");
+    $("stLogging").classList.toggle("active", state === "logging");
+    $("stDone").classList.toggle("active", state === "done");
+  }
+  function setButtons() {
+    $("startBtn").disabled = !available || logging;
+    $("finishBtn").disabled = !available || !logging;
+    $("cancelBtn").disabled = !available || !logging;
+  }
+
+  async function start() {
+    $("startBtn").disabled = true;
+    setStatus("Calling startDiagnosticLogging()…");
+    addLog("→ startDiagnosticLogging()");
+    try {
+      const id = await rtc.startDiagnosticLogging();
+      logging = true;
+      $("sessionId").textContent = id;
+      setMachine("logging");
+      addLog(`← resolved: "${id}"`);
+      setStatus("Logging started. Finish to finalise the log, or cancel to discard it.", "ok");
+      window.showcaseTelemetry?.assert("rtc-start-returns-id", typeof id === "string" && id.length > 0, { idLen: id.length });
+    } catch (e) {
+      addLog(`✗ ${e.name}: ${e.message}`);
+      setStatus(`${e.name}: ${e.message}`, "err");
+      window.showcaseTelemetry?.assert("rtc-start", false, { error: e.name });
+    } finally {
+      setButtons();
+    }
+  }
+
+  async function finish() {
+    $("finishBtn").disabled = true;
+    $("cancelBtn").disabled = true;
+    setStatus("Calling finishDiagnosticLogging()…");
+    addLog("→ finishDiagnosticLogging()");
+    try {
+      await rtc.finishDiagnosticLogging();
+      logging = false;
+      setMachine("done");
+      addLog("← resolved (log finalised on disk)");
+      setStatus("Session finalised. The diagnostic log is saved locally by the browser.", "ok");
+      window.showcaseTelemetry?.assert("rtc-finish", true, {});
+    } catch (e) {
+      addLog(`✗ ${e.name}: ${e.message}`);
+      setStatus(`${e.name}: ${e.message}`, "err");
+    } finally {
+      setButtons();
+    }
+  }
+
+  async function cancel() {
+    $("finishBtn").disabled = true;
+    $("cancelBtn").disabled = true;
+    setStatus("Calling cancelDiagnosticLogging()…");
+    addLog("→ cancelDiagnosticLogging()");
+    try {
+      await rtc.cancelDiagnosticLogging();
+      logging = false;
+      setMachine("done");
+      addLog("← resolved (captured data discarded)");
+      setStatus("Session cancelled. Captured data was discarded.", "ok");
+      window.showcaseTelemetry?.assert("rtc-cancel", true, {});
+    } catch (e) {
+      addLog(`✗ ${e.name}: ${e.message}`);
+      setStatus(`${e.name}: ${e.message}`, "err");
+    } finally {
+      setButtons();
+    }
+  }
+
+  if (available) {
+    $("bindingLine").textContent = `API binding in this browser: ${binding.shape}`;
+  } else {
+    $("bindingLine").textContent = "API binding in this browser: none — neither navigator.rtc nor RTCPeerConnection statics.";
+    $("flagNote").hidden = false;
+    setStatus("Diagnostic logging API not exposed — see the note above.", "warn");
+    logEl.textContent = "API unavailable — enable the flag or origin trial to make real calls.";
+    window.showcaseTelemetry?.assert("rtc-lifecycle-unavailable-fallback", true, { secure: window.isSecureContext });
+  }
+  setButtons();
+  $("startBtn").addEventListener("click", start);
+  $("finishBtn").addEventListener("click", finish);
+  $("cancelBtn").addEventListener("click", cancel);
+</script>
+</body>
+</html>

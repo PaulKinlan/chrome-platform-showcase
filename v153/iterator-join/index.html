@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Iterator Join — Chrome 153 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<!--
+  Research record (2026-08-16, weekly-hardening-agent-v153-iterators):
+  - Exact surface: Iterator.prototype.join(separator) — TC39 Stage 3
+    (https://tc39.es/proposal-iterator-join/, Stage 3 draft dated 2026-08-08;
+    test262 tests: https://github.com/tc39/test262/pull/4768).
+  - V8 status: shipped in V8 main as js_iterator_join inside
+    JAVASCRIPT_SHIPPING_FEATURES (src/flags/flag-definitions.h), i.e. on by
+    default in the V8 that Chrome 153 ships. Verified for real with
+    `deno run --v8-flags=--js-iterator-join` on Deno 2.9.5 / V8 15.0.245.
+    Chromium 141 (V8 14.1) predates the implementation: --js-flags has no
+    effect there (verified locally 2026-08-16). No Blink runtime flag — this is
+    a pure V8 (JS language) feature, so runtime_enabled_features.json5 has no
+    entry; the milestone listing places it under "Enabled by default" at 153.
+  - Spec semantics verified against the real implementation (Deno/V8 15.0):
+    default separator ","; undefined/null elements -> empty string but still
+    separated ("1|||2"); ToString(separator) before iteration; Symbol separator
+    or element -> TypeError; non-object receiver -> TypeError; the iterator is
+    consumed; element-ToString abrupt closes the underlying iterator (finally
+    runs); separator-ToString abrupt ALSO closes it (return() spy verified
+    against V8 15.0) — but a generator-finally probe cannot see that close,
+    because return() on a never-started generator skips the body entirely.
+    That instrumentation gotcha is taught in edge-cases-and-closing case 5.
+  - Use-case portfolio: (1) basic/canonical + practical -> pipeline-join
+    (join a helper pipeline with no intermediate array; the motivating case in
+    the proposal README is exactly Array.from(x.keys()).join()); (2)
+    configuration/inspection -> separator-semantics (dataset x separator
+    matrix over the coercion rules); (3) edge/failure -> edge-cases-and-closing
+    (TypeErrors, closing protocol, consumption). (4) Novel/advanced
+    composition is covered inside pipeline-join (composition with the shipped
+    iterator-helpers pipeline is the feature's whole point — the proposal
+    motivates join as the terminal step of helper chains; a separate concept
+    would duplicate that same angle). (5) A migration angle beyond the
+    Array.from comparison shown in pipeline-join is not applicable: the
+    proposal defines no deprecations and changes no existing surface
+    (single-method addition, README "Proposal" section).
+-->
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/">&larr; Chrome 153</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · enabled by default · javascript</p>
+    <h1>Iterator Join</h1>
+    <p class="lede">Joining values into a string is trivial for arrays and clumsy for everything else: <code>Array.from(map.keys()).join(", ")</code> materialises the whole sequence just to concatenate it. The TC39 <em>Iterator Join</em> proposal (Stage&nbsp;3) adds <code>Iterator.prototype.join(separator)</code>, the missing terminal step for iterator-helper pipelines &mdash; same contract as <code>Array.prototype.join</code>, but streaming, with no intermediate array. These demos call the real method when your engine ships it and fall back to a clearly labelled spec-model when it doesn't.</p>
+  </header>
+
+  <section aria-labelledby="concepts-title">
+    <h2 id="concepts-title">concepts</h2>
+    <ol class="demo-list">
+      <li class="demo-card">
+        <h3><a href="./pipeline-join/">Pipeline join</a></h3>
+        <p>The canonical use: end a real <code>.values().map().filter()</code> helper pipeline with <code>.join()</code> instead of round-tripping through <code>Array.from</code>. Clean up a messy tag list live and compare the three historical workarounds.</p>
+      </li>
+      <li class="demo-card">
+        <h3><a href="./separator-semantics/">Separator semantics lab</a></h3>
+        <p>An inspection matrix over the coercion rules: default comma, empty separator, <code>ToString</code> on numbers and objects, Symbols throwing, and the <code>undefined</code>/<code>null</code> &rarr; empty-string rule &mdash; each cell run for real against the dataset you pick.</p>
+      </li>
+      <li class="demo-card">
+        <h3><a href="./edge-cases-and-closing/">Edge cases &amp; iterator closing</a></h3>
+        <p>The failure contract: non-object receivers, Symbol separators and elements, what actually closes the underlying iterator (observed with generator <code>finally</code> flags and a <code>return()</code> spy &mdash; they see different things), and the fact that <code>join</code> consumes its receiver.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>why it shipped</h2>
+    <p>The proposal&rsquo;s motivation is code that is everywhere on GitHub: <code>Array.from(thing.keys()).join(...)</code> and friends. Without <code>join</code>, an iterator pipeline has two bad endings &mdash; <code>Iterator.from(it).reduce((a, b) =&gt; a + sep + b)</code> allocates every intermediate string and breaks on empty iterators, while <code>Array.from(it).join(sep)</code> converts the whole sequence to an array first. <code>Iterator.prototype.join</code> gives helper chains the same one-call ending arrays have had since ES3. It reached Stage&nbsp;3 with test262 coverage, and V8 ships it on by default (<code>js_iterator_join</code>) in the engine Chrome&nbsp;153 carries.</p>
+  </section>
+
+  <section>
+    <h2>the shape</h2>
+    <pre tabindex="0"><code>Iterator.prototype.join(separator)  // -&gt; string; length 1
+
+[..."hello"].values().join()          // "h,e,l,l,o"  (undefined separator -&gt; ",")
+map.keys().join(" / ")               // streaming — no intermediate array
+[1, undefined, null, 2].values().join("|")  // "1|||2" — like Array.prototype.join</code></pre>
+    <p>Exact contract, verified against the real V8 implementation: the receiver must be an object (else <code>TypeError</code>); <code>ToString(separator)</code> runs <em>before</em> iteration starts; <code>undefined</code> and <code>null</code> elements contribute the empty string but still get separators; Symbol separators or elements throw <code>TypeError</code>; and the method consumes its receiver.</p>
+  </section>
+
+  <section>
+    <h2>running it today</h2>
+    <p>This is a pure V8 language feature &mdash; there is no <code>chrome://flags</code> entry and no Blink runtime flag, because it lives in <code>v8/src/flags/flag-definitions.h</code> as <code>js_iterator_join</code>, already in the <em>shipped</em> set for the V8 in Chrome&nbsp;153. In Chrome&nbsp;152 and earlier the V8 snapshot may simply not contain the implementation: Chromium&nbsp;141 ignores <code>--js-flags=--js-iterator-join</code> entirely (verified 2026-08-16). Outside the browser, <code>deno run --v8-flags=--js-iterator-join</code> runs the real implementation today (verified on Deno&nbsp;2.9.5 / V8&nbsp;15.0). Every demo probes <code>typeof Iterator.prototype.join</code> first and labels each result <em>native</em> or <em>spec-model</em>.</p>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5095183554314240" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://tc39.es/proposal-iterator-join/" target="_blank" rel="noopener">Spec (Stage 3 draft)</a></li>
+      <li><a href="https://github.com/tc39/proposal-iterator-join" target="_blank" rel="noopener">Proposal repository &amp; motivation</a></li>
+      <li><a href="https://github.com/tc39/test262/pull/4768" target="_blank" rel="noopener">test262 tests (PR #4768)</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/join" target="_blank" rel="noopener">MDN: Array.prototype.join (the contract it mirrors)</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Iterator" target="_blank" rel="noopener">MDN: Iterator helpers</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

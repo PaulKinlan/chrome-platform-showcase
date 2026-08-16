@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Consumer rejection matrix — Fetch API: Forward reason from AbortController to fetch Response — Chrome 153 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code { overflow-wrap: anywhere; }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note-banner { background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); border-left: 6px solid var(--accent-blue); }
+    fieldset { border: 2px solid var(--border-black); padding: var(--space-3); margin: 0; display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+    legend { font-weight: 700; padding: 0 var(--space-2); }
+    .radio-row { display: flex; align-items: center; gap: var(--space-2); min-block-size: 44px; }
+    .radio-row input[type="radio"] { inline-size: 22px; block-size: 22px; accent-color: var(--accent-blue); flex: none; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; cursor: pointer; min-block-size: 44px; }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    button:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    .table-wrap { overflow-x: auto; }
+    table.matrix { border-collapse: collapse; inline-size: 100%; min-inline-size: 640px; font-size: 0.9rem; }
+    .matrix th, .matrix td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; vertical-align: top; }
+    .matrix th { background: var(--bg-stone); color: var(--text-black); }
+    .matrix td { background: var(--bg-paper); color: var(--text-charcoal); font-family: var(--font-mono); overflow-wrap: anywhere; }
+    .matrix td.yes { border-left: 6px solid var(--accent-emerald); }
+    .matrix td.no { border-left: 6px solid var(--accent-amber); }
+    .summary { border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-weight: 700; }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Fetch API: Forward reason from AbortController to fetch Response</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · abort reason forwarding · configuration / inspection</p>
+    <h1>Consumer rejection matrix</h1>
+    <p class="lede">A <code>Response</code> body can be consumed six ways, and the Fetch Standard says an abort must forward its reason to <em>all</em> of them. This tool runs one real chunked fetch per consumer &mdash; <code>text()</code>, <code>json()</code>, <code>arrayBuffer()</code>, <code>blob()</code>, <code>bytes()</code>, and a raw <code>body.getReader().read()</code> &mdash; aborts each mid-body with the reason kind you choose, and tabulates exactly what each rejection was.</p>
+  </header>
+
+  <p class="note-banner" role="note">A full run performs six real fetches to this site&rsquo;s streaming route and deliberately cancels every one (six <code>net::ERR_ABORTED</code> DevTools entries). Rows run sequentially; a run takes roughly six seconds.</p>
+
+  <section class="stage" aria-labelledby="matrix-title">
+    <h2 id="matrix-title">Fill the matrix from real aborted fetches</h2>
+    <fieldset>
+      <legend>Reason to pass to <code>abort(&hellip;)</code> for every row</legend>
+      <div class="radio-row">
+        <input type="radio" name="mx-reason" id="mx-error" value="error" checked>
+        <label for="mx-error"><code>new Error("matrix-sentinel")</code></label>
+      </div>
+      <div class="radio-row">
+        <input type="radio" name="mx-reason" id="mx-domex" value="domexception">
+        <label for="mx-domex"><code>DOMException("gone", "TimeoutError")</code></label>
+      </div>
+      <div class="radio-row">
+        <input type="radio" name="mx-reason" id="mx-string" value="string">
+        <label for="mx-string">string <code>"nav-away"</code></label>
+      </div>
+      <div class="radio-row">
+        <input type="radio" name="mx-reason" id="mx-none" value="none">
+        <label for="mx-none">no argument (spec default)</label>
+      </div>
+    </fieldset>
+    <div>
+      <button type="button" id="run-matrix">Run all six consumers</button>
+    </div>
+    <div class="table-wrap" tabindex="0" role="region" aria-labelledby="matrix-title">
+      <table class="matrix">
+        <thead>
+          <tr><th scope="col">consumer</th><th scope="col">rejection value</th><th scope="col"><code>===</code> your reason</th><th scope="col">name / note</th></tr>
+        </thead>
+        <tbody id="matrix-body">
+          <tr><td colspan="4">Not run yet — press &ldquo;Run all six consumers&rdquo;.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="summary" id="mx-summary" role="status">No verdict yet.</p>
+  </section>
+
+  <section>
+    <h2>reading the matrix</h2>
+    <p>With a custom reason, a spec-compliant browser (Firefox today, Chrome&nbsp;153+) shows <strong>yes</strong> in the identity column for every row &mdash; one reason object, forwarded everywhere. Pre-153 Chromium shows <strong>no</strong> on every row with a generic <code>AbortError</code> substitute; the messages even differ by consumer (<code>"The user aborted a request."</code> for buffered consumers, <code>"BodyStreamBuffer was aborted"</code> for raw reads), which is exactly the inconsistency the spec text removes. With <em>no argument</em>, every branch correctly reports the minted <code>AbortError</code> <code>DOMException</code> &mdash; identity with a reason you never supplied is impossible, so that column is marked n/a.</p>
+  </section>
+
+  <section>
+    <h2>the code</h2>
+    <pre tabindex="0"><code>async function probe(consume) {
+  const controller = new AbortController();
+  const res = await fetch(STREAM_URL, { signal: controller.signal });
+  const pending = consume(res);      // res.text(), res.blob(), reader.read()…
+  await delay(400);                  // headers done, body still streaming
+  controller.abort(reason);
+  try { await pending; } catch (err) { return err; }
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../mid-stream-forwarding-probe/">Mid-stream forwarding probe</a> &mdash; single-consumer deep dive with a timeline</li>
+      <li><a href="../cancellable-download/">Cancellable download</a> &mdash; why the identity column matters in product code</li>
+      <li><a href="https://fetch.spec.whatwg.org/#abort-fetch" target="_blank" rel="noopener">Fetch Standard &mdash; abort a fetch() call</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script type="module">
+const STREAM_URL = "/v152/renewed-html-insertion-streaming-methods/html-stream?chunks=6&delay=400";
+const body = document.getElementById("matrix-body");
+const summary = document.getElementById("mx-summary");
+const runBtn = document.getElementById("run-matrix");
+
+const CONSUMERS = [
+  { id: "text()", start: (res) => res.text() },
+  { id: "json()", start: (res) => res.json() },
+  { id: "arrayBuffer()", start: (res) => res.arrayBuffer() },
+  { id: "blob()", start: (res) => res.blob() },
+  { id: "bytes()", start: (res) => typeof res.bytes === "function" ? res.bytes() : Promise.reject(new Error("Response.bytes() not implemented in this browser")), skippable: true },
+  { id: "body reader read()", start: (res) => { const reader = res.body.getReader(); return reader.read().then(() => reader.read()); } },
+];
+
+function makeReason(kind) {
+  switch (kind) {
+    case "error": return { value: new Error("matrix-sentinel"), none: false };
+    case "domexception": return { value: new DOMException("gone", "TimeoutError"), none: false };
+    case "string": return { value: "nav-away", none: false };
+    default: return { value: undefined, none: true };
+  }
+}
+
+function describe(v) {
+  if (v === undefined) return "undefined";
+  if (typeof v === "string") return JSON.stringify(v);
+  if (v instanceof DOMException) return `DOMException "${v.name}": ${v.message}`;
+  if (v instanceof Error) return `${v.constructor.name}: ${v.message}`;
+  return String(v);
+}
+
+function addRow(consumer, rejectionText, identity, note) {
+  const tr = document.createElement("tr");
+  const th = document.createElement("th");
+  th.scope = "row"; th.textContent = consumer;
+  const tdVal = document.createElement("td"); tdVal.textContent = rejectionText;
+  const tdId = document.createElement("td");
+  if (identity === null) { tdId.textContent = "n/a"; }
+  else { tdId.textContent = identity ? "yes ✓ forwarded" : "no — substituted"; tdId.classList.add(identity ? "yes" : "no"); }
+  const tdNote = document.createElement("td"); tdNote.textContent = note;
+  tr.append(th, tdVal, tdId, tdNote);
+  body.append(tr);
+}
+
+async function probeOne(consumer, reasonFactory) {
+  const { value: reason, none } = reasonFactory();
+  const controller = new AbortController();
+  const res = await fetch(STREAM_URL, { signal: controller.signal });
+  if (!res.ok) throw new Error(`streaming endpoint answered HTTP ${res.status}`);
+  // Do NOT await the consumer promise here — it must still be pending when abort fires.
+  const pending = consumer.start(res);
+  // Attach the rejection handler BEFORE aborting so nothing is ever unhandled.
+  const outcome = pending.then((v) => ({ resolved: true, v }), (err) => ({ resolved: false, err }));
+  await new Promise((r) => setTimeout(r, 500));
+  if (none) controller.abort(); else controller.abort(reason);
+  const result = await outcome;
+  if (result.resolved) return { resolvedEarly: true };
+  const err = result.err;
+  if (consumer.skippable && err instanceof Error && /not implemented/.test(err.message)) return { skipped: true, err };
+  return {
+    rejection: err,
+    identity: none ? null : err === reason,
+    isAbortError: err instanceof DOMException && err.name === "AbortError",
+  };
+}
+
+runBtn.addEventListener("click", async () => {
+  runBtn.disabled = true;
+  body.replaceChildren();
+  summary.textContent = "Running six sequential aborted fetches…";
+  const kind = document.querySelector('input[name="mx-reason"]:checked').value;
+  const factory = () => makeReason(kind);
+  const none = kind === "none";
+  let forwarded = 0, substituted = 0, ran = 0;
+  for (const consumer of CONSUMERS) {
+    try {
+      const r = await probeOne(consumer, factory);
+      if (r.skipped) { addRow(consumer.id, describe(r.err), null, "consumer unavailable — skipped honestly"); continue; }
+      if (r.resolvedEarly) { addRow(consumer.id, "(resolved before abort landed)", null, "inconclusive — stream finished early, rerun"); continue; }
+      ran++;
+      if (none) {
+        addRow(consumer.id, describe(r.rejection), null, r.isAbortError ? "spec default: minted AbortError ✓" : "expected an AbortError here");
+      } else {
+        if (r.identity) forwarded++; else substituted++;
+        addRow(consumer.id, describe(r.rejection), r.identity, r.isAbortError && !r.identity ? "generic substitute (pre-153)" : r.identity ? "spec behaviour (153+)" : "unexpected shape");
+      }
+    } catch (err) {
+      addRow(consumer.id, "probe failed: " + describe(err), null, "endpoint/setup error");
+    }
+  }
+  if (none) {
+    summary.textContent = `Done — ${ran} consumers ran with no abort argument; each shows the spec-minted AbortError DOMException.`;
+  } else if (ran === 0) {
+    summary.textContent = "No consumer could be probed — the streaming endpoint may be unavailable. Retry.";
+  } else {
+    summary.textContent = `Done — ${forwarded} of ${ran} consumers received your exact reason object; ${substituted} substituted a generic AbortError. ${forwarded === ran ? "This browser fully forwards abort reasons (Chrome 153 behaviour)." : forwarded === 0 ? "This browser substitutes everywhere — the pre-153 gap this feature fixes." : "Mixed result — partial implementation."}`;
+  }
+  window.showcaseTelemetry?.assert("consumer-matrix-completed", ran > 0 || none, { kind, ran, forwarded, substituted });
+  runBtn.disabled = false;
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JS Self-Profiling Markers — Chrome 153 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<!--
+  Research record (2026-08-16, weekly-hardening-agent-v153-wave3):
+  - Exact surface (markers explainer, WICG/js-self-profiling markers.md + spec PR #89):
+    ProfilerSample gains `[CrossOriginIsolated] ProfilerMarker? marker` where
+    `enum ProfilerMarker { "script", "gc", "style", "layout", "paint", "other" }`;
+    a missing marker member means the sampled moment is interpreted as idle. The
+    base API is `new Profiler({ sampleInterval, maxBufferSize })` (constructing
+    starts sampling; stop() resolves the trie-shaped trace {frames, stacks,
+    samples}), gated on the `Document-Policy: js-profiling` RESPONSE HEADER, and
+    Profiler extends EventTarget (samplebufferfull).
+  - Flags verified in runtime_enabled_features.json5 @ main:
+    name: "ExperimentalJSProfilerMarkers", origin_trial_feature_name:
+    "JSSelfProfilingMarkers", status: "experimental". So the enable path is
+    --enable-blink-features=ExperimentalJSProfilerMarkers (no dedicated
+    chrome://flags entry; --enable-experimental-web-platform-features also works)
+    or the JSSelfProfilingMarkers origin trial; markers ADDITIONALLY require
+    cross-origin isolation (COOP+COEP) per the [CrossOriginIsolated] IDL
+    attribute, and the base Document-Policy header always applies.
+  - Verified live on this container's Chromium 141 (CDP, 2026-08-16):
+    typeof Profiler === "function", and new Profiler(...) throws
+    DOMException "Failed to construct 'Profiler': JS profiling is disabled by
+    Document Policy." on routes without the header — the demos surface that
+    exact error rather than claiming absence of the API.
+  - SERVER DEPENDENCY / TODO(reviewer): the routine cannot edit server.ts, so
+    the v153/js-self-profiling-markers/ routes are currently served WITHOUT
+    `Document-Policy: js-profiling`, and the constructor demos honestly report
+    the blocked state naming that exact header. To light up the real success
+    path, wire this feature the same way v147's js-profiling-in-dedicated-workers
+    is wired: in routes/release.ts add a sub-path match for
+    "/js-self-profiling-markers" that wraps readReleaseAsset with
+    withHeaders(asset, { "document-policy": "js-profiling" }), and mirror the
+    same header in routes/conformance.ts conformanceHeaders() for
+    (release === "v153" && featureSlug === "js-self-profiling-markers").
+    Until then, the v147 demo routes are the live place on this site where the
+    header is already served (linked from every page here). Note markers ALSO
+    need cross-origin isolation, which the site does not currently serve
+    anywhere — COOP/COEP headers would be a second, separate server change.
+  - Use-case portfolio: (1) basic/canonical + inspection -> policy-and-marker-probe
+    (every prerequisite probed separately: global, prototype shape, EventTarget
+    inheritance, the real response header read from a live fetch, crossOriginIsolated,
+    and the real constructor attempt with the exact error); (2) practical product ->
+    live-trace-lab (a real attempted profile run over a mixed script/layout/GC
+    workload with trace + marker-histogram analysis when it can run, and an honest
+    blocked panel when it cannot); (3) walkthrough/education -> marker-anatomy
+    (interactive explorer over a clearly-labelled recorded example trace showing
+    how stackId chains resolve and what each marker means, incl. the missing-marker
+    = idle rule). (4) An edge/failure concept beyond these is not applicable as a
+    separate page: the failure surface IS the policy/isolation/flag gating, which
+    concepts 1-2 exercise directly with real calls. (5) A novel/advanced
+    composition (e.g. shipping traces to a server) would exercise no additional
+    marker surface and is deferred until the real success path can run on this
+    site (see TODO above).
+-->
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/">&larr; Chrome 153</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · origin trial · performance apis</p>
+    <h1>JS Self-Profiling Markers</h1>
+    <p class="lede">The JS Self-Profiling API lets a page sample its own call stacks on real user devices &mdash; but a field trace is full of unexplained gaps where the browser was doing style, layout, paint, or garbage-collection work that stack sampling cannot see. The Chrome&nbsp;153 origin trial adds a <code>marker</code> to each sample &mdash; <code>script</code>, <code>gc</code>, <code>style</code>, <code>layout</code>, <code>paint</code>, or <code>other</code> &mdash; so those gaps become attributable. These demos probe every prerequisite honestly, attempt the real API, and teach the trace format interactively.</p>
+  </header>
+
+  <section aria-labelledby="concepts-title">
+    <h2 id="concepts-title">concepts</h2>
+    <ol class="demo-list">
+      <li class="demo-card">
+        <h3><a href="./policy-and-marker-probe/">Policy &amp; marker probe</a></h3>
+        <p>Each prerequisite checked separately with a real call: the <code>Profiler</code> global and its prototype shape, the actual <code>Document-Policy</code> response header this route was served with, <code>crossOriginIsolated</code> (markers require it), and a live <code>new Profiler(&hellip;)</code> attempt surfacing the exact result.</p>
+      </li>
+      <li class="demo-card">
+        <h3><a href="./live-trace-lab/">Live trace lab</a></h3>
+        <p>The real thing, attempted: profile a mixed workload (hot JS, forced layout, allocation storm), then analyse the returned trace &mdash; frames, stacks, samples, and the marker histogram &mdash; or an honest blocked panel naming exactly what stopped it.</p>
+      </li>
+      <li class="demo-card">
+        <h3><a href="./marker-anatomy/">Marker anatomy</a></h3>
+        <p>An interactive walk through the trace format using a clearly-labelled recorded example: click samples to resolve their <code>stackId</code> chains, filter by marker, and see why a missing marker means <em>idle</em> and why markers sit behind cross-origin isolation.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>why it shipped</h2>
+    <p>Stack sampling profiles only the page&rsquo;s JavaScript. Some browser work (GC especially) <em>interrupts</em> stack execution and is invisible to it; rendering work between tasks shows up as unexplained dead time. Teams shipping the Self-Profiling API in the field &mdash; the API exists since Chrome&nbsp;94 &mdash; kept hitting traces they could not interpret. A per-sample marker attributes that time to the browser activity that actually ran: <code>script</code>, <code>gc</code>, <code>style</code>, <code>layout</code>, <code>paint</code>, or <code>other</code>, with GC timing deliberately coarsened (10&nbsp;ms resolution, post-hoc) so the marker is not a GC side-channel.</p>
+  </section>
+
+  <section>
+    <h2>the shape</h2>
+    <pre tabindex="0"><code>// Served with:  Document-Policy: js-profiling
+const profiler = new Profiler({ sampleInterval: 10, maxBufferSize: 10_000 });
+// … work happens …
+const trace = await profiler.stop();
+
+trace.samples[0];
+// { timestamp: 1551.734, stackId: 2, marker: "script" }   ← the new field
+// { timestamp: 1601.905 }              ← no stack, no marker: idle
+// { timestamp: 1620.001, marker: "gc" }  ← stackless browser work, now attributed
+
+// enum ProfilerMarker { "script", "gc", "style", "layout", "paint", "other" }
+// IDL: [CrossOriginIsolated] ProfilerMarker? marker  — markers need COOP+COEP</code></pre>
+  </section>
+
+  <section>
+    <h2>running it today</h2>
+    <p>Three independent gates, all probed live by the demos: <strong>(1)</strong> the response header <code>Document-Policy: js-profiling</code> &mdash; this showcase route does not currently send it (a server-side TODO is recorded for the reviewer; the <a href="/v147/js-profiling-in-dedicated-workers/">v147 worker-profiling demo</a> is served with it today), so the constructor demos here surface the real <code>DOMException</code> Chrome throws without it. <strong>(2)</strong> the marker field itself: Chrome&nbsp;153 runs the <code>JSSelfProfilingMarkers</code> origin trial; locally, launch with <code>--enable-blink-features=ExperimentalJSProfilerMarkers</code> (no dedicated <code>chrome://flags</code> entry; <code>--enable-experimental-web-platform-features</code> also enables it). <strong>(3)</strong> cross-origin isolation (<code>crossOriginIsolated === true</code>, via COOP+COEP headers) &mdash; the IDL gates <code>marker</code> on it.</p>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5201297767792640" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/WICG/js-self-profiling/blob/main/markers.md" target="_blank" rel="noopener">Markers explainer (WICG)</a></li>
+      <li><a href="https://github.com/WICG/js-self-profiling/pull/89" target="_blank" rel="noopener">Spec PR #89 — marker field</a></li>
+      <li><a href="https://wicg.github.io/js-self-profiling/" target="_blank" rel="noopener">JS Self-Profiling API spec</a></li>
+      <li><a href="https://github.com/victorhuangwq/js-profiler-markers-demo" target="_blank" rel="noopener">Sample: js-profiler-markers-demo</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

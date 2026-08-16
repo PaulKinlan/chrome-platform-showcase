@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Joint Iteration — Chrome 153 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<!--
+  Research record (2026-08-16, weekly-hardening-agent-v153-iterators):
+  - Exact surface: Iterator.zip(iterables[, options]) and
+    Iterator.zipKeyed(iterables[, options]) — TC39 Stage 4
+    (https://tc39.es/proposal-joint-iteration/, Stage 4 draft 2026-05-29;
+    ecma262 integration PR https://github.com/tc39/ecma262/pull/3802).
+  - Options bag: mode "shortest" (default) | "longest" | "strict" (anything
+    else TypeError); padding only read (observable Get) when mode==="longest",
+    must be object/undefined — an iterable of per-position values for zip,
+    a keyed lookup object for zipKeyed.
+  - V8 status: shipped in V8 main as js_joint_iteration inside
+    JAVASCRIPT_SHIPPING_FEATURES (src/flags/flag-definitions.h) — on by
+    default in the V8 Chrome 153 carries. Verified for real with
+    `deno run --v8-flags=--js-joint-iteration` on Deno 2.9.5 / V8 15.0.245.
+    Chromium 141 (V8 14.1) predates the implementation; --js-flags has no
+    effect there (verified locally 2026-08-16). Pure V8 language feature:
+    no Blink runtime flag, no chrome://flags entry.
+  - Semantics verified against the real implementation (29-case differential
+    test, model vs native, all semantic matches): inputs are flattenable
+    objects (primitives incl. strings -> TypeError, both as the outer arg and
+    as elements); zero inputs -> immediately done; results are Iterator Helper
+    objects (chainable .map/.take/.toArray); shortest closes remaining inputs;
+    strict throws TypeError on length mismatch (checked by stepping the
+    remaining inputs when input 0 finishes first); longest substitutes
+    padding, default undefined, zip padding list read eagerly + truncated/
+    extended to iterCount; zipKeyed uses own enumerable keys, SKIPS
+    undefined-valued properties, keeps symbol keys, and yields NULL-PROTOTYPE
+    result objects; consumer .return() closes all open inputs in REVERSE
+    order (IteratorCloseAll); padding is not read at all in shortest/strict
+    (getter-spy verified).
+  - Use-case portfolio: (1) basic/canonical -> zip-basics (real tuple zip +
+    helper chaining); (2) configuration/inspection -> mode-matrix (all three
+    modes side by side over the same inputs, plus padding config);
+    (3) practical product use case -> columnar-records (zipKeyed columns ->
+    records, the proposal's named-correspondence motivation); (4) edge/
+    failure -> edge-lab (primitive rejection, TypeErrors, zero inputs,
+    closing protocol, padding laziness). (5) Novel/advanced composition is
+    covered inside zip-basics (chaining zip output through the shipped
+    iterator-helpers pipeline) and columnar-records (zip + generators for a
+    live data stream) — a separate concept would repeat those angles; noted
+    per the portfolio rule rather than skipped silently.
+-->
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/">&larr; Chrome 153</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · enabled by default · javascript</p>
+    <h1>Joint Iteration</h1>
+    <p class="lede">Walking several sequences in lock-step &mdash; <em>zip</em> &mdash; is a fixture of every iterator library and most languages; JavaScript finally gets it natively. The TC39 <em>Joint Iteration</em> proposal (Stage&nbsp;4) adds two statics: <code>Iterator.zip</code> combines an iterable of iterables into tuples, and <code>Iterator.zipKeyed</code> combines an object of iterables into keyed records. An options bag picks how length mismatches resolve: <code>shortest</code> (default), <code>longest</code> (with per-input padding), or <code>strict</code> (throw). These demos call the real statics when your engine ships them and fall back to a clearly labelled spec-model when it doesn&rsquo;t.</p>
+  </header>
+
+  <section aria-labelledby="concepts-title">
+    <h2 id="concepts-title">concepts</h2>
+    <ol class="demo-list">
+      <li class="demo-card">
+        <h3><a href="./zip-basics/">Zip basics</a></h3>
+        <p>The canonical call: two or three live-edited sequences zipped into tuples, then chained straight into the shipped iterator helpers &mdash; because <code>Iterator.zip</code> returns an Iterator Helper, <code>.map().take().toArray()</code> just works.</p>
+      </li>
+      <li class="demo-card">
+        <h3><a href="./mode-matrix/">Mode matrix</a></h3>
+        <p>The options bag, inspected: the same unequal-length inputs run through <code>shortest</code>, <code>longest</code>, and <code>strict</code> side by side, with editable <code>longest</code>-mode padding &mdash; including proof (via a getter spy) that <code>padding</code> is only ever read in <code>longest</code> mode.</p>
+      </li>
+      <li class="demo-card">
+        <h3><a href="./columnar-records/">Columnar records</a></h3>
+        <p>The practical case for <code>zipKeyed</code>: turn column-oriented data (arrays per field) into row records without index bookkeeping &mdash; plus the two contract details that surprise people: result objects have a <strong>null prototype</strong>, and <code>undefined</code>-valued keys are skipped entirely.</p>
+      </li>
+      <li class="demo-card">
+        <h3><a href="./edge-lab/">Edge &amp; failure lab</a></h3>
+        <p>The rejection and cleanup contract: strings and other primitives throw, zero inputs finish immediately, invalid modes and padding throw, <code>shortest</code> closes the losers, and a consumer <code>return()</code> closes every open input &mdash; in reverse order.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>why it shipped</h2>
+    <p>Positionally-aligned sequences are everywhere &mdash; parallel arrays from an API, columns from a data file, coordinates and labels, streams that advance together. Before this proposal every codebase reinvented <code>zip</code> (the proposal&rsquo;s prior-art table lists 16 JS libraries shipping one), each with different answers to the hard questions: what happens when lengths differ, are the leftovers closed, can you pad, does a mismatch throw? The standard answers all of them with one options bag &mdash; <code>shortest</code> matches Python&rsquo;s <code>zip</code>, <code>longest</code> matches <code>itertools.zip_longest</code> with per-input padding, <code>strict</code> matches <code>zip(&hellip;, strict=True)</code> &mdash; and adds the keyed variant no positional API can express. It reached Stage&nbsp;4 (ecma262 PR&nbsp;#3802), and V8 ships it on by default (<code>js_joint_iteration</code>) in the engine Chrome&nbsp;153 carries.</p>
+  </section>
+
+  <section>
+    <h2>the shape</h2>
+    <pre tabindex="0"><code>Iterator.zip(iterables, options?)       // iterable of iterables -&gt; iterator of arrays
+Iterator.zipKeyed(iterables, options?)  // object of iterables  -&gt; iterator of records
+
+options: {
+  mode: "shortest" | "longest" | "strict",   // default "shortest"
+  padding,   // longest mode only — iterable (zip) or keyed object (zipKeyed)
+}
+
+Iterator.zip([[0, 1, 2], [3, 4, 5]]).toArray()
+// [[0, 3], [1, 4], [2, 5]]
+
+Iterator.zipKeyed({ a: [0, 1], b: [2, 3] }).toArray()
+// [{ a: 0, b: 2 }, { a: 1, b: 3 }]   — records have a null prototype</code></pre>
+    <p>Both statics return an <em>Iterator Helper</em>, so every existing helper &mdash; <code>map</code>, <code>filter</code>, <code>take</code>, <code>toArray</code>, even the new <code>join</code> &mdash; chains directly off a zip.</p>
+  </section>
+
+  <section>
+    <h2>running it today</h2>
+    <p>Pure V8 language feature: no <code>chrome://flags</code> entry, no Blink runtime flag &mdash; it lives in <code>v8/src/flags/flag-definitions.h</code> as <code>js_joint_iteration</code>, already in the <em>shipped</em> set for the V8 in Chrome&nbsp;153. Earlier Chromes may simply lack the implementation: Chromium&nbsp;141 ignores <code>--js-flags=--js-joint-iteration</code> entirely (verified 2026-08-16). Outside the browser, <code>deno run --v8-flags=--js-joint-iteration</code> runs the real statics today (verified on Deno&nbsp;2.9.5 / V8&nbsp;15.0). Every demo probes <code>typeof Iterator.zip</code> first and labels each result <em>native</em> or <em>spec-model</em>.</p>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/6249068542164992" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://tc39.es/proposal-joint-iteration/" target="_blank" rel="noopener">Spec (Stage 4 draft)</a></li>
+      <li><a href="https://github.com/tc39/proposal-joint-iteration" target="_blank" rel="noopener">Proposal repository (design decisions &amp; prior art)</a></li>
+      <li><a href="https://github.com/tc39/ecma262/pull/3802" target="_blank" rel="noopener">ecma262 integration PR #3802</a></li>
+      <li><a href="https://tc39.es/proposal-joint-iteration/demo/" target="_blank" rel="noopener">The champions&rsquo; own demo page</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Iterator" target="_blank" rel="noopener">MDN: Iterator helpers</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
