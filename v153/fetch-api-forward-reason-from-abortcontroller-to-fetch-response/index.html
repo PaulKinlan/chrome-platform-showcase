@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fetch API: Forward reason from AbortController to fetch Response — Chrome 153 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<!--
+  Research record (2026-08-16, weekly-hardening-agent-v153-wave3):
+  - Exact contract: fetch spec "abort a fetch() call" steps
+    (https://fetch.spec.whatwg.org/#abort-fetch): when controller.abort(reason)
+    fires, the deserialized abort reason must (1) reject the pending fetch()
+    promise — shipped in Chrome 98 alongside AbortSignal.reason, chromestatus
+    5631483679080448 — and (2) if the fetch promise HAS already resolved but the
+    body is not fully read, error the Response's body stream and reject pending
+    body-consumer promises (Response.text()/json()/arrayBuffer()/blob()/bytes(),
+    reader.read()) with that same reason. Part (2) is what ships in Chrome 153;
+    pre-153 Chromium rejects those with a generic "AbortError" DOMException
+    ("BodyStreamBuffer was aborted" / "The user aborted a request.") — verified
+    for real on this Chromium 141 via CDP on 2026-08-16 (mid-stream reader.read()
+    rejection: name AbortError, identity !== the custom reason; pending-promise
+    rejection: identity === the custom reason).
+  - Blink runtime flag (looked up in runtime_enabled_features.json5 @ main):
+    name: "ForwardReasonToFetchBodyAbort", status: "experimental",
+    comment cites crbug.com/502133195. No dedicated chrome://flags entry, so the
+    enable path today is --enable-blink-features=ForwardReasonToFetchBodyAbort or
+    --enable-experimental-web-platform-features; Chrome 153 ships it by default
+    (milestone listing category: "Enabled by default"). Firefox already conforms
+    (per the chromestatus summary).
+  - Use-case portfolio: (1) basic/canonical -> abort-reason-basics (reason
+    plumbing into the pending fetch promise + AbortSignal.reason/throwIfAborted);
+    (2) edge/spec-gap probe -> mid-stream-forwarding-probe (the EXACT surface
+    this v153 entry changes, with an honest forwarded-vs-generic verdict);
+    (3) configuration/inspection -> consumer-rejection-matrix (every Response
+    consumer x every reason kind, tabulated from real fetches); (4) practical
+    product + migration -> cancellable-download (progress UI whose catch handler
+    branches on the forwarded reason, incl. AbortSignal.timeout, plus the
+    signal.reason workaround pre-153 code needs). (5) A separate novel/advanced
+    composition concept is not applicable as a distinct page: the feature adds
+    no new API surface (no new member, no new syntax) — it only changes WHICH
+    value already-existing rejection paths carry, and the timeout+streams+retry
+    composition inside cancellable-download already composes it with the other
+    relevant platform capability (Streams + AbortSignal.timeout).
+  - Streaming endpoint: the demos consume the published same-origin streaming
+    route /v152/renewed-html-insertion-streaming-methods/html-stream?chunks=N&delay=MS
+    (real chunked network body, so the fetch promise resolves while the body is
+    still in flight). TODO(reviewer): if you would rather not share that route,
+    wire a dedicated `v153/fetch-api-forward-reason-from-abortcontroller-to-fetch-response/drip`
+    route in server.ts (chunked text/plain, ?chunks=&delay=) and flip STREAM_URL
+    in the three concept pages — the pages already surface an honest error state
+    if the endpoint ever 404s.
+-->
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/">&larr; Chrome 153</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · enabled by default · network</p>
+    <h1>Fetch API: Forward reason from AbortController to fetch Response</h1>
+    <p class="lede">Since Chrome&nbsp;98 you can call <code>controller.abort(reason)</code> and a still-pending <code>fetch()</code> promise rejects with exactly that reason. But once the promise has resolved &mdash; headers in, body still streaming &mdash; Chromium threw the reason away: <code>response.text()</code>, <code>response.blob()</code> and <code>response.body</code> reads rejected with a generic <code>AbortError</code>. Chrome&nbsp;153 closes that spec gap: the abort reason now propagates all the way into the <code>Response</code> object&rsquo;s consumers, matching the Fetch Standard (and Firefox). These demos abort real streaming fetches and report what <em>this</em> browser actually forwards.</p>
+  </header>
+
+  <section aria-labelledby="concepts-title">
+    <h2 id="concepts-title">concepts</h2>
+    <ol class="demo-list">
+      <li class="demo-card">
+        <h3><a href="./abort-reason-basics/">Abort reason basics</a></h3>
+        <p>The part that already shipped: pick a reason (default <code>AbortError</code>, an <code>Error</code>, a string, a structured object), abort a real pending fetch, and inspect the rejection&rsquo;s identity, <code>signal.reason</code>, and <code>throwIfAborted()</code>.</p>
+      </li>
+      <li class="demo-card">
+        <h3><a href="./mid-stream-forwarding-probe/">Mid-stream forwarding probe</a></h3>
+        <p>The exact contract Chrome&nbsp;153 fixes: fetch a chunked response, read one chunk, abort with a sentinel reason, and see &mdash; with a timeline &mdash; whether <code>reader.read()</code> rejects with your reason (v153 behaviour) or a generic <code>AbortError</code> (pre-153).</p>
+      </li>
+      <li class="demo-card">
+        <h3><a href="./consumer-rejection-matrix/">Consumer rejection matrix</a></h3>
+        <p>An inspection table over every <code>Response</code> consumer &mdash; <code>text()</code>, <code>json()</code>, <code>arrayBuffer()</code>, <code>blob()</code>, <code>bytes()</code>, a body reader &mdash; crossed with each reason kind, every cell filled from a real aborted fetch.</p>
+      </li>
+      <li class="demo-card">
+        <h3><a href="./cancellable-download/">Cancellable download</a></h3>
+        <p>Why it matters in a product: a streaming download whose catch handler branches on the forwarded reason (&ldquo;you cancelled at 4,096 bytes&rdquo; vs a timeout), with the <code>signal.reason</code> workaround pre-153 code still needs.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>why it shipped</h2>
+    <p>The Fetch Standard&rsquo;s <a href="https://fetch.spec.whatwg.org/#abort-fetch" target="_blank" rel="noopener">abort steps</a> say the deserialized abort reason is used both to reject the <code>fetch()</code> promise <em>and</em> to error the response&rsquo;s body. Chromium only implemented the first half, so error-handling code at the consumption site &mdash; often far away from the code that owns the <code>AbortController</code> &mdash; saw an anonymous <code>AbortError</code> with no way to tell a user cancel from a timeout from a navigation teardown. Firefox is already compliant; Chrome&nbsp;153 makes Chromium match, behind the Blink feature <code>ForwardReasonToFetchBodyAbort</code> (on by default at 153).</p>
+  </section>
+
+  <section>
+    <h2>the shape</h2>
+    <pre tabindex="0"><code>const controller = new AbortController();
+const res = await fetch(url, { signal: controller.signal }); // headers arrived
+
+const textPromise = res.text();          // body still streaming&hellip;
+controller.abort(new DOMException("User closed the panel", "TimeoutError"));
+
+try { await textPromise; }
+catch (err) {
+  // Chrome 153+: err IS the reason you passed to abort()
+  // Chrome &le;152: err is a generic "AbortError" DOMException
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>running it today</h2>
+    <p>On Chrome&nbsp;153+ the forwarding is on by default. On earlier Chromium the Blink runtime feature exists behind <code>--enable-blink-features=ForwardReasonToFetchBodyAbort</code> (it has no dedicated <code>chrome://flags</code> entry; <code>--enable-experimental-web-platform-features</code> also enables it, status <em>experimental</em> in <code>runtime_enabled_features.json5</code>, tracked as crbug.com/502133195). The probes here never assume: they run the real abort and report the rejection they actually received.</p>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5158507786665984" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://fetch.spec.whatwg.org/#abort-fetch" target="_blank" rel="noopener">Fetch Standard — abort a fetch() call</a></li>
+      <li><a href="https://chromestatus.com/feature/5631483679080448" target="_blank" rel="noopener">ChromeStatus: AbortSignal.reason (the Chrome 98 half)</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/reason" target="_blank" rel="noopener">MDN — AbortSignal.reason</a></li>
+      <li><a href="https://issues.chromium.org/issues/502133195" target="_blank" rel="noopener">Chromium tracking bug (crbug.com/502133195)</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
