@@ -65,6 +65,31 @@
       padding: 0.05rem 0.25rem;
       flex-shrink: 0;
     }
+    .rec-stage {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      padding: 1rem;
+      margin-bottom: 1rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+    }
+    .rec-chip {
+      width: 7.5rem; height: 4rem; display: flex; align-items: center; justify-content: center;
+      background: var(--bg-stone); border: 2px solid var(--border-black);
+      font-family: monospace; font-size: 0.72rem; cursor: grab; user-select: none;
+      touch-action: none;
+    }
+    .rec-stage p { margin: 0; font-size: 0.78rem; color: var(--text-muted); flex: 1 1 12rem; }
+    .rec-verdict {
+      font-family: monospace; font-size: 0.78rem; font-weight: 700; line-height: 1.55;
+      padding: 0.55rem 0.8rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); margin-bottom: 1rem;
+    }
+    .rec-verdict .legacy { color: var(--accent-rose); }
+    .rec-verdict .modern { color: var(--accent-emerald); }
+    #recList { max-height: 14rem; overflow-y: auto; }
 
     .legend {
       display: flex;
@@ -121,6 +146,17 @@
   <div class="note">
     Both Pointer Events and the HTML Drag and Drop API can fire on the same element. Chrome 148 aligns the interaction: when drag starts, pointer events are cancelled via <code>pointercancel</code> and the drag event stream takes over.
   </div>
+
+  <section>
+    <h2>record your own sequence</h2>
+    <div class="rec-stage">
+      <div class="rec-chip" draggable="true" id="dragChip">drag me</div>
+      <p>Drag the chip with a mouse (native HTML drag-and-drop needs a primary-button drag; on touch, native DnD may not start — the recorder reports whatever really happens). Every pointer and drag event on the chip lands in the list below, and the verdict says which column your engine matched.</p>
+      <button type="button" id="clearRec">clear recording</button>
+    </div>
+    <div class="rec-verdict" id="recVerdict" role="status" aria-live="polite">No drag recorded yet.</div>
+    <ul class="seq-list" id="recList" aria-label="Recorded event sequence" aria-live="polite"></ul>
+  </section>
 
   <section>
     <h2>event sequence comparison</h2>
@@ -222,5 +258,80 @@ el.addEventListener('pointermove', e => {
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
+<script>
+  const chip = document.getElementById("dragChip");
+  const list = document.getElementById("recList");
+  const verdict = document.getElementById("recVerdict");
+  const rec = { events: [], sawDragstart: false, sawCancel: false, movesAfterDragstart: 0, active: false };
+
+  function add(name, cls, note) {
+    rec.events.push(name);
+    const li = document.createElement("li");
+    li.className = "seq-item " + cls;
+    const num = document.createElement("span");
+    num.className = "num";
+    num.textContent = rec.events.length + ".";
+    li.append(num, name + (note ? " — " + note : ""));
+    list.append(li);
+    list.scrollTop = list.scrollHeight;
+  }
+
+  function judge() {
+    if (!rec.sawDragstart) {
+      verdict.textContent = "Gesture ended without a dragstart — native drag-and-drop never began (common for touch or too-short drags), so this run says nothing about the 148 change. Try a slower primary-button drag.";
+      return;
+    }
+    if (rec.sawCancel && rec.movesAfterDragstart === 0) {
+      verdict.innerHTML = "Your engine matched the <span class='modern'>Chrome 148+ column</span>: pointercancel fired at dragstart and no pointer events followed — the pointer stream ended correctly when the drag took over.";
+    } else if (!rec.sawCancel && rec.movesAfterDragstart > 0) {
+      verdict.innerHTML = "Your engine matched the <span class='legacy'>legacy column</span>: no pointercancel, and " + rec.movesAfterDragstart + " pointer event(s) kept interleaving after dragstart — the pre-148 double stream, recorded live.";
+    } else {
+      verdict.textContent = "Mixed recording (pointercancel=" + rec.sawCancel + ", pointer events after dragstart=" + rec.movesAfterDragstart + ") — compare the list against both columns.";
+    }
+    window.showcaseTelemetry?.assert("pesods-recorded", true, { cancel: rec.sawCancel, interleaved: rec.movesAfterDragstart });
+  }
+
+  chip.addEventListener("pointerdown", (e) => {
+    if (!e.isTrusted) return;
+    list.replaceChildren();
+    Object.assign(rec, { events: [], sawDragstart: false, sawCancel: false, movesAfterDragstart: 0, active: true });
+    add("pointerdown", "pointer", e.pointerType);
+  });
+  for (const ev of ["pointermove", "pointerup"]) {
+    chip.addEventListener(ev, (e) => {
+      if (!rec.active || !e.isTrusted) return;
+      if (ev === "pointermove" && rec.events.at(-1) === "pointermove" && !rec.sawDragstart) return; // collapse runs pre-drag
+      add(ev, "pointer", rec.sawDragstart ? "after dragstart!" : "");
+      if (rec.sawDragstart) rec.movesAfterDragstart++;
+      if (ev === "pointerup") { rec.active = false; judge(); }
+    });
+  }
+  chip.addEventListener("pointercancel", (e) => {
+    if (!rec.active || !e.isTrusted) return;
+    rec.sawCancel = true;
+    add("pointercancel", "cancel-ev", rec.sawDragstart ? "at dragstart (148+ behavior)" : "(browser took the gesture)");
+  });
+  chip.addEventListener("dragstart", (e) => {
+    if (!rec.active) return;
+    rec.sawDragstart = true;
+    e.dataTransfer.setData("text/plain", "event-sequence-viewer chip");
+    add("dragstart", "drag-ev");
+  });
+  chip.addEventListener("drag", () => {
+    if (!rec.active) return;
+    if (rec.events.at(-1) === "drag") return; // collapse the continuous stream
+    add("drag", "drag-ev", "(stream collapsed)");
+  });
+  chip.addEventListener("dragend", () => {
+    if (!rec.active && rec.events.length === 0) return;
+    add("dragend", "drag-ev");
+    rec.active = false;
+    judge();
+  });
+  document.getElementById("clearRec").addEventListener("click", () => {
+    list.replaceChildren();
+    verdict.textContent = "No drag recorded yet.";
+  });
+</script>
 </body>
 </html>
