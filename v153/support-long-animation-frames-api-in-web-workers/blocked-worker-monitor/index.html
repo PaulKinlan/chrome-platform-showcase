@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blocked-worker monitor — LoAF in Web Workers — Chrome 153</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code, section a { overflow-wrap: anywhere; }
+    .ctrl-row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.25rem; }
+    .status-line {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700; line-height: 1.55;
+      padding: 0.55rem 0.8rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); margin-bottom: 1.25rem;
+    }
+    .duo { display: grid; grid-template-columns: 1fr; gap: 0.8rem; margin-bottom: 1.5rem; }
+    @media (min-width: 700px) { .duo { grid-template-columns: 1fr 1fr; } }
+    .inst { border: 2px solid var(--border-black); background: var(--bg-paper); padding: 0.9rem 1.1rem; min-width: 0; }
+    .inst h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }
+    .inst .big { font-family: var(--font-mono); font-size: 1.4rem; font-weight: 700; color: var(--text-black); }
+    .inst .big.spike { color: var(--accent-rose); }
+    .inst .sub { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); margin-top: 0.25rem; }
+    .log {
+      font-family: var(--font-mono); font-size: 0.74rem; line-height: 1.6; padding: 0.7rem 0.9rem;
+      border: 1.5px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal);
+      max-height: 10rem; overflow-y: auto; white-space: pre-wrap; margin-bottom: 1.5rem;
+    }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/support-long-animation-frames-api-in-web-workers/">&larr; LoAF in Web Workers</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · Performance</p>
+    <h1>Blocked-worker monitor</h1>
+    <p class="lede">A live worker echoes a ping every 100ms while a LoAF observer runs inside it. The block button makes the worker spin synchronously for 300ms — real jank in a real worker. Two instruments read the damage: the round-trip meter (spikes on <em>every</em> engine, because queued messages wait) and the worker's own <code>long-animation-frame</code> entries (Chrome 153 — the attribution layer).</p>
+  </header>
+
+  <div class="ctrl-row">
+    <button id="blockBtn" type="button">Block the worker for 300ms</button>
+  </div>
+  <div class="status-line" id="status" role="status" aria-live="polite">Starting worker…</div>
+
+  <div class="duo">
+    <div class="inst">
+      <h3>ping round-trip (every engine)</h3>
+      <p class="big" id="rtt" aria-live="off">—</p>
+      <p class="sub">100ms cadence · a block delays queued pings</p>
+    </div>
+    <div class="inst">
+      <h3>worker LoAF entries (Chrome 153)</h3>
+      <p class="big" id="loafCount" aria-live="polite">0</p>
+      <p class="sub" id="loafSub">observer state pending…</p>
+    </div>
+  </div>
+
+  <p style="font-family:var(--font-mono);font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);margin-bottom:0.35rem;">Event log</p>
+  <div class="log" id="log" role="log" aria-live="polite">(booting)</div>
+
+  <pre><code>// inside the worker:
+new PerformanceObserver((list) => {
+  for (const e of list.getEntries()) {
+    postMessage({ loaf: { duration: e.duration, blocking: e.blockingDuration } });
+  }
+}).observe({ type: "long-animation-frame", buffered: true });
+
+onmessage = ({ data }) => {
+  if (data === "block") {
+    const end = performance.now() + 300;      // the jank
+    while (performance.now() < end) {}
+  }
+};</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../worker-support-probe/">Worker support probe</a> — whether the observer can even attach here</li>
+      <li><a href="../main-vs-worker-parity/">Main-vs-worker parity</a> — the same jank on both threads</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const lines = [];
+  function log(s) {
+    lines.unshift(`${new Date().toLocaleTimeString()}  ${s}`);
+    $("log").textContent = lines.slice(0, 25).join("\n");
+  }
+
+  const WORKER_SRC = `
+    // observe() silently skips unknown types, so report supportedEntryTypes
+    // membership too — "attached" alone would be a false-support probe.
+    const typeSupported = PerformanceObserver.supportedEntryTypes.includes("long-animation-frame");
+    let observed = "unavailable";
+    try {
+      new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) {
+          postMessage({ loaf: { duration: Math.round(e.duration), blocking: Math.round(e.blockingDuration ?? -1) } });
+        }
+      }).observe({ type: "long-animation-frame", buffered: true });
+      observed = typeSupported ? "active" : "attached-but-type-unsupported";
+    } catch (e) {
+      observed = e.name;
+    }
+    postMessage({ observer: observed });
+    onmessage = ({ data }) => {
+      if (data.type === "ping") postMessage({ pong: data.t });
+      if (data.type === "block") {
+        const end = performance.now() + data.ms;
+        while (performance.now() < end) { /* deliberate jank */ }
+        postMessage({ blocked: data.ms });
+      }
+    };
+  `;
+
+  const url = URL.createObjectURL(new Blob([WORKER_SRC], { type: "application/javascript" }));
+  const worker = new Worker(url);
+  let loafCount = 0;
+  let observerState = "pending";
+
+  worker.onmessage = ({ data }) => {
+    if (data.observer) {
+      observerState = data.observer;
+      $("loafSub").textContent = data.observer === "active"
+        ? "observer active inside the worker — entries will count up here"
+        : (data.observer === "attached-but-type-unsupported"
+          ? "observe() attached but silently ignores the type (not in this worker's supportedEntryTypes) — entries will never arrive here; the round-trip meter is the only witness"
+          : `observer could not attach (${data.observer}) — the round-trip meter is the only witness`);
+      log(`worker LoAF observer: ${data.observer}`);
+      $("status").textContent = "Worker live — pinging every 100ms. Hit the block button.";
+      window.showcaseTelemetry?.assert("loafw-monitor-boot", true, { observerState });
+    } else if (data.pong !== undefined) {
+      const rtt = performance.now() - data.pong;
+      const el = $("rtt");
+      el.textContent = rtt.toFixed(1) + " ms";
+      el.className = "big" + (rtt > 120 ? " spike" : "");
+      if (rtt > 120) log(`round-trip spiked to ${rtt.toFixed(0)}ms — pings were stuck behind the block`);
+    } else if (data.loaf) {
+      loafCount++;
+      $("loafCount").textContent = String(loafCount);
+      log(`worker long-animation-frame: duration ${data.loaf.duration}ms, blocking ${data.loaf.blocking}ms`);
+      window.showcaseTelemetry?.assert("loafw-entry-seen", data.loaf.duration > 0, data.loaf);
+    } else if (data.blocked) {
+      log(`worker finished its ${data.blocked}ms synchronous block`);
+    }
+  };
+
+  setInterval(() => worker.postMessage({ type: "ping", t: performance.now() }), 100);
+  $("blockBtn").addEventListener("click", () => {
+    log("→ asked the worker to block for 300ms");
+    worker.postMessage({ type: "block", ms: 300 });
+    window.showcaseTelemetry?.assert("loafw-block-requested", true, { observerState });
+  });
+</script>
+</body>
+</html>

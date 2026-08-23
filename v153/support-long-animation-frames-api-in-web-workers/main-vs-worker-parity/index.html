@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Main-vs-worker parity — LoAF in Web Workers — Chrome 153</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code, section a { overflow-wrap: anywhere; }
+    .ctrl-row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.25rem; }
+    .status-line {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700; line-height: 1.55;
+      padding: 0.55rem 0.8rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); margin-bottom: 1.25rem;
+    }
+    .tbl-wrap { overflow-x: auto; margin-bottom: 1.5rem; }
+    table.par { border-collapse: collapse; width: 100%; min-width: 34rem; }
+    .par th, .par td {
+      border: 1.5px solid var(--border-black); padding: 0.5rem 0.7rem; text-align: left;
+      font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); vertical-align: top;
+    }
+    .par th {
+      background: var(--bg-stone); font-size: 0.68rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .par td.got { color: var(--accent-emerald); font-weight: 700; }
+    .par td.none { color: var(--accent-rose); font-weight: 700; }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/support-long-animation-frames-api-in-web-workers/">&larr; LoAF in Web Workers</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · Performance</p>
+    <h1>Main-vs-worker parity</h1>
+    <p class="lede">One button, two identical 250ms synchronous blocks — one on the main thread (inside a rAF callback so it lengthens a real animation frame), one inside a live worker. Each column shows what that thread's own LoAF observer reported. On Chrome 141–152 the left column fills while the right stays empty: the observability gap, measured.</p>
+  </header>
+
+  <div class="ctrl-row">
+    <button id="runBtn" type="button">Jank both threads (250ms each)</button>
+  </div>
+  <div class="status-line" id="status" role="status" aria-live="polite">Setting up observers…</div>
+
+  <div class="tbl-wrap">
+    <table class="par">
+      <caption style="text-align:left;font-size:0.78rem;color:var(--text-muted);padding-bottom:0.4rem;">long-animation-frame entries per thread, this session</caption>
+      <thead>
+        <tr>
+          <th scope="col">thread</th>
+          <th scope="col">observer state</th>
+          <th scope="col">entries seen</th>
+          <th scope="col">latest entry</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">main (window)</th>
+          <td id="mState">…</td>
+          <td id="mCount">0</td>
+          <td id="mLatest">—</td>
+        </tr>
+        <tr>
+          <th scope="row">dedicated worker</th>
+          <td id="wState">…</td>
+          <td id="wCount">0</td>
+          <td id="wLatest">—</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <pre><code>// Same jank, both threads:
+requestAnimationFrame(() => spinFor(250));   // main — LoAF since Chrome 123
+worker.postMessage({ type: "block", ms: 250 });  // worker — LoAF from Chrome 153
+
+// Each thread watches ITSELF:
+new PerformanceObserver(report).observe({ type: "long-animation-frame" });</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../worker-support-probe/">Worker support probe</a> — the observer-attach question alone</li>
+      <li><a href="../blocked-worker-monitor/">Blocked-worker monitor</a> — the latency cost, live</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let mCount = 0, wCount = 0;
+
+  function setCell(id, text, cls) {
+    const el = $(id);
+    el.textContent = text;
+    if (cls) el.className = cls;
+  }
+
+  // Main-thread observer.
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        mCount++;
+        setCell("mCount", String(mCount), "got");
+        setCell("mLatest", `duration ${Math.round(e.duration)}ms · blocking ${Math.round(e.blockingDuration ?? -1)}ms`);
+        window.showcaseTelemetry?.assert("loafw-main-entry", e.duration > 0, { duration: Math.round(e.duration) });
+      }
+    }).observe({ type: "long-animation-frame" });
+    setCell("mState", "attached");
+  } catch (e) {
+    setCell("mState", e.name, "none");
+  }
+
+  // Worker with its own observer.
+  const WORKER_SRC = `
+    let state;
+    try {
+      new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) {
+          postMessage({ entry: { duration: Math.round(e.duration), blocking: Math.round(e.blockingDuration ?? -1) } });
+        }
+      }).observe({ type: "long-animation-frame" });
+      state = "attached";
+    } catch (e) { state = e.name; }
+    postMessage({ state });
+    onmessage = ({ data }) => {
+      if (data.type === "block") {
+        const end = performance.now() + data.ms;
+        while (performance.now() < end) {}
+        postMessage({ done: true });
+      }
+    };
+  `;
+  const worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "application/javascript" })));
+  worker.onmessage = ({ data }) => {
+    if (data.state) {
+      const ok = data.state === "attached";
+      setCell("wState", data.state + (ok ? "" : " — LoAF not extended to workers in this engine"), ok ? "" : "none");
+      $("status").textContent = "Observers ready on both threads — run the jank.";
+    } else if (data.entry) {
+      wCount++;
+      setCell("wCount", String(wCount), "got");
+      setCell("wLatest", `duration ${data.entry.duration}ms · blocking ${data.entry.blocking}ms`);
+      window.showcaseTelemetry?.assert("loafw-worker-entry", data.entry.duration > 0, data.entry);
+    } else if (data.done) {
+      finishRun();
+    }
+  };
+
+  let pendingCheck = null;
+  function finishRun() {
+    clearTimeout(pendingCheck);
+    pendingCheck = setTimeout(() => {
+      if (wCount === 0) {
+        setCell("wCount", "0", "none");
+        $("status").textContent = `Both blocks ran. Main thread reported ${mCount} entr${mCount === 1 ? "y" : "ies"}; the worker reported none — its 250ms of jank was invisible to its own performance timeline. That asymmetry is this feature's target.`;
+      } else {
+        $("status").textContent = `Both threads reported their own jank — parity achieved on this engine.`;
+      }
+      window.showcaseTelemetry?.assert("loafw-parity-run", true, { mCount, wCount });
+    }, 800);
+  }
+
+  function spinFor(ms) {
+    const end = performance.now() + ms;
+    while (performance.now() < end) { /* deliberate main-thread jank */ }
+  }
+
+  $("runBtn").addEventListener("click", () => {
+    $("status").textContent = "Janking both threads…";
+    requestAnimationFrame(() => spinFor(250));
+    worker.postMessage({ type: "block", ms: 250 });
+  });
+</script>
+</body>
+</html>
