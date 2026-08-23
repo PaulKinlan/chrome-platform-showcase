@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gap-attribution workbench — JS Self-Profiling Markers — Chrome 153</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code, section a { overflow-wrap: anywhere; }
+    .ctrl-row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.25rem; }
+    .status-line {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700; line-height: 1.55;
+      padding: 0.55rem 0.8rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); margin-bottom: 1.25rem;
+    }
+    .strip-wrap { margin-bottom: 0.5rem; }
+    canvas.strip {
+      width: 100%; height: 4.5rem; display: block;
+      border: 2px solid var(--border-black); background: var(--bg-paper);
+    }
+    .legend { display: flex; flex-wrap: wrap; gap: 0.8rem; margin: 0.6rem 0 1.25rem; }
+    .legend span { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-charcoal); display: inline-flex; align-items: center; gap: 0.35rem; }
+    .legend i { width: 0.9rem; height: 0.9rem; display: inline-block; border: 1px solid var(--border-black); }
+    .verdict {
+      border: 2px solid var(--border-black); background: var(--bg-paper);
+      padding: 0.9rem 1.1rem; margin-bottom: 1.5rem;
+    }
+    .verdict .k {
+      font-family: var(--font-mono); font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.3rem;
+    }
+    .verdict .v { font-family: var(--font-mono); font-size: 0.85rem; font-weight: 700; color: var(--text-charcoal); line-height: 1.7; }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/js-self-profiling-markers/">&larr; JS Self-Profiling Markers</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · Performance</p>
+    <h1>Gap-attribution workbench</h1>
+    <p class="lede">A field trace's worst samples are the ones with <em>no stack</em>: before markers they were unexplainable holes. This workbench profiles ~800ms of mixed load (script bursts alternating with layout storms and paints), then draws every real sample on a timeline — stacked samples below the line, stackless ones above, coloured by marker when the engine provides one. The attribution score is computed from the actual trace.</p>
+  </header>
+
+  <div class="ctrl-row">
+    <button id="runBtn" type="button">Profile &amp; attribute</button>
+  </div>
+  <div class="status-line" id="status" role="status" aria-live="polite">Not run yet.</div>
+
+  <div class="strip-wrap">
+    <canvas class="strip" id="strip" aria-label="Timeline of profiler samples: ticks below the midline have call stacks, ticks above are stackless; colours show the engine's marker for each sample"></canvas>
+  </div>
+  <div class="legend" aria-hidden="true">
+    <span><i style="background: var(--accent-blue)"></i> script</span>
+    <span><i style="background: var(--accent-emerald)"></i> style/layout</span>
+    <span><i style="background: var(--accent-rose)"></i> paint</span>
+    <span><i style="background: var(--accent-amber)"></i> gc/other</span>
+    <span><i style="background: var(--text-muted)"></i> unmarked</span>
+  </div>
+
+  <div class="verdict" role="status" aria-live="polite">
+    <p class="k">attribution score (from the real trace)</p>
+    <p class="v" id="verdict">—</p>
+  </div>
+
+  <pre><code>const stackless = trace.samples.filter((s) => s.stackId === undefined);
+const attributed = stackless.filter((s) => "marker" in s && s.marker);
+
+// Before markers: every stackless sample is a mystery gap.
+// With markers:  gc / layout / paint gaps become actionable —
+//                three different fixes for three different colours.</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../live-trace-explorer/">Live trace explorer</a> — the histogram view of the same data</li>
+      <li><a href="../marker-gates-probe/">Marker gates probe</a> — the three doors to a marked sample</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  const COLORS = {
+    script: "--accent-blue",
+    style: "--accent-emerald",
+    layout: "--accent-emerald",
+    paint: "--accent-rose",
+    gc: "--accent-amber",
+    other: "--accent-amber",
+  };
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  function burst(kind) {
+    if (kind === 0) {
+      let x = 0;
+      const t = performance.now() + 18;
+      while (performance.now() < t) x += Math.sqrt(x + 1);
+      return x;
+    }
+    for (let i = 0; i < 30; i++) {
+      document.body.style.setProperty("--wb-jitter", (i % 7) + "px");
+      void document.body.offsetHeight;
+    }
+  }
+
+  $("runBtn").addEventListener("click", async () => {
+    $("runBtn").disabled = true;
+    let profiler;
+    try {
+      profiler = new Profiler({ sampleInterval: 10, maxBufferSize: 10000 });
+    } catch (e) {
+      $("status").textContent = `${e.name}: ${e.message}`;
+      $("runBtn").disabled = false;
+      return;
+    }
+    $("status").textContent = "Profiling mixed load…";
+    const t0 = performance.now();
+    let phase = 0;
+    while (performance.now() - t0 < 800) {
+      burst(phase % 2);
+      phase++;
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    const trace = await profiler.stop();
+    const t1 = performance.now();
+
+    // Draw the strip.
+    const canvas = $("strip");
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    const g = canvas.getContext("2d");
+    g.scale(dpr, dpr);
+    g.clearRect(0, 0, w, h);
+    g.strokeStyle = cssVar("--border-black");
+    g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
+    const span = Math.max(1, t1 - t0);
+    for (const s of trace.samples) {
+      const x = ((s.timestamp - t0) / span) * (w - 4) + 2;
+      const hasStack = s.stackId !== undefined;
+      const marker = "marker" in s ? s.marker : null;
+      g.strokeStyle = marker ? cssVar(COLORS[marker] ?? "--accent-amber") : cssVar("--text-muted");
+      g.lineWidth = 2;
+      g.beginPath();
+      if (hasStack) { g.moveTo(x, h / 2 + 4); g.lineTo(x, h - 6); }
+      else { g.moveTo(x, 6); g.lineTo(x, h / 2 - 4); }
+      g.stroke();
+    }
+
+    const stackless = trace.samples.filter((s) => s.stackId === undefined);
+    const attributed = stackless.filter((s) => "marker" in s && s.marker);
+    $("verdict").textContent =
+      `${trace.samples.length} samples over ${Math.round(span)}ms · ${stackless.length} stackless gap samples · ` +
+      (attributed.length > 0
+        ? `${attributed.length} attributed by markers (${Math.round((attributed.length / Math.max(1, stackless.length)) * 100)}% of gaps explained)`
+        : `0 attributed — no marker fields in this engine/context, so every gap stays a mystery: exactly the problem markers exist to fix (grey ticks above the line are the unexplained holes)`);
+    $("status").textContent = "Done — every tick on the strip is a real sample from the trace you just captured.";
+    window.showcaseTelemetry?.assert("jsm-workbench-ran", trace.samples.length > 0, { samples: trace.samples.length, stackless: stackless.length, attributed: attributed.length });
+    $("runBtn").disabled = false;
+  });
+</script>
+</body>
+</html>

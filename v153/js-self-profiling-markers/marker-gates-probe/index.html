@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Marker gates probe — JS Self-Profiling Markers — Chrome 153</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code, section a { overflow-wrap: anywhere; }
+    .gate { border: 2px solid var(--border-black); background: var(--bg-paper); padding: 0.9rem 1.1rem; margin-bottom: 0.8rem; min-width: 0; }
+    .gate h3 { margin: 0 0 0.4rem; font-size: 0.98rem; }
+    .gate .res {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700;
+      padding: 0.4rem 0.7rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); overflow-wrap: anywhere;
+    }
+    .gate .res.ok { color: var(--accent-emerald); }
+    .gate .res.blocked { color: var(--accent-rose); }
+    .gate .res.warn { color: var(--accent-amber); }
+    .gate p.expl { font-size: 0.84rem; color: var(--text-charcoal); margin: 0.5rem 0 0; line-height: 1.55; }
+    .ctrl-row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin: 1.25rem 0; }
+    .status-line {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700; line-height: 1.55;
+      padding: 0.55rem 0.8rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); margin-bottom: 1.5rem;
+    }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/js-self-profiling-markers/">&larr; JS Self-Profiling Markers</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · Performance</p>
+    <h1>Marker gates probe</h1>
+    <p class="lede">A marked sample needs three doors to open, and each one is probed for real here: the <strong>document policy</strong> (this page's server sends <code>Document-Policy: js-profiling</code>, and the probe constructs an actual <code>Profiler</code> to prove it), <strong>cross-origin isolation</strong> (the proposal gates <code>marker</code> on <code>[CrossOriginIsolated]</code>), and the <strong>engine implementing markers</strong> at all (probed by inspecting a real captured trace).</p>
+  </header>
+
+  <div class="ctrl-row">
+    <button id="probeBtn" type="button">Run all three gates</button>
+  </div>
+  <div class="status-line" id="status" role="status" aria-live="polite">Runs automatically on load.</div>
+
+  <div class="gate">
+    <h3>Gate 1 · Document-Policy: js-profiling</h3>
+    <p class="res" id="g1" role="status" aria-live="polite">…</p>
+    <p class="expl">Without the policy header, <code>new Profiler()</code> throws <code>NotAllowedError</code>. This page's route serves the header, so construction should genuinely succeed here — try the <a href="/v153/">release index</a> in a console for the opposite result.</p>
+  </div>
+  <div class="gate">
+    <h3>Gate 2 · crossOriginIsolated</h3>
+    <p class="res" id="g2" role="status" aria-live="polite">…</p>
+    <p class="expl">The proposal marks the field <code>[CrossOriginIsolated]</code>: without COOP+COEP isolation, samples stay unmarked even on an implementing engine — deliberate, since markers reveal coarse GC/render timing.</p>
+  </div>
+  <div class="gate">
+    <h3>Gate 3 · engine implements the marker field</h3>
+    <p class="res" id="g3" role="status" aria-live="polite">…</p>
+    <p class="expl">The only honest test is a real capture: profile for 150ms under induced work and check whether any sample object carries a <code>marker</code> member.</p>
+  </div>
+
+  <pre><code>// Gate 1 — the policy (server-side header, probed by constructing):
+const profiler = new Profiler({ sampleInterval: 10, maxBufferSize: 10000 });
+
+// Gate 2 — isolation (the marker field is [CrossOriginIsolated]):
+window.crossOriginIsolated;
+
+// Gate 3 — the field itself, from a real trace:
+const trace = await profiler.stop();
+trace.samples.some((s) => "marker" in s);</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../live-trace-explorer/">Live trace explorer</a> — full histogram from a real session</li>
+      <li><a href="../gap-attribution-workbench/">Gap-attribution workbench</a> — what markers buy you</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function setRes(id, text, cls) {
+    const el = $(id);
+    el.textContent = text;
+    el.className = "res " + (cls || "");
+  }
+
+  function burn(ms) {
+    const end = performance.now() + ms;
+    let x = 0;
+    while (performance.now() < end) x += Math.sqrt(x + 1);
+    return x;
+  }
+
+  async function probe() {
+    $("status").textContent = "Probing…";
+    // Gate 1: real construction.
+    let profiler = null;
+    try {
+      profiler = new Profiler({ sampleInterval: 10, maxBufferSize: 10000 });
+      setRes("g1", "new Profiler() succeeded — the js-profiling document policy is active on this route", "ok");
+    } catch (e) {
+      setRes("g1", `${e.name}: ${e.message}`, "blocked");
+    }
+
+    // Gate 2: real isolation read.
+    const coi = window.crossOriginIsolated === true;
+    setRes("g2", `window.crossOriginIsolated === ${window.crossOriginIsolated}` + (coi ? "" : " — markers stay withheld here even on Chrome 153 (this origin doesn't send COOP/COEP)"), coi ? "ok" : "warn");
+
+    // Gate 3: real capture.
+    if (profiler) {
+      burn(150);
+      try {
+        const trace = await profiler.stop();
+        const marked = trace.samples.filter((s) => "marker" in s).length;
+        setRes("g3", marked > 0
+          ? `${marked}/${trace.samples.length} samples carry a marker member — the engine implements markers`
+          : `0/${trace.samples.length} samples have a marker member — this engine (or this non-isolated context) does not surface markers; the trace itself is real`, marked > 0 ? "ok" : "warn");
+        window.showcaseTelemetry?.assert("jsm-gates-ran", trace.samples.length > 0, { marked, samples: trace.samples.length, coi });
+      } catch (e) {
+        setRes("g3", `${e.name}: ${e.message}`, "blocked");
+      }
+    } else {
+      setRes("g3", "unreachable — gate 1 blocked construction", "blocked");
+    }
+    $("status").textContent = "All three gates probed against real API calls — every readout above is this browser's genuine state.";
+  }
+
+  $("probeBtn").addEventListener("click", probe);
+  probe();
+</script>
+</body>
+</html>

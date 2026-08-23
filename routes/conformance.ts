@@ -13,6 +13,11 @@ function conformanceHeaders(release: string, featureSlug: string): HeadersInit |
       "document-policy": "js-profiling",
     };
   }
+  if (release === "v153" && featureSlug === "js-self-profiling-markers") {
+    return {
+      "document-policy": "js-profiling",
+    };
+  }
   return undefined;
 }
 
