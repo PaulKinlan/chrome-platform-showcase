@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Creation-context comparison — Interoperable dispatch timing — Chrome 153</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code, section a { overflow-wrap: anywhere; }
+    .ctrl-row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.25rem; }
+    .stage-box {
+      border: 2px solid var(--border-black); background: var(--bg-paper);
+      padding: 1rem; margin-bottom: 1.25rem; display: flex; gap: 1.2rem; flex-wrap: wrap;
+    }
+    .cell { min-width: 0; }
+    .cell .lab {
+      font-family: var(--font-mono); font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.4rem;
+    }
+    .sq { width: 3rem; height: 3rem; background: var(--text-black); transition: transform 250ms ease; }
+    .sq.moved { transform: translateX(4.5rem); }
+    .tbl-wrap { overflow-x: auto; margin-bottom: 1.25rem; }
+    table.cmp { border-collapse: collapse; width: 100%; min-width: 30rem; }
+    .cmp th, .cmp td {
+      border: 1.5px solid var(--border-black); padding: 0.5rem 0.7rem; text-align: left;
+      font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal);
+    }
+    .cmp th {
+      background: var(--bg-stone); font-size: 0.68rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .cmp td.same { color: var(--accent-emerald); font-weight: 700; }
+    .cmp td.late { color: var(--accent-amber); font-weight: 700; }
+    .status-line {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700; line-height: 1.55;
+      padding: 0.55rem 0.8rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); margin-bottom: 1.5rem;
+    }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/interoperable-dispatch-timing-for-transitionrun-and-media-query-events/">&larr; Interoperable dispatch timing</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · Interop</p>
+    <h1>Creation-context comparison</h1>
+    <p class="lede">The fix's precise wording matters: events fire at step 3.11 "even for animations created <em>earlier in the same iteration</em>". This lab creates one transition from a plain task (early in the iteration, before rendering) and one from inside a <code>requestAnimationFrame</code> callback (inside the rendering update itself) — and measures rAF-ticks-until-<code>transitionrun</code> for each. Spec-aligned engines report 0 for both.</p>
+  </header>
+
+  <div class="ctrl-row">
+    <button id="runBtn" type="button">Run both contexts (3 trials each)</button>
+  </div>
+
+  <div class="stage-box" aria-hidden="true">
+    <div class="cell"><p class="lab">created in a task</p><div class="sq" id="sqTask"></div></div>
+    <div class="cell"><p class="lab">created in rAF</p><div class="sq" id="sqRaf"></div></div>
+  </div>
+
+  <div class="tbl-wrap">
+    <table class="cmp">
+      <caption style="text-align:left;font-size:0.78rem;color:var(--text-muted);padding-bottom:0.4rem;">Median rAF ticks before transitionrun, per creation context</caption>
+      <thead>
+        <tr><th scope="col">creation context</th><th scope="col">median ticks</th><th scope="col">median delay</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row">plain task (setTimeout)</th><td id="tTask">—</td><td id="dTask">—</td></tr>
+        <tr><th scope="row">requestAnimationFrame callback</th><td id="tRaf">—</td><td id="dRaf">—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="status-line" id="status" role="status" aria-live="polite">Not run yet.</div>
+
+  <pre><code>// context A — before the rendering update of this iteration:
+setTimeout(() => { el.classList.add("moved"); }, 0);
+
+// context B — inside the rendering update (rAF callbacks are step 3.11's
+// neighbours), the case the old deferral punished hardest:
+requestAnimationFrame(() => { el.classList.add("moved"); });
+
+// spec-aligned: transitionrun before the NEXT frame's callbacks in both.</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../transitionrun-latency-lab/">transitionrun latency lab</a> — one context, more trials</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function measure(el, useRaf) {
+    return new Promise((resolve) => {
+      el.classList.remove("moved");
+      void el.offsetWidth;
+      setTimeout(() => {
+        const start = () => {
+          let frames = 0, done = false;
+          const tick = () => { if (done) return; frames++; requestAnimationFrame(tick); };
+          requestAnimationFrame(tick);
+          const t0 = performance.now();
+          const timeout = setTimeout(() => { if (!done) { done = true; resolve({ frames: NaN, delay: NaN }); } }, 2500);
+          el.addEventListener("transitionrun", () => {
+            if (done) return;
+            done = true;
+            clearTimeout(timeout);
+            resolve({ frames, delay: performance.now() - t0 });
+          }, { once: true });
+          el.classList.add("moved");
+          void el.offsetWidth;
+        };
+        useRaf ? requestAnimationFrame(start) : setTimeout(start, 0);
+      }, 400); // let the return transition (250ms) finish before arming
+    });
+  }
+
+  function median(arr) {
+    const v = arr.filter((x) => !Number.isNaN(x)).sort((a, b) => a - b);
+    return v.length ? v[Math.floor(v.length / 2)] : NaN;
+  }
+
+  $("runBtn").addEventListener("click", async () => {
+    $("runBtn").disabled = true;
+    $("status").textContent = "Measuring…";
+    const task = [], raf = [];
+    for (let i = 0; i < 3; i++) {
+      task.push(await measure($("sqTask"), false));
+      await new Promise((r) => setTimeout(r, 300));
+      raf.push(await measure($("sqRaf"), true));
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    const tT = median(task.map((r) => r.frames)), dT = median(task.map((r) => r.delay));
+    const tR = median(raf.map((r) => r.frames)), dR = median(raf.map((r) => r.delay));
+    const put = (id, v, isTicks) => {
+      const el = $(id);
+      el.textContent = Number.isNaN(v) ? "no event" : (isTicks ? String(v) : v.toFixed(2) + " ms");
+      if (isTicks && !Number.isNaN(v)) el.className = v === 0 ? "same" : "late";
+    };
+    put("tTask", tT, true); put("dTask", dT, false);
+    put("tRaf", tR, true); put("dRaf", dR, false);
+    $("status").textContent = (tT === 0 && tR === 0)
+      ? "Both contexts report 0 ticks — same-iteration delivery regardless of where the transition was created: the interoperable behavior."
+      : `Task-created: ${tT} tick(s) · rAF-created: ${tR} tick(s) — any non-zero value is a legacy deferral for that creation context; the split you're seeing is this engine's real per-context behavior. Chrome 153 reads 0 / 0 for both.`;
+    window.showcaseTelemetry?.assert("idt-context-compared", !Number.isNaN(tT) && !Number.isNaN(tR), { tT, tR });
+    $("runBtn").disabled = false;
+  });
+</script>
+</body>
+</html>
