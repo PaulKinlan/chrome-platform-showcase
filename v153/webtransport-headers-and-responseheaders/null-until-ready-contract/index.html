@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>null-until-ready contract — WebTransport headers — Chrome 153</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code, section a { overflow-wrap: anywhere; }
+    .ctrl-row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.25rem; }
+    .steps { display: grid; grid-template-columns: 1fr; gap: 0.6rem; margin-bottom: 1.25rem; }
+    .step {
+      border: 2px solid var(--border-black); background: var(--bg-paper); padding: 0.7rem 0.9rem;
+      display: flex; gap: 0.8rem; align-items: baseline; flex-wrap: wrap;
+    }
+    .step .no { font-family: var(--font-mono); font-weight: 700; font-size: 0.8rem; color: var(--text-muted); }
+    .step .what { font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-charcoal); overflow-wrap: anywhere; min-width: 0; }
+    .step .result { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; margin-left: auto; }
+    .step .result.ok { color: var(--accent-emerald); }
+    .step .result.err { color: var(--accent-rose); }
+    .step .result.idle { color: var(--text-muted); }
+    .status-line {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700; line-height: 1.55;
+      padding: 0.55rem 0.8rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); margin-bottom: 1.5rem;
+    }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/webtransport-headers-and-responseheaders/">&larr; WebTransport headers</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · In developer trial</p>
+    <h1>null-until-ready contract</h1>
+    <p class="lede">A detail with a lesson in it: <code>responseHeaders</code> reads <code>null</code> from construction until the session establishes, then becomes a <code>Headers</code> object — a value that <em>changes across reads</em>, which is why Chromium's IDL carries a comment noting the spec's <code>[SameObject]</code> label is wrong. The button runs the whole lifecycle for real against an unreachable endpoint (so the null phase is guaranteed observable) and cleans up.</p>
+  </header>
+
+  <div class="ctrl-row">
+    <button id="runBtn" type="button">Run the lifecycle read sequence</button>
+  </div>
+
+  <div class="steps" aria-label="Lifecycle steps">
+    <div class="step"><span class="no">1</span><span class="what">new WebTransport("https://unreachable.invalid:4433/")</span><span class="result idle" id="s1">idle</span></div>
+    <div class="step"><span class="no">2</span><span class="what">read responseHeaders IMMEDIATELY (pre-establishment)</span><span class="result idle" id="s2">idle</span></div>
+    <div class="step"><span class="no">3</span><span class="what">await outcome (ready would flip it to Headers; failure keeps it null)</span><span class="result idle" id="s3">idle</span></div>
+    <div class="step"><span class="no">4</span><span class="what">close() and final read</span><span class="result idle" id="s4">idle</span></div>
+  </div>
+  <div class="status-line" id="status" role="status" aria-live="polite">Not run yet.</div>
+
+  <pre><code>const t = new WebTransport(url, { headers });
+t.responseHeaders;        // null — the handshake hasn't finished
+
+await t.ready;
+t.responseHeaders;        // Headers — a DIFFERENT object than before,
+                          // hence no [SameObject] guarantee is possible
+
+// Robust consumers gate on ready (or on null) instead of assuming:
+const h = t.responseHeaders ?? await t.ready.then(() => t.responseHeaders);</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../connect-handshake-lab/">CONNECT handshake lab</a> — the established-state read against a real server</li>
+      <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/modules/webtransport/web_transport.idl" target="_blank" rel="noopener">The IDL comment about [SameObject]</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function mark(id, text, cls) {
+    const el = $(id);
+    el.textContent = text;
+    el.className = "result " + cls;
+  }
+
+  $("runBtn").addEventListener("click", async () => {
+    $("runBtn").disabled = true;
+    for (const s of ["s1", "s2", "s3", "s4"]) mark(s, "idle", "idle");
+
+    if (typeof WebTransport !== "function") {
+      mark("s1", "WebTransport absent", "err");
+      $("status").textContent = "WebTransport is not exposed in this browser.";
+      $("runBtn").disabled = false;
+      return;
+    }
+    const hasAttr = "responseHeaders" in WebTransport.prototype;
+    let t;
+    try {
+      t = new WebTransport("https://unreachable.invalid:4433/");
+      t.closed.catch(() => {});
+      mark("s1", "constructed", "ok");
+    } catch (e) {
+      mark("s1", e.name, "err");
+      $("status").textContent = `Construction failed: ${e.message}`;
+      $("runBtn").disabled = false;
+      return;
+    }
+
+    if (hasAttr) {
+      const early = t.responseHeaders;
+      mark("s2", early === null ? "null ✓ (contract holds)" : "NOT null — contract violation, report it", early === null ? "ok" : "err");
+      window.showcaseTelemetry?.assert("wth-null-before-ready", early === null, {});
+    } else {
+      mark("s2", "attribute absent (undefined) — feature off in this engine", "err");
+    }
+
+    let established = false;
+    try {
+      await Promise.race([
+        t.ready.then(() => { established = true; }),
+        new Promise((res) => setTimeout(res, 4000)),
+      ]);
+    } catch (_) { /* expected: unreachable endpoint */ }
+    mark("s3", established ? "established (unexpected for .invalid!)" : "failed/pending as expected — endpoint is unreachable by design", "ok");
+
+    try { t.close(); } catch (_) { /* already dead */ }
+    if (hasAttr) {
+      const fin = t.responseHeaders;
+      mark("s4", "closed · responseHeaders reads " + (fin === null ? "null" : "Headers(" + [...fin.keys()].length + ")"), "ok");
+    } else {
+      mark("s4", "closed", "ok");
+    }
+    $("status").textContent = hasAttr
+      ? "Lifecycle observed with real reads: null before establishment, cleanup clean. The Headers phase needs a reachable endpoint — the lab page covers that half."
+      : "The attribute is absent in this engine (WebTransportHeaders flag off), so the lifecycle reads undefined throughout — the honest pre-153 state. The construction/teardown steps still ran for real.";
+    window.showcaseTelemetry?.assert("wth-lifecycle-ran", true, { hasAttr });
+    $("runBtn").disabled = false;
+  });
+</script>
+</body>
+</html>
