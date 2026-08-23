@@ -4788,6 +4788,22 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
     }
   }
 
+  if (release === "v153") {
+    // JS Self-Profiling Markers demos need the same document policy the
+    // v147 js-profiling demos use — Profiler cannot be constructed without it.
+    if (
+      sub === "/js-self-profiling-markers" ||
+      sub.startsWith("/js-self-profiling-markers/")
+    ) {
+      const asset = await readReleaseAsset(release, sub);
+      if (asset) {
+        return withHeaders(asset, {
+          "document-policy": "js-profiling",
+        });
+      }
+    }
+  }
+
   if (release === "v135" || release === "v145" || release === "v147") {
     if (release === "v135") {
       const fetchLaterResponse = await renderFetchLaterRoute(req, sub);

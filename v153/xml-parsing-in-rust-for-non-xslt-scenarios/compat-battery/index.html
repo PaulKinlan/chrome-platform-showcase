@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Compat battery — XML parsing in Rust — Chrome 153</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code, section a { overflow-wrap: anywhere; }
+    .ctrl-row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.25rem; }
+    .status-line {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700; line-height: 1.55;
+      padding: 0.55rem 0.8rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); margin-bottom: 1.25rem;
+    }
+    .tbl-wrap { overflow-x: auto; margin-bottom: 1.5rem; }
+    table.bat { border-collapse: collapse; width: 100%; min-width: 40rem; }
+    .bat th, .bat td {
+      border: 1.5px solid var(--border-black); padding: 0.45rem 0.65rem; text-align: left;
+      font-family: var(--font-mono); font-size: 0.74rem; color: var(--text-charcoal); vertical-align: top;
+    }
+    .bat th {
+      background: var(--bg-stone); font-size: 0.68rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .bat td.pass { color: var(--accent-emerald); font-weight: 700; }
+    .bat td.fail { color: var(--accent-rose); font-weight: 700; }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/xml-parsing-in-rust-for-non-xslt-scenarios/">&larr; XML parsing in Rust</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · Parsing</p>
+    <h1>Compat battery</h1>
+    <p class="lede">Every row parses a deliberately tricky document through the real <code>DOMParser</code> and asserts a spec-required property of the result. This table is the change's whole contract in runnable form: it must read identically before and after the Rust swap — a red row on any engine is a genuine parser bug.</p>
+  </header>
+
+  <div class="ctrl-row">
+    <button id="runBtn" type="button">Run all cases</button>
+  </div>
+  <div class="status-line" id="status" role="status" aria-live="polite">Runs automatically on load.</div>
+
+  <div class="tbl-wrap">
+    <table class="bat">
+      <caption style="text-align:left;font-size:0.78rem;color:var(--text-muted);padding-bottom:0.4rem;">Each row parsed live in this engine</caption>
+      <thead>
+        <tr><th scope="col">case</th><th scope="col">asserted contract</th><th scope="col">result</th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <pre><code>const doc = new DOMParser().parseFromString(xml, "application/xml");
+// Same input ⇒ same tree, same namespaces, same entity expansion,
+// same whitespace — whichever engine (C or Rust) did the parsing.</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../parsererror-anatomy/">parsererror anatomy</a> — the failure half of the contract</li>
+      <li><a href="../parser-surfaces-inventory/">Parser-surfaces inventory</a> — where this engine runs</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const P = new DOMParser();
+  const parse = (xml) => P.parseFromString(xml, "application/xml");
+  const ok = (doc) => !doc.querySelector("parsererror") && doc.getElementsByTagNameNS("http://www.mozilla.org/newlayout/xml/parsererror.xml", "parsererror").length === 0;
+
+  const CASES = [
+    ["default namespace", "documentElement.namespaceURI honours xmlns",
+      () => parse('<r xmlns="urn:a"/>').documentElement.namespaceURI === "urn:a"],
+    ["prefixed namespace", "prefixed child resolves through xmlns:p",
+      () => parse('<r xmlns:p="urn:b"><p:c/></r>').getElementsByTagNameNS("urn:b", "c").length === 1],
+    ["CDATA section", "CDATA content is literal (markup not parsed)",
+      () => parse("<r><![CDATA[<not-a-tag> & fine]]></r>").documentElement.textContent === "<not-a-tag> & fine"],
+    ["predefined entities", "&amp; &lt; &gt; &quot; &apos; expand",
+      () => parse("<r>&amp;&lt;&gt;&quot;&apos;</r>").documentElement.textContent === "&<>\"'"],
+    ["character references", "decimal and hex char refs expand",
+      () => parse("<r>&#65;&#x42;</r>").documentElement.textContent === "AB"],
+    ["attribute entity", "entities expand inside attribute values",
+      () => parse('<r a="x&amp;y"/>').documentElement.getAttribute("a") === "x&y"],
+    ["whitespace preserved", "text nodes keep exact whitespace",
+      () => parse("<r>  a \n b  </r>").documentElement.textContent === "  a \n b  "],
+    ["processing instruction", "PI node with target and data",
+      () => { const d = parse('<?pi some data?><r/>'); const n = d.firstChild; return n.nodeType === 7 && n.target === "pi" && n.data === "some data"; }],
+    ["comments", "comment nodes preserved with exact text",
+      () => parse("<r><!-- keep me --></r>").documentElement.firstChild.nodeValue === " keep me "],
+    ["case sensitivity", "XML names are case-sensitive (A ≠ a)",
+      () => { const d = parse("<r><A/><a/></r>"); return d.getElementsByTagName("A").length === 1 && d.getElementsByTagName("a").length === 1; }],
+    ["deep nesting (500)", "500-deep tree parses without loss",
+      () => { const xml = "<n>".repeat(500) + "</n>".repeat(500); let el = parse(xml).documentElement, depth = 1; while (el.firstElementChild) { el = el.firstElementChild; depth++; } return depth === 500; }],
+    ["xml:lang inheritance surface", "xml:lang attribute exposed verbatim",
+      () => parse('<r xml:lang="en-GB"/>').documentElement.getAttributeNS("http://www.w3.org/XML/1998/namespace", "lang") === "en-GB"],
+  ];
+
+  function run() {
+    const tbody = $("rows");
+    tbody.replaceChildren();
+    let passed = 0;
+    for (const [name, contract, fn] of CASES) {
+      let res, cls;
+      try {
+        res = fn() === true;
+      } catch (e) {
+        res = false;
+      }
+      if (res) passed++;
+      const tr = document.createElement("tr");
+      const th = document.createElement("th");
+      th.scope = "row";
+      th.textContent = name;
+      const td1 = document.createElement("td");
+      td1.textContent = contract;
+      const td2 = document.createElement("td");
+      td2.textContent = res ? "pass" : "FAIL";
+      td2.className = res ? "pass" : "fail";
+      tr.append(th, td1, td2);
+      tbody.appendChild(tr);
+    }
+    $("status").textContent = passed === CASES.length
+      ? `${passed}/${CASES.length} contracts hold in this engine — exactly what the Rust swap must preserve. Run this same page on Chrome 153 and the numbers must not move.`
+      : `${passed}/${CASES.length} — a failing row here is a real parser bug in THIS engine, worth reporting whichever parser produced it.`;
+    window.showcaseTelemetry?.assert("xmlr-battery", passed === CASES.length, { passed, total: CASES.length });
+  }
+
+  $("runBtn").addEventListener("click", run);
+  run();
+</script>
+</body>
+</html>

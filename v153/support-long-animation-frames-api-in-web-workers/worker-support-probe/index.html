@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker support probe — LoAF in Web Workers — Chrome 153</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code, section a { overflow-wrap: anywhere; }
+    .ctrl-row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.25rem; }
+    .status-line {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700; line-height: 1.55;
+      padding: 0.55rem 0.8rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); margin-bottom: 1.25rem;
+    }
+    .panel { border: 2px solid var(--border-black); background: var(--bg-paper); padding: 0.9rem 1.1rem; margin-bottom: 0.8rem; }
+    .panel .k {
+      font-family: var(--font-mono); font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.35rem;
+    }
+    .panel .v { font-family: var(--font-mono); font-size: 0.82rem; font-weight: 700; color: var(--text-charcoal); line-height: 1.7; overflow-wrap: anywhere; }
+    .panel .v .yes { color: var(--accent-emerald); }
+    .panel .v .no { color: var(--accent-rose); }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/support-long-animation-frames-api-in-web-workers/">&larr; LoAF in Web Workers</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · Performance</p>
+    <h1>Worker support probe</h1>
+    <p class="lede">Support questions about a worker context must be answered <em>from</em> a worker context — the window's globals prove nothing. The button spawns a real dedicated worker; the worker enumerates its own <code>PerformanceObserver.supportedEntryTypes</code>, attempts a real <code>observe({type: "long-animation-frame"})</code>, and posts both verdicts back.</p>
+  </header>
+
+  <div class="ctrl-row">
+    <button id="probeBtn" type="button">Spawn worker &amp; probe from inside</button>
+  </div>
+  <div class="status-line" id="status" role="status" aria-live="polite">Runs automatically on load.</div>
+
+  <div class="panel">
+    <p class="k">the worker's own supportedEntryTypes</p>
+    <p class="v" id="pTypes" role="status" aria-live="polite">…</p>
+  </div>
+  <div class="panel">
+    <p class="k">observe({type: "long-animation-frame"}) in the worker</p>
+    <p class="v" id="pObserve" role="status" aria-live="polite">…</p>
+  </div>
+  <div class="panel">
+    <p class="k">for contrast: the window's supportedEntryTypes includes it?</p>
+    <p class="v" id="pWindow" role="status" aria-live="polite">…</p>
+  </div>
+
+  <pre><code>// worker.js — the only honest place to ask:
+const types = PerformanceObserver.supportedEntryTypes;
+let observeResult;
+try {
+  new PerformanceObserver(() => {}).observe({ type: "long-animation-frame" });
+  observeResult = "accepted";
+} catch (e) {
+  observeResult = e.name;          // TypeError on engines without the extension
+}
+postMessage({ types, observeResult });</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../blocked-worker-monitor/">Blocked-worker monitor</a> — make the worker jank for real</li>
+      <li><a href="../main-vs-worker-parity/">Main-vs-worker parity</a> — the observability gap, side by side</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  const WORKER_SRC = `
+    const types = [...PerformanceObserver.supportedEntryTypes];
+    let observeResult;
+    try {
+      new PerformanceObserver(() => {}).observe({ type: "long-animation-frame" });
+      observeResult = "accepted";
+    } catch (e) {
+      observeResult = e.name + ": " + e.message;
+    }
+    postMessage({ types, observeResult });
+  `;
+
+  function probe() {
+    $("status").textContent = "Spawning worker…";
+    const url = URL.createObjectURL(new Blob([WORKER_SRC], { type: "application/javascript" }));
+    const worker = new Worker(url);
+    const timer = setTimeout(() => {
+      $("status").textContent = "Worker never reported (2s) — unexpected.";
+      worker.terminate();
+    }, 2000);
+    worker.onmessage = (e) => {
+      clearTimeout(timer);
+      const { types, observeResult } = e.data;
+      const hasLoaf = types.includes("long-animation-frame");
+      const tEl = $("pTypes");
+      tEl.replaceChildren(`[${types.join(", ")}] — long-animation-frame `);
+      const s1 = document.createElement("span");
+      s1.className = hasLoaf ? "yes" : "no";
+      s1.textContent = hasLoaf ? "present" : "absent";
+      tEl.appendChild(s1);
+
+      const oEl = $("pObserve");
+      oEl.replaceChildren();
+      const s2 = document.createElement("span");
+      const accepted = observeResult === "accepted";
+      // Trap: observe() silently SKIPS unknown types instead of throwing, so
+      // "accepted" alone proves nothing — supportedEntryTypes is the truth.
+      const reallyWorks = accepted && hasLoaf;
+      s2.className = reallyWorks ? "yes" : "no";
+      s2.textContent = observeResult;
+      oEl.appendChild(s2);
+      oEl.append(reallyWorks
+        ? " — and the type is in supportedEntryTypes: the worker can watch its own event loop"
+        : (accepted
+          ? " — but note the trap: observe() silently ignores unknown types instead of throwing, and long-animation-frame is NOT in this worker's supportedEntryTypes, so entries will never arrive. The set above is the honest signal."
+          : " — this engine rejects the type outright; the genuine result from inside the worker"));
+
+      const winHas = PerformanceObserver.supportedEntryTypes.includes("long-animation-frame");
+      const wEl = $("pWindow");
+      wEl.replaceChildren();
+      const s3 = document.createElement("span");
+      s3.className = winHas ? "yes" : "no";
+      s3.textContent = String(winHas);
+      wEl.appendChild(s3);
+      wEl.append(winHas
+        ? " — the window has had LoAF since Chrome 123, which is exactly why probing the window proves nothing about workers"
+        : " — even the window lacks LoAF here (very old engine)");
+
+      $("status").textContent = "Both verdicts above came over postMessage from the real worker context.";
+      window.showcaseTelemetry?.assert("loafw-probe-ran", Array.isArray(types), { hasLoaf, observeResult: observeResult.slice(0, 40), winHas });
+      worker.terminate();
+      URL.revokeObjectURL(url);
+    };
+  }
+
+  $("probeBtn").addEventListener("click", probe);
+  probe();
+</script>
+</body>
+</html>

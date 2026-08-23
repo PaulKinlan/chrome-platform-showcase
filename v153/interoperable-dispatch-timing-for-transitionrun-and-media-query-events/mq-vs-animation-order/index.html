@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MQ-vs-animation order — Interoperable dispatch timing — Chrome 153</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    code, section a { overflow-wrap: anywhere; }
+    .ctrl-row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.25rem; }
+    .frame-box { border: 2px solid var(--border-black); background: var(--bg-paper); padding: 0.8rem; margin-bottom: 1.25rem; }
+    .frame-box iframe {
+      display: block; border: 1.5px solid var(--border-black); background: var(--bg-ivory);
+      height: 7rem; width: 480px; max-width: 100%; transition: none;
+    }
+    .frame-box .note { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); margin-top: 0.4rem; }
+    .order-box {
+      border: 2px solid var(--border-black); background: var(--bg-paper);
+      padding: 0.9rem 1.1rem; margin-bottom: 1.25rem;
+    }
+    .order-box .k {
+      font-family: var(--font-mono); font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.35rem;
+    }
+    .order-box ol { margin: 0; padding-left: 1.4rem; }
+    .order-box li { font-family: var(--font-mono); font-size: 0.82rem; font-weight: 700; color: var(--text-charcoal); margin-bottom: 0.25rem; }
+    .order-box li.mq { color: var(--accent-blue); }
+    .order-box li.anim { color: var(--accent-emerald); }
+    .status-line {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700; line-height: 1.55;
+      padding: 0.55rem 0.8rem; border: 1.5px solid var(--border-black);
+      background: var(--bg-stone); color: var(--text-charcoal); margin-bottom: 1.5rem;
+    }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/interoperable-dispatch-timing-for-transitionrun-and-media-query-events/">&larr; Interoperable dispatch timing</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · Interop</p>
+    <h1>MQ-vs-animation order</h1>
+    <p class="lede">The iframe below carries a <code>(max-width: 300px)</code> media query listener <em>and</em> a transitioning box. The button shrinks the iframe and pokes the transition in the same task, so both a <code>change</code> event and transition events become pending in one rendering update. The inner document timestamps every event and posts the true arrival order out — step 3.10 (<span style="color:var(--accent-blue)">media query</span>) must come before step 3.11 (<span style="color:var(--accent-emerald)">animation events</span>).</p>
+  </header>
+
+  <div class="ctrl-row">
+    <button id="runBtn" type="button">Shrink + transition together</button>
+    <button id="resetBtn" type="button">Reset width</button>
+  </div>
+
+  <div class="frame-box">
+    <iframe id="lab" title="Ordering lab: inner document with a media query listener and a transition" srcdoc='
+      <!doctype html>
+      <style>
+        body { margin: 8px; font-family: monospace; font-size: 11px; }
+        #box { width: 40px; height: 40px; background: #222; transition: transform 200ms linear; }
+        #box.go { transform: translateX(60px); }
+      </style>
+      <div id="box"></div>
+      <p id="lbl">inner doc ready</p>
+      <script>
+        const events = [];
+        const mql = matchMedia("(max-width: 300px)");
+        mql.addEventListener("change", (e) => {
+          events.push({ kind: "mq-change", matches: e.matches, t: performance.now() });
+          report();
+        });
+        const box = document.getElementById("box");
+        for (const type of ["transitionrun", "transitionstart", "transitionend"]) {
+          box.addEventListener(type, () => {
+            events.push({ kind: type, t: performance.now() });
+            report();
+          });
+        }
+        let reportTimer;
+        function report() {
+          clearTimeout(reportTimer);
+          reportTimer = setTimeout(() => {
+            parent.postMessage({ order: events.splice(0) }, "*");
+          }, 250);
+        }
+        addEventListener("message", (e) => {
+          if (e.data === "go") {
+            box.classList.toggle("go");
+            void box.offsetWidth;
+            document.getElementById("lbl").textContent = "triggered @ " + performance.now().toFixed(0);
+          }
+        });
+      </script>'>
+    </iframe>
+    <p class="note">iframe width drives the inner media query; the inner box owns the transition</p>
+  </div>
+
+  <div class="order-box">
+    <p class="k">arrival order reported by the inner document</p>
+    <ol id="order"><li style="color:var(--text-muted)">no run yet</li></ol>
+  </div>
+  <div class="status-line" id="status" role="status" aria-live="polite">Shrink to fire both event sources in one update.</div>
+
+  <pre><code>// same task, two pending event sources:
+iframe.style.width = "240px";        // → inner (max-width: 300px) change event
+iframe.contentWindow.postMessage("go", "*"); // → inner transitionrun/start/end
+
+// spec order inside the inner document's next rendering update:
+//   step 3.10  mq-change            ← always first (Chrome 153, Gecko, WebKit)
+//   step 3.11  transitionrun, …     ← animation events after</code></pre>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../transitionrun-latency-lab/">transitionrun latency lab</a> — the same-iteration half</li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const iframe = $("lab");
+  let shrunk = false;
+
+  window.addEventListener("message", (e) => {
+    if (!e.data || !e.data.order || !e.data.order.length) return;
+    const order = e.data.order;
+    const ol = $("order");
+    ol.replaceChildren(...order.map((ev) => {
+      const li = document.createElement("li");
+      li.className = ev.kind === "mq-change" ? "mq" : "anim";
+      li.textContent = `${ev.kind}${ev.kind === "mq-change" ? " (matches: " + ev.matches + ")" : ""} @ ${ev.t.toFixed(1)}ms`;
+      return li;
+    }));
+    const mqIdx = order.findIndex((ev) => ev.kind === "mq-change");
+    const animIdx = order.findIndex((ev) => ev.kind.startsWith("transition"));
+    let msg;
+    if (mqIdx === -1 || animIdx === -1) {
+      msg = mqIdx === -1
+        ? "Only animation events arrived this run (the width crossed no breakpoint — use reset, then shrink)."
+        : "Only the media query event arrived this run.";
+    } else if (mqIdx < animIdx) {
+      msg = "mq-change arrived BEFORE every animation event — the deterministic step-3.10-before-3.11 ordering this change guarantees.";
+    } else {
+      msg = "An animation event arrived before mq-change — the legacy intermixed ordering this change removes (deterministic on Chrome 153).";
+    }
+    $("status").textContent = msg;
+    window.showcaseTelemetry?.assert("idt-order-observed", order.length > 0, { order: order.map((o) => o.kind).join(","), mqFirst: mqIdx !== -1 && (animIdx === -1 || mqIdx < animIdx) });
+  });
+
+  $("runBtn").addEventListener("click", () => {
+    shrunk = !shrunk;
+    iframe.style.width = shrunk ? "240px" : "480px";
+    iframe.contentWindow.postMessage("go", "*");
+    $("status").textContent = "Triggered — waiting for the inner document's report…";
+  });
+  $("resetBtn").addEventListener("click", () => {
+    shrunk = false;
+    iframe.style.width = "480px";
+    $("status").textContent = "Width reset to 480px (query not matching).";
+  });
+</script>
+</body>
+</html>
