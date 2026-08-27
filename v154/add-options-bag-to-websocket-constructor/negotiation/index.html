@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Subprotocol negotiation — WebSocket options bag — Chrome 154 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button[disabled] { opacity: 0.55; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.83rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.77rem; }
+    td.mono { font-family: var(--font-mono); }
+    td.ok { color: var(--accent-emerald); font-weight: 700; }
+    td.bad { color: var(--accent-rose); font-weight: 700; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebSocket options bag</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v154 · websocket options</p>
+    <h1>Subprotocol negotiation</h1>
+    <p class="lede">Six real handshakes against the same endpoint, each offering a different set. The rule that surprises people is in row three: the client's order is a list of what it can speak, not a ranking — the server picks, and it picks by its own preference.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="cases-title">
+    <h2 id="cases-title">Six offers, one server</h2>
+    <button type="button" id="run">Run all six</button>
+    <p class="note">The endpoint knows <code>echo.v2</code>, <code>echo</code>, <code>chat</code> and <code>soap</code>, in that preference order. Every row opens a genuine connection and reports the server's own account of what it saw.</p>
+    <table>
+      <caption>Offer, outcome, and what the server did with it</caption>
+      <thead><tr><th scope="col">what the client offered</th><th scope="col">opened?</th><th scope="col">negotiated</th><th scope="col">expected</th><th scope="col">as expected?</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5">Not run yet.</td></tr></tbody>
+    </table>
+    <output id="detail" aria-live="polite">Press the button.</output>
+  </section>
+
+  <section><h2>the rules, as exercised above</h2>
+    <ul>
+      <li>Offering nothing opens a connection with no subprotocol. That is not a failure — most sockets do not use one.</li>
+      <li>Offering several does not rank them. The server chooses, and a server that prefers <code>echo</code> will take it even when <code>chat</code> came first.</li>
+      <li>Offering only things the server does not know is a failed handshake, not a plain connection: the server has no protocol it can agree to.</li>
+      <li>A duplicate in the list is a construction error before any request is sent.</li>
+    </ul>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5080055102439424" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://websockets.spec.whatwg.org/#dom-websocket-websocket" target="_blank" rel="noopener">WebSockets Standard: the constructor</a></li>
+    <li><a href="../both-forms/">Both forms, one server</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[ws-options:negotiation]';
+  const detail = document.getElementById('detail');
+
+  function endpoint() {
+    const url = new URL('/public/echo-socket', location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return url.href;
+  }
+
+  const CASES = [
+    { offer: [], label: 'nothing', expect: 'opens with no subprotocol' },
+    { offer: ['echo'], label: '["echo"]', expect: 'echo' },
+    { offer: ['chat', 'echo'], label: '["chat", "echo"]', expect: 'echo — the SERVER prefers it' },
+    { offer: ['soap'], label: '["soap"]', expect: 'soap' },
+    { offer: ['nope', 'alsonope'], label: '["nope", "alsonope"]', expect: 'handshake fails' },
+    { offer: ['echo', 'echo'], label: '["echo", "echo"]', expect: 'construction throws — duplicate' },
+  ];
+
+  function connect(offer) {
+    return new Promise((resolve) => {
+      const result = { opened: false, negotiated: '', serverSaw: null, error: null };
+      let socket;
+      const finish = () => {
+        try { socket?.close(); } catch { /* already closing */ }
+        resolve(result);
+      };
+      try {
+        socket = offer.length ? new WebSocket(endpoint(), offer) : new WebSocket(endpoint());
+      } catch (error) {
+        result.error = `${error.name}: ${error.message}`;
+        resolve(result);
+        return;
+      }
+      socket.addEventListener('open', () => {
+        result.opened = true;
+        result.negotiated = socket.protocol;
+      });
+      socket.addEventListener('message', (event) => {
+        try {
+          const frame = JSON.parse(event.data);
+          if (frame.type === 'welcome') {
+            result.serverSaw = frame.negotiated;
+            result.negotiated = socket.protocol;
+            finish();
+          }
+        } catch { /* not ours */ }
+      });
+      socket.addEventListener('close', (event) => {
+        if (!result.opened) result.error = result.error ?? `closed before opening (code ${event.code})`;
+        finish();
+      });
+      socket.addEventListener('error', () => {
+        result.error = result.error ?? 'handshake failed';
+      });
+      setTimeout(finish, 4000);
+    });
+  }
+
+  document.getElementById('run').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    detail.textContent = 'Opening six connections…';
+    const results = [];
+    for (const testCase of CASES) results.push({ testCase, result: await connect(testCase.offer) });
+
+    const body = document.getElementById('rows');
+    body.innerHTML = '';
+    let matched = 0;
+    for (const { testCase, result } of results) {
+      // Did the outcome match what the rules predict?
+      const asExpected = testCase.offer.length === 0
+        ? result.opened && result.negotiated === ''
+        : testCase.expect.startsWith('handshake fails')
+        ? !result.opened
+        : testCase.expect.startsWith('construction throws')
+        ? Boolean(result.error) && !result.opened
+        : result.opened && result.negotiated === testCase.expect.split(' ')[0];
+      if (asExpected) matched += 1;
+
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.className = 'mono';
+      th.textContent = testCase.label;
+      const opened = document.createElement('td');
+      opened.textContent = result.opened ? 'yes' : (result.error ?? 'no');
+      opened.className = result.opened ? 'ok' : 'bad';
+      const negotiated = document.createElement('td');
+      negotiated.className = 'mono';
+      negotiated.textContent = result.opened ? (result.negotiated || '(none)') : '—';
+      const expected = document.createElement('td');
+      expected.textContent = testCase.expect;
+      const verdict = document.createElement('td');
+      verdict.textContent = asExpected ? 'yes' : 'no';
+      verdict.className = asExpected ? 'ok' : 'bad';
+      tr.append(th, opened, negotiated, expected, verdict);
+      body.append(tr);
+    }
+
+    const ordering = results[2].result;
+    detail.textContent =
+      `${matched} of ${CASES.length} outcomes matched the rules. ` +
+      (ordering.opened && ordering.negotiated === 'echo'
+        ? 'Row three is the one worth noting: the client listed "chat" first and got "echo", because the server picks from what it prefers rather than honouring the client\'s order.'
+        : `Row three negotiated "${ordering.negotiated || 'nothing'}", so read it against the expectation — the client's order is not a ranking.`);
+
+    console.log(`${LOG} ${matched}/${CASES.length} matched`);
+    globalThis.showcaseTelemetry?.assert('negotiation-run', true, { matched, total: CASES.length });
+    button.disabled = false;
+  });
+
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>

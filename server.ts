@@ -13,6 +13,7 @@ import { handleFedCmWellKnownRoute } from "./routes/fedcm-well-known.ts";
 import { handleIndexRoute } from "./routes/index.ts";
 import { handleProfileTelemetryRoute } from "./routes/profile-telemetry.ts";
 import { handlePublicRoute } from "./routes/public.ts";
+import { handleEchoSocketRoute } from "./routes/echo-socket.ts";
 import { handleReleaseRoute } from "./routes/release.ts";
 
 const PORT = Number(Deno.env.get("PORT") ?? 3000);
@@ -27,6 +28,7 @@ const routes: RouteHandler[] = [
   handleCritiquesRoute,
   handleCategoriesRoute,
   handleFaviconRoute,
+  handleEchoSocketRoute,
   handlePublicRoute,
   handleProfileTelemetryRoute,
   handleDemoTelemetryRoute,
