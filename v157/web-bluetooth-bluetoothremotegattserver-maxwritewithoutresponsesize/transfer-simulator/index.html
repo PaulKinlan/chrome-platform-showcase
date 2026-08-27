@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Firmware transfer simulator — Web Bluetooth maxWriteWithoutResponseSize — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: var(--space-3); align-items: end; }
+    label { display: grid; gap: var(--space-1); font-weight: 700; }
+    input[type="range"] { width: 100%; min-height: 44px; }
+    .buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button.secondary { background: var(--bg-stone); color: var(--text-black); }
+    button[disabled] { opacity: 0.55; }
+    .lanes { display: grid; gap: var(--space-3); }
+    .lane { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); display: grid; gap: var(--space-2); }
+    .lane h3 { margin: 0; font-size: 1rem; }
+    .track { height: 30px; border: 2px solid var(--border-black); background: var(--bg-ivory); position: relative; overflow: hidden; }
+    .track i { display: block; height: 100%; background: var(--accent-blue); opacity: 0.35; width: 0; }
+    .track b { position: absolute; inset: 0; display: flex; align-items: center; padding-left: var(--space-2); font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; }
+    .lane dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: var(--space-2); margin: 0; }
+    .lane dt { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); }
+    .lane dd { margin: 0; font-weight: 700; font-family: var(--font-mono); }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Web Bluetooth: maxWriteWithoutResponseSize</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v157 · web bluetooth</p>
+    <h1>Firmware transfer simulator</h1>
+    <p class="lede">Packet counts are abstract; minutes are not. Push the same firmware image down two simulated links — one at the 20-byte assumption, one at the negotiated size — and watch them separate in real time. The model is the one that governs BLE throughput: writes are paced by the connection interval, several per event.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="sim-title">
+    <h2 id="sim-title">Run the transfer</h2>
+    <div class="controls">
+      <label for="image">Firmware image: <span id="image-label">256 KB</span>
+        <input type="range" id="image" min="0" max="100" value="50">
+      </label>
+      <label for="mtu">Negotiated write size: <span id="mtu-label">182 bytes</span>
+        <input type="range" id="mtu" min="21" max="509" value="182">
+      </label>
+      <label for="interval">Connection interval: <span id="interval-label">15 ms</span>
+        <input type="range" id="interval" min="75" max="400" value="150" step="25">
+      </label>
+      <label for="perevent">Packets per event: <span id="perevent-label">4</span>
+        <input type="range" id="perevent" min="1" max="8" value="4">
+      </label>
+    </div>
+    <p class="note">A BLE central sends a handful of packets per connection event, and events happen once per connection interval. Throughput is therefore <em>packets per event x write size / interval</em> — which is why a bigger write size, not a faster radio, is what makes a firmware update finish.</p>
+    <div class="buttons">
+      <button type="button" id="run">Run both transfers</button>
+      <button type="button" id="stop" class="secondary" disabled>Stop</button>
+    </div>
+
+    <div class="lanes">
+      <div class="lane">
+        <h3>Assuming 20 bytes</h3>
+        <div class="track" role="img" aria-labelledby="baseline-progress"><i id="baseline-fill"></i><b id="baseline-text">idle</b></div>
+        <dl>
+          <div><dt>Packets</dt><dd id="baseline-packets">0</dd></div>
+          <div><dt>Sent</dt><dd id="baseline-sent">0 B</dd></div>
+          <div><dt>Elapsed (simulated)</dt><dd id="baseline-time">0.0 s</dd></div>
+        </dl>
+        <p id="baseline-progress" class="visually-hidden-note"></p>
+      </div>
+      <div class="lane">
+        <h3>Reading <code>maxWriteWithoutResponseSize</code></h3>
+        <div class="track" role="img" aria-labelledby="negotiated-progress"><i id="negotiated-fill"></i><b id="negotiated-text">idle</b></div>
+        <dl>
+          <div><dt>Packets</dt><dd id="negotiated-packets">0</dd></div>
+          <div><dt>Sent</dt><dd id="negotiated-sent">0 B</dd></div>
+          <div><dt>Elapsed (simulated)</dt><dd id="negotiated-time">0.0 s</dd></div>
+        </dl>
+        <p id="negotiated-progress"></p>
+      </div>
+    </div>
+    <output id="detail" aria-live="polite">Press Run to send the same image down both links.</output>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>// Throughput is set by how much fits in each connection event.
+const perSecond = (packetsPerEvent * writeSize) / (intervalMs / 1000);
+const seconds = imageBytes / perSecond;
+
+// Which is why this one line is the whole optimisation:
+const writeSize = server.maxWriteWithoutResponseSize ?? 20;</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5177569273053184" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="../chunk-planner/">Chunk planner</a></li>
+    <li><a href="../size-change-event/">Handling a size change mid-transfer</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[ble-mtu:simulator]';
+  const imageSlider = document.getElementById('image');
+  const mtuSlider = document.getElementById('mtu');
+  const intervalSlider = document.getElementById('interval');
+  const perEventSlider = document.getElementById('perevent');
+  const detail = document.getElementById('detail');
+  let animation = null;
+
+  // 16 KB to 4 MB, logarithmic.
+  const imageBytes = () => Math.round(16384 * Math.pow(256, Number(imageSlider.value) / 100));
+  const intervalMs = () => Number(intervalSlider.value) / 10;
+
+  const formatBytes = (bytes) =>
+    bytes >= 1048576 ? `${(bytes / 1048576).toFixed(2)} MB`
+      : bytes >= 1024 ? `${Math.round(bytes / 1024)} KB`
+      : `${Math.round(bytes)} B`;
+
+  function labels() {
+    document.getElementById('image-label').textContent = formatBytes(imageBytes());
+    document.getElementById('mtu-label').textContent = `${mtuSlider.value} bytes`;
+    document.getElementById('interval-label').textContent = `${intervalMs().toFixed(1)} ms`;
+    document.getElementById('perevent-label').textContent = perEventSlider.value;
+  }
+
+  function totalSeconds(bytes, writeSize) {
+    const packets = Math.ceil(bytes / writeSize);
+    const events = Math.ceil(packets / Number(perEventSlider.value));
+    return (events * intervalMs()) / 1000;
+  }
+
+  function paint(lane, fraction, bytes, writeSize, seconds) {
+    const packets = Math.ceil(bytes / writeSize);
+    const sentPackets = Math.round(packets * fraction);
+    const sentBytes = Math.min(bytes, sentPackets * writeSize);
+    document.getElementById(`${lane}-fill`).style.width = `${fraction * 100}%`;
+    document.getElementById(`${lane}-text`).textContent =
+      `${Math.round(fraction * 100)}% at ${writeSize} B/write`;
+    document.getElementById(`${lane}-packets`).textContent = sentPackets.toLocaleString();
+    document.getElementById(`${lane}-sent`).textContent = formatBytes(sentBytes);
+    document.getElementById(`${lane}-time`).textContent = `${(seconds * fraction).toFixed(1)} s`;
+    const progress = document.getElementById(`${lane}-progress`);
+    if (progress) {
+      progress.textContent = fraction >= 1
+        ? `Finished: ${packets.toLocaleString()} packets in ${seconds.toFixed(1)} simulated seconds.`
+        : `${Math.round(fraction * 100)}% complete.`;
+    }
+  }
+
+  function stop() {
+    if (animation !== null) cancelAnimationFrame(animation);
+    animation = null;
+    document.getElementById('run').disabled = false;
+    document.getElementById('stop').disabled = true;
+  }
+
+  function run() {
+    stop();
+    const bytes = imageBytes();
+    const negotiated = Number(mtuSlider.value);
+    const baselineSeconds = totalSeconds(bytes, 20);
+    const negotiatedSeconds = totalSeconds(bytes, negotiated);
+    const longest = Math.max(baselineSeconds, negotiatedSeconds);
+    // Compress the whole run into ~6 seconds of wall clock so a 20-minute
+    // transfer is watchable; both lanes share the same compression, so the
+    // gap between them stays honest.
+    const wallMs = 6000;
+    const started = performance.now();
+    document.getElementById('run').disabled = true;
+    document.getElementById('stop').disabled = false;
+    console.log(`${LOG} run: ${bytes}B, 20B -> ${baselineSeconds.toFixed(1)}s, ${negotiated}B -> ${negotiatedSeconds.toFixed(1)}s`);
+
+    const step = () => {
+      const elapsed = (performance.now() - started) / wallMs;
+      const simulated = Math.min(1, elapsed) * longest;
+      paint('baseline', Math.min(1, simulated / baselineSeconds), bytes, 20, baselineSeconds);
+      paint('negotiated', Math.min(1, simulated / negotiatedSeconds), bytes, negotiated, negotiatedSeconds);
+      if (elapsed < 1) {
+        animation = requestAnimationFrame(step);
+      } else {
+        stop();
+        detail.textContent =
+          `${formatBytes(bytes)} took ${baselineSeconds.toFixed(1)} s at the 20-byte assumption and ` +
+          `${negotiatedSeconds.toFixed(1)} s at ${negotiated} bytes — ` +
+          `${(baselineSeconds / negotiatedSeconds).toFixed(1)}x faster, from reading one property.`;
+        window.showcaseTelemetry?.assert('transfer-simulated', true, {
+          bytes, negotiated,
+          baselineSeconds: Number(baselineSeconds.toFixed(1)),
+          negotiatedSeconds: Number(negotiatedSeconds.toFixed(1)),
+        });
+      }
+    };
+    animation = requestAnimationFrame(step);
+  }
+
+  for (const slider of [imageSlider, mtuSlider, intervalSlider, perEventSlider]) {
+    slider.addEventListener('input', () => {
+      labels();
+      const bytes = imageBytes();
+      const negotiated = Number(mtuSlider.value);
+      detail.textContent =
+        `Estimated: ${totalSeconds(bytes, 20).toFixed(1)} s at 20 bytes against ` +
+        `${totalSeconds(bytes, negotiated).toFixed(1)} s at ${negotiated}. Press Run to watch it.`;
+    });
+  }
+  document.getElementById('run').addEventListener('click', run);
+  document.getElementById('stop').addEventListener('click', () => {
+    stop();
+    detail.textContent = 'Stopped.';
+  });
+
+  labels();
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>
