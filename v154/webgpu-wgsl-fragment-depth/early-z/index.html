@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Why early-Z matters — WGSL fragment depth — Chrome 154 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); align-items: end; }
+    label { display: grid; gap: var(--space-1); font-weight: 700; }
+    input[type="range"] { width: 100%; min-height: 44px; }
+    label.inline { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    .bars { display: grid; gap: var(--space-2); }
+    .bar-row { display: grid; grid-template-columns: 190px 1fr; gap: var(--space-2); align-items: center; }
+    .bar-row span { font-family: var(--font-mono); font-size: 0.78rem; }
+    .bar { height: 28px; border: 2px solid var(--border-black); background: var(--bg-ivory); position: relative; overflow: hidden; }
+    .bar i { display: block; height: 100%; background: var(--accent-blue); opacity: 0.35; }
+    .bar b { position: absolute; inset: 0; display: flex; align-items: center; padding-left: var(--space-2); font-family: var(--font-mono); font-size: 0.75rem; font-weight: 700; }
+    .pipeline { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space-3); }
+    .lane { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); display: grid; gap: var(--space-2); }
+    .lane h3 { margin: 0; font-size: 0.9rem; }
+    .lane ol { margin: 0; padding-left: 1.4em; font-size: 0.84rem; }
+    .lane li.skipped { color: var(--text-muted); text-decoration: line-through; }
+    .lane .cost { font-family: var(--font-mono); font-size: 0.82rem; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.84rem; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.78rem; }
+    td.num { font-family: var(--font-mono); text-align: right; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WGSL fragment depth</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v154 · frag_depth modifiers</p>
+    <h1>Why early-Z matters</h1>
+    <p class="lede">Early depth testing is worth a lot and costs nothing — until a shader writes depth, at which point the driver turns it off for the whole draw call. This models the arithmetic: how many fragment shader invocations you run with it, without it, and with the modifier that gets it back.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="model-title">
+    <h2 id="model-title">Model a draw call</h2>
+    <div class="controls">
+      <label for="pixels">Covered pixels: <span id="pixels-label">1,000,000</span>
+        <input type="range" id="pixels" min="10" max="400" value="100">
+      </label>
+      <label for="overdraw">Depth complexity: <span id="overdraw-label">4.0x</span>
+        <input type="range" id="overdraw" min="10" max="120" value="40">
+      </label>
+      <label for="cost">Shader cost: <span id="cost-label">40 ops</span>
+        <input type="range" id="cost" min="4" max="400" value="40">
+      </label>
+      <label class="inline"><input type="checkbox" id="sorted" checked> geometry drawn front to back</label>
+    </div>
+    <p class="note">Depth complexity is how many surfaces cover the average pixel. Front-to-back order is what makes early-Z effective: each surface rejects the ones behind it, so the first one shades and the rest are discarded before the shader runs. Back to front, nothing can be rejected and the optimisation is worth almost nothing — which is a fact about your renderer, not about the modifier.</p>
+
+    <div class="bars" id="bars"></div>
+
+    <table>
+      <caption>Fragment shader invocations per frame</caption>
+      <thead><tr><th scope="col">shader</th><th scope="col">early-Z</th><th scope="col">invocations</th><th scope="col">shader ops</th><th scope="col">vs best case</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <output id="detail" aria-live="polite"></output>
+  </section>
+
+  <section class="stage" aria-labelledby="pipeline-title">
+    <h2 id="pipeline-title">Where the depth test happens</h2>
+    <div class="pipeline">
+      <div class="lane">
+        <h3>Early-Z kept</h3>
+        <ol>
+          <li>rasterise the triangle</li>
+          <li><strong>depth test</strong> — reject what is already hidden</li>
+          <li>run the fragment shader on survivors</li>
+          <li>write colour and depth</li>
+        </ol>
+        <p class="cost" id="lane-early"></p>
+      </div>
+      <div class="lane">
+        <h3>Early-Z disabled</h3>
+        <ol>
+          <li>rasterise the triangle</li>
+          <li class="skipped">depth test — cannot run yet, the shader may change the depth</li>
+          <li>run the fragment shader on <strong>everything</strong></li>
+          <li>depth test, then write colour and depth</li>
+        </ol>
+        <p class="cost" id="lane-late"></p>
+      </div>
+    </div>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5663304168112128" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webgpu/#depth-stencil-state" target="_blank" rel="noopener">WebGPU: depth-stencil state</a></li>
+    <li><a href="../shader-forms/">The three shader forms</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wgsl-depth:early-z]';
+  const detail = document.getElementById('detail');
+
+  const read = (id) => Number(document.getElementById(id).value);
+  const format = (n) => n >= 1e9 ? `${(n / 1e9).toFixed(2)}B`
+    : n >= 1e6 ? `${(n / 1e6).toFixed(2)}M`
+    : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K`
+    : String(Math.round(n));
+
+  function model() {
+    const pixels = read('pixels') * 10000;
+    const overdraw = read('overdraw') / 10;
+    const shaderCost = read('cost');
+    const sorted = document.getElementById('sorted').checked;
+    const fragments = pixels * overdraw;
+
+    // With early-Z and front-to-back order, only the nearest surface per
+    // pixel shades; the rest are rejected before the shader. Unsorted, the
+    // rejection rate collapses towards nothing — on average about half the
+    // draws are still in front of what has been written so far.
+    const earlyZInvocations = sorted ? pixels : pixels * (1 + Math.log2(Math.max(1, overdraw)));
+    const noEarlyZInvocations = fragments;
+
+    return {
+      pixels, overdraw, shaderCost, sorted, fragments,
+      rows: [
+        {
+          name: 'no depth write',
+          earlyZ: 'kept',
+          invocations: earlyZInvocations,
+        },
+        {
+          name: '@builtin(frag_depth) f32',
+          earlyZ: 'disabled',
+          invocations: noEarlyZInvocations,
+        },
+        {
+          name: '@builtin(frag_depth) greater f32',
+          earlyZ: 'kept',
+          invocations: earlyZInvocations,
+        },
+      ],
+    };
+  }
+
+  function render() {
+    const result = model();
+    document.getElementById('pixels-label').textContent = result.pixels.toLocaleString();
+    document.getElementById('overdraw-label').textContent = `${result.overdraw.toFixed(1)}x`;
+    document.getElementById('cost-label').textContent = `${result.shaderCost} ops`;
+
+    const best = Math.min(...result.rows.map((r) => r.invocations));
+    const worst = Math.max(...result.rows.map((r) => r.invocations));
+
+    const body = document.getElementById('rows');
+    body.innerHTML = '';
+    for (const row of result.rows) {
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.textContent = row.name;
+      const earlyZ = document.createElement('td');
+      earlyZ.textContent = row.earlyZ;
+      const invocations = document.createElement('td');
+      invocations.className = 'num';
+      invocations.textContent = format(row.invocations);
+      const ops = document.createElement('td');
+      ops.className = 'num';
+      ops.textContent = format(row.invocations * result.shaderCost);
+      const ratio = document.createElement('td');
+      ratio.className = 'num';
+      ratio.textContent = `${(row.invocations / best).toFixed(2)}x`;
+      tr.append(th, earlyZ, invocations, ops, ratio);
+      body.append(tr);
+    }
+
+    const bars = document.getElementById('bars');
+    bars.innerHTML = '';
+    for (const row of result.rows) {
+      const wrap = document.createElement('div');
+      wrap.className = 'bar-row';
+      const label = document.createElement('span');
+      label.textContent = row.name.replace('@builtin(frag_depth)', 'frag_depth');
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      const fill = document.createElement('i');
+      fill.style.width = `${(row.invocations / worst) * 100}%`;
+      const text = document.createElement('b');
+      text.textContent = `${format(row.invocations)} invocations`;
+      bar.append(fill, text);
+      wrap.append(label, bar);
+      bars.append(wrap);
+    }
+
+    document.getElementById('lane-early').textContent =
+      `${format(result.rows[0].invocations)} invocations — one per visible pixel when the geometry is sorted.`;
+    document.getElementById('lane-late').textContent =
+      `${format(result.rows[1].invocations)} invocations — one per covered fragment, visible or not.`;
+
+    const saved = result.rows[1].invocations - result.rows[2].invocations;
+    detail.textContent = !result.sorted
+      ? `Unsorted geometry: early-Z only rejects ${((1 - result.rows[0].invocations / result.fragments) * 100).toFixed(0)}% of fragments, so keeping it saves ${format(saved)} invocations rather than the ${format(result.fragments - result.pixels)} it could. Sorting front to back is what makes the modifier worth reaching for.`
+      : `At ${result.overdraw.toFixed(1)}x depth complexity, writing depth without a modifier costs ${format(result.rows[1].invocations)} shader invocations against ${format(result.rows[2].invocations)} with one — ${format(saved)} avoided, or ${(result.rows[1].invocations / result.rows[2].invocations).toFixed(1)}x. The saving scales with overdraw, which is why it hurts most in exactly the effects that write depth: particles and volumetrics, drawn many layers deep.`;
+
+    console.log(`${LOG} overdraw=${result.overdraw} sorted=${result.sorted} saved=${Math.round(saved)}`);
+    globalThis.showcaseTelemetry?.assert('early-z-modelled', true, {
+      overdraw: result.overdraw, sorted: result.sorted,
+      withModifier: Math.round(result.rows[2].invocations),
+      without: Math.round(result.rows[1].invocations),
+    });
+  }
+
+  for (const id of ['pixels', 'overdraw', 'cost']) {
+    document.getElementById(id).addEventListener('input', render);
+  }
+  document.getElementById('sorted').addEventListener('change', render);
+  render();
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>
