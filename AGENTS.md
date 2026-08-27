@@ -29,6 +29,7 @@ deno check server.ts
 deno task check
 deno task audit
 deno task check-routes    # Route regression gate — run before EVERY push (see contract below)
+deno task check-duplicates # One-folder-per-feature gate — run before EVERY push (see contract below)
 deno task route-manifest  # Emit the published-demo route manifest
 deno task start
 deno task auto-research   # Starts the local server and displays the quality/conformance status
@@ -60,6 +61,9 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
 - Place `v<N>/<feature-slug>/` only when the feature appears in the `features_by_type` listing for
   milestone `N`. Do not infer the milestone from `browsers.chrome.desktop`, `shipping_year`, or
   similar fields.
+- **One demo folder per ChromeStatus feature.** Appearing in milestone `N`'s listing is necessary,
+  not sufficient. If the feature id already has a folder anywhere in the catalogue, milestone `N`
+  does not get a second one — see "One demo folder per feature" below.
 - Every feature and concept page must include a `chromestatus.com/feature/<id>` link.
 - `escapeHTML` must escape `&`, `<`, `>`, `"`, and `'`. Attribute escaping regressions have caused
   real DOM injection bugs on `/features`.
@@ -110,6 +114,39 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
   pick up incomplete (thin) demos, do not skip a folder just because it exists.
 - Automated routine-style work should normally stay inside `v<N>/`. Top-level files are only edited
   for explicit maintenance tasks, route support, shared fixes, or user-directed changes.
+
+## One demo folder per feature — ChromeStatus re-lists, we do not rebuild
+
+ChromeStatus lists a feature in the milestone listing for **every** milestone its shipping estimate
+passes through. `Capability Elements <usermedia> MVP` is in the v144, v149, v150 and v151 listings;
+`Local network access restrictions` is in six. Following the milestone rule alone produced 164
+features spread over 364 folders — a quarter of the catalogue re-demonstrating APIs that were
+already built, each page opening "Chrome N introduces…" for a feature that shipped elsewhere.
+
+**The rule:**
+
+1. A ChromeStatus feature id gets **one** folder carrying demos. Before creating
+   `v<N>/<feature-slug>/`, grep the catalogue for that feature id. If it already exists, do not
+   create a second folder — improve the existing one (add concepts, fix the demos, deepen the
+   portfolio) and move on to a feature that has no coverage at all.
+2. The 364 folders that predate this rule are **grandfathered**. They are recorded in
+   `feature-lineage.json`, their URLs are durable, and they may be improved in place. They may not
+   be joined by new siblings.
+3. Every folder in a multi-milestone lineage carries a **lineage note** stating which milestone the
+   feature actually shipped in and linking the others. It is generated, not hand-written.
+
+**Files:**
+
+- `feature-lineage.json` — feature id → every milestone folder hosting it, the canonical folder (the
+  milestone it shipped in per `browsers.chrome.desktop`), and the basis for that choice. Regenerate
+  with `deno task feature-lineage` (hits ChromeStatus).
+- `deno task apply-lineage` — writes/refreshes the lineage note on every affected page. Idempotent.
+- `deno task check-duplicates` — the gate. FAILS on a new duplicate folder, on a lineage record that
+  no longer matches disk, and on any affected page missing its note. Wired into `deno task check`.
+
+**When a new milestone re-lists a feature you have already built:** do nothing to the catalogue.
+Regenerate the lineage so the note picks up the new listing, and spend the time on an uncovered
+feature instead. The work-list (`deno task worklist`) is the place to find those.
 
 ## Durable demo compatibility contract — stable URLs · additive evolution · non-destructive
 
@@ -373,6 +410,8 @@ Before handing off meaningful changes:
 
 - Run the narrowest relevant checks, preferably `deno fmt --check`, `deno check server.ts`, and
   `deno task audit` or `deno task check` when generated demos changed.
+- **Run `deno task check-duplicates` before every push.** A second folder for a feature that is
+  already built is wasted work and a false claim about which Chrome introduced it.
 - **Run `deno task check-routes` before every push.** Read the existing demo, its git history, and
   the route manifest before editing any published demo; default to the smallest patch and never
   regenerate a working demo from scratch. Record any intentional removal/rename/move/identity-change

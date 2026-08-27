@@ -164,6 +164,20 @@ for (const record of inventory) {
     if (!byMilestoneAndId.has(key)) byMilestoneAndId.set(key, record);
   }
 }
+// Every feature id built ANYWHERE, so a later milestone re-listing of an
+// already-built feature is reported as covered rather than missing. ChromeStatus
+// re-lists a feature in each milestone its shipping estimate passes through, and
+// rebuilding it there is duplicate work the one-folder-per-feature rule forbids
+// (AGENTS.md, "One demo folder per feature").
+const builtAnywhere = new Map();
+for (const record of inventory) {
+  if (/^uber-demo/.test(record.slug)) continue;
+  for (const id of record.identities ?? []) {
+    if (!builtAnywhere.has(id)) builtAnywhere.set(id, []);
+    builtAnywhere.get(id).push(record.route);
+  }
+}
+
 const expected = [];
 
 for (let milestone = minMilestone; milestone <= maxMilestone; milestone++) {
@@ -191,7 +205,12 @@ const work = expected.map((feature) => {
   const support = responsive[route.replace(/^\//, "").replace(/\/$/, "")] || {};
   const reasons = [];
   let priority = 0;
-  if (!local) {
+  const coveredAt = local ? [] : (builtAnywhere.get(feature.id) ?? []);
+  if (!local && coveredAt.length) {
+    // Built under another milestone. Not work: regenerate the lineage so this
+    // listing shows up in the note, and spend the time on an uncovered feature.
+    reasons.push(`covered-elsewhere:${coveredAt.join(",")}`);
+  } else if (!local) {
     reasons.push("missing-demo");
     priority += 100;
   } else {
@@ -220,13 +239,23 @@ const work = expected.map((feature) => {
     priority += 10;
   }
   const gendnAvailable = gendnRoutes.has(route);
-  return { ...feature, route, built: !!local, gendnAvailable, priority, reasons, local };
+  return {
+    ...feature,
+    route,
+    built: !!local,
+    coveredElsewhere: coveredAt.length ? coveredAt : undefined,
+    gendnAvailable,
+    priority,
+    reasons,
+    local,
+  };
 }).sort((a, b) =>
   b.priority - a.priority || b.milestone - a.milestone || a.name.localeCompare(b.name)
 );
 
 const built = work.filter((item) => item.built).length;
-const missing = work.length - built;
+const coveredElsewhere = work.filter((item) => !item.built && item.coveredElsewhere).length;
+const missing = work.length - built - coveredElsewhere;
 const thin =
   work.filter((item) => item.reasons.some((reason) => reason.startsWith("thin:"))).length;
 const portfolioUnassessed =
@@ -241,6 +270,7 @@ const report = {
   denominators: {
     expectedFeatures: work.length,
     built,
+    coveredElsewhere,
     missing,
     thin,
     portfolioHeuristicUnassessed: portfolioUnassessed,
@@ -252,6 +282,7 @@ const report = {
     "ChromeStatus IDs are deduplicated within each milestone; Deprecated and Removed groups are excluded from expected build coverage.",
     "Portfolio categories are filename heuristics and remain unknown until source-backed feature research records the five-angle assessment.",
     "Unknown, untested, blocked, and missing states are never counted as complete.",
+    "`coveredElsewhere` is a ChromeStatus re-listing of a feature already built under another milestone. It is not missing work — one feature gets one demo folder (AGENTS.md).",
   ],
   milestones: Object.fromEntries(
     Array.from({ length: maxMilestone - minMilestone + 1 }, (_, offset) => {
@@ -260,7 +291,8 @@ const report = {
       return [`v${milestone}`, {
         expected: rows.length,
         built: rows.filter((item) => item.built).length,
-        missing: rows.filter((item) => !item.built).length,
+        coveredElsewhere: rows.filter((item) => !item.built && item.coveredElsewhere).length,
+        missing: rows.filter((item) => !item.built && !item.coveredElsewhere).length,
         actionable: rows.filter((item) => item.reasons.length).length,
       }];
     }),
@@ -283,6 +315,7 @@ const lines = [
   `- Expected ChromeStatus features: **${work.length}**`,
   `- Built: **${built}**`,
   `- Missing: **${missing}**`,
+  `- Covered under another milestone (re-listings, do not rebuild): **${coveredElsewhere}**`,
   `- Thin (<2 concepts): **${thin}**`,
   `- Portfolio heuristic unassessed/gapped: **${portfolioUnassessed}**`,
   `- Responsive complete: **${responsiveComplete}/${work.length}**`,
@@ -291,10 +324,10 @@ const lines = [
   "",
   "## Milestones",
   "",
-  "| milestone | expected | built | missing | actionable |",
-  "|---|---:|---:|---:|---:|",
+  "| milestone | expected | built | re-listed | missing | actionable |",
+  "|---|---:|---:|---:|---:|---:|",
   ...Object.entries(report.milestones).map(([milestone, value]) =>
-    `| ${milestone} | ${value.expected} | ${value.built} | ${value.missing} | ${value.actionable} |`
+    `| ${milestone} | ${value.expected} | ${value.built} | ${value.coveredElsewhere} | ${value.missing} | ${value.actionable} |`
   ),
   "",
   "## Highest-priority work",
@@ -309,6 +342,6 @@ const lines = [
 ];
 await Deno.writeTextFile(MARKDOWN_OUTPUT, `${lines.join("\n")}\n`);
 console.log(
-  `worklist: ${built}/${work.length} built · ${missing} missing · ${thin} thin · ${actionable.length} actionable`,
+  `worklist: ${built}/${work.length} built · ${coveredElsewhere} re-listed · ${missing} missing · ${thin} thin · ${actionable.length} actionable`,
 );
 console.log(`wrote ${JSON_OUTPUT.pathname} and ${MARKDOWN_OUTPUT.pathname}`);

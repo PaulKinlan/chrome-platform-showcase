@@ -300,6 +300,21 @@ infer N from `browsers.chrome.desktop`, `shipping_year`, or any other field. A f
 Chrome 18 but still appear under milestone 149 because something is changing in 149 — that's the
 v149 entry, the v18 ship date is incidental.
 
+### 2b. One folder per feature — the listing is necessary, not sufficient
+
+Listing position decides _which_ milestone a feature could live under; it does not entitle every
+listing to its own demo folder. ChromeStatus re-lists a feature in each milestone its shipping
+estimate passes through — `Capability Elements <usermedia> MVP` in v144, v149, v150 and v151, local
+network access restrictions in six — so following rule 2 alone spread 164 features over 364 folders,
+a quarter of the catalogue re-demonstrating APIs that were already built.
+
+Before creating `v<N>/<slug>/`, check whether the feature id already has a folder. If it does, do
+not create a second one: improve the existing folder and pick an uncovered feature instead.
+Pre-existing duplicates are grandfathered in `feature-lineage.json`, keep their URLs, and carry a
+generated note saying where the feature actually shipped. `deno task check-duplicates` (part of
+`deno task check`) fails on a new duplicate or a missing note. See AGENTS.md, "One demo folder per
+feature".
+
 ### 3. Every page must include the chromestatus.com/feature/<id> link
 
 This is our self-heal. If folder names get garbled again, the cleanup script in `/tmp/fix-slugs.py`
