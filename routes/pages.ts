@@ -245,7 +245,7 @@ export async function renderIndex(channels: Channels): Promise<string> {
     <header class="lede-block">
       <p class="eyebrow">work in progress</p>
       <h1>chrome platform showcase</h1>
-      <p class="lede">A premium, hand-crafted demo for every new web platform feature shipping in Chrome. One per API. One uber-demo per release. Maintained by an automated routine; reviewed and merged by humans.</p>
+      <p class="lede">A premium, hand-crafted demo for every new web platform feature shipping in Chrome. One per API, each with its own portfolio of interactive use cases. Maintained by an automated routine; reviewed and merged by humans.</p>
       ${formatCommitLine(commit)}
     </header>
 
@@ -907,15 +907,6 @@ async function featureHasDemo(release: string, feature: FeatureSummary): Promise
   }
 }
 
-async function releaseHasUberDemo(release: string): Promise<boolean> {
-  try {
-    await Deno.stat(`./${release}/uber-demo/index.html`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export async function renderReleasePage(
   release: string,
   milestone: number,
@@ -936,7 +927,6 @@ export async function renderReleasePage(
     { name: "Chrome platform showcase", path: "/" },
     { name: `Chrome ${milestone}`, path: `/${release}/` },
   ], origin);
-  const hasUberDemo = await releaseHasUberDemo(release);
   const sections = await Promise.all(features.groups.map(async (group) => {
     const cards = await Promise.all(group.features.map(async (f) => {
       const hasDemo = await featureHasDemo(release, f);
@@ -990,16 +980,10 @@ export async function renderReleasePage(
   <header class="lede-block">
     <p class="eyebrow">chrome ${milestone} · ${escapeHTML(status.toLowerCase())}</p>
     <h1>chrome ${milestone} platform demos</h1>
-    <p class="lede">${features.total} features tracked for Chrome ${milestone}. Click a feature's title to open its demo; each card also links to its ChromeStatus entry. A single "uber" demo per release combines several APIs into one larger experience.</p>
+    <p class="lede">${features.total} features tracked for Chrome ${milestone}. Click a feature's title to open its demo; each card also links to its ChromeStatus entry.</p>
   </header>
 
   <section>
-    <h2>uber demo</h2>
-    ${
-    hasUberDemo
-      ? `<p><a class="tag tag-live" href="/${release}/uber-demo/">open the Chrome ${milestone} uber demo &rarr;</a></p>`
-      : `<p><span class="tag tag-pending">uber demo pending</span> The release-level experience will live at <code>/${release}/uber-demo/</code>.</p>`
-  }
     <p>Per-feature demos below are built automatically, one feature per commit, and every distinct use case should become an interactive concept page.</p>
   </section>
 

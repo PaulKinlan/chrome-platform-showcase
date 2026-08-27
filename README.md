@@ -1,8 +1,8 @@
 # chrome-platform-showcase
 
 A showcase site of premium, hand-crafted demos for every new web platform feature shipping in
-Chrome. One small interactive demo per API per release. One bigger "uber" demo per release that
-combines several APIs into something compelling.
+Chrome. One demo per API per release, each carrying a portfolio of interactive concepts that put the
+feature in the context of a real use case.
 
 The site is generated and maintained by an automated routine:
 
@@ -12,9 +12,6 @@ The site is generated and maintained by an automated routine:
    interactive concept it can identify from the ChromeStatus entry, specs, docs, and explainers.
 3. The routine commits one feature at a time directly to `main`. Deno Deploy redeploys from GitHub.
 4. Humans review the live output and tighten the routine prompt, demos, or server routes as needed.
-
-Per-release uber demos are the exception: those are larger editorial experiences that combine
-several APIs and still get a separate concept pass before implementation.
 
 ## Why
 
@@ -32,8 +29,7 @@ chrome-platform-showcase/
   lib/                   Shared streaming helpers and a sibling-file loader.
   public/styles.css      Shared design system: palette, type, surfaces, motion.
   v<N>/                  Per-release directory.
-    index.html           Index page listing every feature demo + the uber showcase.
-    uber-demo/           The larger combined demo for that Chrome release.
+    index.html           Index page listing every feature demo.
     <feature-slug>/      One folder per feature, with index.html + concept subfolders.
 ```
 
