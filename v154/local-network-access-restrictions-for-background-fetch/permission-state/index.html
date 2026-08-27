@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The permission, before you ask — LNA for Background Fetch — Chrome 154 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    .state { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); display: flex; align-items: center; gap: var(--space-2); }
+    .state svg { width: 1.2em; height: 1.2em; flex: none; }
+    .state.granted { color: var(--accent-emerald); border-color: var(--accent-emerald); }
+    .state.prompt { color: var(--accent-amber); border-color: var(--accent-amber); }
+    .state.denied, .state.unknown { color: var(--accent-rose); border-color: var(--accent-rose); }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.83rem; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.77rem; }
+    td.mono { font-family: var(--font-mono); }
+    tr.current td, tr.current th { background: var(--bg-stone); font-weight: 700; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; LNA for Background Fetch</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v154 · lna + background fetch</p>
+    <h1>The permission, before you ask</h1>
+    <p class="lede">A service worker cannot show a permission prompt. So for a background fetch to a local address, the grant has to exist <em>before</em> the fetch is registered — which makes querying the state, from the page, the first thing your code should do.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="state-title">
+    <h2 id="state-title">This origin's local-network permission</h2>
+    <p class="state" id="state">Querying…</p>
+    <button type="button" id="requery">Query again</button>
+    <table>
+      <caption>What each state means for a background fetch to a local address</caption>
+      <thead><tr><th scope="col">state</th><th scope="col">what a background fetch does</th><th scope="col">what your code should do</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <output id="detail" aria-live="polite"></output>
+    <p class="note"><code>permissions.query()</code> never prompts — it reports. That is what makes it safe to call on load and to branch on before you have asked the user for anything, which is exactly the shape this feature needs.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="related-title">
+    <h2 id="related-title">Related permission states, for comparison</h2>
+    <p>Not every permission name is queryable in every browser, and an unrecognised name throws rather than returning a state. The rows here are the real result of asking.</p>
+    <table>
+      <caption>Queried on this origin, just now</caption>
+      <thead><tr><th scope="col">permission</th><th scope="col">state</th></tr></thead>
+      <tbody id="others"></tbody>
+    </table>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/6225598451154944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://wicg.github.io/local-network-access/" target="_blank" rel="noopener">Local Network Access specification</a></li>
+    <li><a href="../target-audit/">Which targets are affected</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[lna-bgfetch:permission]';
+  const ICONS = {
+    granted: '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8.5 6.5 12 13 4"/></svg>',
+    prompt: '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="8" r="6"/><path d="M8 5v4M8 11h.01"/></svg>',
+    denied: '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
+    unknown: '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="8" r="6"/><path d="M8 5v4M8 11h.01"/></svg>',
+  };
+  const MEANINGS = {
+    granted: {
+      fetch: 'Runs. The grant is on the origin, so the service worker inherits it.',
+      code: 'Register the fetch. Nothing else to do.',
+    },
+    prompt: {
+      fetch: 'Fails. A service worker cannot prompt, and the fetch will not wait for one.',
+      code: 'Ask in the PAGE first, from a user gesture, then register the fetch once granted.',
+    },
+    denied: {
+      fetch: 'Fails, permanently, until the user changes it in site settings.',
+      code: 'Do not register the fetch. Explain what it was for and let the user decide.',
+    },
+    unknown: {
+      fetch: 'Unknowable from here.',
+      code: 'Treat it as "prompt": ask in the page before relying on it.',
+    },
+  };
+  const detail = document.getElementById('detail');
+
+  async function queryLocalNetwork() {
+    if (!navigator.permissions?.query) return { state: 'unknown', why: 'no Permissions API' };
+    try {
+      const status = await navigator.permissions.query({ name: 'local-network' });
+      return { state: status.state, status };
+    } catch (error) {
+      // An unrecognised permission name throws rather than returning a state.
+      return { state: 'unknown', why: `${error.name}: ${error.message}` };
+    }
+  }
+
+  function renderMeanings(current) {
+    const body = document.getElementById('rows');
+    body.innerHTML = '';
+    for (const state of ['granted', 'prompt', 'denied']) {
+      const tr = document.createElement('tr');
+      if (state === current) tr.className = 'current';
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.className = 'mono';
+      th.textContent = state;
+      const fetchCell = document.createElement('td');
+      fetchCell.textContent = MEANINGS[state].fetch;
+      const codeCell = document.createElement('td');
+      codeCell.textContent = MEANINGS[state].code;
+      tr.append(th, fetchCell, codeCell);
+      body.append(tr);
+    }
+  }
+
+  async function renderOthers() {
+    const names = ['local-network', 'geolocation', 'notifications', 'background-sync', 'persistent-storage'];
+    const body = document.getElementById('others');
+    body.innerHTML = '';
+    for (const name of names) {
+      let value;
+      try {
+        value = (await navigator.permissions.query({ name })).state;
+      } catch (error) {
+        value = `not queryable — ${error.name}`;
+      }
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.className = 'mono';
+      th.textContent = name;
+      const td = document.createElement('td');
+      td.className = 'mono';
+      td.textContent = value;
+      tr.append(th, td);
+      body.append(tr);
+    }
+  }
+
+  async function run() {
+    const result = await queryLocalNetwork();
+    const known = ['granted', 'prompt', 'denied'].includes(result.state);
+    const key = known ? result.state : 'unknown';
+    const element = document.getElementById('state');
+    element.className = `state ${key}`;
+    element.innerHTML = `${ICONS[key]}<span>local-network: ${result.state}${result.why ? ` (${result.why})` : ''}</span>`;
+    renderMeanings(known ? result.state : null);
+
+    detail.textContent = !known
+      ? `The local-network permission is not queryable in this browser (${result.why}). That is itself informative: a build that does not know the name has not shipped Local Network Access, so a background fetch to a private address is governed by whatever came before it. Treat the state as "prompt" and ask in the page.`
+      : result.state === 'granted'
+      ? 'Granted, so a background fetch to a local address will run — the service worker inherits the origin\'s grant, which is the whole reason to take the permission in the page first.'
+      : result.state === 'prompt'
+      ? 'Not yet granted. Registering a background fetch to a local address now would fail: the service worker cannot raise the prompt, and the fetch does not wait for one. Ask from a user gesture in the page, then register.'
+      : 'Denied. Nothing your code does will change that except the user revisiting site settings — so do not register the fetch, and say what it was for.';
+
+    // Live updates: the state can change while the page is open.
+    result.status?.addEventListener?.('change', () => {
+      console.log(`${LOG} permission changed to ${result.status.state}`);
+      run();
+    });
+
+    console.log(`${LOG} local-network = ${result.state}`);
+    globalThis.showcaseTelemetry?.assert('permission-queried', true, { state: result.state, known });
+    await renderOthers();
+  }
+
+  document.getElementById('requery').addEventListener('click', run);
+  run();
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>

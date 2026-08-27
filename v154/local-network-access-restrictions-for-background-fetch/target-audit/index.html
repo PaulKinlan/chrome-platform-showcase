@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Which targets are affected — LNA for Background Fetch — Chrome 154 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    label { display: grid; gap: var(--space-1); font-weight: 700; }
+    textarea { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; width: 100%; min-height: 150px; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.76rem; }
+    td.mono { font-family: var(--font-mono); }
+    td.public { color: var(--text-muted); }
+    td.local, td.loopback { color: var(--accent-rose); font-weight: 700; }
+    td.unknown { color: var(--accent-amber); font-weight: 700; }
+    .tally { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--space-2); }
+    .tally div { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-2); }
+    .tally dt { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); }
+    .tally dd { margin: var(--space-1) 0 0; font-size: 1.3rem; font-weight: 700; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; LNA for Background Fetch</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v154 · lna + background fetch</p>
+    <h1>Which targets are affected</h1>
+    <p class="lede">A background fetch takes a list of URLs, and the permission it needs depends on where each one points. Paste the list and see which entries now require a grant — including the ones that cannot be decided at all until they resolve.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="audit-title">
+    <h2 id="audit-title">Audit a fetch list</h2>
+    <label for="urls">The URLs you would pass to <code>backgroundFetch.fetch()</code>
+      <textarea id="urls" spellcheck="false"></textarea>
+    </label>
+    <button type="button" id="run">Audit</button>
+    <dl class="tally" id="tally"></dl>
+    <table>
+      <caption>Address space per target</caption>
+      <thead><tr><th scope="col">URL</th><th scope="col">space</th><th scope="col">needs the permission?</th><th scope="col">why</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <output id="detail" aria-live="polite"></output>
+    <p class="note">A background fetch is all-or-nothing per registration in practice: one target that cannot be reached takes the download with it. Splitting local targets into their own registration means a failure there does not lose the public assets you could have had.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/6225598451154944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://wicg.github.io/local-network-access/" target="_blank" rel="noopener">Local Network Access specification</a></li>
+    <li><a href="../attempt-a-fetch/">Attempting one</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[lna-bgfetch:audit]';
+  const DEFAULT = [
+    'https://cdn.example.com/pack-01.bin',
+    'https://cdn.example.com/pack-02.bin',
+    'http://127.0.0.1:8000/dev-bundle.bin',
+    'http://192.168.1.20/printer-firmware.bin',
+    'http://10.0.4.7/nas/backup.tar',
+    'http://172.31.9.1/edge-config.json',
+    'http://172.32.9.1/not-actually-private.json',
+    'https://printer.local/firmware.bin',
+    'https://assets.internal/pack-03.bin',
+  ].join('\n');
+
+  const detail = document.getElementById('detail');
+
+  function classify(host) {
+    const bare = host.replace(/^\[|\]$/g, '');
+    if (bare === 'localhost' || bare.endsWith('.localhost')) {
+      return { space: 'loopback', why: 'the localhost name resolves to loopback by definition' };
+    }
+    if (bare === '::1') return { space: 'loopback', why: 'IPv6 loopback' };
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(bare);
+    if (v4) {
+      const a = Number(v4[1]);
+      const b = Number(v4[2]);
+      if (a === 127) return { space: 'loopback', why: '127.0.0.0/8' };
+      if (a === 10) return { space: 'local', why: '10.0.0.0/8' };
+      if (a === 192 && b === 168) return { space: 'local', why: '192.168.0.0/16' };
+      if (a === 172 && b >= 16 && b <= 31) return { space: 'local', why: '172.16.0.0/12' };
+      if (a === 169 && b === 254) return { space: 'local', why: '169.254.0.0/16, link-local' };
+      return { space: 'public', why: 'a routable address' };
+    }
+    if (/^f[cd][0-9a-f]{2}:/i.test(bare)) return { space: 'local', why: 'fc00::/7, IPv6 unique-local' };
+    if (bare.endsWith('.local')) {
+      return { space: 'unknown', why: 'an mDNS name — almost certainly local, but not decidable before it resolves' };
+    }
+    if (!bare.includes('.')) {
+      return { space: 'unknown', why: 'a single-label name — typically an internal host, not decidable in advance' };
+    }
+    return { space: 'unknown', why: 'a hostname — the space depends on what it resolves to' };
+  }
+
+  function run() {
+    const lines = document.getElementById('urls').value
+      .split('\n').map((line) => line.trim()).filter(Boolean);
+    const body = document.getElementById('rows');
+    body.innerHTML = '';
+    const tally = { public: 0, local: 0, loopback: 0, unknown: 0 };
+
+    for (const line of lines) {
+      let host;
+      try {
+        host = new URL(line, location.href).hostname;
+      } catch {
+        host = line;
+      }
+      const { space, why } = classify(host);
+      tally[space] += 1;
+      const needs = space === 'public'
+        ? 'no'
+        : space === 'unknown'
+        ? 'unknown until it resolves'
+        : 'yes';
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.className = 'mono';
+      th.textContent = line;
+      const spaceCell = document.createElement('td');
+      spaceCell.textContent = space;
+      spaceCell.className = space;
+      const needsCell = document.createElement('td');
+      needsCell.textContent = needs;
+      const whyCell = document.createElement('td');
+      whyCell.textContent = why;
+      tr.append(th, spaceCell, needsCell, whyCell);
+      body.append(tr);
+    }
+
+    const tallyBox = document.getElementById('tally');
+    tallyBox.innerHTML = '';
+    for (const [name, value] of [
+      ['public', tally.public], ['private', tally.local],
+      ['loopback', tally.loopback], ['undecidable', tally.unknown],
+    ]) {
+      const wrap = document.createElement('div');
+      const dt = document.createElement('dt');
+      dt.textContent = name;
+      const dd = document.createElement('dd');
+      dd.textContent = String(value);
+      wrap.append(dt, dd);
+      tallyBox.append(wrap);
+    }
+
+    const affected = tally.local + tally.loopback;
+    detail.textContent =
+      `${lines.length} targets: ${affected} definitely need the local-network permission, ` +
+      `${tally.unknown} cannot be decided until DNS answers, and ` +
+      `${tally.public} ${tally.public === 1 ? 'is' : 'are'} unaffected. ` +
+      (tally.unknown
+        ? 'The undecidable ones are the interesting group — a name like printer.local or a single-label internal host is almost certainly local, and the browser only finds out after resolving it. That is why the permission is taken up front rather than inferred per request.'
+        : 'Every target here is classifiable from its address alone, which is the easy case.');
+
+    console.log(`${LOG} audited ${lines.length}: ${JSON.stringify(tally)}`);
+    globalThis.showcaseTelemetry?.assert('targets-audited', true, { total: lines.length, ...tally });
+  }
+
+  document.getElementById('run').addEventListener('click', run);
+  document.getElementById('urls').value = DEFAULT;
+  run();
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>
