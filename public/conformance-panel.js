@@ -1,4 +1,7 @@
-import { runConformanceAssertion } from "/public/conformance-runner.js";
+import {
+  runConformanceAssertion,
+  withProbeRejectionsCaptured,
+} from "/public/conformance-runner.js";
 
 const loader = document.querySelector('script[src^="/public/conformance-panel.js"]');
 const suiteUrl = loader?.dataset.suiteUrl;
@@ -56,10 +59,14 @@ async function renderPanel() {
     let blocked = 0;
 
     for (const assertion of suite.assertions || []) {
-      const result = await runConformanceAssertion(
-        assertion.kind,
-        assertion.test,
-        assertion.expect,
+      // The probe's own rejections are captured here so they do not surface as
+      // page errors; `captured` is reported below rather than discarded.
+      const { value: result, captured } = await withProbeRejectionsCaptured(() =>
+        runConformanceAssertion(
+          assertion.kind,
+          assertion.test,
+          assertion.expect,
+        )
       );
       const status = statusFor(result);
       if (status === "pass") pass++;
@@ -75,6 +82,13 @@ async function renderPanel() {
       const description = element("p", {}, assertion.description);
       item.append(titleRow, description);
       if (result.detail) item.append(element("p", { class: "feature-test-detail" }, result.detail));
+      if (captured.length) {
+        item.append(element(
+          "p",
+          { class: "feature-test-detail" },
+          `probe rejected: ${captured.map((reason) => reason?.name || String(reason)).join(", ")}`,
+        ));
+      }
       if (assertion.specSection) {
         item.append(element("a", {
           class: "feature-test-spec",

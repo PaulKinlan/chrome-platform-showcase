@@ -127,6 +127,16 @@ async function checkPage(conn, url, cls) {
   const spec = CLASSES[cls];
   const consoleErrors = [];
   const netFailures = [];
+  const cancelled = [];
+  // Requests the conformance suite made, by requestId. A conformance assertion
+  // is often a NEGATIVE probe whose passing condition is that the request
+  // fails: local-network-access fetches http://127.0.0.1:1 (ERR_UNSAFE_PORT)
+  // and blob-url-partitioning fetches a revoked blob URL (ERR_FILE_NOT_FOUND),
+  // and each assertion returns true precisely because the fetch rejected.
+  // Charging those to the demo marked working pages broken.
+  const probes = [];
+  const probeRequests = new Set();
+  const probeUrls = ["conformance-runner.js", "conformance-panel.js"];
   const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
 
@@ -145,16 +155,42 @@ async function checkPage(conn, url, cls) {
         (e.source === "network" || e.source === "javascript") && e.url &&
         e.url.includes("localhost")
       ) {
-        netFailures.push(`${e.text}`);
+        if (probeRequests.has(e.networkRequestId)) probes.push(`${e.text}`);
+        else netFailures.push(`${e.text}`);
       } else if (e.source !== "network") {
         consoleErrors.push(e.text);
       }
+    } else if (msg.method === "Network.requestWillBeSent") {
+      // Walk the initiator's async stack chain: an assertion body runs through
+      // `new Function`, so its own frame has no URL and the conformance module
+      // is the parent.
+      const seen = [];
+      for (let frame = msg.params?.initiator?.stack; frame; frame = frame.parent) {
+        for (const call of frame.callFrames ?? []) seen.push(call.url ?? "");
+      }
+      if (seen.some((u) => probeUrls.some((probe) => u.includes(probe)))) {
+        probeRequests.add(msg.params.requestId);
+      }
     } else if (msg.method === "Network.loadingFailed") {
-      netFailures.push(msg.params?.errorText ?? "loadingFailed");
+      // ERR_ABORTED means the request was CANCELLED, not that it failed: the
+      // page tore down while a probe was in flight, or the demo aborted it on
+      // purpose via AbortController. Counting cancellations as breakage marked
+      // four demos broken whose requests all return 200 — the conformance
+      // suite's HEAD probes for local media fixtures simply had not finished
+      // inside the settle window. Genuine failures (refused, DNS, blocked) and
+      // 4xx/5xx responses are still recorded below.
+      const errorText = msg.params?.errorText ?? "loadingFailed";
+      if (probeRequests.has(msg.params?.requestId)) probes.push(errorText);
+      else if (errorText !== "net::ERR_ABORTED") netFailures.push(errorText);
+      else cancelled.push(msg.params?.requestId ?? "request");
     } else if (msg.method === "Network.responseReceived") {
       const res = msg.params?.response;
       if (res && res.status >= 400 && String(res.url).includes(new URL(base).host)) {
-        netFailures.push(`HTTP ${res.status} ${res.url}`);
+        if (probeRequests.has(msg.params?.requestId)) {
+          probes.push(`HTTP ${res.status} ${res.url}`);
+        } else {
+          netFailures.push(`HTTP ${res.status} ${res.url}`);
+        }
       }
     }
   });
@@ -249,6 +285,8 @@ async function checkPage(conn, url, cls) {
     probe,
     consoleErrors: consoleErrors.slice(0, 5),
     netFailures: netFailures.slice(0, 5),
+    cancelledRequests: cancelled.length,
+    conformanceProbeFailures: probes.slice(0, 5),
   };
 }
 

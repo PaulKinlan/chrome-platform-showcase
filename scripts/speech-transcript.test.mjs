@@ -71,7 +71,6 @@ const migratedPages = [
   "v150/web-speech-api-on-device-recognition-quality/quality-level-explorer/index.html",
   "v150/web-speech-api-on-device-recognition-quality/use-case-sampler/index.html",
   "v150/web-speech-api-unspoken-punctuation/code-mode/index.html",
-  "v151/uber-demo/index.html",
   "v151/web-speech-api-unspoken-punctuation/dictation-demo/index.html",
   "v151/web-speech-api-unspoken-punctuation/punctuation-diff-viewer/index.html",
   "v151/web-speech-api-unspoken-punctuation/punctuation-transcription/index.html",
