@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Every place it can surface — Fetch abort reason — Chrome 154 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; }
+    label { display: grid; gap: var(--space-1); font-weight: 700; }
+    select { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font-family: var(--font-mono); min-height: 44px; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button[disabled] { opacity: 0.55; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.84rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.78rem; }
+    td.mono { font-family: var(--font-mono); font-size: 0.8rem; }
+    td.carried { color: var(--accent-emerald); font-weight: 700; }
+    td.lost { color: var(--accent-rose); font-weight: 700; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Fetch API: forward the abort reason</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v154 · abort reason</p>
+    <h1>Every place it can surface</h1>
+    <p class="lede">One request, one abort, four catch sites. The table records what each one actually received — your reason, or a generic <code>AbortError</code> the platform made up because the real one did not reach that far.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">Abort and catch everywhere</h2>
+    <div class="controls">
+      <label for="reason">Abort with
+        <select id="reason">
+          <option value="object">a structured object</option>
+          <option value="string">a string</option>
+          <option value="error">an Error subclass</option>
+          <option value="none">no reason at all</option>
+        </select>
+      </label>
+      <label for="when">Abort
+        <select id="when">
+          <option value="after-headers">after the response arrives, before reading the body</option>
+          <option value="before">before the request completes</option>
+        </select>
+      </label>
+      <button type="button" id="run">Run</button>
+    </div>
+    <p class="note">The request targets a large same-origin file from this repository, so there is a real body still streaming when the abort lands. That is the point: the interesting failures happen after the fetch promise has already resolved.</p>
+
+    <table>
+      <caption>What each catch site received</caption>
+      <thead><tr><th scope="col">catch site</th><th scope="col">carried your reason?</th><th scope="col">what it got</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="3">Not run yet.</td></tr></tbody>
+    </table>
+    <output id="detail" aria-live="polite">Choose a reason and run.</output>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const controller = new AbortController();
+const response = await fetch(url, { signal: controller.signal });
+// The promise has resolved. The body has not finished arriving.
+
+controller.abort({ code: "USER_CANCEL" });
+
+try { await response.text(); }
+catch (error) {
+  // Chrome 154: error.code === "USER_CANCEL"
+  // Before:    error.name === "AbortError", reason lost
+}</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5158507786665984" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://fetch.spec.whatwg.org/" target="_blank" rel="noopener">Fetch Standard</a></li>
+    <li><a href="../timeout-vs-user/">Timeout or user?</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[abort-reason:everywhere]';
+  // A file big enough that its body is still arriving when the abort lands.
+  const TARGET = '/public/media/jpeg-xl/source.png';
+  const detail = document.getElementById('detail');
+
+  class CancelledByUser extends Error {
+    constructor(where) {
+      super(`cancelled from ${where}`);
+      this.name = 'CancelledByUser';
+      this.where = where;
+    }
+  }
+
+  function makeReason(kind) {
+    switch (kind) {
+      case 'object': return { code: 'USER_CANCEL', where: 'the cancel button' };
+      case 'string': return 'USER_CANCEL';
+      case 'error': return new CancelledByUser('the cancel button');
+      default: return undefined;
+    }
+  }
+
+  // Did this thrown value carry the reason we supplied, or is it a generic
+  // AbortError the platform substituted?
+  function carried(thrown, reason, kind) {
+    if (kind === 'none') {
+      // With no reason the platform supplies an AbortError, and that IS the
+      // reason — so the honest answer is "matches signal.reason".
+      return thrown instanceof DOMException && thrown.name === 'AbortError';
+    }
+    if (kind === 'string') return thrown === reason;
+    return thrown === reason;
+  }
+
+  function describe(thrown) {
+    if (thrown === undefined) return 'nothing thrown';
+    if (thrown instanceof DOMException) return `DOMException ${thrown.name}: ${thrown.message}`;
+    if (thrown instanceof Error) return `${thrown.name}: ${thrown.message}`;
+    if (typeof thrown === 'object') return JSON.stringify(thrown);
+    return `${typeof thrown} ${String(thrown)}`;
+  }
+
+  document.getElementById('run').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    const kind = document.getElementById('reason').value;
+    const when = document.getElementById('when').value;
+    const reason = makeReason(kind);
+    const controller = new AbortController();
+    const results = [];
+
+    let fetchThrew;
+    let response = null;
+    if (when === 'before') {
+      // Abort while the request is still in flight: only the fetch promise
+      // can observe it, because there is no Response yet.
+      const pending = fetch(`${TARGET}?a=${Date.now()}`, { signal: controller.signal });
+      queueMicrotask(() => reason === undefined ? controller.abort() : controller.abort(reason));
+      try {
+        response = await pending;
+      } catch (error) {
+        fetchThrew = error;
+      }
+    } else {
+      try {
+        response = await fetch(`${TARGET}?a=${Date.now()}`, { signal: controller.signal });
+      } catch (error) {
+        fetchThrew = error;
+      }
+      if (reason === undefined) controller.abort();
+      else controller.abort(reason);
+    }
+
+    results.push({
+      site: 'the fetch promise',
+      thrown: fetchThrew,
+      applicable: when === 'before' || fetchThrew !== undefined,
+    });
+
+    // Reading the body after the abort. This is the site the change is about.
+    if (response) {
+      const clone = response.clone();
+      let textThrew;
+      try {
+        await response.text();
+      } catch (error) {
+        textThrew = error;
+      }
+      results.push({ site: 'response.text()', thrown: textThrew, applicable: true });
+
+      let streamThrew;
+      try {
+        const reader = clone.body.getReader();
+        for (;;) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
+      } catch (error) {
+        streamThrew = error;
+      }
+      results.push({ site: 'the body stream reader', thrown: streamThrew, applicable: true });
+    } else {
+      results.push({ site: 'response.text()', thrown: undefined, applicable: false });
+      results.push({ site: 'the body stream reader', thrown: undefined, applicable: false });
+    }
+
+    results.push({ site: 'signal.reason', thrown: controller.signal.reason, applicable: true, direct: true });
+
+    const body = document.getElementById('rows');
+    body.innerHTML = '';
+    let carriedCount = 0;
+    let applicableCount = 0;
+    for (const result of results) {
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.textContent = result.site;
+      const status = document.createElement('td');
+      const got = result.thrown !== undefined;
+      const ok = got && carried(result.thrown, reason, kind);
+      if (result.applicable && got) {
+        applicableCount += 1;
+        if (ok) carriedCount += 1;
+      }
+      status.textContent = !result.applicable || !got
+        ? 'did not reject'
+        : ok ? 'yes' : 'no — substituted';
+      status.className = !result.applicable || !got ? '' : ok ? 'carried' : 'lost';
+      const what = document.createElement('td');
+      what.className = 'mono';
+      what.textContent = describe(result.thrown);
+      tr.append(th, status, what);
+      body.append(tr);
+    }
+
+    detail.textContent = kind === 'none'
+      ? `No reason was supplied, so the platform makes one: every site should report an AbortError DOMException, and signal.reason is that same object. ${carriedCount} of ${applicableCount} sites matched it.`
+      : carriedCount === applicableCount
+      ? `All ${applicableCount} rejecting sites carried your reason. That is the Chrome 154 behaviour: the reason travels to the Response and its stream, not just the fetch promise.`
+      : `${carriedCount} of ${applicableCount} rejecting sites carried your reason; the rest substituted a generic AbortError. That is the pre-154 behaviour, and it is why code that needed to distinguish a timeout from a cancel had to track it separately.`;
+
+    console.log(`${LOG} kind=${kind} when=${when} carried=${carriedCount}/${applicableCount}`);
+    window.showcaseTelemetry?.assert('reason-sites-checked', true, {
+      kind, when, carried: carriedCount, applicable: applicableCount,
+    });
+    button.disabled = false;
+  });
+
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A token pipeline — CSSStyleValue in workers — Chrome 154 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; }
+    label { display: grid; gap: var(--space-1); font-weight: 700; }
+    input[type="range"] { min-width: 190px; min-height: 44px; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button[disabled] { opacity: 0.55; }
+    textarea { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; width: 100%; min-height: 140px; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.76rem; }
+    td.mono { font-family: var(--font-mono); }
+    td.ok { color: var(--accent-emerald); font-weight: 700; }
+    td.bad { color: var(--accent-rose); font-weight: 700; }
+    .preview { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-4); display: grid; gap: var(--space-2); }
+    .preview div { background: var(--accent-blue); opacity: 0.45; border: 2px solid var(--border-black); }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; CSSStyleValue in workers</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v154 · typed om in workers</p>
+    <h1>A token pipeline</h1>
+    <p class="lede">Normalise a spacing ramp off the main thread: parse each token, reject what is not a length, convert to a common unit, scale it, and post the results back. The last step is the one worth reading — Typed OM objects do not survive <code>postMessage</code>, so the message shape has to be values and units.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="pipeline-title">
+    <h2 id="pipeline-title">Run the pipeline</h2>
+    <label for="tokens">Token sheet (name: value)
+      <textarea id="tokens" spellcheck="false"></textarea>
+    </label>
+    <div class="controls">
+      <label for="scale">Scale factor: <span id="scale-label">1.5</span>
+        <input type="range" id="scale" min="50" max="300" value="150">
+      </label>
+      <label for="root">Root font size: <span id="root-label">16px</span>
+        <input type="range" id="root" min="12" max="24" value="16">
+      </label>
+      <button type="button" id="run">Process in a worker</button>
+    </div>
+
+    <table>
+      <caption>What came back from the worker</caption>
+      <thead><tr><th scope="col">token</th><th scope="col">input</th><th scope="col">normalised</th><th scope="col">scaled</th><th scope="col">status</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5">Not run yet.</td></tr></tbody>
+    </table>
+
+    <h3>The scaled ramp, applied</h3>
+    <div class="preview" id="preview"></div>
+    <output id="detail" aria-live="polite">Press the button.</output>
+    <p class="note">Every token is converted to pixels before scaling, so a sheet mixing <code>rem</code>, <code>em</code> and <code>px</code> comes out on one scale. Doing that with string arithmetic means reimplementing unit conversion; <code>CSSUnitValue.to()</code> is the parser's own.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5114591051907072" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/CSSNumericValue/to" target="_blank" rel="noopener">MDN: CSSNumericValue.to()</a></li>
+    <li><a href="../context-probe/">What exists where</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[typed-om-workers:pipeline]';
+  const DEFAULT = [
+    'space-xs: 4px',
+    'space-sm: 0.5rem',
+    'space-md: 1rem',
+    'space-lg: 1.5rem',
+    'space-xl: 32px',
+    'space-xxl: 3em',
+    'space-broken: medium',
+    'space-alsobroken: 12',
+  ].join('\n');
+
+  const WORKER_SOURCE = `
+    const hasTyped = typeof self.CSSStyleValue === 'function' &&
+      typeof self.CSSUnitValue === 'function';
+
+    // Without Typed OM the worker has to do unit conversion by hand, which is
+    // where a fallback starts guessing: em depends on the element, rem on the
+    // root, and calc() cannot be evaluated at all.
+    const MANUAL = { px: 1, rem: null, em: null };
+
+    function normalise(input, rootPx) {
+      if (hasTyped) {
+        try {
+          const parsed = self.CSSStyleValue.parse('width', input);
+          if (!(parsed instanceof self.CSSUnitValue)) {
+            return { ok: false, note: parsed.constructor.name + ', not a length' };
+          }
+          if (parsed.unit === 'number') return { ok: false, note: 'unitless' };
+          // rem and em both resolve against a font size the worker was told
+          // about; px converts natively.
+          if (parsed.unit === 'rem' || parsed.unit === 'em') {
+            return { ok: true, px: parsed.value * rootPx, from: parsed.unit, value: parsed.value };
+          }
+          const px = parsed.to('px');
+          return { ok: true, px: px.value, from: parsed.unit, value: parsed.value };
+        } catch (error) {
+          return { ok: false, note: error.name };
+        }
+      }
+      const match = /^(-?[\\d.]+)(px|rem|em)$/.exec(input);
+      if (!match) return { ok: false, note: 'regex rejected it' };
+      const value = Number(match[1]);
+      const unit = match[2];
+      const factor = unit === 'px' ? 1 : rootPx;
+      return { ok: true, px: value * factor, from: unit, value, guessed: MANUAL[unit] === null };
+    }
+
+    onmessage = (event) => {
+      const { tokens, scale, rootPx } = event.data;
+      const rows = tokens.map(({ name, input }) => {
+        const parsed = normalise(input, rootPx);
+        if (!parsed.ok) return { name, input, ok: false, note: parsed.note };
+        const scaled = parsed.px * scale;
+        return {
+          name, input, ok: true,
+          normalisedPx: Math.round(parsed.px * 100) / 100,
+          scaledPx: Math.round(scaled * 100) / 100,
+          from: parsed.from,
+          guessed: Boolean(parsed.guessed),
+        };
+      });
+      // A CSSUnitValue is not structured-cloneable, so what crosses the wire
+      // is plain numbers. Try to send one to prove it.
+      let cloneable = null;
+      if (hasTyped) {
+        try {
+          structuredClone(new self.CSSUnitValue(1, 'px'));
+          cloneable = true;
+        } catch {
+          cloneable = false;
+        }
+      }
+      postMessage({ rows, hasTyped, cloneable });
+    };
+  `;
+
+  function parseTokens() {
+    return document.getElementById('tokens').value
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const at = line.indexOf(':');
+        return at === -1
+          ? { name: line, input: '' }
+          : { name: line.slice(0, at).trim(), input: line.slice(at + 1).trim() };
+      });
+  }
+
+  document.getElementById('run').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    document.getElementById('detail').textContent = 'Processing in a worker…';
+    const scale = Number(document.getElementById('scale').value) / 100;
+    const rootPx = Number(document.getElementById('root').value);
+
+    const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'text/javascript' }));
+    const worker = new Worker(url);
+    const result = await new Promise((resolve) => {
+      worker.onmessage = (message) => resolve(message.data);
+      worker.onerror = (error) => resolve({ rows: [], hasTyped: false, failed: error.message });
+      setTimeout(() => resolve({ rows: [], hasTyped: false, failed: 'timed out' }), 4000);
+      worker.postMessage({ tokens: parseTokens(), scale, rootPx });
+    });
+    worker.terminate();
+    URL.revokeObjectURL(url);
+
+    const body = document.getElementById('rows');
+    body.innerHTML = '';
+    let accepted = 0;
+    for (const row of result.rows) {
+      if (row.ok) accepted += 1;
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.textContent = row.name;
+      const input = document.createElement('td');
+      input.className = 'mono';
+      input.textContent = row.input || '(empty)';
+      const normalised = document.createElement('td');
+      normalised.className = 'mono';
+      normalised.textContent = row.ok ? `${row.normalisedPx}px (from ${row.from})` : '—';
+      const scaled = document.createElement('td');
+      scaled.className = 'mono';
+      scaled.textContent = row.ok ? `${row.scaledPx}px` : '—';
+      const status = document.createElement('td');
+      status.textContent = row.ok ? 'accepted' : `rejected — ${row.note}`;
+      status.className = row.ok ? 'ok' : 'bad';
+      tr.append(th, input, normalised, scaled, status);
+      body.append(tr);
+    }
+
+    const preview = document.getElementById('preview');
+    preview.innerHTML = '';
+    for (const row of result.rows.filter((r) => r.ok)) {
+      const bar = document.createElement('div');
+      bar.style.height = `${Math.max(4, row.scaledPx)}px`;
+      bar.title = `${row.name}: ${row.scaledPx}px`;
+      preview.append(bar);
+    }
+
+    document.getElementById('detail').textContent = result.failed
+      ? `The worker failed: ${result.failed}`
+      : `${accepted} of ${result.rows.length} tokens survived. ` +
+        (result.hasTyped
+          ? `Typed OM did the parsing and the unit conversion. structuredClone of a CSSUnitValue ${result.cloneable ? 'succeeded' : 'threw'}, which is why the message carries numbers rather than objects.`
+          : `Typed OM was unavailable in the worker, so a regular expression did the parsing and the rem conversion is a guess against the root size you set — the CSS parser would have resolved it properly. That guess is the cost of the gap Chrome 154 closes.`);
+
+    console.log(`${LOG} ${accepted}/${result.rows.length} accepted, typedOm=${result.hasTyped}, cloneable=${result.cloneable}`);
+    globalThis.showcaseTelemetry?.assert('tokens-processed', true, {
+      accepted, total: result.rows.length, hasTyped: result.hasTyped, scale,
+    });
+    button.disabled = false;
+  });
+
+  document.getElementById('scale').addEventListener('input', (event) => {
+    document.getElementById('scale-label').textContent = (Number(event.target.value) / 100).toFixed(2);
+  });
+  document.getElementById('root').addEventListener('input', (event) => {
+    document.getElementById('root-label').textContent = `${event.target.value}px`;
+  });
+  document.getElementById('tokens').value = DEFAULT;
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>

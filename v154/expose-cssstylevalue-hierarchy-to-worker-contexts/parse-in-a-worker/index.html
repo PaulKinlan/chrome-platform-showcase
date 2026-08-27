@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Parsing off the main thread — CSSStyleValue in workers — Chrome 154 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    label { display: grid; gap: var(--space-1); font-weight: 700; }
+    textarea { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; width: 100%; min-height: 150px; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button[disabled] { opacity: 0.55; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.76rem; }
+    td.mono { font-family: var(--font-mono); }
+    td.agree { color: var(--accent-emerald); font-weight: 700; }
+    td.differ { color: var(--accent-rose); font-weight: 700; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; CSSStyleValue in workers</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v154 · typed om in workers</p>
+    <h1>Parsing off the main thread</h1>
+    <p class="lede">The fallback for a worker without Typed OM is a regular expression. It works for <code>16px</code> and then quietly gets everything else wrong. Run both against the same list and read the disagreements — they are not edge cases you can dismiss, they are <code>calc()</code>, units, and values that should have been rejected.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="parse-title">
+    <h2 id="parse-title">Parse a list of values</h2>
+    <label for="values">One CSS length per line
+      <textarea id="values" spellcheck="false"></textarea>
+    </label>
+    <button type="button" id="run">Parse in a worker</button>
+    <table>
+      <caption>Typed OM against a regular expression, both inside the worker</caption>
+      <thead><tr><th scope="col">input</th><th scope="col">Typed OM</th><th scope="col">regex fallback</th><th scope="col">agree?</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="4">Not run yet.</td></tr></tbody>
+    </table>
+    <output id="detail" aria-live="polite">Press the button.</output>
+    <p class="note">Both parsers run in the same worker, so this is not a thread comparison — it is a correctness one. The point of having Typed OM in a worker is that the work can move off the main thread <em>without</em> giving up the CSS parser.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5114591051907072" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/css-typed-om-1/#stylevalue-subclasses" target="_blank" rel="noopener">CSS Typed OM: StyleValue subclasses</a></li>
+    <li><a href="../token-pipeline/">A token pipeline</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[typed-om-workers:parse]';
+  const DEFAULT = [
+    '16px',
+    '2.5rem',
+    'calc(100% - 2rem)',
+    '1e2px',
+    '-0.5em',
+    '10',
+    'banana',
+    '12 px',
+    '3vmin',
+    'calc(1px + 1px)',
+  ].join('\n');
+
+  const WORKER_SOURCE = `
+    // The regex fallback: what a worker without Typed OM has to fall back to.
+    const PATTERN = /^(-?[\\d.]+)(px|em|rem|vh|vw|vmin|vmax|%|ch|ex)$/;
+    function viaRegex(input) {
+      const match = PATTERN.exec(input.trim());
+      if (!match) return { ok: false, note: 'no match' };
+      return { ok: true, value: Number(match[1]), unit: match[2] };
+    }
+    function viaTyped(input) {
+      if (typeof self.CSSStyleValue !== 'function') return { ok: false, note: 'no Typed OM here' };
+      try {
+        const parsed = self.CSSStyleValue.parse('width', input);
+        if (typeof self.CSSUnitValue === 'function' && parsed instanceof self.CSSUnitValue) {
+          return { ok: true, value: parsed.value, unit: parsed.unit, kind: 'CSSUnitValue' };
+        }
+        return { ok: true, kind: parsed.constructor.name, text: parsed.toString() };
+      } catch (error) {
+        return { ok: false, note: error.name };
+      }
+    }
+    onmessage = (event) => {
+      const rows = event.data.map((input) => ({
+        input, typed: viaTyped(input), regex: viaRegex(input),
+      }));
+      postMessage({ rows, hasTypedOm: typeof self.CSSStyleValue === 'function' });
+    };
+  `;
+
+  function describe(result) {
+    if (!result.ok) return `rejected (${result.note})`;
+    if (result.kind && result.kind !== 'CSSUnitValue') return `${result.kind}: ${result.text}`;
+    return `${result.value}${result.unit}`;
+  }
+
+  document.getElementById('run').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    document.getElementById('detail').textContent = 'Parsing in a worker…';
+    const inputs = document.getElementById('values').value
+      .split('\n').map((line) => line.trim()).filter(Boolean);
+
+    const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'text/javascript' }));
+    const worker = new Worker(url);
+    const result = await new Promise((resolve) => {
+      worker.onmessage = (message) => resolve(message.data);
+      worker.onerror = () => resolve({ rows: [], hasTypedOm: false, failed: true });
+      setTimeout(() => resolve({ rows: [], hasTypedOm: false, failed: true }), 4000);
+      worker.postMessage(inputs);
+    });
+    worker.terminate();
+    URL.revokeObjectURL(url);
+
+    const body = document.getElementById('rows');
+    body.innerHTML = '';
+    let disagreements = 0;
+    for (const row of result.rows) {
+      const typed = describe(row.typed);
+      const regex = describe(row.regex);
+      // "Agree" means both accepted with the same value and unit, or both
+      // rejected. Anything else is a case the fallback gets wrong.
+      const agree = row.typed.ok === row.regex.ok &&
+        (!row.typed.ok || (row.typed.value === row.regex.value && row.typed.unit === row.regex.unit));
+      if (!agree) disagreements += 1;
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.textContent = row.input;
+      const typedCell = document.createElement('td');
+      typedCell.className = 'mono';
+      typedCell.textContent = typed;
+      const regexCell = document.createElement('td');
+      regexCell.className = 'mono';
+      regexCell.textContent = regex;
+      const agreeCell = document.createElement('td');
+      agreeCell.textContent = agree ? 'yes' : 'no';
+      agreeCell.className = agree ? 'agree' : 'differ';
+      tr.append(th, typedCell, regexCell, agreeCell);
+      body.append(tr);
+    }
+
+    document.getElementById('detail').textContent = result.failed
+      ? 'The worker failed to start, so nothing was parsed.'
+      : result.hasTypedOm
+      ? `Typed OM is available in the worker. ${disagreements} of ${result.rows.length} values were handled differently by the regex — every one of those is a bug the fallback would have shipped.`
+      : `Typed OM is NOT available in this worker, so its column is empty and only the regex ran. That is the state Chrome 154 fixes; the disagreements you would see are visible in the rows the regex accepted or rejected on its own terms.`;
+
+    console.log(`${LOG} parsed ${result.rows.length} values, typedOm=${result.hasTypedOm}, disagreements=${disagreements}`);
+    globalThis.showcaseTelemetry?.assert('values-parsed', true, {
+      count: result.rows.length, hasTypedOm: result.hasTypedOm, disagreements,
+    });
+    button.disabled = false;
+  });
+
+  document.getElementById('values').value = DEFAULT;
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>
