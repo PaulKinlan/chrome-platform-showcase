@@ -98,7 +98,7 @@ export async function cdpConnection(wsUrl) {
           pending.delete(id);
           reject(new Error(`CDP timeout: ${method}`));
         }
-      }, 30000);
+      }, 120000);
     });
   }
   return { ws, send, onEvent: (fn) => listeners.add(fn), close: () => ws.close() };

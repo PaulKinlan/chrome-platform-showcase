@@ -25,13 +25,21 @@ const MIME: Record<string, string> = {
   woff2: "font/woff2",
 };
 
-async function readPublicAsset(path: string): Promise<Response> {
+async function readPublicAsset(path: string, url: URL): Promise<Response> {
   try {
     const file = await Deno.readFile("." + path);
     const ext = path.split(".").pop() ?? "";
-    return new Response(file, {
-      headers: { "content-type": MIME[ext] ?? "application/octet-stream" },
-    });
+    const headers: Record<string, string> = {
+      "content-type": MIME[ext] ?? "application/octet-stream",
+    };
+    // Opt-in CORS, for demos that need a genuinely cross-origin request they
+    // can toggle. http://127.0.0.1 and http://localhost are different origins
+    // even on the same server, which is what makes that possible locally.
+    if (url.searchParams.has("cors")) {
+      headers["access-control-allow-origin"] = "*";
+      headers["cache-control"] = "no-store";
+    }
+    return new Response(file, { headers });
   } catch {
     return new Response("Not found", { status: 404 });
   }
@@ -76,18 +84,18 @@ function slowStream(url: URL): Response {
     },
   });
 
-  return new Response(body, {
-    headers: {
-      "content-type": "application/octet-stream",
-      "content-length": String(bytes),
-      "cache-control": "no-store",
-    },
-  });
+  const headers: Record<string, string> = {
+    "content-type": "application/octet-stream",
+    "content-length": String(bytes),
+    "cache-control": "no-store",
+  };
+  if (url.searchParams.has("cors")) headers["access-control-allow-origin"] = "*";
+  return new Response(body, { headers });
 }
 
 export async function handlePublicRoute(req: Request): Promise<Response | null> {
   const url = new URL(req.url);
   const path = url.pathname;
   if (path === "/public/slow-stream") return slowStream(url);
-  return path.startsWith("/public/") ? await readPublicAsset(path) : null;
+  return path.startsWith("/public/") ? await readPublicAsset(path, url) : null;
 }

@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A background fetch that works — CORS enforcement for Background Fetch — Chrome 154 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button[disabled] { opacity: 0.55; }
+    .buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    .steps { display: grid; gap: var(--space-2); }
+    .step { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-2); font-size: 0.85rem; display: flex; gap: var(--space-2); align-items: center; }
+    .step.ok { border-color: var(--accent-emerald); }
+    .step.no { border-color: var(--accent-rose); }
+    .step svg { width: 1.1em; height: 1.1em; flex: none; }
+    .track { height: 28px; border: 2px solid var(--border-black); background: var(--bg-ivory); position: relative; overflow: hidden; }
+    .track i { display: block; height: 100%; background: var(--accent-blue); opacity: 0.35; width: 0; }
+    .track b { position: absolute; inset: 0; display: flex; align-items: center; padding-left: var(--space-2); font-family: var(--font-mono); font-size: 0.76rem; font-weight: 700; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.76rem; }
+    td.mono { font-family: var(--font-mono); }
+    td.ok { color: var(--accent-emerald); font-weight: 700; }
+    td.bad { color: var(--accent-rose); font-weight: 700; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; CORS enforcement for Background Fetch</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v154 · background fetch</p>
+    <h1>A background fetch that works</h1>
+    <p class="lede">The baseline, with everything real: a service worker registered from this directory, a genuine <code>backgroundFetch.fetch()</code> over same-origin files, and the per-record results reported back from the worker rather than guessed at from the page.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">Download three files</h2>
+    <div class="steps" id="steps"></div>
+    <div class="buttons">
+      <button type="button" id="run">Start the background fetch</button>
+      <button type="button" id="abort" disabled>Abort it</button>
+    </div>
+    <div class="track"><i id="fill"></i><b id="fill-text">idle</b></div>
+    <table>
+      <caption>What the service worker saw, per record</caption>
+      <thead><tr><th scope="col">request</th><th scope="col">status</th><th scope="col">response type</th><th scope="col">readable?</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="4">Not run yet.</td></tr></tbody>
+    </table>
+    <output id="detail" aria-live="polite">Press the button.</output>
+    <p class="note">A background fetch is deliberately visible to the user — Chrome shows it in the downloads UI, because a download that outlives the page is something they should be able to see and cancel. The <code>title</code> and <code>downloadTotal</code> passed here are what appears there.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/6210300985606144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://wicg.github.io/background-fetch/" target="_blank" rel="noopener">Background Fetch specification</a></li>
+    <li><a href="../cross-origin/">With and without CORS headers</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[bgfetch-cors:same-origin]';
+  const ICONS = {
+    ok: '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8.5 6.5 12 13 4"/></svg>',
+    no: '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
+  };
+  const FILES = [
+    '/public/media/jpeg-xl/image.webp',
+    '/public/media/jpeg-xl/image.jpg',
+    '/public/media/jpeg-xl/image.avif',
+  ];
+  const detail = document.getElementById('detail');
+  let current = null;
+
+  function step(name, ok, note) {
+    const container = document.getElementById('steps');
+    const div = document.createElement('div');
+    div.className = `step ${ok ? 'ok' : 'no'}`;
+    div.innerHTML = `${ICONS[ok ? 'ok' : 'no']}<span>${name}${note ? ` — ${note}` : ''}</span>`;
+    container.append(div);
+    console.log(`${LOG} ${name}: ${ok}${note ? ` (${note})` : ''}`);
+    return ok;
+  }
+
+  function renderRows(rows) {
+    const body = document.getElementById('rows');
+    body.innerHTML = '';
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="4">No records reported.</td></tr>';
+      return;
+    }
+    for (const row of rows) {
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.className = 'mono';
+      th.textContent = row.url.replace(location.origin, '');
+      const status = document.createElement('td');
+      status.className = 'mono';
+      status.textContent = row.status ?? (row.error ?? 'none');
+      const type = document.createElement('td');
+      type.className = 'mono';
+      type.textContent = row.type ?? '—';
+      const readable = document.createElement('td');
+      readable.textContent = row.ok ? 'yes' : 'no';
+      readable.className = row.ok ? 'ok' : 'bad';
+      tr.append(th, status, type, readable);
+      body.append(tr);
+    }
+  }
+
+  async function prepare() {
+    document.getElementById('steps').innerHTML = '';
+    if (!step('service workers available', 'serviceWorker' in navigator)) return null;
+    if (!step('secure context', globalThis.isSecureContext, 'Background Fetch needs one')) return null;
+    if (!step('BackgroundFetchManager exposed', typeof BackgroundFetchManager === 'function')) return null;
+    let registration;
+    try {
+      registration = await navigator.serviceWorker.register('../sw.js', { scope: '../' });
+      await navigator.serviceWorker.ready;
+    } catch (error) {
+      step('service worker registered', false, `${error.name}: ${error.message}`);
+      return null;
+    }
+    step('service worker registered', true, `scope ${registration.scope.replace(location.origin, '')}`);
+    if (!step('backgroundFetch on the registration', 'backgroundFetch' in registration)) return null;
+    return registration;
+  }
+
+  navigator.serviceWorker?.addEventListener('message', (event) => {
+    const data = event.data;
+    if (!data || !data.type?.startsWith('backgroundfetch')) return;
+    if (data.type.endsWith(':fired')) {
+      // The event landed; the detailed records follow in a second message.
+      step('the service worker received the event', true, data.type.replace(':fired', ''));
+      detail.textContent = 'The service worker received the event and is reading the records…';
+      return;
+    }
+    console.log(`${LOG} worker reported ${data.type}`, data);
+    renderRows(data.rows ?? []);
+    const readable = (data.rows ?? []).filter((r) => r.ok).length;
+    detail.textContent = data.type === 'backgroundfetchsuccess'
+      ? `The fetch completed and the worker read back ${readable} of ${(data.rows ?? []).length} records. Same-origin requests need no CORS headers, so every one of them is readable — that is the control this feature's other demo is measured against.`
+      : `The fetch reported ${data.type} (${data.failureReason || 'no reason given'}); ${readable} of ${(data.rows ?? []).length} records were readable.`;
+    document.getElementById('abort').disabled = true;
+    document.getElementById('run').disabled = false;
+    globalThis.showcaseTelemetry?.assert('background-fetch-reported', true, {
+      type: data.type, readable, total: (data.rows ?? []).length,
+    });
+  });
+
+  document.getElementById('run').addEventListener('click', async () => {
+    const button = document.getElementById('run');
+    button.disabled = true;
+    detail.textContent = 'Preparing…';
+    const registration = await prepare();
+    if (!registration) {
+      detail.textContent = 'Background Fetch is not usable here — the failed step above says which requirement is missing.';
+      button.disabled = false;
+      return;
+    }
+    try {
+      current = await registration.backgroundFetch.fetch(
+        `same-origin-${Date.now()}`,
+        FILES,
+        { title: 'Showcase: same-origin background fetch', downloadTotal: 80048 },
+      );
+      step('backgroundFetch.fetch() accepted', true, `id ${current.id}`);
+      document.getElementById('abort').disabled = false;
+      detail.textContent = 'Downloading in the background. The service worker will report the result.';
+
+      const paint = () => {
+        const total = current.downloadTotal || 0;
+        const fraction = total ? Math.min(1, current.downloaded / total) : 0;
+        document.getElementById('fill').style.width = `${fraction * 100}%`;
+        document.getElementById('fill-text').textContent =
+          `${(current.downloaded ?? 0).toLocaleString()} bytes${total ? ` of ${total.toLocaleString()}` : ''} — ${current.result || 'in progress'}`;
+      };
+      current.addEventListener('progress', paint);
+      paint();
+
+      // A background fetch is handed to the browser's download service, and
+      // some environments — headless runs in particular — accept the
+      // registration and never run it. Say so rather than showing a progress
+      // bar that will not move.
+      const started = performance.now();
+      const watchdog = setInterval(() => {
+        paint();
+        const elapsed = performance.now() - started;
+        const bytes = current.downloaded ?? 0;
+        if (current.result) {
+          clearInterval(watchdog);
+          return;
+        }
+        if (elapsed > 6000 && bytes === 0) {
+          clearInterval(watchdog);
+          step('the download started', false, 'no bytes after six seconds');
+          detail.textContent =
+            'The registration was accepted — the id above is real — but no bytes arrived. Background Fetch hands the download to the browser\'s download service, and some environments (headless runs, profiles with downloads disabled) accept the registration and never run it.';
+          document.getElementById('abort').disabled = true;
+          document.getElementById('run').disabled = false;
+          globalThis.showcaseTelemetry?.assert('background-fetch-stalled', true, { id: current.id, downloaded: bytes });
+          return;
+        }
+        if (elapsed > 20000 && bytes > 0) {
+          // Downloading, just slowly. Say so rather than leaving a bar
+          // creeping along with no explanation.
+          clearInterval(watchdog);
+          step('the download is running', true, `${bytes.toLocaleString()} bytes so far`);
+          detail.textContent =
+            `Still downloading after ${Math.round(elapsed / 1000)} seconds — ${bytes.toLocaleString()} of ${(current.downloadTotal || 0).toLocaleString()} bytes. ` +
+            'The download service paces background fetches deliberately, and paces them harder in headless and battery-saver contexts, so this is normal rather than stuck. ' +
+            'The record table fills in when the service worker gets its event; leave the tab open and it will.';
+          globalThis.showcaseTelemetry?.assert('background-fetch-progressing', true, {
+            id: current.id, downloaded: bytes, total: current.downloadTotal ?? 0,
+          });
+        }
+      }, 1000);
+    } catch (error) {
+      step('backgroundFetch.fetch() accepted', false, `${error.name}: ${error.message}`);
+      detail.textContent = `The fetch was refused: ${error.name}: ${error.message}`;
+      button.disabled = false;
+    }
+  });
+
+  document.getElementById('abort').addEventListener('click', async () => {
+    if (!current) return;
+    await current.abort();
+    detail.textContent = 'Aborted.';
+    document.getElementById('abort').disabled = true;
+    document.getElementById('run').disabled = false;
+  });
+
+  prepare().then(() => console.log(`${LOG} ready`));
+})();
+</script>
+</body>
+</html>

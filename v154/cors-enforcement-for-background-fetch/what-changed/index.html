@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What the change means for your code — CORS enforcement for Background Fetch — Chrome 154 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    label { display: grid; gap: var(--space-1); font-weight: 700; }
+    textarea { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.82rem; width: 100%; min-height: 130px; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.76rem; }
+    td.mono { font-family: var(--font-mono); }
+    td.same { color: var(--accent-emerald); font-weight: 700; }
+    td.risk { color: var(--accent-rose); font-weight: 700; }
+    td.check { color: var(--accent-amber); font-weight: 700; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; CORS enforcement for Background Fetch</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v154 · background fetch</p>
+    <h1>What the change means for your code</h1>
+    <p class="lede">If a background fetch worked before Chrome 154 and stops working now, it is one of three things — and the useful part is that all three are decidable from the URL list before you ship. Paste yours in.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="audit-title">
+    <h2 id="audit-title">Audit a URL list</h2>
+    <label for="urls">The URLs you pass to <code>backgroundFetch.fetch()</code>, one per line
+      <textarea id="urls" spellcheck="false"></textarea>
+    </label>
+    <button type="button" id="run">Audit</button>
+    <table>
+      <caption>Each URL, and what enforcement means for it</caption>
+      <thead><tr><th scope="col">URL</th><th scope="col">relative to this page</th><th scope="col">what changes</th><th scope="col">what to do</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <output id="detail" aria-live="polite"></output>
+  </section>
+
+  <section class="stage" aria-labelledby="modes-title">
+    <h2 id="modes-title">The three ways it breaks</h2>
+    <table>
+      <caption>What each looks like from the service worker</caption>
+      <thead><tr><th scope="col">cause</th><th scope="col">symptom in the worker</th><th scope="col">fix</th></tr></thead>
+      <tbody>
+        <tr>
+          <th scope="row">Cross-origin with no <code>Access-Control-Allow-Origin</code></th>
+          <td>The fetch may report success, but <code>record.responseReady</code> gives you an opaque or failed response — you cannot read the bytes.</td>
+          <td>Add the header at the origin serving the file, or proxy it through your own.</td>
+        </tr>
+        <tr>
+          <th scope="row">A request that now needs a preflight</th>
+          <td>The record fails outright. Custom headers and non-simple methods trigger an <code>OPTIONS</code> that was previously skipped.</td>
+          <td>Answer the preflight, or drop the header that triggers it — a background download rarely needs one.</td>
+        </tr>
+        <tr>
+          <th scope="row">A local or loopback address</th>
+          <td>Blocked by <a href="/v154/local-network-access-restrictions-for-background-fetch/">Local Network Access</a>, which now applies here too.</td>
+          <td>Declare the address space and take the permission, as any other fetch would.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="note">All three have the same shape: the request was always subject to these rules on paper, and Background Fetch was the one path that skipped them. Anything that breaks was relying on the gap — which is why the fix is never "work around the enforcement" and always "do what a normal fetch would have needed".</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/6210300985606144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://fetch.spec.whatwg.org/#cors-protocol" target="_blank" rel="noopener">Fetch Standard: the CORS protocol</a></li>
+    <li><a href="../cross-origin/">With and without CORS headers</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[bgfetch-cors:audit]';
+  const DEFAULT = [
+    '/assets/level-1.pack',
+    'https://cdn.example.com/level-2.pack',
+    'http://127.0.0.1:8000/dev-assets.pack',
+    'http://192.168.1.20/printer-firmware.bin',
+    'https://localhost:8123/public/media/jpeg-xl/image.webp',
+    '//cdn.example.com/protocol-relative.pack',
+  ].join('\n');
+
+  const detail = document.getElementById('detail');
+
+  function classify(raw) {
+    let url;
+    try {
+      url = new URL(raw, location.href);
+    } catch {
+      return { relation: 'unparseable', change: 'This is not a URL, so the fetch would reject before any of this applied.', action: 'Fix the string.' , level: 'risk' };
+    }
+    const sameOrigin = url.origin === location.origin;
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    const loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1' || /^127\./.test(host);
+    const privateRange = /^10\./.test(host) || /^192\.168\./.test(host) ||
+      /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+
+    if (sameOrigin) {
+      return {
+        relation: 'same origin',
+        change: 'Nothing. Same-origin requests never needed CORS and still do not.',
+        action: 'No action.',
+        level: 'same',
+      };
+    }
+    if (loopback || privateRange) {
+      return {
+        relation: loopback ? 'cross origin, loopback' : 'cross origin, private network',
+        change: 'Now subject to CORS AND to Local Network Access, both of which it previously skipped.',
+        action: 'Serve Access-Control-Allow-Origin from the device, and take the local-network permission.',
+        level: 'risk',
+      };
+    }
+    return {
+      relation: 'cross origin',
+      change: 'Now needs Access-Control-Allow-Origin to be readable from the service worker.',
+      action: 'Check the response headers on that origin; add the header or proxy the file.',
+      level: 'check',
+    };
+  }
+
+  function run() {
+    const lines = document.getElementById('urls').value
+      .split('\n').map((line) => line.trim()).filter(Boolean);
+    const body = document.getElementById('rows');
+    body.innerHTML = '';
+    const tally = { same: 0, check: 0, risk: 0 };
+
+    for (const line of lines) {
+      const result = classify(line);
+      tally[result.level] += 1;
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.className = 'mono';
+      th.textContent = line;
+      const relation = document.createElement('td');
+      relation.textContent = result.relation;
+      relation.className = result.level;
+      const change = document.createElement('td');
+      change.textContent = result.change;
+      const action = document.createElement('td');
+      action.textContent = result.action;
+      tr.append(th, relation, change, action);
+      body.append(tr);
+    }
+
+    detail.textContent =
+      `${lines.length} URLs: ${tally.same} unaffected, ${tally.check} need a CORS header checked, ` +
+      `${tally.risk} need both a CORS header and a local-network permission. ` +
+      (tally.check + tally.risk === 0
+        ? 'Nothing here changes under enforcement.'
+        : 'Every one of the affected URLs was already supposed to satisfy these rules — the fix is to satisfy them, not to route around the check.');
+
+    console.log(`${LOG} audited ${lines.length}: ${JSON.stringify(tally)}`);
+    globalThis.showcaseTelemetry?.assert('urls-audited', true, { total: lines.length, ...tally });
+  }
+
+  document.getElementById('run').addEventListener('click', run);
+  document.getElementById('urls').value = DEFAULT;
+  run();
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>
