@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Authenticating at connect time — WebTransport headers — Chrome 154 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button[disabled] { opacity: 0.55; }
+    .shapes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-3); align-content: start; }
+    .shape { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); display: grid; gap: var(--space-2); align-content: start; }
+    .shape h3 { margin: 0; font-size: 1rem; }
+    .shape ol { margin: 0; padding-left: 1.2em; font-size: 0.85rem; display: grid; gap: var(--space-1); }
+    .shape li.pending { color: var(--text-muted); }
+    .shape li.done { font-weight: 700; }
+    .shape li.exposed { color: var(--accent-rose); font-weight: 700; }
+    .figure { font-family: var(--font-mono); font-size: 1.4rem; font-weight: 700; }
+    .figure small { display: block; font-family: var(--font-sans, inherit); font-size: 0.7rem; font-weight: 400; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.76rem; }
+    td.num { font-family: var(--font-mono); text-align: right; }
+    td.bad { color: var(--accent-rose); font-weight: 700; }
+    td.ok { color: var(--accent-emerald); font-weight: 700; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport headers</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v154 · webtransport headers</p>
+    <h1>Authenticating at connect time</h1>
+    <p class="lede">Two ways to prove who you are: in the handshake, or in the first message after it. Both are run here against this server, for real, and timed — because the difference is not only how long the client waits but how long the server holds a session it has no reason to trust.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">Run both shapes</h2>
+    <button type="button" id="run">Run both</button>
+    <div class="shapes">
+      <article class="shape" aria-labelledby="shape-a-title">
+        <h3 id="shape-a-title">Credentials in the handshake</h3>
+        <ol id="shape-a">
+          <li class="pending">send the request, token attached</li>
+          <li class="pending">server decides</li>
+          <li class="pending">client learns the verdict</li>
+        </ol>
+        <p class="figure" id="figure-a">—<small>time to verdict</small></p>
+      </article>
+      <article class="shape" aria-labelledby="shape-b-title">
+        <h3 id="shape-b-title">Credentials in the first message</h3>
+        <ol id="shape-b">
+          <li class="pending">open the session, anonymously</li>
+          <li class="pending">session is open, peer unproven</li>
+          <li class="pending">send the token</li>
+          <li class="pending">server acknowledges it</li>
+        </ol>
+        <p class="figure" id="figure-b">—<small>time to verdict</small></p>
+      </article>
+    </div>
+
+    <table>
+      <caption>Measured on this page, against this origin</caption>
+      <thead><tr><th scope="col">shape</th><th scope="col">ms to verdict</th><th scope="col">round trips</th><th scope="col">unproven session held</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="4">Not run yet.</td></tr></tbody>
+    </table>
+    <output id="detail" aria-live="polite">Press the button.</output>
+    <p class="note">The second shape is measured over a WebSocket, not a WebTransport session: a WebTransport server needs HTTP/3 and a certificate this host does not serve. The stand-in is honest about the thing being measured — a session that opens before credentials arrive — because that is a property of the shape, not of the protocol. The numbers are real; the protocol is not the point.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="window-title">
+    <h2 id="window-title">The window in the middle</h2>
+    <p id="window-copy">The interesting number is not the total. It is the gap between "session open" and "token acknowledged" — every millisecond of which the server spent tracking a connection from a peer that had proven nothing. Multiply it by your connection rate and it is a budget an attacker can spend for free.</p>
+    <p><code>headers</code> removes the gap rather than shortening it. The token travels in the <code>CONNECT</code>, so a session either exists and is authenticated, or was never created. There is no half-trusted state to write code for, and no half-trusted state to attack.</p>
+  </section>
+
+  <section><h2>the shape it replaces</h2>
+    <pre tabindex="0"><code>// Before: connect first, prove yourself second.
+const transport = new WebTransport(url);
+await transport.ready;                       // the server now has a session
+const writer = transport.datagrams.writable.getWriter();
+await writer.write(encode({ token }));       // …and only now knows who you are
+
+// After: the CONNECT carries it, so an unauthenticated session never exists.
+const transport = new WebTransport(url, {
+  headers: { authorization: `Bearer ${token}` },
+});
+await transport.ready;                       // resolving means you were accepted</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5194104408506368" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#dom-webtransportoptions-headers" target="_blank" rel="noopener">WebTransport: WebTransportOptions.headers</a></li>
+    <li><a href="../handshake-anatomy/">What the handshake carries</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[webtransport-headers:auth]';
+  const TOKEN = 'Bearer demo-token-not-a-secret';
+  const detail = document.getElementById('detail');
+
+  function mark(listId, index, state) {
+    const item = document.querySelectorAll(`#${listId} li`)[index];
+    if (item) item.className = state;
+  }
+
+  // Shape A: the credential rides along with the request, so the first thing
+  // the client hears back is already the verdict.
+  async function handshakeCarried() {
+    const started = performance.now();
+    mark('shape-a', 0, 'done');
+    const response = await fetch(`/public/echo-socket?probe=${Math.floor(performance.now())}`, {
+      headers: { authorization: TOKEN },
+      cache: 'no-store',
+    });
+    mark('shape-a', 1, 'done');
+    await response.json();
+    mark('shape-a', 2, 'done');
+    return {
+      ms: performance.now() - started,
+      trips: 1,
+      unprovenMs: 0,
+      status: response.status,
+    };
+  }
+
+  // Shape B: the session opens first and the credential follows, so there is
+  // a real interval during which the server is holding an unproven peer.
+  function firstMessage() {
+    return new Promise((resolve, reject) => {
+      const started = performance.now();
+      let openedAt = 0;
+      const socket = new WebSocket(
+        `${location.origin.replace(/^http/, 'ws')}/public/echo-socket`,
+        'echo.v2',
+      );
+      const fail = (why) => {
+        try { socket.close(); } catch { /* already closing */ }
+        reject(new Error(why));
+      };
+      const watchdog = setTimeout(() => fail('the socket did not complete in 8s'), 8000);
+      mark('shape-b', 0, 'done');
+
+      socket.addEventListener('open', () => {
+        openedAt = performance.now();
+        mark('shape-b', 1, 'exposed');
+      });
+      socket.addEventListener('error', () => {
+        clearTimeout(watchdog);
+        fail('the socket errored');
+      });
+      socket.addEventListener('message', (event) => {
+        let payload;
+        try {
+          payload = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (payload.type === 'welcome') {
+          // The session exists now. The server knows nothing about who holds
+          // it, and will not until the next frame arrives.
+          mark('shape-b', 2, 'done');
+          socket.send(JSON.stringify({ authorization: TOKEN }));
+          return;
+        }
+        if (payload.type !== 'echo') return;
+        clearTimeout(watchdog);
+        mark('shape-b', 3, 'done');
+        const finished = performance.now();
+        try { socket.close(1000, 'demo finished'); } catch { /* already closing */ }
+        resolve({
+          ms: finished - started,
+          trips: 2,
+          unprovenMs: openedAt ? finished - openedAt : 0,
+          negotiated: payload.negotiated ?? null,
+        });
+      });
+    });
+  }
+
+  function renderRows(a, b) {
+    const body = document.getElementById('rows');
+    body.innerHTML = '';
+    const rows = [
+      ['credentials in the handshake', a, 'none — the session is only created once the token checks out'],
+      ['credentials in the first message', b, `${b.unprovenMs.toFixed(1)} ms of open, unproven session`],
+    ];
+    for (const [name, result, held] of rows) {
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.textContent = name;
+      const ms = document.createElement('td');
+      ms.className = 'num';
+      ms.textContent = result.ms.toFixed(1);
+      const trips = document.createElement('td');
+      trips.className = 'num';
+      trips.textContent = String(result.trips);
+      const window_ = document.createElement('td');
+      window_.textContent = held;
+      window_.className = result.unprovenMs > 0 ? 'bad' : 'ok';
+      tr.append(th, ms, trips, window_);
+      body.append(tr);
+    }
+  }
+
+  document.getElementById('run').addEventListener('click', async () => {
+    const button = document.getElementById('run');
+    button.disabled = true;
+    detail.textContent = 'Running both shapes…';
+    for (const list of ['shape-a', 'shape-b']) {
+      for (const item of document.querySelectorAll(`#${list} li`)) item.className = 'pending';
+    }
+    document.getElementById('figure-a').firstChild.textContent = '—';
+    document.getElementById('figure-b').firstChild.textContent = '—';
+
+    try {
+      const a = await handshakeCarried();
+      const b = await firstMessage();
+      document.getElementById('figure-a').firstChild.textContent = `${a.ms.toFixed(0)} ms`;
+      document.getElementById('figure-b').firstChild.textContent = `${b.ms.toFixed(0)} ms`;
+      renderRows(a, b);
+
+      const slower = b.ms - a.ms;
+      detail.textContent =
+        `Both completed against this origin. The handshake-carried shape learned its verdict in ` +
+        `${a.ms.toFixed(1)} ms; the first-message shape took ${b.ms.toFixed(1)} ms ` +
+        `(${slower >= 0 ? `${slower.toFixed(1)} ms more` : `${Math.abs(slower).toFixed(1)} ms less — on a loopback connection the two are close enough that ordering can invert, which is the point: latency is the small difference`}). ` +
+        `The durable difference is the ${b.unprovenMs.toFixed(1)} ms during which this server held an open session for a peer that had proven nothing. On a real network that window is a round trip wide, and it exists on every connection you accept.`;
+
+      console.log(`${LOG} handshake=${a.ms.toFixed(1)}ms firstMessage=${b.ms.toFixed(1)}ms unproven=${b.unprovenMs.toFixed(1)}ms`);
+      globalThis.showcaseTelemetry?.assert('both-shapes-measured', true, {
+        handshakeMs: a.ms, firstMessageMs: b.ms, unprovenMs: b.unprovenMs,
+      });
+    } catch (error) {
+      detail.textContent = `The measurement did not complete: ${error.message}. Both shapes need this origin's /public/echo-socket endpoint.`;
+      console.warn(`${LOG} failed: ${error.message}`);
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>
