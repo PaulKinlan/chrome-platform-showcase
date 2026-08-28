@@ -30,6 +30,8 @@ deno task check
 deno task audit
 deno task check-routes    # Route regression gate — run before EVERY push (see contract below)
 deno task check-duplicates # One-folder-per-feature gate — run before EVERY push (see contract below)
+deno task check-demo-coverage # No-demo-pending gate — run before EVERY push (see contract below)
+deno task demo-index      # Rebuild demo-index.json after adding or moving a feature folder
 deno task route-manifest  # Emit the published-demo route manifest
 deno task start
 deno task auto-research   # Starts the local server and displays the quality/conformance status
@@ -147,6 +149,25 @@ already built, each page opening "Chrome N introduces…" for a feature that shi
 **When a new milestone re-lists a feature you have already built:** do nothing to the catalogue.
 Regenerate the lineage so the note picks up the new listing, and spend the time on an uncovered
 feature instead. The work-list (`deno task worklist`) is the place to find those.
+
+## Every listed feature has a demo — no "demo pending" anywhere
+
+Paul, 2026-08-25: _"I never want to be in a state where there is no demo."_ A milestone page that
+advertises a feature and then offers nothing to open is the failure this rules out.
+
+One folder per feature means a feature listed against several milestones is demonstrated in exactly
+one of them, so the listing pages resolve a feature to wherever its demo lives rather than looking
+only in the milestone folder they are rendering. `demo-index.json` is that map, from ChromeStatus
+feature id to demo folder, built by scanning every `v*/*/index.html` for its ChromeStatus link and
+preferring `feature-lineage.json`'s canonical folder when a feature has several.
+
+- After adding, moving, or renaming a feature folder, run `deno task demo-index`. `deno task check`
+  fails if the committed index no longer matches what is on disk.
+- Run `deno task check-demo-coverage` before every push. It reads the live milestone listings and
+  fails if any listed feature resolves to no demo anywhere — the exact condition that renders a
+  "demo pending" badge. A milestone listing it cannot fetch is a failure, not a skip.
+- The fix for a coverage failure is a demo, not a suppression. Feature removals get one too: pair
+  detection with the replacement pattern, the same as any other removal.
 
 ## Durable demo compatibility contract — stable URLs · additive evolution · non-destructive
 

@@ -315,6 +315,24 @@ generated note saying where the feature actually shipped. `deno task check-dupli
 `deno task check`) fails on a new duplicate or a missing note. See AGENTS.md, "One demo folder per
 feature".
 
+### 2b. Every listed feature has a demo — no "demo pending" anywhere
+
+Paul, 2026-08-25: _"I never want to be in a state where there is no demo."_
+
+Rule 2 has a consequence the listing pages have to honour: a feature listed against four milestones
+is built in one of them, so three release pages would report "demo pending" for a demo that exists.
+`demo-index.json` maps ChromeStatus feature id to the folder that demonstrates it, and the release,
+category and catalogue pages resolve through it — a feature built elsewhere renders `demo in v152`,
+not a pending badge.
+
+- Rebuild it with `deno task demo-index` after adding, moving or renaming a feature folder.
+  `deno task check` fails when the committed index no longer matches disk.
+- `deno task check-demo-coverage` reads the live milestone listings and fails if any listed feature
+  resolves to no demo anywhere. Run it before every push. A listing it cannot fetch fails the gate
+  rather than being skipped.
+- Fix a coverage failure by building the demo. Removals count: pair detection with the replacement
+  pattern, as with any other removal.
+
 ### 3. Every page must include the chromestatus.com/feature/<id> link
 
 This is our self-heal. If folder names get garbled again, the cleanup script in `/tmp/fix-slugs.py`
@@ -503,6 +521,7 @@ routine.
 deno fmt --check                      # format check
 deno check server.ts                  # type check
 deno task check-routes                # route + parity regression gate — run before EVERY push
+deno task check-demo-coverage         # no listed feature without a demo — run before EVERY push
 deno task responsive-support report   # mobile/desktop parity coverage denominators
 deno task responsive-check <id> --merge  # mobile+desktop matrix for a touched demo (headless Chrome)
 deno task start                       # boot at localhost:3000

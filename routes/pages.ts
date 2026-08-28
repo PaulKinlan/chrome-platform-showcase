@@ -907,6 +907,54 @@ async function featureHasDemo(release: string, feature: FeatureSummary): Promise
   }
 }
 
+// Feature id → the folder that demonstrates it, built by
+// `deno task demo-index` and kept honest by `deno task check-demo-index`.
+let demoIndexCache: Record<string, string> | null = null;
+async function getDemoIndex(): Promise<Record<string, string>> {
+  if (demoIndexCache) return demoIndexCache;
+  try {
+    const parsed = JSON.parse(await Deno.readTextFile("./demo-index.json"));
+    demoIndexCache = (parsed?.demos ?? {}) as Record<string, string>;
+  } catch {
+    // A missing index must not take the site down: every feature then falls
+    // back to the same-milestone check, which is what this used to do.
+    demoIndexCache = {};
+  }
+  return demoIndexCache;
+}
+
+export interface ResolvedDemo {
+  href: string;
+  /** The milestone the demo actually lives in, e.g. "v152". */
+  release: string;
+  /** False when the demo is in a different milestone's folder. */
+  sameRelease: boolean;
+}
+
+/**
+ * Where to send someone who wants to try this feature.
+ *
+ * One folder per feature means a feature listed against several milestones is
+ * demonstrated in exactly one of them — usually the one it shipped in. Looking
+ * only in the current release's folder reports "demo pending" for a demo that
+ * exists, which is both false and the most annoying thing a listing page can
+ * do. Returns null only when nothing anywhere covers the feature.
+ */
+async function resolveDemo(
+  release: string,
+  feature: FeatureSummary,
+): Promise<ResolvedDemo | null> {
+  const slug = slugify(feature.name);
+  if (await featureHasDemo(release, feature)) {
+    return { href: `/${release}/${slug}/`, release, sameRelease: true };
+  }
+  const index = await getDemoIndex();
+  const dir = index[String(feature.id)];
+  if (!dir) return null;
+  const [elsewhere] = dir.split("/");
+  return { href: `/${dir}/`, release: elsewhere, sameRelease: false };
+}
+
 export async function renderReleasePage(
   release: string,
   milestone: number,
@@ -929,16 +977,14 @@ export async function renderReleasePage(
   ], origin);
   const sections = await Promise.all(features.groups.map(async (group) => {
     const cards = await Promise.all(group.features.map(async (f) => {
-      const hasDemo = await featureHasDemo(release, f);
-      const slug = slugify(f.name);
+      const demo = await resolveDemo(release, f);
       const summary = (f.summary ?? "").slice(0, 220);
-      const demoUrl = `/${release}/${slug}/`;
-      // Title links to the demo when one exists (the thing you actually want to
-      // open); otherwise fall back to the ChromeStatus entry. ChromeStatus is
-      // always reachable via the button in the tags row.
-      const titleHref = hasDemo ? demoUrl : chromeStatusUrl(f.id);
+      // Title links to the demo wherever it lives (the thing you actually want
+      // to open); otherwise fall back to the ChromeStatus entry. ChromeStatus
+      // is always reachable via the button in the tags row.
+      const titleHref = demo ? demo.href : chromeStatusUrl(f.id);
       return `<li class="demo-card">
-        <h3><a href="${titleHref}"${hasDemo ? "" : ' target="_blank" rel="noopener"'}>${
+        <h3><a href="${titleHref}"${demo ? "" : ' target="_blank" rel="noopener"'}>${
         escapeHTML(f.name)
       }</a></h3>
         <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
@@ -948,8 +994,12 @@ export async function renderReleasePage(
         chromeStatusUrl(f.id)
       }" target="_blank" rel="noopener">ChromeStatus &nearr;</a>
           ${
-        hasDemo
-          ? `<a class="tag tag-live" href="${demoUrl}">demo &rarr;</a>`
+        demo
+          ? demo.sameRelease
+            ? `<a class="tag tag-live" href="${demo.href}">demo &rarr;</a>`
+            : `<a class="tag tag-live" href="${demo.href}" title="This feature is demonstrated in the milestone it shipped in">demo in ${
+              escapeHTML(demo.release)
+            } &rarr;</a>`
           : `<span class="tag tag-pending">demo pending</span>`
       }
         </div>
@@ -1213,7 +1263,10 @@ interface CategorizedRow {
   name: string;
   summary: string;
   category: Category;
+  /** Built in this milestone's own folder — what the category counts count. */
   hasDemo: boolean;
+  /** Where to send a reader, which may be another milestone's folder. */
+  demo: ResolvedDemo | null;
 }
 
 async function collectCategorizedRows(channels: Channels): Promise<CategorizedRow[]> {
@@ -1233,14 +1286,15 @@ async function collectCategorizedRows(channels: Channels): Promise<CategorizedRo
           const key = `${m}:${slug}`;
           if (seen.has(key)) continue;
           seen.add(key);
-          const hasDemo = await featureHasDemo(`v${m}`, f);
+          const demo = await resolveDemo(`v${m}`, f);
           rows.push({
             mstone: m,
             id: f.id,
             name: f.name,
             summary: f.summary ?? "",
             category: categoryForFeature(f.name, g.category),
-            hasDemo,
+            hasDemo: demo?.sameRelease ?? false,
+            demo,
           });
         }
       }
@@ -1360,20 +1414,21 @@ export async function renderCategoryPage(slug: string, channels: Channels): Prom
 
   const milestoneSections = [...byMstone.entries()].map(([m, rs]) => {
     const cards = rs.map((r) => {
-      const slugged = slugify(r.name);
       const summary = (r.summary ?? "").slice(0, 220);
       return `<li class="demo-card">
         <h3>${
-        r.hasDemo
-          ? `<a href="/v${r.mstone}/${slugged}/">${escapeHTML(r.name)}</a>`
-          : escapeHTML(r.name)
+        r.demo ? `<a href="${r.demo.href}">${escapeHTML(r.name)}</a>` : escapeHTML(r.name)
       }</h3>
         <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
         <div class="demo-tags">
           <a class="tag" href="https://chromestatus.com/feature/${r.id}" target="_blank" rel="noopener">chromestatus</a>
           ${
-        r.hasDemo
-          ? `<a class="tag tag-live" href="/v${r.mstone}/${slugged}/">demo &rarr;</a>`
+        r.demo
+          ? r.demo.sameRelease
+            ? `<a class="tag tag-live" href="${r.demo.href}">demo &rarr;</a>`
+            : `<a class="tag tag-live" href="${r.demo.href}" title="This feature is demonstrated in the milestone it shipped in">demo in ${
+              escapeHTML(r.demo.release)
+            } &rarr;</a>`
           : `<span class="tag tag-pending">demo pending</span>`
       }
         </div>
