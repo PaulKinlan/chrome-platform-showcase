@@ -39,10 +39,10 @@ function startObserving() {
     observer.disconnect();
     observer = null;
   }
-  const wanted = ["long-animation-frame", "longtask"].filter((type) =>
-    supported().includes(type)
-  );
-  if (wanted.length === 0) return { observing: [], reason: "no long-task entry type is supported in this worker" };
+  const wanted = ["long-animation-frame", "longtask"].filter((type) => supported().includes(type));
+  if (wanted.length === 0) {
+    return { observing: [], reason: "no long-task entry type is supported in this worker" };
+  }
   observer = new PerformanceObserver((list) => {
     for (const entry of list.getEntries()) {
       observed.push({
@@ -65,7 +65,9 @@ function block(ms) {
   while (performance.now() - started < ms) {
     sink += Math.sqrt(sink + 1);
   }
-  lastTaskEnd = performance.now();
+  // lastTaskEnd is deliberately NOT updated here: the self-timer's whole job is
+  // to notice the gap this block leaves between two of its own ticks, and
+  // resetting the marker from inside the block would erase the evidence.
   return { requested: ms, actual: performance.now() - started, sink };
 }
 
@@ -87,7 +89,11 @@ self.onmessage = (event) => {
   }
   if (type === "block") {
     const result = block(Number(ms) || 0);
-    // Give any observer a turn of the event loop before reporting.
+    // Report after a delay rather than on the next task. Measured: a
+    // setTimeout(0) scheduled here runs BEFORE the self-timer's own pending
+    // tick, so reporting immediately produced an empty record for the block
+    // that had just happened and attributed it to the following one. 30ms
+    // clears the 4ms clamp on nested timers with room to spare.
     setTimeout(() => {
       self.postMessage({
         type: "blocked",
@@ -99,7 +105,7 @@ self.onmessage = (event) => {
         entryTypes: supported(),
       });
       observed = [];
-    }, 0);
+    }, 30);
     return;
   }
   if (type === "ping") {

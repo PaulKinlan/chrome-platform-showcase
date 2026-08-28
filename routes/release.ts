@@ -4760,6 +4760,22 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
     if (autoPasskeyResponse) return autoPasskeyResponse;
   }
 
+  // JS Self-Profiling needs a Document-Policy to construct a Profiler at all,
+  // so the markers demos are served with it — otherwise every page there would
+  // be a description of an API it could not call.
+  if (
+    release === "v153" &&
+    (sub === "/js-self-profiling-markers" ||
+      sub.startsWith("/js-self-profiling-markers/"))
+  ) {
+    const asset = await readReleaseAsset(release, sub);
+    if (asset) {
+      return withHeaders(asset, {
+        "document-policy": "js-profiling",
+      });
+    }
+  }
+
   if (release === "v147") {
     const spcAuthResponse = await renderSpcAuthRoute(req, sub);
     if (spcAuthResponse) return spcAuthResponse;
