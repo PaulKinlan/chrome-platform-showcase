@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>One rendering iteration, in order — Interoperable dispatch timing — Chrome 153 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button[disabled] { opacity: 0.55; }
+    .buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    iframe { width: 100%; height: 130px; border: 2px solid var(--border-black); background: var(--bg-ivory); }
+    .scroller { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.8rem; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.75rem; }
+    td.num { font-family: var(--font-mono); text-align: right; }
+    td.mono { font-family: var(--font-mono); }
+    tr.iteration-break td { background: var(--bg-stone); font-weight: 700; }
+    .steps { display: grid; gap: 2px; }
+    .step { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-1) var(--space-2); font-size: 0.8rem; display: flex; gap: var(--space-2); align-items: baseline; }
+    .step .num { font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-muted); min-width: 3.5ch; }
+    .step.seen { border-color: var(--accent-emerald); background: var(--bg-paper); }
+    .step.seen .num { color: var(--accent-emerald); }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Interoperable dispatch timing</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · dispatch timing</p>
+    <h1>One rendering iteration, in order</h1>
+    <p class="lede">Resizing the frame below crosses a media query breakpoint, whose listener starts a transition. Everything that happens next is recorded with the animation frame it landed in, so the sequence is the browser's, not a description of one.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">Trigger a breakpoint crossing</h2>
+    <iframe id="stage" src="../stage.html" title="A frame whose width crosses a media query breakpoint"></iframe>
+    <div class="buttons">
+      <button type="button" id="run">Cross the breakpoint</button>
+      <button type="button" id="clear">Clear the record</button>
+    </div>
+    <div class="scroller">
+      <table>
+        <caption id="record-caption">What the browser did, in the order it did it</caption>
+        <thead><tr>
+          <th scope="col">#</th>
+          <th scope="col">what happened</th>
+          <th scope="col">frame</th>
+          <th scope="col">ms from the resize</th>
+        </tr></thead>
+        <tbody id="record"><tr><td colspan="4">Nothing recorded yet.</td></tr></tbody>
+      </table>
+    </div>
+    <output id="detail" aria-live="polite">Press the button.</output>
+    <p class="note">The frame column is the number of animation frame callbacks that had run when each entry was recorded. Two entries sharing a frame number were produced in the same rendering iteration; a rise between them means an iteration boundary was crossed.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="steps-title">
+    <h2 id="steps-title">Where each one belongs</h2>
+    <p>These are the steps of HTML's "update the rendering", in order. The ones this run actually observed are marked.</p>
+    <div class="steps" id="steps"></div>
+    <p class="note">The specification's order is fixed; what varies between engines is whether an event created during an early step is dispatched by the later step in the <em>same</em> pass. That is the whole of this change, and it is why the frame column matters more than the millisecond column.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/6312504658624512" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/webappapis.html#event-loop-processing-model" target="_blank" rel="noopener">HTML: the event loop processing model</a></li>
+    <li><a href="../frames-to-run/">How many frames until it runs</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[dispatch-timing:order]';
+  const frame = document.getElementById('stage');
+
+  const STEPS = [
+    { id: 'resize', label: 'run the resize steps (the resize event)' },
+    { id: 'scroll', label: 'run the scroll steps (the scroll event)' },
+    { id: 'mq', label: 'evaluate media queries and report changes' },
+    { id: 'animations', label: 'update animations and send events (transitionrun, transitionstart)' },
+    { id: 'raf', label: 'run the animation frame callbacks' },
+    { id: 'paint', label: 'update the rendering or user interface' },
+  ];
+
+  let record = [];
+  let frames = 0;
+  let origin = 0;
+  let running = false;
+
+  function note(what, step) {
+    record.push({ what, step, frame: frames, ms: performance.now() - origin });
+  }
+
+  function renderSteps() {
+    const seen = new Set(record.map((entry) => entry.step));
+    const container = document.getElementById('steps');
+    container.innerHTML = '';
+    for (const [index, step] of STEPS.entries()) {
+      const row = document.createElement('div');
+      row.className = `step${seen.has(step.id) ? ' seen' : ''}`;
+      const num = document.createElement('span');
+      num.className = 'num';
+      num.textContent = `3.${index + 4}`;
+      const label = document.createElement('span');
+      label.textContent = step.label + (seen.has(step.id) ? '' : ' — not observed in this run');
+      row.append(num, label);
+      container.append(row);
+    }
+  }
+
+  function renderRecord() {
+    const body = document.getElementById('record');
+    body.innerHTML = '';
+    if (record.length === 0) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 4;
+      td.textContent = 'Nothing recorded yet.';
+      tr.append(td);
+      body.append(tr);
+      return;
+    }
+    let lastFrame = record[0].frame;
+    record.forEach((entry, index) => {
+      if (entry.frame !== lastFrame) {
+        const divider = document.createElement('tr');
+        divider.className = 'iteration-break';
+        const td = document.createElement('td');
+        td.colSpan = 4;
+        td.textContent = `— an animation frame callback ran here, so everything below is a later rendering iteration —`;
+        divider.append(td);
+        body.append(divider);
+        lastFrame = entry.frame;
+      }
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.textContent = String(index + 1);
+      const what = document.createElement('td');
+      what.className = 'mono';
+      what.textContent = entry.what;
+      const frameCell = document.createElement('td');
+      frameCell.className = 'num';
+      frameCell.textContent = String(entry.frame);
+      const ms = document.createElement('td');
+      ms.className = 'num';
+      ms.textContent = entry.ms.toFixed(1);
+      tr.append(th, what, frameCell, ms);
+      body.append(tr);
+    });
+    document.getElementById('record-caption').textContent =
+      `What the browser did, in the order it did it (${record.length} entries)`;
+  }
+
+  document.getElementById('run').addEventListener('click', () => {
+    if (running) return;
+    running = true;
+    const button = document.getElementById('run');
+    button.disabled = true;
+    record = [];
+    frames = 0;
+
+    const view = frame.contentWindow;
+    const doc = frame.contentDocument;
+    const panel = doc.getElementById('panel');
+
+    // Start from a clean panel without creating a transition to reset it.
+    panel.style.transition = 'none';
+    panel.classList.remove('lit');
+    void view.getComputedStyle(panel).opacity;
+    panel.style.transition = '';
+    void view.getComputedStyle(panel).opacity;
+
+    const query = view.matchMedia('(min-width: 420px)');
+    const onChange = () => {
+      note('mediaQueryList change', 'mq');
+      panel.classList.add('lit');
+    };
+    const onRun = (event) => note(`transitionrun (${event.propertyName})`, 'animations');
+    const onStart = (event) => note(`transitionstart (${event.propertyName})`, 'animations');
+    const onResize = () => note('window resize', 'resize');
+
+    query.addEventListener('change', onChange);
+    panel.addEventListener('transitionrun', onRun);
+    panel.addEventListener('transitionstart', onStart);
+    view.addEventListener('resize', onResize);
+
+    const tick = () => {
+      frames += 1;
+      note(`animation frame callback #${frames}`, 'raf');
+      if (frames < 4) {
+        view.requestAnimationFrame(tick);
+        return;
+      }
+      query.removeEventListener('change', onChange);
+      panel.removeEventListener('transitionrun', onRun);
+      panel.removeEventListener('transitionstart', onStart);
+      view.removeEventListener('resize', onResize);
+
+      renderRecord();
+      renderSteps();
+
+      const change = record.find((entry) => entry.step === 'mq');
+      const run = record.find((entry) => entry.what.startsWith('transitionrun'));
+      document.getElementById('detail').textContent = !change
+        ? 'No media query change was reported, which means the frame did not actually cross the breakpoint — press the button again to send it back the other way.'
+        : !run
+        ? 'The media query change was reported but no transition ran, so the class change did not produce one.'
+        : run.frame === change.frame
+        ? `The change was reported and transitionrun followed in the same rendering iteration — both at frame ${change.frame}, ${(run.ms - change.ms).toFixed(1)} ms apart, with no animation frame callback in between. That is the aligned behaviour.`
+        : `The change was reported at frame ${change.frame} and transitionrun did not arrive until frame ${run.frame}: an animation frame callback ran in between, so the dispatch was deferred to the next rendering iteration. The specification puts both in the same pass, and Gecko and WebKit already do.`;
+
+      console.log(`${LOG} change=frame${change?.frame} run=frame${run?.frame} entries=${record.length}`);
+      globalThis.showcaseTelemetry?.assert('iteration-recorded', true, {
+        entries: record.length,
+        changeFrame: change?.frame ?? null,
+        runFrame: run?.frame ?? null,
+      });
+      button.disabled = false;
+      running = false;
+    };
+
+    origin = performance.now();
+    // Flip the frame across the breakpoint; the media query change is reported
+    // during a rendering iteration, which is where the recording begins.
+    frame.style.maxWidth = query.matches ? '360px' : '';
+    view.requestAnimationFrame(tick);
+  });
+
+  document.getElementById('clear').addEventListener('click', () => {
+    record = [];
+    renderRecord();
+    renderSteps();
+    frame.style.maxWidth = '';
+    document.getElementById('detail').textContent = 'Cleared.';
+  });
+
+  renderSteps();
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>

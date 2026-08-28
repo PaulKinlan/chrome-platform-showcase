@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How many frames until it runs — Interoperable dispatch timing — Chrome 153 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button[disabled] { opacity: 0.55; }
+    .buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    label { display: grid; gap: var(--space-1); font-weight: 700; font-size: 0.85rem; }
+    input { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font: inherit; min-height: 44px; }
+    iframe { width: 100%; height: 130px; border: 2px solid var(--border-black); background: var(--bg-ivory); }
+    .scroller { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.8rem; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.75rem; }
+    td.num { font-family: var(--font-mono); text-align: right; }
+    td.same { color: var(--accent-emerald); font-weight: 700; }
+    td.late { color: var(--accent-rose); font-weight: 700; }
+    td.wide { white-space: normal; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Interoperable dispatch timing</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · dispatch timing</p>
+    <h1>How many frames until it runs</h1>
+    <p class="lede">A transition is created the moment a style change makes one. When its <code>transitionrun</code> arrives depends on where in the event loop the change happened — and this page starts the same transition from five different places and counts the rendering frames in between.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">Measure every trigger</h2>
+    <label for="reps">Repetitions per trigger (medians are reported)
+      <input type="number" id="reps" value="5" min="1" max="15" step="1">
+    </label>
+    <div class="buttons">
+      <button type="button" id="run">Measure</button>
+      <button type="button" id="clear">Clear</button>
+    </div>
+    <iframe id="stage" src="../stage.html" title="The element being transitioned"></iframe>
+    <div class="scroller">
+      <table>
+        <caption>Frames between creating the transition and receiving transitionrun</caption>
+        <thead><tr>
+          <th scope="col">started from</th>
+          <th scope="col">frames</th>
+          <th scope="col">ms</th>
+          <th scope="col">same iteration?</th>
+          <th scope="col">why it lands there</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="5">Not measured yet.</td></tr></tbody>
+      </table>
+    </div>
+    <output id="detail" aria-live="polite">Press the button.</output>
+    <p class="note">"Frames" counts <code>requestAnimationFrame</code> callbacks between the style change and the event, with the counter installed at the moment of the change. Animation frame callbacks run <em>after</em> the animation events step, so a transitionrun dispatched at the first opportunity is always seen at zero — for every trigger, including one started inside an animation frame callback. A count of one means the dispatch was deferred by a whole rendering iteration.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="reading-title">
+    <h2 id="reading-title">Reading the result</h2>
+    <p>Zero is the expected answer everywhere, and it takes a moment to see why. The counter starts when the transition is created. Whichever iteration ends up dispatching the event, that iteration updates animations <em>before</em> it runs animation frame callbacks — so the event always arrives before the counter's next tick, provided nothing defers it.</p>
+    <p>That makes one frame a meaningful reading rather than a rounding error: it means the dispatch skipped an iteration it could have used. The triggers where that happens are the ones that run inside the rendering steps — a media query <code>change</code> listener, a scroll handler — which is precisely the case this change corrects.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/6312504658624512" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/webappapis.html#event-loop-processing-model" target="_blank" rel="noopener">HTML: the event loop processing model</a></li>
+    <li><a href="../event-order/">One rendering iteration, in order</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[dispatch-timing:frames]';
+  const frame = document.getElementById('stage');
+
+  // Every trigger should produce zero frames. The counter is installed at the
+  // moment the transition is created, and within one rendering iteration the
+  // animation events step runs BEFORE the animation frame callbacks — so a
+  // transitionrun dispatched at the first opportunity is always seen before the
+  // counter has ticked. A count of one means the dispatch was deferred by a
+  // whole iteration.
+  const TRIGGERS = [
+    { id: 'task', name: 'a task (setTimeout 0)', why: 'Runs between rendering iterations, so the transition exists before the next one begins and should be dispatched in it.' },
+    { id: 'microtask', name: 'a microtask (promise)', why: 'Drains at the end of the current task, which puts it in the same position as the task above.' },
+    { id: 'raf', name: 'an animation frame callback', why: 'The animation events step of this iteration has already gone by, so the earliest dispatch is the next iteration — which still precedes the next animation frame callback.' },
+    { id: 'scroll', name: 'a scroll event handler', why: 'Scroll events are dispatched during the rendering steps, before animations are updated, so the transition should run in the same iteration that created it.' },
+    { id: 'mq', name: 'a media query change handler', why: 'Media query changes are reported earlier in the same iteration than animations are updated. This is the case the change is about.' },
+  ];
+
+  function stageDocument() {
+    return frame.contentDocument;
+  }
+
+  // One measurement: reset the panel, wait for a clean frame, start the
+  // transition from the requested place, then count animation frames until
+  // transitionrun. The panel's transition is 400ms, so there is no risk of the
+  // event arriving before the counter is installed.
+  function measure(trigger) {
+    return new Promise((resolve) => {
+      const doc = stageDocument();
+      const panel = doc.getElementById('panel');
+      const view = frame.contentWindow;
+
+      // Resetting is itself a style change, and a style change on a
+      // transitioning property creates a transition — which would fire the
+      // very event being measured. Suppress transitions across the reset, then
+      // restore them and flush again so the next change starts cleanly.
+      panel.style.transition = 'none';
+      panel.classList.remove('lit');
+      void view.getComputedStyle(panel).opacity;
+      panel.style.transition = '';
+      void view.getComputedStyle(panel).opacity;
+
+      let frames = 0;
+      let started = 0;
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        panel.removeEventListener('transitionrun', onRun);
+        resolve(result);
+      };
+      const onRun = () => {
+        finish({ frames, ms: performance.now() - started, ok: true });
+      };
+
+      const tick = () => {
+        frames += 1;
+        if (frames > 20) {
+          finish({ frames, ms: performance.now() - started, ok: false });
+          return;
+        }
+        view.requestAnimationFrame(tick);
+      };
+
+      const start = () => {
+        started = performance.now();
+        // Listen only from here. Anything dispatched before the style change
+        // belongs to a previous measurement, and counting it would report a
+        // transition that ran before it was created.
+        panel.addEventListener('transitionrun', onRun, { once: true });
+        panel.classList.add('lit');
+        // Install the frame counter immediately after the style change so the
+        // first callback it sees belongs to the next iteration.
+        view.requestAnimationFrame(tick);
+      };
+
+      // Give the removal a full iteration to settle before starting.
+      view.requestAnimationFrame(() => {
+        view.requestAnimationFrame(() => {
+          if (trigger === 'task') {
+            view.setTimeout(start, 0);
+          } else if (trigger === 'microtask') {
+            view.Promise.resolve().then(start);
+          } else if (trigger === 'raf') {
+            view.requestAnimationFrame(start);
+          } else if (trigger === 'scroll') {
+            const scroller = doc.getElementById('scroller');
+            scroller.addEventListener('scroll', start, { once: true });
+            scroller.scrollTop = scroller.scrollTop === 0 ? 40 : 0;
+          } else {
+            const query = view.matchMedia('(min-width: 420px)');
+            const onChange = () => {
+              query.removeEventListener('change', onChange);
+              start();
+            };
+            query.addEventListener('change', onChange);
+            // Flip the frame across the breakpoint. The change is reported in
+            // a rendering iteration, which is the point of this trigger.
+            frame.style.maxWidth = query.matches ? '360px' : '';
+          }
+        });
+      });
+    });
+  }
+
+  function median(values) {
+    const sorted = [...values].sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+
+  document.getElementById('run').addEventListener('click', async () => {
+    const button = document.getElementById('run');
+    button.disabled = true;
+    document.getElementById('detail').textContent = 'Measuring…';
+    const reps = Math.max(1, Math.min(15, Number(document.getElementById('reps').value) || 1));
+    const results = [];
+
+    for (const trigger of TRIGGERS) {
+      const frames = [];
+      const times = [];
+      let timedOut = false;
+      for (let run = 0; run < reps; run++) {
+        const result = await measure(trigger.id);
+        if (!result.ok) timedOut = true;
+        frames.push(result.frames);
+        times.push(result.ms);
+      }
+      results.push({ ...trigger, frames: median(frames), ms: median(times), timedOut });
+    }
+    frame.style.maxWidth = '';
+
+    const body = document.getElementById('rows');
+    body.innerHTML = '';
+    for (const result of results) {
+      const tr = document.createElement('tr');
+      const th = document.createElement('th');
+      th.scope = 'row';
+      th.textContent = result.name;
+      const frames = document.createElement('td');
+      frames.className = 'num';
+      frames.textContent = result.timedOut ? '—' : String(result.frames);
+      const ms = document.createElement('td');
+      ms.className = 'num';
+      ms.textContent = result.timedOut ? '—' : result.ms.toFixed(1);
+      const onTime = !result.timedOut && result.frames === 0;
+      const same = document.createElement('td');
+      same.textContent = result.timedOut
+        ? 'no event'
+        : onTime
+        ? 'first opportunity'
+        : `${result.frames} iteration${result.frames === 1 ? '' : 's'} late`;
+      same.className = onTime ? 'same' : 'late';
+      const why = document.createElement('td');
+      why.className = 'wide';
+      why.textContent = result.timedOut
+        ? 'No transitionrun arrived within 20 frames — the style change did not create a transition at all from this trigger.'
+        : result.why;
+      tr.append(th, frames, ms, same, why);
+      body.append(tr);
+    }
+
+    const late = results.filter((result) => !result.timedOut && result.frames > 0);
+    const mq = results.find((result) => result.id === 'mq');
+    document.getElementById('detail').textContent =
+      `Median of ${reps} run${reps === 1 ? '' : 's'} per trigger. ` +
+      (mq && !mq.timedOut
+        ? `The media query listener — the case this change is about — saw transitionrun ${mq.frames} frame${mq.frames === 1 ? '' : 's'} later (${mq.ms.toFixed(1)} ms), which is ${mq.frames === 0 ? 'the first opportunity the specification allows' : 'one rendering iteration later than the specification allows'}. `
+        : 'The media query trigger produced no transition, which usually means the frame did not actually cross the breakpoint. ') +
+      (late.length === 0
+        ? 'Every trigger was served at its first opportunity, which is what the aligned timing looks like.'
+        : `${late.length} of ${results.length} triggers were served a whole iteration late: ${late.map((result) => result.name).join(', ')}. That is the deferral this change removes — and note which ones they are, because a trigger that runs inside the rendering steps is exactly the case that was affected.`) +
+      ' Frame counts on a busy machine are noisy at the margins; raise the repetitions if two runs disagree.';
+
+    console.log(`${LOG} ${results.map((r) => `${r.id}=${r.timedOut ? 'none' : r.frames}`).join(' ')}`);
+    globalThis.showcaseTelemetry?.assert('triggers-measured', true, {
+      results: results.map((r) => ({ id: r.id, frames: r.frames, timedOut: r.timedOut })),
+    });
+    button.disabled = false;
+  });
+
+  document.getElementById('clear').addEventListener('click', () => {
+    document.getElementById('rows').innerHTML = '<tr><td colspan="5">Not measured yet.</td></tr>';
+    document.getElementById('detail').textContent = 'Cleared.';
+    frame.style.maxWidth = '';
+  });
+
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>
