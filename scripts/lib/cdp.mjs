@@ -27,6 +27,10 @@ export async function launchChrome() {
       "--hide-scrollbars",
       `--remote-debugging-port=${port}`,
       `--user-data-dir=${userDataDir}`,
+      // Extra switches for flag-gated verification. A demo that claims a
+      // feature is available behind a flag has to be driven behind that flag,
+      // so CHROME_FLAGS carries them in rather than needing a second harness.
+      ...(Deno.env.get("CHROME_FLAGS") ?? "").split(" ").filter(Boolean),
       "about:blank",
     ],
     stdout: "null",

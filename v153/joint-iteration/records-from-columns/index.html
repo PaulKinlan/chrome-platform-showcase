@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Records from columns — Joint Iteration — Chrome 153 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    label { display: grid; gap: var(--space-1); font-weight: 700; font-size: 0.85rem; }
+    textarea { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; width: 100%; min-height: 130px; }
+    input, select { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font: inherit; min-height: 44px; }
+    .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); align-items: end; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); font-family: var(--font-mono); font-size: 0.76rem; }
+    td.mono { font-family: var(--font-mono); }
+    td.missing { color: var(--accent-amber); font-weight: 700; }
+    .scroller { overflow-x: auto; }
+    pre.json { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-3); margin: 0; overflow-x: auto; font-size: 0.78rem; max-height: 320px; overflow-y: auto; }
+    .error { border: 2px solid var(--accent-rose); background: var(--bg-stone); color: var(--accent-rose); padding: var(--space-3); font-weight: 700; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Joint Iteration</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · joint iteration</p>
+    <h1>Records from columns</h1>
+    <p class="lede">Analytics exports, columnar stores and half the CSV parsers in the world hand you arrays-per-field and leave the transposing to you. <code>zipKeyed</code> is that transpose, with the ragged case handled by a mode you pick rather than by whatever your loop happened to do.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="columns-title">
+    <h2 id="columns-title">The columns</h2>
+    <label for="columns">One column per line, as <code>name: value, value, value</code>
+      <textarea id="columns" spellcheck="false"></textarea>
+    </label>
+    <div class="controls">
+      <label for="mode">Mode
+        <select id="mode">
+          <option value="shortest">shortest — stop at the shortest column</option>
+          <option value="longest" selected>longest — fill the gaps</option>
+          <option value="strict">strict — refuse ragged columns</option>
+        </select>
+      </label>
+      <label for="fill">Fill value for <code>longest</code>
+        <input type="text" id="fill" value="(missing)">
+      </label>
+    </div>
+    <p class="note">Real exports are ragged more often than anyone admits: a column added halfway through a retention window, a metric that only started reporting last month. <code>strict</code> is the right default for a pipeline that must not silently misalign rows; <code>longest</code> is the right one for a report that has to render anyway.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="records-title">
+    <h2 id="records-title">The records</h2>
+    <div id="error-slot"></div>
+    <div class="scroller">
+      <table>
+        <caption id="records-caption">One row per record</caption>
+        <thead><tr id="head"></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <output id="detail" aria-live="polite"></output>
+    <h3>As JSON</h3>
+    <pre class="json" id="json" tabindex="0"></pre>
+  </section>
+
+  <section><h2>the call</h2><pre id="call" tabindex="0"><code></code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/6249068542164992" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://tc39.es/proposal-joint-iteration/" target="_blank" rel="noopener">Joint Iteration specification text</a></li>
+    <li><a href="../zip-modes/">The three modes, and the padding</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { zipKeyed, hasNativeZipKeyed } from '../zip.js';
+
+const LOG = '[joint-iteration:keyed]';
+
+const SAMPLE = [
+  'day: Mon, Tue, Wed, Thu, Fri',
+  'visits: 1840, 1922, 2104, 1993, 2210',
+  'signups: 41, 55, 62, 48',
+  'revenue: 512.40, 601.10, 733.75, 588.20, 690.00',
+  'experiment: control, control, variant',
+].join('\n');
+
+function parseColumns(text) {
+  const columns = {};
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed === '') continue;
+    const at = trimmed.indexOf(':');
+    if (at === -1) continue;
+    const name = trimmed.slice(0, at).trim();
+    if (name === '') continue;
+    columns[name] = trimmed
+      .slice(at + 1)
+      .split(',')
+      .map((value) => value.trim())
+      .filter((value) => value !== '');
+  }
+  return columns;
+}
+
+function run() {
+  const columns = parseColumns(document.getElementById('columns').value);
+  const names = Object.keys(columns);
+  const mode = document.getElementById('mode').value;
+  const fill = document.getElementById('fill').value;
+
+  const padding = Object.fromEntries(names.map((name) => [name, fill]));
+  const options = mode === 'longest' ? { mode, padding } : { mode };
+
+  document.querySelector('#call code').textContent =
+    `Iterator.zipKeyed({\n${
+      names.map((name) => `  ${name}: columns[${JSON.stringify(name)}],`).join('\n')
+    }\n}, ${
+      mode === 'longest'
+        ? `{ mode: "longest", padding: { ${names.map((name) => `${name}: ${JSON.stringify(fill)}`).join(', ')} } }`
+        : `{ mode: ${JSON.stringify(mode)} }`
+    })`;
+
+  const records = [];
+  let error = null;
+  try {
+    for (const record of zipKeyed(columns, options)) {
+      records.push(record);
+      if (records.length > 500) break;
+    }
+  } catch (caught) {
+    error = caught;
+  }
+
+  const errorSlot = document.getElementById('error-slot');
+  errorSlot.innerHTML = '';
+  if (error) {
+    const box = document.createElement('p');
+    box.className = 'error';
+    box.setAttribute('role', 'status');
+    box.textContent = `${error.name}: ${error.message}`;
+    errorSlot.append(box);
+  }
+
+  const head = document.getElementById('head');
+  head.innerHTML = '';
+  const indexHeading = document.createElement('th');
+  indexHeading.scope = 'col';
+  indexHeading.textContent = '#';
+  head.append(indexHeading);
+  for (const name of names) {
+    const th = document.createElement('th');
+    th.scope = 'col';
+    th.textContent = `${name} (${columns[name].length})`;
+    head.append(th);
+  }
+
+  const body = document.getElementById('rows');
+  body.innerHTML = '';
+  records.forEach((record, index) => {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th');
+    th.scope = 'row';
+    th.textContent = String(index + 1);
+    tr.append(th);
+    for (const name of names) {
+      const td = document.createElement('td');
+      td.className = 'mono';
+      const value = record[name];
+      const wasFilled = index >= columns[name].length;
+      td.textContent = value === undefined ? '(undefined)' : String(value);
+      if (wasFilled) td.classList.add('missing');
+      tr.append(td);
+    }
+    body.append(tr);
+  });
+
+  document.getElementById('records-caption').textContent = error
+    ? `${records.length} record${records.length === 1 ? '' : 's'} produced before the walk was aborted`
+    : `${records.length} record${records.length === 1 ? '' : 's'} from ${names.length} column${names.length === 1 ? '' : 's'}`;
+  document.getElementById('json').textContent = JSON.stringify(records, null, 2);
+
+  const lengths = names.map((name) => columns[name].length);
+  const ragged = new Set(lengths).size > 1;
+  const filled = records.reduce(
+    (total, _, index) => total + names.filter((name) => index >= columns[name].length).length,
+    0,
+  );
+
+  document.getElementById('detail').textContent = error
+    ? `${records.length} record${records.length === 1 ? '' : 's'} came out before it threw. That is worth noticing: strict does not check the lengths up front — it cannot, because an iterator has no length — so it hands you rows until the step where the columns disagree, and only then refuses. The columns are ${lengths.join(', ')} long, so the refusal lands at record ${records.length + 1}. A consumer that treats the throw as fatal must discard what it already collected; switch to longest to render anyway, or to shortest to keep only the rows every column agrees on.`
+    : ragged
+    ? `${records.length} records. The columns are ${lengths.join(', ')} long, so ${filled} cell${filled === 1 ? '' : 's'} came from the fill value rather than from the data — highlighted above. Those are the cells a hand-rolled index loop would have quietly left as undefined.`
+    : `${records.length} records, every column ${lengths[0]} long, so all three modes would produce this same table. The modes only matter once the data stops being tidy.`;
+
+  console.log(`${LOG} mode=${mode} records=${records.length} filled=${filled} error=${error?.name ?? 'none'}`);
+  globalThis.showcaseTelemetry?.assert('records-built', true, {
+    mode, records: records.length, filled, threw: Boolean(error), native: hasNativeZipKeyed,
+  });
+}
+
+document.getElementById('columns').value = SAMPLE;
+for (const id of ['columns', 'mode', 'fill']) {
+  document.getElementById(id).addEventListener('input', run);
+}
+run();
+console.log(`${LOG} ready native=${hasNativeZipKeyed}`);
+</script>
+</body>
+</html>
