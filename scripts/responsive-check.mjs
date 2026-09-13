@@ -58,6 +58,19 @@ const sampleN = Number(flag("--sample") ?? 0);
 const milestone = flag("--milestone");
 const explicitIds = args.filter((a) => !a.startsWith("--"));
 
+// Sandboxed runners (e.g. the cloud weekly-hardening session) cannot reach the
+// Google Fonts CDN reliably: the shared stylesheet's @import dies with
+// ERR_CONNECTION_RESET and every demo would be recorded broken for a failure
+// that belongs to the environment, not the page. RESPONSIVE_BLOCK_URLS is an
+// explicit opt-in escape hatch: a comma-separated list of URL patterns
+// (Network.setBlockedURLs syntax) blocked BEFORE navigation and then not
+// charged to the demo — they fail with ERR_BLOCKED_BY_CLIENT, which in this
+// clean-profile harness browser can only come from this list. Default: unset,
+// behaviour unchanged. The run report records the patterns so a merged result
+// is never silently different from an unblocked run.
+const BLOCKED_URL_PATTERNS = (Deno.env.get("RESPONSIVE_BLOCK_URLS") ?? "")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+
 // ── select target ids ────────────────────────────────────────────────────────
 const manifest = buildFromDisk().filter((m) => m.status === "built");
 let targets;
@@ -180,8 +193,17 @@ async function checkPage(conn, url, cls) {
       // inside the settle window. Genuine failures (refused, DNS, blocked) and
       // 4xx/5xx responses are still recorded below.
       const errorText = msg.params?.errorText ?? "loadingFailed";
+      const harnessBlocked = BLOCKED_URL_PATTERNS.length > 0 &&
+        (msg.params?.blockedReason === "inspector" ||
+          errorText === "net::ERR_BLOCKED_BY_CLIENT");
       if (probeRequests.has(msg.params?.requestId)) probes.push(errorText);
-      else if (errorText !== "net::ERR_ABORTED") netFailures.push(errorText);
+      else if (harnessBlocked) {
+        // Blocked by this harness's own RESPONSIVE_BLOCK_URLS list (a
+        // setBlockedURLs block reports blockedReason "inspector" with an empty
+        // errorText; nothing else produces either in the clean-profile browser
+        // we launched) — an environmental exclusion, not a demo failure.
+        cancelled.push(msg.params?.requestId ?? "request");
+      } else if (errorText !== "net::ERR_ABORTED") netFailures.push(errorText);
       else cancelled.push(msg.params?.requestId ?? "request");
     } else if (msg.method === "Network.responseReceived") {
       const res = msg.params?.response;
@@ -199,6 +221,9 @@ async function checkPage(conn, url, cls) {
   await conn.send("Runtime.enable", {}, sessionId);
   await conn.send("Log.enable", {}, sessionId);
   await conn.send("Network.enable", {}, sessionId);
+  if (BLOCKED_URL_PATTERNS.length) {
+    await conn.send("Network.setBlockedURLs", { urls: BLOCKED_URL_PATTERNS }, sessionId);
+  }
   await conn.send("Emulation.setDeviceMetricsOverride", {
     width: spec.width,
     height: spec.height,
@@ -383,7 +408,16 @@ async function writeReport(summary, full) {
   await Deno.mkdir(dir, { recursive: true });
   await Deno.writeTextFile(
     `${dir}/last-run.json`,
-    JSON.stringify({ generatedAt: new Date().toISOString(), summary, full }, null, 2) + "\n",
+    JSON.stringify(
+      {
+        generatedAt: new Date().toISOString(),
+        ...(BLOCKED_URL_PATTERNS.length ? { blockedUrlPatterns: BLOCKED_URL_PATTERNS } : {}),
+        summary,
+        full,
+      },
+      null,
+      2,
+    ) + "\n",
   );
 }
 
