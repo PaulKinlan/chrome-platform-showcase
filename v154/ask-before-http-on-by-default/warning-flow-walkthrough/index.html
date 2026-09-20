@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Warning flow walkthrough — Ask before http — Chrome 154 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button.secondary { background: var(--bg-stone); color: var(--text-black); }
+    button[disabled] { opacity: 0.55; }
+    label { font-weight: 700; display: block; }
+    input[type="text"], select { border: 2px solid var(--border-black); padding: var(--space-2); font: inherit; inline-size: 100%; box-sizing: border-box; background: var(--bg-paper); color: var(--text-black); min-height: 44px; }
+    input[type="text"] { font-family: var(--font-mono); }
+    .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: var(--space-3); }
+    .classify { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; overflow-wrap: anywhere; }
+    ol.flow { margin: 0; padding: 0; display: grid; gap: var(--space-2); counter-reset: step; }
+    ol.flow li { list-style: none; border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); color: var(--text-muted); position: relative; }
+    ol.flow li.current { background: var(--text-black); color: var(--bg-ivory); }
+    ol.flow li.current .flow-detail { color: var(--bg-ivory); }
+    ol.flow li.done { color: var(--text-charcoal); border-color: var(--accent-emerald); }
+    ol.flow li.skipped { opacity: 0.5; text-decoration: line-through; }
+    ol.flow li h3 { margin: 0 0 var(--space-1); font-size: 1rem; }
+    .flow-detail { font-size: 0.9rem; color: var(--text-charcoal); }
+    .outcome { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); }
+    .outcome.warn { border-color: var(--accent-rose); color: var(--accent-rose); }
+    .outcome.quiet { border-color: var(--accent-emerald); color: var(--accent-emerald); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Ask before http on by default</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v154 · security · illustrative walkthrough</p>
+    <h1>Warning flow walkthrough</h1>
+    <p class="lede">What actually happens between "user follows an <code>http://</code> link" and "page on screen" in Chrome 154. The host classifier below is real, runnable logic mirroring the exemption rules; the interstitial step is an <strong>illustration</strong> — a page cannot embed or trigger Chrome's real warning UI, and this one does not pretend to.</p>
+  </header>
+
+  <p class="note"><strong>Illustration, clearly labelled.</strong> The step-through models documented behaviour (HTTPS-Upgrades with its ~3s fallback timer, the Balanced-mode exemptions, the <code>HttpsOnlyMode</code> policy states). To see the real interstitial: in Chrome 154+, visit a public HTTP-only site, e.g. from <code>chrome://settings/security</code> → "Always Use Secure Connections". On older channels enable <code>chrome://flags/#https-first-balanced-mode</code>.</p>
+
+  <section class="stage" aria-labelledby="setup-title">
+    <h2 id="setup-title">1 · Choose the navigation</h2>
+    <div class="grid2">
+      <div>
+        <label for="url">Typed / clicked URL</label>
+        <input type="text" id="url" value="http://example.com/news" autocomplete="off" spellcheck="false">
+      </div>
+      <div>
+        <label for="server">What the server actually supports</label>
+        <select id="server">
+          <option value="https-ok">HTTPS works (most sites)</option>
+          <option value="http-only" selected>HTTP only — nothing on port 443</option>
+          <option value="https-bad">HTTPS answers with an invalid certificate</option>
+        </select>
+      </div>
+      <div>
+        <label for="mode">Always Use Secure Connections mode</label>
+        <select id="mode">
+          <option value="balanced" selected>Balanced — the Chrome 154 default</option>
+          <option value="strict">Strict (user opt-in / policy force_enabled)</option>
+          <option value="off">Off (policy disallowed)</option>
+        </select>
+      </div>
+      <div>
+        <label for="allowlist">Host in HttpAllowlist / user clicked "Continue" before?</label>
+        <select id="allowlist">
+          <option value="no" selected>No</option>
+          <option value="yes">Yes — allowlisted</option>
+        </select>
+      </div>
+    </div>
+    <p>Host classification (real logic, applied to your URL):</p>
+    <p class="classify" id="classify" aria-live="polite"></p>
+  </section>
+
+  <section class="stage" aria-labelledby="flow-title">
+    <h2 id="flow-title">2 · Step through what Chrome does</h2>
+    <div class="controls">
+      <button type="button" id="next">Next step</button>
+      <button type="button" id="back" class="secondary" disabled>Back</button>
+      <button type="button" id="reset" class="secondary">Restart</button>
+    </div>
+    <ol class="flow" id="flow"></ol>
+    <p class="outcome" id="outcome" aria-live="polite">Press "Next step" to begin.</p>
+  </section>
+
+  <section><h2>the classifier, for real</h2><pre tabindex="0"><code>// Balanced mode skips the warning when HTTPS can't reasonably be
+// expected. Mirrored from the Chromium behaviour:
+function exemption(host) {
+  if (host === "localhost" || host.endsWith(".localhost") ||
+      host === "127.0.0.1" || host === "[::1]") return "loopback";
+  if (!host.includes(".")) return "single-label";   // http://router
+  if (isPrivateIPv4(host)) return "private-ip";     // 10/8, 172.16/12,
+                                                    // 192.168/16, 169.254/16
+  if (host.endsWith(".local")) return "mdns-local";
+  return null;  // public host — the warning applies
+}
+// Plus: HttpAllowlist policy entries and hosts the user already
+// clicked through ("Continue to site" is remembered).</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5143933628841984" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://chromeenterprise.google/policies/#HttpsOnlyMode" target="_blank" rel="noopener">HttpsOnlyMode policy</a></li>
+    <li><a href="https://blog.chromium.org/2023/08/towards-https-by-default.html" target="_blank" rel="noopener">Chromium blog: Towards HTTPS by default</a></li>
+    <li><a href="../https-migration-toolkit/">HTTPS migration toolkit</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[ask-http:flow]';
+
+  function isPrivateIPv4(host) {
+    const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!m) return false;
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+
+  function classify(raw) {
+    let url;
+    try {
+      url = new URL(/^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : 'http://' + raw);
+    } catch {
+      return { error: `not a parseable URL: ${raw}` };
+    }
+    const host = url.hostname;
+    let exemption = null;
+    if (host === 'localhost' || host.endsWith('.localhost') || host === '127.0.0.1' || host === '[::1]') exemption = 'loopback';
+    else if (host.match(/^\d{1,3}(\.\d{1,3}){3}$/) && isPrivateIPv4(host)) exemption = 'private IP range';
+    else if (!host.includes('.')) exemption = 'single-label hostname';
+    else if (host.endsWith('.local')) exemption = '.local (mDNS)';
+    return { url, host, scheme: url.protocol, exemption };
+  }
+
+  function buildSteps() {
+    const c = classify(document.getElementById('url').value.trim());
+    const server = document.getElementById('server').value;
+    const mode = document.getElementById('mode').value;
+    const allowlisted = document.getElementById('allowlist').value === 'yes';
+
+    const cEl = document.getElementById('classify');
+    if (c.error) {
+      cEl.textContent = c.error;
+      return { steps: [], outcome: { cls: '', text: 'Fix the URL to step through the flow.' } };
+    }
+    cEl.textContent = `host "${c.host}" → ${c.exemption ? 'EXEMPT (' + c.exemption + ')' : 'public host — warning rules apply'}; scheme ${c.scheme}`;
+
+    const steps = [];
+    const done = (title, detail) => steps.push({ title, detail });
+
+    if (c.scheme === 'https:') {
+      done('Navigation starts', `The URL is already https — ${c.url.href}`);
+      done('No upgrade needed', 'Ask-before-HTTP never enters the picture for https navigations.');
+      return { steps, outcome: { cls: 'quiet', text: 'Loads normally. Nothing new in Chrome 154 for this navigation.' } };
+    }
+
+    done('Navigation starts', `Plaintext target: ${c.url.href}`);
+
+    if (mode === 'off') {
+      done('Policy check', 'HttpsOnlyMode is "disallowed" — the admin switched the feature off. Chrome may still silently attempt the HTTPS-Upgrades rewrite, but no warning will ever show.');
+      return { steps, outcome: { cls: 'warn', text: 'Loads over plaintext HTTP, no ask. The policy value "disallowed" disables Always Use Secure Connections entirely.' } };
+    }
+
+    done('Silent HTTPS upgrade attempt', 'Chrome rewrites the request to https:// and tries it first (the HttpsUpgrades feature). A fallback timer runs — around 3 seconds, 5 for Ask-before-HTTP navigations — in case the https attempt hangs.');
+
+    if (server === 'https-ok') {
+      done('HTTPS attempt succeeds', 'The server answered on 443 with a valid certificate. The http URL never touched the network.');
+      return { steps, outcome: { cls: 'quiet', text: 'Loads over https. The user asked for http and got https, silently — this is the common case and shows no UI at all.' } };
+    }
+
+    done('HTTPS attempt fails', server === 'http-only'
+      ? 'Nothing answers on port 443 (or it times out). Chrome falls back toward plaintext http.'
+      : 'Port 443 answers but the certificate is invalid. The upgrade cannot be trusted, so Chrome falls back toward plaintext http.');
+
+    if (allowlisted) {
+      done('Exemption check', 'The host is in HttpAllowlist (or the user previously chose "Continue to site", which is remembered). No warning.');
+      return { steps, outcome: { cls: 'warn', text: 'Loads over plaintext HTTP without asking — explicitly allowlisted.' } };
+    }
+
+    if (mode === 'balanced' && c.exemption) {
+      done('Exemption check', `Balanced mode does not warn where HTTPS can't reasonably be expected. This host is exempt: ${c.exemption}.`);
+      return { steps, outcome: { cls: 'warn', text: 'Loads over plaintext HTTP, no ask. Strict mode WOULD warn here — that is the entire difference between the two modes.' } };
+    }
+
+    done('Exemption check', mode === 'strict'
+      ? 'Strict mode warns on every http fallback — no exemptions for local or single-label hosts.'
+      : 'Public hostname, not allowlisted — no exemption applies.');
+    done('THE ASK — full-page warning (illustration)', '"The site you’re trying to visit doesn’t support a secure connection." Chrome shows a full-page interstitial before any http request is sent. This is browser UI: a web page cannot embed, style, or detect it — which is the point.');
+
+    return {
+      steps,
+      outcome: {
+        cls: 'warn',
+        text: 'The user chooses: "Continue to site" loads the plaintext page (and is remembered for this host), "Go back" abandons the navigation. This choice — made before any insecure bytes travel — is what Chrome 154 turns on by default.',
+      },
+    };
+  }
+
+  let steps = [];
+  let cursor = -1;
+  let outcome = null;
+
+  function render() {
+    const list = document.getElementById('flow');
+    list.innerHTML = '';
+    steps.forEach((s, i) => {
+      const li = document.createElement('li');
+      li.className = i < cursor ? 'done' : i === cursor ? 'current' : '';
+      if (i === cursor) li.setAttribute('aria-current', 'step');
+      const h = document.createElement('h3');
+      h.textContent = `${i + 1}. ${s.title}`;
+      const p = document.createElement('p');
+      p.className = 'flow-detail';
+      p.textContent = i <= cursor ? s.detail : '…';
+      li.append(h, p);
+      list.append(li);
+    });
+    const out = document.getElementById('outcome');
+    if (cursor >= steps.length - 1 && outcome) {
+      out.className = 'outcome ' + outcome.cls;
+      out.textContent = 'Outcome: ' + outcome.text;
+    } else {
+      out.className = 'outcome';
+      out.textContent = cursor < 0 ? 'Press "Next step" to begin.' : `Step ${cursor + 1} of ${steps.length}. Keep going.`;
+    }
+    document.getElementById('back').disabled = cursor <= 0;
+    document.getElementById('next').disabled = cursor >= steps.length - 1;
+  }
+
+  function rebuild() {
+    const built = buildSteps();
+    steps = built.steps;
+    outcome = built.outcome;
+    cursor = steps.length ? Math.min(cursor, -1) : -1;
+    cursor = -1;
+    render();
+    window.showcaseTelemetry?.assert('ask-http-flow-built', steps.length > 0 || !!built.outcome, { steps: steps.length });
+  }
+
+  document.getElementById('next').addEventListener('click', () => { cursor = Math.min(cursor + 1, steps.length - 1); render(); });
+  document.getElementById('back').addEventListener('click', () => { cursor = Math.max(cursor - 1, 0); render(); });
+  document.getElementById('reset').addEventListener('click', () => { cursor = -1; render(); });
+  for (const id of ['url', 'server', 'mode', 'allowlist']) {
+    document.getElementById(id).addEventListener('input', rebuild);
+  }
+
+  rebuild();
+  if (new URLSearchParams(location.search).get('autorun') === '1') {
+    while (cursor < steps.length - 1) cursor += 1;
+    render();
+  }
+  console.log(`${LOG} ready — ${steps.length} steps for the default scenario`);
+})();
+</script>
+</body>
+</html>

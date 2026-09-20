@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reconnect lifecycle — BluetoothRemoteGATTServer EventTarget — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button.secondary { background: var(--bg-stone); color: var(--text-black); }
+    button[disabled] { opacity: 0.55; }
+    .readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); margin: 0; }
+    .readout div { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); min-inline-size: 0; }
+    .readout dt { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); overflow-wrap: anywhere; }
+    .readout dd { margin: var(--space-1) 0 0; font-size: 1.2rem; font-weight: 700; overflow-wrap: anywhere; }
+    .readout dd.good { color: var(--accent-emerald); }
+    .support { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); }
+    .support.yes { border-color: var(--accent-emerald); color: var(--accent-emerald); }
+    .support.no { border-color: var(--accent-rose); color: var(--accent-rose); }
+    .log { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); max-height: 260px; overflow-y: auto; font-family: var(--font-mono); font-size: 0.8rem; }
+    .log li { list-style: none; margin-block-end: var(--space-1); overflow-wrap: anywhere; }
+    .log li.event { color: var(--accent-blue); font-weight: 700; }
+    .log li.error { color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Web Bluetooth: Make BluetoothRemoteGATTServer an EventTarget</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v157 · web bluetooth · needs hardware for the full path</p>
+    <h1>Reconnect lifecycle</h1>
+    <p class="lede">The spec marks <code>device.gatt</code> as <code>[SameObject]</code>: every read returns the <em>same</em> server instance, across disconnects and reconnects. Combined with the server now being an <code>EventTarget</code>, that yields the killer property of this design — <strong>attach a connection-level listener once and it survives every reconnect</strong>. This page proves the identity on real hardware and demonstrates the backoff-reconnect pattern that relies on it.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="sup-title">
+    <h2 id="sup-title">Prerequisites</h2>
+    <p class="support" id="support" aria-live="polite">probing…</p>
+    <p class="note" id="support-detail"></p>
+  </section>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">Prove it on a device</h2>
+    <p class="note"><strong>Opens Chrome's device chooser.</strong> After connecting, use "Drop &amp; auto-reconnect" (or power-cycle the device) and watch: the reconnect resolves the <em>same</em> server object (identity check runs each cycle), and the listener attached before the first drop keeps firing after reconnection without being re-attached.</p>
+    <div class="controls">
+      <button type="button" id="pair">Choose a device</button>
+      <button type="button" id="drop" class="secondary" disabled>Drop &amp; auto-reconnect</button>
+      <button type="button" id="stop" class="secondary" disabled>Stop reconnecting</button>
+    </div>
+    <dl class="readout">
+      <div><dt>device.gatt === first ref</dt><dd id="out-same">—</dd></div>
+      <div><dt>reconnect cycles</dt><dd id="out-cycles">0</dd></div>
+      <div><dt>listener re-attached?</dt><dd id="out-reattach">never (that's the point)</dd></div>
+      <div><dt>server.connected</dt><dd id="out-conn">—</dd></div>
+    </dl>
+    <h3>Log</h3>
+    <ul class="log" id="log" aria-live="polite" aria-label="Reconnect log"><li>Nothing yet.</li></ul>
+  </section>
+
+  <section><h2>the pattern</h2><pre tabindex="0"><code>const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true });
+const server = device.gatt;          // [SameObject] — stable for the device's life
+
+// Attach ONCE. Survives every reconnect because the object survives.
+server.addEventListener("maxwritewithoutresponsesizechanged", onSizeChange);
+
+device.addEventListener("gattserverdisconnected", async () =&gt; {
+  for (let delay = 250; delay &lt;= 8000; delay *= 2) {   // exponential backoff
+    await new Promise((r) =&gt; setTimeout(r, delay));
+    try {
+      await server.connect();        // same object, fresh connection
+      return;                        // listener above is still live
+    } catch { /* next backoff step */ }
+  }
+  showOffline();
+});
+
+// The stale-listener bug this design prevents: with a NEW server object
+// per connection you would re-attach listeners each time — forget one
+// path and a renegotiated write size silently truncates your queue.</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5138797158334464" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://pr-preview.s3.amazonaws.com/hjanuschka/web-bluetooth/pull/672.html#bluetoothremotegattserver" target="_blank" rel="noopener">Spec PR preview ([SameObject] readonly attribute BluetoothDevice device)</a></li>
+    <li><a href="/v157/web-bluetooth-bluetoothremotegattserver-maxwritewithoutresponsesize/size-change-event/">Sibling demo: handling a size change mid-transfer</a></li>
+    <li><a href="../live-server-events/">Live server events</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[gatt-eventtarget:reconnect]';
+  const logList = document.getElementById('log');
+  let device = null;
+  let firstServerRef = null;
+  let cycles = 0;
+  let reconnecting = false;
+  let stopFlag = false;
+
+  function line(text, kind) {
+    if (logList.children.length === 1 && logList.firstElementChild.textContent === 'Nothing yet.') logList.innerHTML = '';
+    const li = document.createElement('li');
+    if (kind) li.className = kind;
+    li.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
+    logList.prepend(li);
+    while (logList.children.length > 50) logList.lastElementChild.remove();
+    console.log(`${LOG} ${text}`);
+  }
+
+  async function reportSupport() {
+    const hasApi = 'bluetooth' in navigator;
+    const hasIface = typeof globalThis.BluetoothRemoteGATTServer !== 'undefined';
+    const isET = hasIface && BluetoothRemoteGATTServer.prototype instanceof EventTarget;
+    const secure = globalThis.isSecureContext;
+    const support = document.getElementById('support');
+    const ready = hasApi && secure;
+    support.className = `support ${ready ? 'yes' : 'no'}`;
+    support.textContent = ready
+      ? `Web Bluetooth is available${isET ? ' and the server inherits EventTarget (157 contract present)' : ', but the server does not inherit EventTarget here (pre-157: the identity check still runs; the once-attached listener pattern does not)'}.`
+      : 'The hardware flow cannot run in this context.';
+    document.getElementById('support-detail').textContent = !hasApi
+      ? 'navigator.bluetooth is absent — on desktop Linux enable chrome://flags/#enable-experimental-web-platform-features or launch with --enable-blink-features=WebBluetooth; on iOS/Firefox/Safari the API does not exist. Honest unsupported branch: nothing below will pretend to connect.'
+      : !secure
+      ? 'Secure context required — serve over https or localhost.'
+      : 'Chooser needs a user gesture and a device in range. The [SameObject] identity check runs on whatever device you pick.';
+    document.getElementById('pair').disabled = !ready;
+    window.showcaseTelemetry?.assert('reconnect-support-probed', true, { hasApi, isET, secure });
+  }
+
+  async function reconnectWithBackoff(server) {
+    if (reconnecting) return;
+    reconnecting = true;
+    document.getElementById('stop').disabled = false;
+    for (let delay = 250; delay <= 8000 && !stopFlag; delay *= 2) {
+      line(`waiting ${delay}ms before reconnect attempt`);
+      await new Promise((r) => setTimeout(r, delay));
+      if (stopFlag) break;
+      try {
+        await server.connect();
+        cycles += 1;
+        document.getElementById('out-cycles').textContent = String(cycles);
+        document.getElementById('out-conn').textContent = String(server.connected);
+        const same = device.gatt === firstServerRef;
+        document.getElementById('out-same').textContent = String(same);
+        document.getElementById('out-same').className = same ? 'good' : '';
+        line(`reconnected — device.gatt === firstRef: ${same}; listener from before the drop is still attached (never re-attached)`, 'event');
+        window.showcaseTelemetry?.assert('reconnect-same-object', same, { cycles });
+        reconnecting = false;
+        document.getElementById('stop').disabled = true;
+        document.getElementById('drop').disabled = false;
+        return;
+      } catch (error) {
+        line(`connect() failed (${error.name}) — backing off`, 'error');
+      }
+    }
+    reconnecting = false;
+    document.getElementById('stop').disabled = true;
+    line(stopFlag ? 'reconnect loop stopped by user' : 'backoff exhausted — device is offline. Honest terminal state; press "Drop & auto-reconnect" to retry.', 'error');
+    stopFlag = false;
+  }
+
+  document.getElementById('pair').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      line('requestDevice() — chooser open');
+      device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true });
+      firstServerRef = device.gatt;
+      line(`chose ${device.name || '(unnamed)'} — capturing device.gatt as the identity reference`);
+      await firstServerRef.connect();
+      document.getElementById('out-conn').textContent = String(firstServerRef.connected);
+      document.getElementById('out-same').textContent = 'true (first read)';
+      document.getElementById('out-same').className = 'good';
+      document.getElementById('drop').disabled = false;
+
+      if (typeof firstServerRef.addEventListener === 'function') {
+        firstServerRef.addEventListener('maxwritewithoutresponsesizechanged', () => {
+          line(`server event fired (size now ${firstServerRef.maxWriteWithoutResponseSize}) — through the ONCE-attached listener, cycle ${cycles}`, 'event');
+          window.showcaseTelemetry?.assert('reconnect-listener-survived', true, { cycles });
+        });
+        line('listener attached ONCE on the server — it will never be re-attached in this session');
+      } else {
+        line('pre-157 build: server has no addEventListener — identity check still demonstrable, listener persistence is not (honest fallback)', 'error');
+      }
+
+      device.addEventListener('gattserverdisconnected', () => {
+        document.getElementById('out-conn').textContent = 'false';
+        line('gattserverdisconnected (on the device) — starting backoff reconnect against the SAME server object');
+        reconnectWithBackoff(firstServerRef);
+      });
+      window.showcaseTelemetry?.assert('reconnect-connected', true, {});
+    } catch (error) {
+      line(error.name === 'NotFoundError'
+        ? 'no device chosen (chooser dismissed) — normal outcome'
+        : `${error.name}: ${error.message}`, error.name === 'NotFoundError' ? undefined : 'error');
+      button.disabled = false;
+      window.showcaseTelemetry?.assert('reconnect-pair-ended', true, { name: error.name });
+    }
+  });
+
+  document.getElementById('drop').addEventListener('click', () => {
+    if (device?.gatt?.connected) {
+      document.getElementById('drop').disabled = true;
+      line('disconnect() called deliberately — expect gattserverdisconnected, then auto-reconnect');
+      device.gatt.disconnect();
+    }
+  });
+  document.getElementById('stop').addEventListener('click', () => { stopFlag = true; });
+
+  reportSupport();
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>

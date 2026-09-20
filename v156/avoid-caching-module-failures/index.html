@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Avoid caching module failures — Chrome 156 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v156/">&larr; Chrome 156</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v156 · javascript · modules</p>
+    <h1>Avoid caching module failures</h1>
+    <p class="lede">Until now, a module fetch that failed — a dropped connection, a 404, a server hiccup — was cached in the module map <em>forever</em>: every later <code>import()</code> of the same URL rejected instantly without touching the network, for the whole life of the page. Chrome 156 removes failed fetches from the module map, so calling <code>import()</code> again actually retries. There is no new API; the change is that retries finally reach the network.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./retry-refetch-probe/">Retry refetch probe</a></h3>
+      <p>The exact observable contract: import the same failing URL twice and count the <em>real network attempts</em> in the Resource Timing buffer. One entry after two imports means the failure was served from the module map cache (pre-156); two entries mean the browser refetched (the 156 behaviour). The verdict is read from <code>performance.getEntriesByType("resource")</code>, not from a version sniff.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./flaky-network-recovery/">Flaky network recovery</a></h3>
+      <p>The developer pain this fixes: a module fails to load on an unstable connection and a retry button recovers it. A service worker plays the unreliable network — it drops the first fetch and serves the module on the next — so on Chrome 156 the retry genuinely reaches the network layer and the widget mounts, while on older Chrome the worker never sees attempt #2 and the page shows exactly why.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./what-stays-cached/">What stays cached</a></h3>
+      <p>The spec change is precise: network and HTTP-status failures become retryable, but a module that <em>parses</em> badly is still cached, and successes were always cached. Three modules — a missing one, a served-but-broken one, and a healthy one — each imported twice, with the fetch counts to prove which category refetches.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Single-page apps import code on demand, and mobile networks drop requests. Before this change, one transient failure poisoned that module URL for the whole session: the HTML Standard's "fetch a single module script" stored a permanent null entry in the module map, so <code>import()</code> retries rejected from cache without a network request. The only workarounds were a full page reload or cache-busting query strings (<code>import(url + "?retry=1")</code>) — which then double-load the module once the network recovers, because each URL variant is a separate module map entry.</p>
+    <p>The spec change (<a href="https://github.com/whatwg/html/pull/10327" target="_blank" rel="noopener">whatwg/html#10327</a>, driven by developers hitting this at scale) removes the module map entry when the fetch fails with a network error or a non-ok status — but keeps it when the module was fetched fine and failed to <em>parse</em>, since refetching identical broken source would not help. Firefox and Safari ship the same behaviour. The failure itself still rejects; what changes is that a deliberate retry is now allowed to succeed.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>// There is no new syntax — import() simply becomes retryable.
+async function importWithRetry(url, attempts = 3) {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await import(url);
+    } catch (error) {
+      if (i === attempts) throw error;
+      // Pre-156: this retry rejects instantly from the module map cache.
+      // Chrome 156+: this retry issues a real network fetch.
+      await new Promise((r) => setTimeout(r, 250 * 2 ** i));
+    }
+  }
+}</code></pre>
+  </section>
+
+  <section><h2>research notes</h2>
+    <p>Behaviour grounded in the merged "fetch a single module script" algorithm (module map entries are now callback lists while fetching, and are <em>removed</em> when <code>bodyBytes</code> is null/failure or the response status is not ok), the explainer by Yoav Weiss, and live probing: on this project's Chromium&nbsp;141 baseline a second <code>import()</code> of a 404 URL adds no Resource Timing entry (cached failure), which is the pre-156 behaviour these demos detect. No runtime flag: the change rides the default module loader (<code>Blink&gt;HTML&gt;Modules</code>, tracking bug <a href="https://issues.chromium.org/issues/534781954" target="_blank" rel="noopener">534781954</a>). Use-case portfolio: exact-contract probe (basic + inspection), retry/recovery product flow (practical), failure-category matrix (edge/spec nuance); no new API surface exists to compose with, so a separate "advanced composition" page would duplicate the retry-helper pattern already shown.</p>
+  </section>
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5214647044145152" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/whatwg/html/pull/10327" target="_blank" rel="noopener">Spec change: whatwg/html#10327</a></li>
+    <li><a href="https://gist.github.com/yoavweiss/a54501545ab2ad22bfde0ebed02a115c" target="_blank" rel="noopener">Explainer (Yoav Weiss)</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/webappapis.html#fetch-a-single-module-script" target="_blank" rel="noopener">HTML Standard: fetch a single module script</a></li>
+    <li><a href="https://issues.chromium.org/issues/534781954" target="_blank" rel="noopener">Chromium tracking bug</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

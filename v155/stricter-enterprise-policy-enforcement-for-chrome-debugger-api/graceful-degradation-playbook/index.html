@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Graceful degradation playbook — chrome.debugger policy enforcement — Chrome 155 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button.secondary { background: var(--bg-stone); color: var(--text-black); }
+    button[aria-pressed="true"] { background: var(--accent-blue); color: var(--bg-ivory); }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); background: var(--bg-stone); }
+    .verdict strong.ok { color: var(--accent-emerald); }
+    .verdict strong.no { color: var(--accent-rose); }
+    pre.gen { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.8rem; overflow-x: auto; margin: 0; color: var(--text-black); }
+    .copied { font-weight: 700; color: var(--accent-emerald); }
+    h3 { margin-block-end: var(--space-1); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Stricter enterprise policy enforcement for chrome.debugger API</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v155 · extensions · developer tool</p>
+    <h1>Graceful degradation playbook</h1>
+    <p class="lede">Chrome 155 gives extension developers something they never had: a deterministic moment to fall back. Pick the capability you were using <code>chrome.debugger</code> for; get the restricted-environment alternative, the manifest permissions it needs, and the attach-rejection handler that catches the two stable error strings — copy-ready.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="pick-title">
+    <h2 id="pick-title">1 · What were you attaching a debugger for?</h2>
+    <div class="controls" role="group" aria-label="Capability">
+      <button type="button" class="cap" data-cap="inject" aria-pressed="true">Inject script / CSS</button>
+      <button type="button" class="cap" data-cap="network" aria-pressed="false">Modify network traffic</button>
+      <button type="button" class="cap" data-cap="screenshot" aria-pressed="false">Capture screenshots</button>
+      <button type="button" class="cap" data-cap="emulate" aria-pressed="false">Emulate device / conditions</button>
+      <button type="button" class="cap" data-cap="profile" aria-pressed="false">Profile / step-debug JS</button>
+    </div>
+    <div class="verdict" id="verdict" aria-live="polite"></div>
+  </section>
+
+  <section class="stage" aria-labelledby="code-title">
+    <h2 id="code-title">2 · The code to ship</h2>
+    <h3 id="code-label">manifest + fallback</h3>
+    <pre class="gen" id="gen" tabindex="0" aria-labelledby="code-label"></pre>
+    <div class="controls">
+      <button type="button" id="copy">Copy</button>
+      <span id="copy-note" role="status"></span>
+    </div>
+  </section>
+
+  <section class="stage" aria-labelledby="handler-title">
+    <h2 id="handler-title">3 · The attach handler every debugger extension needs now</h2>
+    <pre class="gen" tabindex="0"><code>async function attachOrFallback(tabId) {
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+    return { mode: "debugger" };
+  } catch (e) {
+    // Chrome 155+ deterministic policy rejections:
+    if (e.message === "Host access is restricted by policy." ||
+        e.message === "Screenshot capture is restricted by policy.") {
+      return { mode: "restricted", reason: e.message };
+    }
+    throw e; // real failures (bad tab, already attached...) still surface
+  }
+}</code></pre>
+    <p>Pre-155 there was nothing reliable to catch here — attach succeeded and commands failed later, one by one. Watch that difference in the <a href="../attach-gate-simulator/">simulator</a>.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5072259281715200" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://developer.chrome.com/docs/extensions/reference/api/scripting" target="_blank" rel="noopener">chrome.scripting reference</a></li>
+    <li><a href="https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest" target="_blank" rel="noopener">declarativeNetRequest reference</a></li>
+    <li><a href="../policy-composer/">ExtensionSettings policy composer</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[debugger-policy:playbook]';
+
+  const PLAYS = {
+    inject: {
+      verdict: '<strong class="ok">Full replacement exists.</strong> <code>chrome.scripting.executeScript</code> / <code>insertCSS</code> cover injection with per-origin host permissions that <code>runtime_blocked_hosts</code> can reason about granularly — blocked hosts fail individually instead of nuking the whole capability.',
+      code: `// manifest.json\n{\n  "permissions": ["scripting", "activeTab"],\n  "host_permissions": ["https://*.example.com/*"]\n}\n\n// service worker — replaces Runtime.evaluate via chrome.debugger\nconst [{ result }] = await chrome.scripting.executeScript({\n  target: { tabId },\n  func: () => document.title,\n});\n\nawait chrome.scripting.insertCSS({\n  target: { tabId },\n  css: "body { outline: 4px solid hotpink; }",\n});`,
+    },
+    network: {
+      verdict: '<strong class="ok">Declarative replacement exists.</strong> <code>declarativeNetRequest</code> blocks, redirects, and rewrites headers without seeing the traffic at all — which is exactly why enterprise policy tolerates it where a CDP network session is refused.',
+      code: `// manifest.json\n{\n  "permissions": ["declarativeNetRequest"],\n  "host_permissions": ["https://*.example.com/*"]\n}\n\n// replaces Network.* interception via chrome.debugger\nawait chrome.declarativeNetRequest.updateDynamicRules({\n  addRules: [{\n    id: 1,\n    condition: { urlFilter: "||tracker.example", resourceTypes: ["script"] },\n    action: { type: "block" },\n  }],\n});`,
+    },
+    screenshot: {
+      verdict: '<strong class="no">Partial.</strong> <code>tabs.captureVisibleTab</code> replaces <code>Page.captureScreenshot</code> for the visible viewport — but it honours the same <code>DisableScreenshots</code>/DLP policies, so where the 155 gate refused your attach for screenshot policy, capture stays unavailable. Detect the failure and say so; full-page composite capture has no non-debugger equivalent.',
+      code: `// manifest.json\n{\n  "permissions": ["activeTab"]\n}\n\n// replaces Page.captureScreenshot — visible viewport only\ntry {\n  const dataUrl = await chrome.tabs.captureVisibleTab(\n    undefined, { format: "png" });\n} catch (e) {\n  // Screenshot policy applies here too — tell the user honestly\n  showBanner("Screenshots are disabled by your organisation.");\n}`,
+    },
+    emulate: {
+      verdict: '<strong class="no">No general replacement.</strong> Device metrics, geolocation, and network-condition overrides are CDP-only (<code>Emulation.*</code>). In a restricted profile, degrade to what the open web offers: responsive layouts testable via CSS, <code>navigator.geolocation</code> with real permission prompts, and honest messaging that emulation is unavailable.',
+      code: `const attach = await attachOrFallback(tabId);\nif (attach.mode === "restricted") {\n  // No CDP emulation in this profile. Do NOT fake it —\n  // disable the emulation UI with the reason:\n  setPanelState("unavailable", attach.reason);\n} else {\n  await chrome.debugger.sendCommand({ tabId },\n    "Emulation.setDeviceMetricsOverride",\n    { width: 360, height: 740, deviceScaleFactor: 3, mobile: true });\n}`,
+    },
+    profile: {
+      verdict: '<strong class="no">No replacement.</strong> Breakpoints, stepping, and CPU profiles are the debugger itself (<code>Debugger.*</code>, <code>Profiler.*</code>). Under the 155 gate your extension knows at attach time that the profile is restricted — surface that state instead of a broken panel, and point users at DevTools itself where their admin allows it.',
+      code: `const attach = await attachOrFallback(tabId);\nif (attach.mode === "restricted") {\n  // One deterministic branch — new in Chrome 155:\n  renderEmptyState(\n    "Debugging is disabled by enterprise policy on this browser.",\n    { docsLink: "https://developer.chrome.com/docs/extensions/reference/api/debugger" }\n  );\n}`,
+    },
+  };
+
+  let cap = 'inject';
+  function render() {
+    const play = PLAYS[cap];
+    document.getElementById('verdict').innerHTML = play.verdict;
+    document.getElementById('gen').textContent = play.code;
+    document.getElementById('code-label').textContent = `manifest + fallback — ${document.querySelector(`.cap[data-cap="${cap}"]`).textContent}`;
+    console.log(`${LOG} cap=${cap}`);
+    window.showcaseTelemetry?.assert('playbook-rendered', play.code.length > 0, { cap });
+  }
+  document.querySelectorAll('.cap').forEach((b) =>
+    b.addEventListener('click', () => {
+      cap = b.dataset.cap;
+      document.querySelectorAll('.cap').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+      render();
+    })
+  );
+  document.getElementById('copy').addEventListener('click', async () => {
+    const note = document.getElementById('copy-note');
+    try {
+      await navigator.clipboard.writeText(document.getElementById('gen').textContent);
+      note.className = 'copied';
+      note.textContent = 'copied';
+    } catch (error) {
+      note.className = '';
+      note.textContent = `clipboard unavailable (${error.name}) — select and copy manually`;
+    }
+    setTimeout(() => { note.textContent = ''; }, 2500);
+  });
+
+  render();
+  if (new URLSearchParams(location.search).get('autorun') === '1') {
+    cap = 'screenshot';
+    document.querySelectorAll('.cap').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.cap === cap)));
+    render();
+  }
+  console.log(`${LOG} ready`);
+})();
+</script>
+</body>
+</html>
