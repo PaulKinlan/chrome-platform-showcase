@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flaky network recovery — Avoid caching module failures — Chrome 156 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); margin: 0; }
+    .buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    button.secondary { background: var(--bg-stone); color: var(--text-black); }
+    button:disabled { opacity: 0.55; }
+    label { display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 700; min-height: 44px; }
+    select { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font: inherit; min-height: 44px; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+    .counters { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); }
+    .counter { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); display: grid; gap: var(--space-1); }
+    .counter .num { font-size: 1.6rem; font-weight: 700; font-family: var(--font-mono); }
+    .counter .lbl { font-size: 0.8rem; color: var(--text-charcoal); }
+    .widget-slot { border: 2px dashed var(--border-black); padding: var(--space-3); min-height: 3.5rem; }
+    .widget-slot .placeholder { color: var(--text-muted); margin: 0; font-size: 0.9rem; }
+    .widget-slot .widget-live { margin: 0; font-weight: 700; color: var(--accent-emerald); }
+    .log { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); margin: 0; font-family: var(--font-mono); font-size: 0.78rem; max-block-size: 220px; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; list-style: none; display: grid; gap: var(--space-1); }
+    .log li { overflow-wrap: anywhere; }
+    .unsupported { border: 2px solid var(--accent-rose); padding: var(--space-3); }
+    .unsupported h3 { margin-top: 0; color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Avoid caching module failures</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v156 · retry · service worker as the network</p>
+    <h1>Flaky network recovery</h1>
+    <p class="lede">A widget module fails to load, and a retry button tries again. Pre-156, the retry never leaves the module map; on Chrome 156 it reaches the network and recovers. To make that observable on a healthy connection, a service worker plays the unreliable network — dropping the first fetch, serving the module on the next — while the page counts how many attempts the "network" actually saw.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="setup-title">
+    <h2 id="setup-title">The unreliable network</h2>
+    <p class="note">The service worker here is <strong>only the network simulator</strong> — the module-map behaviour under test is entirely the browser's. The worker fails the first <em>N</em> fetches of the widget URL with <code>Response.error()</code> (a genuine network error) and serves a real module afterwards. Whether a retry ever reaches the worker is exactly the contract Chrome 156 changed.</p>
+    <div class="buttons">
+      <label for="fail-count">drop the first
+        <select id="fail-count"><option value="1" selected>1 fetch</option><option value="2">2 fetches</option><option value="3">3 fetches</option></select>
+      </label>
+      <button type="button" id="setup">Install the network simulator</button>
+    </div>
+    <output id="sw-status" aria-live="polite">Service worker not installed yet.</output>
+  </section>
+
+  <section class="stage" aria-labelledby="app-title">
+    <h2 id="app-title">Load the widget, then retry</h2>
+    <div class="buttons">
+      <button type="button" id="load" disabled>Load widget module</button>
+      <button type="button" id="retry" disabled>Retry</button>
+      <button type="button" id="auto-retry" disabled>Auto-retry with backoff</button>
+      <button type="button" id="reset" class="secondary" disabled>Reset scenario</button>
+    </div>
+    <div class="counters">
+      <div class="counter"><span class="num" id="c-imports">0</span><span class="lbl">import() attempts by the page</span></div>
+      <div class="counter"><span class="num" id="c-network">0</span><span class="lbl">fetches the network layer saw</span></div>
+    </div>
+    <div class="widget-slot" id="widget-slot" aria-live="polite">
+      <p class="placeholder">The widget mounts here once its module finally evaluates.</p>
+    </div>
+    <output id="status" aria-live="polite">Install the network simulator first.</output>
+    <h3>event log</h3>
+    <ul class="log" id="log" aria-label="scenario event log"><li>waiting for setup</li></ul>
+  </section>
+
+  <section class="stage" aria-labelledby="pattern-title">
+    <h2 id="pattern-title">The retry pattern this enables</h2>
+    <pre tabindex="0"><code>async function importWithRetry(url, attempts = 3) {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await import(url);
+    } catch (error) {
+      if (i === attempts) throw error;
+      await new Promise((r) => setTimeout(r, 250 * 2 ** i)); // backoff
+    }
+  }
+}
+// Pre-156 this loop was pointless: attempts 2..n rejected from cache.
+// From Chrome 156 each attempt is a real fetch, so it recovers as soon
+// as the network does.</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5214647044145152" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/whatwg/html/pull/10327" target="_blank" rel="noopener">Spec change: whatwg/html#10327</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API" target="_blank" rel="noopener">MDN: Service Worker API</a></li>
+    <li><a href="../retry-refetch-probe/">Retry refetch probe</a></li>
+    <li><a href="../what-stays-cached/">What stays cached</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[module-failures:flaky-recovery]';
+  const statusEl = document.getElementById('status');
+  const swStatusEl = document.getElementById('sw-status');
+  const logEl = document.getElementById('log');
+  const slot = document.getElementById('widget-slot');
+  const buttons = {
+    setup: document.getElementById('setup'),
+    load: document.getElementById('load'),
+    retry: document.getElementById('retry'),
+    auto: document.getElementById('auto-retry'),
+    reset: document.getElementById('reset'),
+  };
+
+  let session = null;
+  let imports = 0;
+  let networkAttempts = 0;
+  let registration = null;
+
+  function log(line) {
+    if (logEl.firstChild && logEl.firstChild.textContent === 'waiting for setup') logEl.replaceChildren();
+    const li = document.createElement('li');
+    li.textContent = new Date().toLocaleTimeString() + ' — ' + line;
+    logEl.appendChild(li);
+    logEl.scrollTop = logEl.scrollHeight;
+    console.log(LOG + ' ' + line);
+  }
+
+  function counters() {
+    document.getElementById('c-imports').textContent = imports;
+    document.getElementById('c-network').textContent = networkAttempts;
+  }
+
+  function moduleURL() {
+    const fail = document.getElementById('fail-count').value;
+    return new URL('../flaky-modules/' + session + '/widget.js?fail=' + fail, location.href).href;
+  }
+
+  function unsupported(reason) {
+    swStatusEl.textContent = 'Service workers are not usable here (' + reason + '), so the unreliable-network scenario cannot run. The retry-refetch probe on the previous page shows the same contract without a service worker.';
+    for (const key of ['load', 'retry', 'auto', 'reset']) buttons[key].disabled = true;
+    window.showcaseTelemetry?.assert('flaky-recovery-sw-unavailable', true, { reason });
+  }
+
+  if (!('serviceWorker' in navigator)) {
+    buttons.setup.disabled = true;
+    unsupported('navigator.serviceWorker is missing — likely an insecure context');
+  }
+
+  navigator.serviceWorker?.addEventListener('message', (event) => {
+    const data = event.data || {};
+    if (data.type === 'network-attempt' && data.session === session) {
+      networkAttempts = data.attempt;
+      counters();
+      log('network layer saw fetch attempt #' + data.attempt +
+        (data.attempt <= data.failCount ? ' → dropped it (simulated outage)' : ' → served the module'));
+    }
+  });
+
+  buttons.setup.addEventListener('click', async () => {
+    buttons.setup.disabled = true;
+    try {
+      registration = await navigator.serviceWorker.register('../flaky-sw.js', { scope: '../' });
+      await navigator.serviceWorker.ready;
+      if (!navigator.serviceWorker.controller) {
+        // First install: the page is not yet controlled, so module fetches
+        // would bypass the worker. A one-time reload puts it in control.
+        swStatusEl.textContent = 'Service worker installed — reloading once so it controls this page…';
+        try { sessionStorage.setItem('flaky-recovery-autoresume', '1'); } catch { /* storage unavailable */ }
+        location.reload();
+        return;
+      }
+      startScenario();
+    } catch (error) {
+      buttons.setup.disabled = false;
+      unsupported(error.name + ': ' + error.message);
+    }
+  });
+
+  function startScenario() {
+    session = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+    imports = 0; networkAttempts = 0; counters();
+    slot.innerHTML = '<p class="placeholder">The widget mounts here once its module finally evaluates.</p>';
+    swStatusEl.textContent = 'Network simulator active. It will drop the first ' + document.getElementById('fail-count').value + ' fetch(es) of the widget module.';
+    statusEl.textContent = 'Ready — load the widget. The first attempt is guaranteed to fail at the network layer.';
+    buttons.load.disabled = false;
+    buttons.reset.disabled = false;
+    buttons.retry.disabled = true;
+    buttons.auto.disabled = true;
+    log('scenario started, session ' + session);
+    if (new URLSearchParams(location.search).has('autorun')) autoDrive();
+  }
+
+  async function autoDrive() {
+    // Deterministic post-setup sequence for headless verification: load the
+    // widget (first fetch is dropped), then retry.
+    await new Promise((r) => setTimeout(r, 300));
+    if (!buttons.load.disabled) { buttons.load.click(); }
+    await new Promise((r) => setTimeout(r, 800));
+    if (!buttons.retry.disabled) { buttons.retry.click(); }
+  }
+
+  async function attempt(kind) {
+    imports += 1;
+    counters();
+    const n = imports;
+    log('page called import() — attempt #' + n + ' (' + kind + ')');
+    try {
+      const mod = await import(moduleURL());
+      mod.mount(slot);
+      statusEl.textContent = 'Recovered: attempt #' + n + ' succeeded because the retry reached the network and the module evaluated. This is the Chrome 156 behaviour.';
+      log('import #' + n + ' RESOLVED — widget mounted');
+      window.showcaseTelemetry?.assert('flaky-recovery-recovered', typeof mod.mount === 'function',
+        { imports: n, networkAttempts });
+      buttons.retry.disabled = true;
+      buttons.auto.disabled = true;
+      return true;
+    } catch (error) {
+      // The service worker's "network-attempt" postMessage can land just after
+      // the import() rejection resolves; give it a beat before judging whether
+      // this attempt reached the network layer.
+      await new Promise((r) => setTimeout(r, 120));
+      const reachedNetwork = networkAttempts >= n;
+      log('import #' + n + ' rejected (' + error.name + ')' +
+        (reachedNetwork ? ' — the network layer did see this attempt' : ' — the network layer NEVER saw this attempt: the module map answered from its cached failure'));
+      statusEl.textContent = reachedNetwork
+        ? 'Attempt #' + n + ' failed at the (simulated) network. Retry — if this browser has the Chrome 156 behaviour, the retry will reach the network and recover.'
+        : 'Attempt #' + n + ' was rejected from the module map cache without a network request — the pre-156 behaviour. On this browser the module is unrecoverable until the page reloads; that is exactly what Chrome 156 fixes.';
+      if (!reachedNetwork) {
+        window.showcaseTelemetry?.assert('flaky-recovery-cached-failure-observed', true,
+          { imports: n, networkAttempts });
+      }
+      buttons.retry.disabled = false;
+      buttons.auto.disabled = false;
+      return false;
+    }
+  }
+
+  buttons.load.addEventListener('click', async () => {
+    buttons.load.disabled = true;
+    await attempt('initial load');
+  });
+  buttons.retry.addEventListener('click', async () => {
+    buttons.retry.disabled = true;
+    buttons.auto.disabled = true;
+    await attempt('manual retry');
+  });
+  buttons.auto.addEventListener('click', async () => {
+    buttons.retry.disabled = true;
+    buttons.auto.disabled = true;
+    for (let i = 0; i < 3; i++) {
+      const delay = 250 * 2 ** i;
+      log('auto-retry: waiting ' + delay + ' ms (exponential backoff)');
+      await new Promise((r) => setTimeout(r, delay));
+      if (await attempt('auto-retry ' + (i + 1) + '/3')) return;
+      const stillCached = networkAttempts < imports;
+      if (stillCached) {
+        log('auto-retry stopped early: retries are being answered from the cached failure, so more attempts cannot help on this browser.');
+        return;
+      }
+    }
+  });
+  buttons.reset.addEventListener('click', () => {
+    registration?.active?.postMessage({ type: 'reset', session });
+    startScenario();
+  });
+
+  function readFlag(key) {
+    try { return sessionStorage.getItem(key); } catch { return null; }
+  }
+  function clearFlag(key) {
+    try { sessionStorage.removeItem(key); } catch { /* storage unavailable */ }
+  }
+
+  // Resume after the one-time controlling reload.
+  if (readFlag('flaky-recovery-autoresume')) {
+    clearFlag('flaky-recovery-autoresume');
+    if (navigator.serviceWorker?.controller) {
+      navigator.serviceWorker.getRegistration('../').then((reg) => {
+        registration = reg || null;
+        buttons.setup.disabled = true;
+        startScenario();
+      });
+    }
+  }
+
+  // Verification hook: ?autorun=1 installs the simulator; the controlling
+  // reload preserves the query string, and startScenario() then drives the
+  // load → retry sequence via autoDrive() so headless screenshots capture it.
+  if (new URLSearchParams(location.search).has('autorun') && 'serviceWorker' in navigator &&
+      !readFlag('flaky-recovery-autoresume') && !buttons.setup.disabled) {
+    setTimeout(() => { if (!buttons.setup.disabled) buttons.setup.click(); }, 300);
+  }
+
+  console.log(LOG + ' ready');
+})();
+</script>
+</body>
+</html>
