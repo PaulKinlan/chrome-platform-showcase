@@ -7,10 +7,9 @@
 // resolves it; one that does not throws a SyntaxError at parse time. We report
 // the actual reason rather than sniffing navigator.userAgent.
 
-const PROBE_SOURCE =
-  'import defer * as ns from "data:text/javascript,export const ok = true;";' +
-  'export const tag = ns[Symbol.toStringTag];' +
-  'export const ok = true;';
+const PROBE_SOURCE = 'import defer * as ns from "data:text/javascript,export const ok = true;";' +
+  "export const tag = ns[Symbol.toStringTag];" +
+  "export const ok = true;";
 
 let cached = null;
 
@@ -19,7 +18,11 @@ export async function detectImportDefer() {
   const url = "data:text/javascript," + encodeURIComponent(PROBE_SOURCE);
   try {
     const mod = await import(url);
-    cached = { supported: true, tag: mod.tag ?? null, reason: "the import defer statement parsed and evaluated" };
+    cached = {
+      supported: true,
+      tag: mod.tag ?? null,
+      reason: "the import defer statement parsed and evaluated",
+    };
   } catch (error) {
     const name = error && error.name ? error.name : "Error";
     const message = error && error.message ? error.message : String(error);

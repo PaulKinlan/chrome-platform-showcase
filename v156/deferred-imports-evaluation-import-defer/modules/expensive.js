@@ -24,5 +24,6 @@ const at = performance.now();
 export const ready = true;
 export const checksum = Math.round(acc);
 export function describe() {
-  return "expensive.js evaluated at " + at.toFixed(1) + "ms (took " + (at - start).toFixed(1) + "ms of synchronous work)";
+  return "expensive.js evaluated at " + at.toFixed(1) + "ms (took " + (at - start).toFixed(1) +
+    "ms of synchronous work)";
 }
