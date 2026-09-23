@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Point-cloud splatting &amp; CAS contention analyzer — WebGPU: atomic-vec2u-min-max — Chrome 156 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .support { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .support.yes { color: var(--accent-emerald); border-color: var(--accent-emerald); }
+    .support.no { color: var(--accent-amber); border-color: var(--accent-amber); }
+    .controls-grid { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+    label.ctrl-card { display: flex; flex-direction: column; gap: var(--space-1); min-height: 44px; border: 2px solid var(--border-black); padding: var(--space-2); background: var(--bg-ivory); font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-black); }
+    input[type="range"], select.ctrl-select { min-height: 44px; accent-color: var(--accent-blue); font-family: var(--font-mono); }
+    select.ctrl-select { border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); padding: 0 var(--space-2); }
+    button.preset-btn { min-height: 44px; padding: var(--space-2) var(--space-3); border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); font-family: var(--font-mono); font-weight: 700; font-size: 0.82rem; cursor: pointer; }
+    button.preset-btn:hover, button.preset-btn:focus-visible { background: var(--accent-blue); color: var(--bg-paper); }
+    .chart-wrap { display: grid; justify-items: center; }
+    .chart-wrap svg { width: min(100%, 540px); height: auto; border: 2px solid var(--border-black); background: var(--bg-ivory); }
+    pre.rule { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-3); overflow-x: auto; margin: 0; font-size: 0.82rem; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; color: var(--text-black); }
+    th { background: var(--bg-stone); font-family: var(--font-mono); }
+    td.num { font-family: var(--font-mono); text-align: right; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.88rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebGPU: atomic-vec2u-min-max</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v156 · webgpu atomic-vec2u-min-max · point-cloud splatting &amp; migration</p>
+    <h1>Point-cloud splatting &amp; CAS contention analyzer</h1>
+    <p class="lede">Rendering millions of LiDAR or 3D Gaussian Splatting points in a compute shader requires updating both pixel depth and RGBA8 color atomically. Previously, developers had to choose between packing 16-bit depth + 16-bit RGB565 into <code>atomic&lt;u32&gt;</code> (causing severe Z-fighting) or running a two-buffer Compare-And-Swap (CAS) spin-loop that serializes SIMT threads under high overdraw. <code>atomicMin</code> on <code>atomic&lt;vec2u&gt;</code> executes a lock-free 64-bit update in 1 instruction per thread.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="bench-heading">
+    <h2 id="bench-heading">Overdraw contention &amp; Z-precision simulator</h2>
+    <p class="support" id="gpu-status" aria-live="polite"></p>
+
+    <div class="controls-grid">
+      <label class="ctrl-card" for="overdraw-slider">
+        <span>Overdraw contention (splats / pixel): <strong id="lbl-overdraw">16</strong></span>
+        <input type="range" id="overdraw-slider" min="2" max="64" step="2" value="16">
+      </label>
+
+      <label class="ctrl-card" for="baseline-range">
+        <span>Camera far-plane distance (meters): <strong id="lbl-distance">500</strong>m</span>
+        <input type="range" id="baseline-range" min="50" max="5000" step="50" value="500">
+      </label>
+
+      <label class="ctrl-card" for="kernel-mode">
+        <span>WGSL kernel snippet:</span>
+        <select id="kernel-mode" class="ctrl-select">
+          <option value="vec2u" selected>Chrome 156: 64-bit atomicMin(&amp;buf[p], vec2u(rgba8, depth32))</option>
+          <option value="u32-packed">Legacy 1: 32-bit packed (16-bit depth + 16-bit RGB565)</option>
+          <option value="cas-loop">Legacy 2: 32-bit atomicCompareExchangeWeak spin-loop</option>
+        </select>
+      </label>
+    </div>
+
+    <div>
+      <button type="button" class="preset-btn" id="btn-high-contention">Simulate Dense Splat Hotspot (64 splats/pixel at 2500m)</button>
+    </div>
+
+    <div class="chart-wrap">
+      <svg id="contention-svg" viewBox="0 0 520 190" role="img" aria-label="Bar chart comparing atomic instructions per pixel between 32-bit CAS spin-loop and 64-bit atomicMin on vec2u">
+      </svg>
+    </div>
+
+    <h3>Selected WGSL compute kernel</h3>
+    <pre class="rule" tabindex="0"><code id="kernel-code"></code></pre>
+
+    <table>
+      <caption>Architecture comparison across <span id="table-overdraw">16</span> overlapping splats/pixel</caption>
+      <thead>
+        <tr>
+          <th scope="col">metric</th>
+          <th scope="col">32-bit packed u32 (16+16)</th>
+          <th scope="col">32-bit CAS spin-loop</th>
+          <th scope="col">64-bit atomic&lt;vec2u&gt; (Chrome 156)</th>
+        </tr>
+      </thead>
+      <tbody id="bench-rows"></tbody>
+    </table>
+
+    <output id="bench-readout" aria-live="polite"></output>
+  </section>
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/4882016087703552" target="_blank" rel="noopener">ChromeStatus entry (4882016087703552)</a></li>
+    <li><a href="https://www.w3.org/TR/webgpu/#dom-gpufeaturename-atomic-vec2u-min-max" target="_blank" rel="noopener">W3C WebGPU: atomic-vec2u-min-max</a></li>
+    <li><a href="https://github.com/gpuweb/gpuweb/issues/5071" target="_blank" rel="noopener">WGSL specification issue (#5071)</a></li>
+    <li><a href="../depth-id-visibility-buffer/">64-bit depth + ID visibility buffer</a></li>
+    <li><a href="../wgsl-vec2u-endian-inspector/">WGSL vec2u 64-bit word-order &amp; endian inspector</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const gpuStatus = document.getElementById('gpu-status');
+  const overdrawSlider = document.getElementById('overdraw-slider');
+  const distanceSlider = document.getElementById('baseline-range');
+  const kernelMode = document.getElementById('kernel-mode');
+  const contentionSvg = document.getElementById('contention-svg');
+  const kernelCode = document.getElementById('kernel-code');
+  const benchRows = document.getElementById('bench-rows');
+  const benchReadout = document.getElementById('bench-readout');
+
+  async function probe() {
+    try {
+      const adapter = navigator.gpu ? await navigator.gpu.requestAdapter() : null;
+      const supported = Boolean(adapter && adapter.features && adapter.features.has('atomic-vec2u-min-max'));
+      gpuStatus.className = 'support ' + (supported ? 'yes' : 'no');
+      gpuStatus.textContent = supported
+        ? 'Hardware WebGPU adapter supports "atomic-vec2u-min-max": single-instruction 64-bit point-cloud splatting is available.'
+        : 'Hardware WebGPU adapter does not report "atomic-vec2u-min-max" in this browser session (requires Chrome 156+ with --enable-unsafe-webgpu). Interactive contention & Z-precision model is active below.';
+      window.showcaseTelemetry?.assert('point-cloud-probe', true, { supported });
+    } catch {
+      gpuStatus.className = 'support no';
+      gpuStatus.textContent = 'WebGPU unavailable; running point-cloud contention & Z-precision analyzer.';
+    }
+  }
+
+  function render() {
+    const k = Number(overdrawSlider.value);
+    const farMeters = Number(distanceSlider.value);
+    const selected = kernelMode.value;
+
+    document.getElementById('lbl-overdraw').textContent = String(k);
+    document.getElementById('lbl-distance').textContent = String(farMeters);
+    document.getElementById('table-overdraw').textContent = String(k);
+
+    // Expected atomic operations for K contending threads in a SIMT warp:
+    // Single hardware atomicMin(vec2u): K operations total (1 per thread, hardware coalesced)
+    // CAS spin-loop under warp contention: K * (K + 1) / 2 worst-case retries
+    const opsVec2u = k;
+    const opsCas = Math.round((k * (k + 1)) / 2);
+
+    // Depth resolution step size in millimeters at far plane:
+    const step16BitMm = ((farMeters * 1000) / 65535).toFixed(2);
+    const step32BitMm = ((farMeters * 1000) / 4294967295).toFixed(5);
+
+    contentionSvg.innerHTML = '';
+    const maxOps = Math.max(opsCas, 64);
+    const barWCas = Math.max(12, Math.round((opsCas / maxOps) * 340));
+    const barWVec = Math.max(12, Math.round((opsVec2u / maxOps) * 340));
+
+    const drawBar = (y, w, fill, label, valText) => {
+      const lbl = document.createElementNS(SVG_NS, 'text');
+      lbl.setAttribute('x', '16'); lbl.setAttribute('y', y + 22);
+      lbl.setAttribute('fill', 'var(--text-black)');
+      lbl.setAttribute('font-size', '12');
+      lbl.setAttribute('font-weight', '700');
+      lbl.textContent = label;
+      contentionSvg.appendChild(lbl);
+
+      const rect = document.createElementNS(SVG_NS, 'rect');
+      rect.setAttribute('x', '155'); rect.setAttribute('y', y);
+      rect.setAttribute('width', w); rect.setAttribute('height', '34');
+      rect.setAttribute('fill', fill);
+      rect.setAttribute('stroke', 'var(--border-black)');
+      rect.setAttribute('stroke-width', '2');
+      contentionSvg.appendChild(rect);
+
+      const v = document.createElementNS(SVG_NS, 'text');
+      v.setAttribute('x', 162 + w); v.setAttribute('y', y + 22);
+      v.setAttribute('fill', 'var(--text-black)');
+      v.setAttribute('font-size', '11');
+      v.setAttribute('font-weight', '700');
+      v.textContent = valText;
+      contentionSvg.appendChild(v);
+    };
+
+    drawBar(35, barWCas, 'var(--accent-rose)', '32-bit CAS spin-loop', `${opsCas} atomic ops`);
+    drawBar(105, barWVec, 'var(--accent-emerald)', '64-bit atomic<vec2u>', `${opsVec2u} atomic ops (1/splat)`);
+
+    if (selected === 'vec2u') {
+      kernelCode.textContent =
+        `enable atomic_vec2u_min_max;\n` +
+        `@group(0) @binding(0) var<storage, read_write> framebuf: array<atomic<vec2u>>;\n\n` +
+        `fn splatPoint(pixelIdx: u32, depth32: u32, rgba8: u32) {\n` +
+        `  // 1 instruction, full 32-bit Z precision + full 32-bit RGBA8 color:\n` +
+        `  atomicMin(&framebuf[pixelIdx], vec2u(rgba8, depth32));\n` +
+        `}`;
+    } else if (selected === 'u32-packed') {
+      kernelCode.textContent =
+        `@group(0) @binding(0) var<storage, read_write> framebuf: array<atomic<u32>>;\n\n` +
+        `fn splatPointLegacy16(pixelIdx: u32, depth16: u32, rgb565: u32) {\n` +
+        `  // Quantizes depth to 16 bits (${step16BitMm}mm steps -> Z-fighting) & loses alpha:\n` +
+        `  let packed32 = (depth16 << 16u) | (rgb565 & 0xFFFFu);\n` +
+        `  atomicMin(&framebuf[pixelIdx], packed32);\n` +
+        `}`;
+    } else {
+      kernelCode.textContent =
+        `@group(0) @binding(0) var<storage, read_write> lockBuf: array<atomic<u32>>;\n` +
+        `// Spin-loop serializes SIMT lanes (${opsCas} atomic ops for ${k} splats):\n` +
+        `loop {\n` +
+        `  let res = atomicCompareExchangeWeak(&lockBuf[pixelIdx], oldVal, newVal);\n` +
+        `  if (res.exchanged) { break; }\n` +
+        `}`;
+    }
+
+    const rows = [
+      ['Depth precision (bits)', '16-bit (65,536 buckets)', '32-bit float/uint', '32-bit float/uint (.y MSB)'],
+      ['Minimum depth step at ' + farMeters + 'm', `${step16BitMm} mm (visible Z-fighting)`, `${step32BitMm} mm`, `${step32BitMm} mm (sub-micron)`],
+      ['Payload capacity (bits)', '16-bit (RGB565, no alpha)', '32-bit (split buffer hazard)', '32-bit RGBA8 / Triangle ID (.x LSB)'],
+      ['Atomic ops per pixel (' + k + ' splats)', `${k} ops`, `${opsCas} ops (${(opsCas / k).toFixed(1)}x amplification)`, `${opsVec2u} ops (lock-free 1.0x)`]
+    ];
+
+    benchRows.innerHTML = '';
+    for (const [m, c1, c2, c3] of rows) {
+      const tr = document.createElement('tr');
+      const th = document.createElement('th'); th.scope = 'row'; th.textContent = m;
+      const td1 = document.createElement('td'); td1.className = 'num'; td1.textContent = c1;
+      const td2 = document.createElement('td'); td2.className = 'num'; td2.textContent = c2;
+      const td3 = document.createElement('td'); td3.className = 'num'; td3.textContent = c3;
+      tr.append(th, td1, td2, td3);
+      benchRows.appendChild(tr);
+    }
+
+    benchReadout.textContent =
+      `At ${k} splats/pixel over a ${farMeters}m scene, 64-bit atomicMin(&buf[p], vec2u(rgba8, depth32)) reduces atomic bus traffic by ${(opsCas / opsVec2u).toFixed(1)}x vs a CAS spin-loop (${opsVec2u} vs ${opsCas} ops) while improving depth resolution from ${step16BitMm}mm (16-bit) to ${step32BitMm}mm (32-bit).`;
+  }
+
+  [overdrawSlider, distanceSlider, kernelMode].forEach((el) => el.addEventListener('input', render));
+  document.getElementById('btn-high-contention').addEventListener('click', () => {
+    overdrawSlider.value = '64';
+    distanceSlider.value = '2500';
+    render();
+  });
+
+  probe();
+  render();
+})();
+</script>
+</body>
+</html>

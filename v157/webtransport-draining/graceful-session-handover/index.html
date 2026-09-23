@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Graceful session handover — WebTransport draining — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+      display: grid;
+      gap: var(--space-3);
+    }
+    .note {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      color: var(--text-charcoal);
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+      align-items: center;
+    }
+    .controls label {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2);
+      font-weight: 600;
+      min-height: 44px;
+    }
+    select, input[type="number"] {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-black);
+      padding: var(--space-1) var(--space-2);
+      font: inherit;
+      min-height: 44px;
+    }
+    button {
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: var(--space-2) var(--space-3);
+      font: inherit;
+      font-weight: 700;
+      min-height: 44px;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: var(--bg-stone);
+      color: var(--text-black);
+    }
+    button[disabled] {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+    .session-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: var(--space-3);
+    }
+    .session-card {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: var(--space-3);
+      display: grid;
+      gap: var(--space-2);
+    }
+    .session-card h3 {
+      margin: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: var(--space-2);
+      font-size: 1rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-black);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .table-wrap {
+      overflow-x: auto;
+      max-width: 100%;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--bg-paper);
+    }
+    caption {
+      text-align: left;
+      font-weight: 700;
+      margin-bottom: var(--space-2);
+    }
+    th, td {
+      border: 1px solid var(--border-black);
+      padding: var(--space-2);
+      text-align: left;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+    }
+    th {
+      background: var(--bg-stone);
+      color: var(--text-black);
+    }
+    output {
+      display: block;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      padding: var(--space-3);
+      white-space: pre-wrap;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+    }
+    .deferred-section {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 260px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport draining</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v157 · webtransport draining</p>
+    <h1>Graceful session handover</h1>
+    <p class="lede">Probe the real <code>WebTransport.prototype.draining</code> getter in your browser, then drive a zero-downtime session migration: when Session A receives an HTTP/3 <code>DRAIN_WEBTRANSPORT_SESSION</code> (<code>0x78ae</code>) capsule, its <code>draining</code> Promise resolves, replacement Session B opens immediately for new bidirectional streams, and in-flight streams on Session A finish without dropping a byte.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="probe-heading">
+    <h2 id="probe-heading">1. Live <code>WebTransport.prototype.draining</code> IDL probe</h2>
+    <p class="note"><strong>Contract tested:</strong> Checks whether <code>WebTransport</code> exists, whether <code>'draining' in WebTransport.prototype</code> is present, and whether <code>Object.getOwnPropertyDescriptor(WebTransport.prototype, 'draining')?.get</code> is a getter function alongside <code>ready</code> and <code>closed</code>.</p>
+    <div class="controls">
+      <button type="button" id="run-probe-btn">Re-run IDL probe</button>
+    </div>
+    <output id="probe-output" aria-live="polite">Running WebTransport.prototype.draining support probe...</output>
+  </section>
+
+  <section class="stage" aria-labelledby="lab-heading">
+    <h2 id="lab-heading">2. Zero-downtime session handover simulator</h2>
+    <p class="note">Spawn bidirectional streams, then trigger <code>DRAIN_WEBTRANSPORT_SESSION (0x78ae)</code> on Session A. Existing streams remain open on Session A until they complete, while newly created streams automatically route to replacement Session B.</p>
+
+    <div class="controls">
+      <label for="stream-duration-select">Stream work duration
+        <select id="stream-duration-select">
+          <option value="1800">1.8 s (fast RPC)</option>
+          <option value="3200" selected>3.2 s (media segment)</option>
+          <option value="5000">5.0 s (bulk upload)</option>
+        </select>
+      </label>
+      <button type="button" id="spawn-stream-btn">Open bidirectional stream</button>
+      <button type="button" id="trigger-drain-btn" class="secondary">Send DRAIN_WEBTRANSPORT_SESSION (0x78ae)</button>
+      <button type="button" id="reset-lab-btn" class="secondary">Reset sessions</button>
+    </div>
+
+    <div class="session-grid">
+      <article class="session-card" aria-labelledby="session-a-title">
+        <h3 id="session-a-title"><span>Session A (primary edge node)</span> <span class="badge" id="session-a-badge">READY</span></h3>
+        <p><code>ready</code>: <strong id="session-a-ready">resolved</strong> · <code>draining</code>: <strong id="session-a-draining">pending</strong> · <code>closed</code>: <strong id="session-a-closed">pending</strong></p>
+        <p>Active streams: <strong id="session-a-active">0</strong> · Completed: <strong id="session-a-completed">0</strong></p>
+      </article>
+
+      <article class="session-card" aria-labelledby="session-b-title">
+        <h3 id="session-b-title"><span>Session B (replacement node)</span> <span class="badge" id="session-b-badge">STANDBY</span></h3>
+        <p><code>ready</code>: <strong id="session-b-ready">not opened</strong> · <code>draining</code>: <strong id="session-b-draining">not opened</strong> · <code>closed</code>: <strong id="session-b-closed">not opened</strong></p>
+        <p>Active streams: <strong id="session-b-active">0</strong> · Completed: <strong id="session-b-completed">0</strong></p>
+      </article>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <caption>Live bidirectional stream routing table</caption>
+        <thead>
+          <tr>
+            <th scope="col">Stream ID</th>
+            <th scope="col">Routed Session</th>
+            <th scope="col">State</th>
+            <th scope="col">Progress</th>
+          </tr>
+        </thead>
+        <tbody id="stream-tbody">
+          <tr><td colspan="4">No streams opened yet. Click "Open bidirectional stream" to start traffic.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <output id="handover-log" aria-live="polite">Session A is READY and routing all new createBidirectionalStream() calls.</output>
+  </section>
+
+  <section class="deferred-section"><h2>code path</h2>
+    <pre tabindex="0"><code>class DrainingAwareTransportPool {
+  constructor(url) {
+    this.url = url;
+    this.current = this.#connect();
+  }
+
+  #connect() {
+    const wt = new WebTransport(this.url);
+    if ("draining" in wt) {
+      wt.draining.then(() =&gt; {
+        // Server sent HTTP/3 DRAIN_WEBTRANSPORT_SESSION (0x78ae).
+        // Immediately warm up a replacement session for new streams:
+        const oldSession = wt;
+        this.current = this.#connect();
+        // Existing streams on oldSession continue until they finish.
+      });
+    }
+    return wt;
+  }
+
+  async openBidiStream() {
+    await this.current.ready;
+    return this.current.createBidirectionalStream();
+  }
+}</code></pre>
+  </section>
+
+  <section class="deferred-section"><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/6427766428925952" target="_blank" rel="noopener">ChromeStatus entry (6427766428925952)</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransport-draining" target="_blank" rel="noopener">W3C WebTransport Specification: <code>draining</code> attribute</a></li>
+    <li><a href="../capsule-timeline-inspector/">Capsule timeline inspector</a></li>
+    <li><a href="../load-balancer-drain-budget/">Load-balancer drain budget</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const probeOutput = document.getElementById('probe-output');
+  const durationSelect = document.getElementById('stream-duration-select');
+  const spawnBtn = document.getElementById('spawn-stream-btn');
+  const drainBtn = document.getElementById('trigger-drain-btn');
+  const resetBtn = document.getElementById('reset-lab-btn');
+  const streamTbody = document.getElementById('stream-tbody');
+  const handoverLog = document.getElementById('handover-log');
+
+  function runIdlProbe() {
+    const hasWT = typeof globalThis.WebTransport === 'function';
+    const proto = hasWT ? globalThis.WebTransport.prototype : {};
+    const inProto = hasWT && ('draining' in proto);
+    const desc = hasWT ? Object.getOwnPropertyDescriptor(proto, 'draining') : undefined;
+    const hasGetter = Boolean(desc && typeof desc.get === 'function' && desc.set === undefined);
+    const hasReady = hasWT && typeof Object.getOwnPropertyDescriptor(proto, 'ready')?.get === 'function';
+    const hasClosed = hasWT && typeof Object.getOwnPropertyDescriptor(proto, 'closed')?.get === 'function';
+
+    const lines = [
+      `WebTransport constructor: ${hasWT ? 'present (function)' : 'missing'}`,
+      `'draining' in WebTransport.prototype: ${inProto ? 'true (SUPPORTED in this browser)' : 'false (pre-Chrome 157 browser)'}`,
+      `Object.getOwnPropertyDescriptor(WebTransport.prototype, 'draining')?.get: ${hasGetter ? 'function get draining()' : 'undefined'}`,
+      `Lifecycle triad (ready / draining / closed getters): ${hasReady && hasGetter && hasClosed ? 'complete' : `ready=${hasReady}, draining=${hasGetter}, closed=${hasClosed}`}`,
+    ];
+    probeOutput.textContent = lines.join('\n');
+    window.showcaseTelemetry?.assert('webtransport-draining-idl-probe', true, {
+      hasWT,
+      inProto,
+      hasGetter,
+    });
+  }
+
+  let state = {
+    nextStreamId: 1,
+    sessionAState: 'READY',
+    sessionBState: 'STANDBY',
+    sessionACompleted: 0,
+    sessionBCompleted: 0,
+    streams: [],
+    timerId: null,
+  };
+
+  function updateUI() {
+    const activeA = state.streams.filter((s) => s.session === 'Session A' && s.status === 'IN-FLIGHT').length;
+    const activeB = state.streams.filter((s) => s.session === 'Session B' && s.status === 'IN-FLIGHT').length;
+
+    if (state.sessionAState === 'DRAINING' && activeA === 0) {
+      state.sessionAState = 'CLOSED (GRACEFUL)';
+      handoverLog.textContent = 'All in-flight streams on Session A finished cleanly. Session A closed with closeCode=0; Session B is serving 100% of traffic.';
+    }
+
+    document.getElementById('session-a-badge').textContent = state.sessionAState;
+    document.getElementById('session-a-draining').textContent =
+      state.sessionAState === 'READY' ? 'pending' : 'resolved (0x78ae)';
+    document.getElementById('session-a-closed').textContent =
+      state.sessionAState === 'CLOSED (GRACEFUL)' ? 'resolved (code 0)' : 'pending';
+    document.getElementById('session-a-active').textContent = String(activeA);
+    document.getElementById('session-a-completed').textContent = String(state.sessionACompleted);
+
+    document.getElementById('session-b-badge').textContent = state.sessionBState;
+    document.getElementById('session-b-ready').textContent =
+      state.sessionBState === 'READY' ? 'resolved' : 'not opened';
+    document.getElementById('session-b-draining').textContent =
+      state.sessionBState === 'READY' ? 'pending' : 'not opened';
+    document.getElementById('session-b-closed').textContent =
+      state.sessionBState === 'READY' ? 'pending' : 'not opened';
+    document.getElementById('session-b-active').textContent = String(activeB);
+    document.getElementById('session-b-completed').textContent = String(state.sessionBCompleted);
+
+    drainBtn.disabled = state.sessionAState !== 'READY';
+
+    if (state.streams.length === 0) {
+      streamTbody.innerHTML = '<tr><td colspan="4">No streams opened yet. Click "Open bidirectional stream" to start traffic.</td></tr>';
+      return;
+    }
+
+    streamTbody.innerHTML = state.streams
+      .slice()
+      .reverse()
+      .map((s) => {
+        const pct = Math.min(100, Math.round((s.elapsed / s.duration) * 100));
+        return `<tr>
+          <td>bidi-${s.id}</td>
+          <td>${s.session}</td>
+          <td>${s.status}</td>
+          <td>${pct}% (${(s.elapsed / 1000).toFixed(1)}s / ${(s.duration / 1000).toFixed(1)}s)</td>
+        </tr>`;
+      })
+      .join('');
+  }
+
+  function tick() {
+    let changed = false;
+    for (const s of state.streams) {
+      if (s.status === 'IN-FLIGHT') {
+        s.elapsed = Math.min(s.duration, s.elapsed + 200);
+        changed = true;
+        if (s.elapsed >= s.duration) {
+          s.status = 'COMPLETED';
+          if (s.session === 'Session A') state.sessionACompleted++;
+          else state.sessionBCompleted++;
+        }
+      }
+    }
+    if (changed) updateUI();
+  }
+
+  spawnBtn.addEventListener('click', () => {
+    const duration = Number(durationSelect.value) || 3200;
+    const routedSession = state.sessionAState === 'READY' ? 'Session A' : 'Session B';
+    const stream = {
+      id: state.nextStreamId++,
+      session: routedSession,
+      status: 'IN-FLIGHT',
+      elapsed: 0,
+      duration,
+    };
+    state.streams.push(stream);
+    handoverLog.textContent = `Opened bidirectional stream bidi-${stream.id} on ${routedSession} (duration ${(duration / 1000).toFixed(1)}s).`;
+    updateUI();
+  });
+
+  drainBtn.addEventListener('click', () => {
+    if (state.sessionAState !== 'READY') return;
+    const activeOnA = state.streams.filter((s) => s.session === 'Session A' && s.status === 'IN-FLIGHT').length;
+    if (activeOnA === 0) {
+      // Automatically open one in-flight stream on Session A right before draining so the user sees the overlap
+      state.streams.push({
+        id: state.nextStreamId++,
+        session: 'Session A',
+        status: 'IN-FLIGHT',
+        elapsed: 400,
+        duration: Number(durationSelect.value) || 3200,
+      });
+    }
+    state.sessionAState = 'DRAINING';
+    state.sessionBState = 'READY';
+    handoverLog.textContent =
+      'Server sent HTTP/3 DRAIN_WEBTRANSPORT_SESSION (0x78ae) on Session A -> sessionA.draining resolved! Replacement Session B is now READY and receives all new streams while Session A finishes in-flight streams.';
+    updateUI();
+  });
+
+  resetBtn.addEventListener('click', () => {
+    state.nextStreamId = 1;
+    state.sessionAState = 'READY';
+    state.sessionBState = 'STANDBY';
+    state.sessionACompleted = 0;
+    state.sessionBCompleted = 0;
+    state.streams = [];
+    handoverLog.textContent = 'Sessions reset. Session A is READY and routing all new createBidirectionalStream() calls.';
+    updateUI();
+  });
+
+  document.getElementById('run-probe-btn').addEventListener('click', runIdlProbe);
+  runIdlProbe();
+  state.timerId = setInterval(tick, 200);
+  updateUI();
+})();
+</script>
+</body>
+</html>

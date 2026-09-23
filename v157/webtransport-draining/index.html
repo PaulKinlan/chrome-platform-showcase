@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransport draining — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .deferred-section {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 260px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v157/">&larr; Chrome 157</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v157 · networking · webtransport</p>
+    <h1>WebTransport draining</h1>
+    <p class="lede">Chrome 157 implements <code>WebTransport.prototype.draining</code>, a Promise that resolves when the server sends an HTTP/3 <code>DRAIN_WEBTRANSPORT_SESSION</code> capsule (<code>0x78ae</code>). Instead of abruptly tearing down active streams during a server deployment or load-balancer scale-in, the server signals that the session is retiring so the client can open a replacement session for new work while existing streams finish cleanly.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./graceful-session-handover/">Graceful session handover</a></h3>
+      <p>Run the live <code>WebTransport.prototype.draining</code> IDL probe, spawn bidirectional streams on Session A, and fire a <code>DRAIN_WEBTRANSPORT_SESSION</code> signal. Watch active streams finish uninterrupted on Session A while new streams cut over automatically to replacement Session B.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./capsule-timeline-inspector/">Capsule timeline inspector</a></h3>
+      <p>Compare the HTTP/3 <code>DRAIN_WEBTRANSPORT_SESSION</code> (<code>0x78ae</code>) and <code>CLOSE_WEBTRANSPORT_SESSION</code> (<code>0x2843</code>) wire capsules alongside the three-stage <code>ready &rarr; draining &rarr; closed</code> Promise lifecycle and in-flight stream survival counts.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./load-balancer-drain-budget/">Load-balancer drain budget</a></h3>
+      <p>Model active WebTransport stream duration distributions (p50, p95, p99) against your edge load-balancer or Kubernetes drain grace window to size the gap between <code>DRAIN_WEBTRANSPORT_SESSION</code> and final termination.</p>
+    </li>
+  </ol></section>
+
+  <section class="deferred-section"><h2>why it shipped</h2>
+    <p>Long-lived WebTransport sessions multiplex dozens of bidirectional and unidirectional streams plus datagrams over a single HTTP/3 connection. Before <code>WebTransport.prototype.draining</code>, a server node preparing for a rolling restart or autoscaling scale-in had no standard WebTransport API surface to tell the browser "stop opening new streams on this session, but finish the ones you already started." Calling <code>CLOSE_WEBTRANSPORT_SESSION</code> (<code>0x2843</code>) or closing the underlying QUIC connection immediately aborts in-flight media segments, RPC calls, or state sync transfers.</p>
+    <p>HTTP/3 WebTransport defines the <code>DRAIN_WEBTRANSPORT_SESSION</code> capsule (<code>type = 0x78ae</code>, empty payload) sent on the CONNECT control stream. When Chrome 157 receives this capsule, it resolves the <code>wt.draining</code> Promise without closing existing streams. Application code awaiting <code>wt.draining</code> can immediately dial a warm replacement session to a healthy backend instance, route all subsequent <code>createBidirectionalStream()</code> and <code>createUnidirectionalStream()</code> calls to the new session, and close the draining session once its remaining streams drain to zero.</p>
+  </section>
+
+  <section class="deferred-section"><h2>the API</h2>
+    <pre tabindex="0"><code>let activeTransport = new WebTransport("https://edge.example.com/wt");
+await activeTransport.ready;
+
+// React to the server's HTTP/3 DRAIN_WEBTRANSPORT_SESSION (0x78ae) capsule:
+activeTransport.draining.then(async () =&gt; {
+  console.info("Session draining; opening replacement WebTransport session...");
+  const replacement = new WebTransport("https://edge.example.com/wt");
+  await replacement.ready;
+  // Cut over new stream creation to the replacement session while
+  // in-flight streams on the old session complete naturally.
+  activeTransport = replacement;
+});</code></pre>
+    <p><code>WebTransport.prototype.draining</code> is a getter returning a <code>Promise&lt;undefined&gt;</code>. Each <code>WebTransport</code> instance initializes an internal <code>[[Draining]]</code> promise on construction, resolves it when the <code>DRAIN_WEBTRANSPORT_SESSION</code> capsule arrives on the session's HTTP/3 CONNECT stream, and rejects it if the session is abruptly closed or fails before draining.</p>
+  </section>
+
+  <section class="deferred-section"><h2>research notes</h2>
+    <ul>
+      <li><strong>Wire capsule format:</strong> Per the IETF WebTransport over HTTP/3 draft, <code>DRAIN_WEBTRANSPORT_SESSION</code> uses capsule type <code>0x78ae</code> with a length of <code>0x00</code> (zero value bytes) on the extended CONNECT data stream.</li>
+      <li><strong>Lifecycle ordering:</strong> A graceful retirement resolves <code>wt.ready</code> first, then <code>wt.draining</code> upon receiving capsule <code>0x78ae</code>, and finally <code>wt.closed</code> with <code>{ closeCode, reason }</code> when either peer closes the session via <code>CLOSE_WEBTRANSPORT_SESSION</code> (<code>0x2843</code>).</li>
+      <li><strong>Feature detection:</strong> Check <code>'draining' in WebTransport.prototype</code> or inspect <code>Object.getOwnPropertyDescriptor(WebTransport.prototype, 'draining')?.get</code> before relying on automatic session handover.</li>
+    </ul>
+  </section>
+
+  <section class="deferred-section"><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/6427766428925952" target="_blank" rel="noopener">ChromeStatus entry (6427766428925952)</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransport-draining" target="_blank" rel="noopener">W3C WebTransport Specification: <code>draining</code> attribute</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md#11-handling-session-draining" target="_blank" rel="noopener">W3C WebTransport Explainer: Handling session draining</a></li>
+    <li><a href="https://datatracker.ietf.org/doc/html/draft-ietf-webtrans-http3" target="_blank" rel="noopener">IETF WebTransport over HTTP/3 (DRAIN_WEBTRANSPORT_SESSION 0x78ae)</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

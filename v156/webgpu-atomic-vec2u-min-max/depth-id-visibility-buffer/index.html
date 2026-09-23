@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>64-bit depth + ID visibility buffer — WebGPU: atomic-vec2u-min-max — Chrome 156 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); }
+    .support { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .support.yes { color: var(--accent-emerald); border-color: var(--accent-emerald); }
+    .support.no { color: var(--accent-amber); border-color: var(--accent-amber); }
+    .controls-grid { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    label.ctrl-box { display: flex; flex-direction: column; gap: var(--space-1); min-height: 44px; border: 2px solid var(--border-black); padding: var(--space-2); background: var(--bg-ivory); font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-black); }
+    input[type="range"], select.ctrl-select { min-height: 44px; accent-color: var(--accent-blue); font-family: var(--font-mono); }
+    select.ctrl-select { border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); padding: 0 var(--space-2); }
+    button.run-btn { min-height: 44px; padding: var(--space-2) var(--space-3); border: 2px solid var(--border-black); background: var(--accent-blue); color: var(--bg-paper); font-family: var(--font-mono); font-weight: 700; font-size: 0.84rem; cursor: pointer; }
+    button.run-btn:hover, button.run-btn:focus-visible { background: var(--text-black); color: var(--bg-paper); }
+    .vis-wrap { display: grid; justify-items: center; }
+    .vis-wrap svg { width: min(100%, 380px); height: auto; border: 2px solid var(--border-black); background: var(--bg-ivory); }
+    pre.rule { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-3); overflow-x: auto; margin: 0; font-size: 0.82rem; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; color: var(--text-black); }
+    th { background: var(--bg-stone); font-family: var(--font-mono); }
+    td.num { font-family: var(--font-mono); text-align: right; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.88rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebGPU: atomic-vec2u-min-max</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v156 · webgpu atomic-vec2u-min-max · visibility buffer</p>
+    <h1>64-bit depth + ID visibility buffer</h1>
+    <p class="lede">In software rasterization (like Nanite-style micro-polygon compute passes), every fragment writes both a 32-bit depth key and a 32-bit triangle/instance ID. Packing <code>vec2u(triangleId, depthBits)</code> places <code>depthBits</code> in the high 32-bit word (<code>.y</code>) and <code>triangleId</code> in the low 32-bit word (<code>.x</code>). A single <code>atomicMin(&amp;visBuffer[pixel], packedVec2u)</code> atomically retains the closest triangle and its ID.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="vis-heading">
+    <h2 id="vis-heading">Overlapping triangle visibility rasterizer</h2>
+    <p class="support" id="gpu-support" aria-live="polite"></p>
+
+    <div class="controls-grid">
+      <label class="ctrl-box" for="depth-t1">
+        <span>Triangle A (ID=101, Blue) Z-depth: <strong id="val-t1">0.25</strong></span>
+        <input type="range" id="depth-t1" min="0.05" max="0.95" step="0.05" value="0.25">
+      </label>
+
+      <label class="ctrl-box" for="depth-t2">
+        <span>Triangle B (ID=202, Emerald) Z-depth: <strong id="val-t2">0.50</strong></span>
+        <input type="range" id="depth-t2" min="0.05" max="0.95" step="0.05" value="0.50">
+      </label>
+
+      <label class="ctrl-box" for="depth-t3">
+        <span>Triangle C (ID=303, Amber) Z-depth: <strong id="val-t3">0.75</strong></span>
+        <input type="range" id="depth-t3" min="0.05" max="0.95" step="0.05" value="0.75">
+      </label>
+
+      <label class="ctrl-box" for="atomic-op">
+        <span>WGSL atomic operation:</span>
+        <select id="atomic-op" class="ctrl-select">
+          <option value="atomicMin" selected>atomicMin (nearest Z wins)</option>
+          <option value="atomicMax">atomicMax (farthest Z wins)</option>
+        </select>
+      </label>
+    </div>
+
+    <div>
+      <button type="button" class="run-btn" id="btn-swap-depths">Invert Z-order (C in front of A)</button>
+    </div>
+
+    <div class="vis-wrap">
+      <svg id="vis-grid" viewBox="0 0 320 320" role="img" aria-label="8 by 8 visibility buffer pixel grid showing winning triangle ID per pixel">
+      </svg>
+    </div>
+
+    <h3>WGSL compute kernel</h3>
+    <pre class="rule" tabindex="0"><code id="wgsl-code"></code></pre>
+
+    <table>
+      <caption>Center overlap pixel (4, 4) — 64-bit <code>atomic&lt;vec2u&gt;</code> contenders</caption>
+      <thead>
+        <tr>
+          <th scope="col">candidate</th>
+          <th scope="col">.y (hi 32-bit depthBits)</th>
+          <th scope="col">.x (lo 32-bit triangleId)</th>
+          <th scope="col">64-bit unsigned value</th>
+          <th scope="col">outcome</th>
+        </tr>
+      </thead>
+      <tbody id="contender-rows"></tbody>
+    </table>
+
+    <output id="vis-readout" aria-live="polite"></output>
+  </section>
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/4882016087703552" target="_blank" rel="noopener">ChromeStatus entry (4882016087703552)</a></li>
+    <li><a href="https://www.w3.org/TR/webgpu/#dom-gpufeaturename-atomic-vec2u-min-max" target="_blank" rel="noopener">W3C WebGPU: atomic-vec2u-min-max</a></li>
+    <li><a href="https://github.com/gpuweb/gpuweb/issues/5071" target="_blank" rel="noopener">WGSL atomic-vec2u-min-max issue (#5071)</a></li>
+    <li><a href="../wgsl-vec2u-endian-inspector/">WGSL vec2u 64-bit word-order &amp; endian inspector</a></li>
+    <li><a href="../point-cloud-splatting-benchmark/">Point-cloud splatting &amp; CAS contention analyzer</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const supportBanner = document.getElementById('gpu-support');
+  const sT1 = document.getElementById('depth-t1');
+  const sT2 = document.getElementById('depth-t2');
+  const sT3 = document.getElementById('depth-t3');
+  const vT1 = document.getElementById('val-t1');
+  const vT2 = document.getElementById('val-t2');
+  const vT3 = document.getElementById('val-t3');
+  const opSelect = document.getElementById('atomic-op');
+  const visGrid = document.getElementById('vis-grid');
+  const wgslCode = document.getElementById('wgsl-code');
+  const contenderRows = document.getElementById('contender-rows');
+  const visReadout = document.getElementById('vis-readout');
+
+  let adapterFeatureSupported = false;
+
+  function floatDepthToU32(z) {
+    const f32 = new Float32Array([z]);
+    const u32 = new Uint32Array(f32.buffer);
+    return u32[0] >>> 0;
+  }
+
+  function packU64(loX, hiY) {
+    return (BigInt(hiY >>> 0) << 32n) | BigInt(loX >>> 0);
+  }
+
+  async function probeWebGPU() {
+    try {
+      if (!navigator.gpu) {
+        supportBanner.className = 'support no';
+        supportBanner.textContent = 'WebGPU (navigator.gpu) is unavailable in this environment. Running the bit-exact 64-bit vec2u(lo, hi) BigInt reference rasterizer.';
+        window.showcaseTelemetry?.assert('atomic-vec2u-probe', true, { gpu: false, feature: false });
+        return;
+      }
+      const adapter = await navigator.gpu.requestAdapter();
+      adapterFeatureSupported = Boolean(adapter && adapter.features && adapter.features.has('atomic-vec2u-min-max'));
+      supportBanner.className = 'support ' + (adapterFeatureSupported ? 'yes' : 'no');
+      supportBanner.innerHTML = adapterFeatureSupported
+        ? '<span>Hardware WebGPU adapter supports <code>"atomic-vec2u-min-max"</code> (<code>adapter.features.has("atomic-vec2u-min-max") === true</code>). Executing 64-bit visibility reduction.</span>'
+        : '<span>WebGPU adapter found, but <code>adapter.features.has("atomic-vec2u-min-max")</code> is false on this GPU/driver (enable in Chrome 156+ with <code>--enable-unsafe-webgpu</code> or <code>--enable-dawn-features=atomic_vec2u_min_max</code>). Running the bit-exact 64-bit BigInt reference rasterizer below.</span>';
+      window.showcaseTelemetry?.assert('atomic-vec2u-probe', true, { gpu: true, feature: adapterFeatureSupported });
+    } catch (err) {
+      supportBanner.className = 'support no';
+      supportBanner.textContent = 'WebGPU probe encountered an error (' + err.message + '); using bit-exact 64-bit reference rasterizer.';
+    }
+  }
+
+  function renderRasterizer() {
+    const z1 = Number(sT1.value);
+    const z2 = Number(sT2.value);
+    const z3 = Number(sT3.value);
+    vT1.textContent = z1.toFixed(2);
+    vT2.textContent = z2.toFixed(2);
+    vT3.textContent = z3.toFixed(2);
+    const op = opSelect.value;
+
+    const triangles = [
+      { id: 101, name: 'Triangle A (101)', z: z1, hi: floatDepthToU32(z1), fill: 'var(--accent-blue)', bounds: [1, 1, 5, 5] },
+      { id: 202, name: 'Triangle B (202)', z: z2, hi: floatDepthToU32(z2), fill: 'var(--accent-emerald)', bounds: [2, 2, 6, 6] },
+      { id: 303, name: 'Triangle C (303)', z: z3, hi: floatDepthToU32(z3), fill: 'var(--accent-amber)', bounds: [3, 1, 7, 6] }
+    ];
+
+    visGrid.innerHTML = '';
+    const cellSize = 40;
+    for (let gy = 0; gy < 8; gy++) {
+      for (let gx = 0; gx < 8; gx++) {
+        let currentLo = 0;
+        let currentHi = op === 'atomicMin' ? 0xFFFFFFFF : 0x00000000;
+        let currentU64 = packU64(currentLo, currentHi);
+        let winTri = null;
+
+        for (const t of triangles) {
+          const [x0, y0, x1, y1] = t.bounds;
+          if (gx >= x0 && gx <= x1 && gy >= y0 && gy <= y1) {
+            const candidateU64 = packU64(t.id, t.hi);
+            const wins = op === 'atomicMin' ? (candidateU64 < currentU64) : (candidateU64 > currentU64);
+            if (wins) {
+              currentU64 = candidateU64;
+              currentLo = t.id;
+              currentHi = t.hi;
+              winTri = t;
+            }
+          }
+        }
+
+        const rect = document.createElementNS(SVG_NS, 'rect');
+        rect.setAttribute('x', gx * cellSize);
+        rect.setAttribute('y', gy * cellSize);
+        rect.setAttribute('width', cellSize);
+        rect.setAttribute('height', cellSize);
+        rect.setAttribute('fill', winTri ? winTri.fill : 'var(--bg-stone)');
+        rect.setAttribute('stroke', 'var(--border-black)');
+        rect.setAttribute('stroke-width', (gx === 4 && gy === 4) ? '3' : '1');
+        visGrid.appendChild(rect);
+
+        const txt = document.createElementNS(SVG_NS, 'text');
+        txt.setAttribute('x', gx * cellSize + 20);
+        txt.setAttribute('y', gy * cellSize + 24);
+        txt.setAttribute('text-anchor', 'middle');
+        txt.setAttribute('fill', winTri ? 'var(--bg-paper)' : 'var(--text-muted)');
+        txt.setAttribute('font-size', '10');
+        txt.setAttribute('font-weight', '700');
+        txt.textContent = winTri ? String(winTri.id) : '—';
+        visGrid.appendChild(txt);
+      }
+    }
+
+    // Evaluate center pixel (4,4) where all 3 triangles overlap
+    const scored = triangles.map((t) => ({
+      ...t,
+      u64: packU64(t.id, t.hi),
+      hex64: '0x' + packU64(t.id, t.hi).toString(16).toUpperCase().padStart(16, '0')
+    }));
+    scored.sort((a, b) => {
+      if (op === 'atomicMin') return a.u64 < b.u64 ? -1 : 1;
+      return a.u64 > b.u64 ? -1 : 1;
+    });
+    const winner = scored[0];
+
+    wgslCode.textContent =
+      `enable atomic_vec2u_min_max;\n\n` +
+      `@group(0) @binding(0) var<storage, read_write> visBuffer: array<atomic<vec2u>, 64>;\n\n` +
+      `@compute @workgroup_size(64)\n` +
+      `fn rasterizeTile(@builtin(global_invocation_id) gid: vec3u) {\n` +
+      `  let depthBits: u32 = bitcast<u32>(fragmentZ); // .y = high 32-bit key\n` +
+      `  let triangleId: u32 = ${winner.id}u;               // .x = low 32-bit payload\n` +
+      `  let packed = vec2u(triangleId, depthBits);\n` +
+      `  let prev = ${op}(&visBuffer[gid.x], packed);\n` +
+      `}`;
+
+    contenderRows.innerHTML = '';
+    for (const t of triangles) {
+      const u64 = packU64(t.id, t.hi);
+      const isWin = t.id === winner.id;
+      const tr = document.createElement('tr');
+      const th = document.createElement('th'); th.scope = 'row'; th.textContent = `${t.name} (Z=${t.z.toFixed(2)})`;
+      const tdHi = document.createElement('td'); tdHi.className = 'num'; tdHi.textContent = `0x${t.hi.toString(16).toUpperCase().padStart(8, '0')}`;
+      const tdLo = document.createElement('td'); tdLo.className = 'num'; tdLo.textContent = `${t.id} (0x${t.id.toString(16).toUpperCase().padStart(8, '0')})`;
+      const tdU64 = document.createElement('td'); tdU64.className = 'num'; tdU64.textContent = `0x${u64.toString(16).toUpperCase().padStart(16, '0')}`;
+      const tdOut = document.createElement('td'); tdOut.textContent = isWin ? `WINNER (${op})` : 'Discarded';
+      tr.append(th, tdHi, tdLo, tdU64, tdOut);
+      contenderRows.appendChild(tr);
+    }
+
+    visReadout.textContent =
+      `At overlap pixel (4, 4), ${op} selected ${winner.name} with packed 64-bit vec2u(lo=${winner.id}, hi=0x${winner.hi.toString(16).toUpperCase()}) = ${winner.hex64}.`;
+  }
+
+  [sT1, sT2, sT3].forEach((el) => el.addEventListener('input', renderRasterizer));
+  opSelect.addEventListener('change', renderRasterizer);
+  document.getElementById('btn-swap-depths').addEventListener('click', () => {
+    const tmp = sT1.value;
+    sT1.value = sT3.value;
+    sT3.value = tmp;
+    renderRasterizer();
+  });
+
+  probeWebGPU();
+  renderRasterizer();
+})();
+</script>
+</body>
+</html>

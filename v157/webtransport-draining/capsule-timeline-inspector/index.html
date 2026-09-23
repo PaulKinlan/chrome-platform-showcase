@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Capsule timeline inspector — WebTransport draining — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+      display: grid;
+      gap: var(--space-3);
+    }
+    .note {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      color: var(--text-charcoal);
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-3);
+      align-items: center;
+    }
+    .controls label {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-2);
+      font-weight: 600;
+      min-height: 44px;
+    }
+    select, input[type="range"] {
+      min-height: 44px;
+      font: inherit;
+    }
+    select {
+      border: 2px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-black);
+      padding: var(--space-1) var(--space-2);
+    }
+    button {
+      border: 2px solid var(--border-black);
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      padding: var(--space-2) var(--space-3);
+      font: inherit;
+      font-weight: 700;
+      min-height: 44px;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: var(--bg-stone);
+      color: var(--text-black);
+    }
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: var(--space-3);
+    }
+    .capsule-box {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      padding: var(--space-3);
+      display: grid;
+      gap: var(--space-2);
+    }
+    .capsule-box h3 {
+      margin: 0;
+      font-size: 1rem;
+    }
+    .wire-bytes {
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      background: var(--bg-paper);
+      color: var(--text-black);
+      border: 1px solid var(--border-black);
+      padding: var(--space-2);
+      overflow-x: auto;
+    }
+    .table-wrap {
+      overflow-x: auto;
+      max-width: 100%;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--bg-paper);
+    }
+    caption {
+      text-align: left;
+      font-weight: 700;
+      margin-bottom: var(--space-2);
+    }
+    th, td {
+      border: 1px solid var(--border-black);
+      padding: var(--space-2);
+      text-align: left;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+    }
+    th {
+      background: var(--bg-stone);
+      color: var(--text-black);
+    }
+    output {
+      display: block;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-charcoal);
+      padding: var(--space-3);
+      white-space: pre-wrap;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+    }
+    .deferred-section {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 260px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport draining</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v157 · webtransport draining</p>
+    <h1>Capsule timeline inspector</h1>
+    <p class="lede">Inspect the wire-level HTTP/3 capsules on the extended CONNECT stream — <code>DRAIN_WEBTRANSPORT_SESSION</code> (<code>0x78ae</code>) versus <code>CLOSE_WEBTRANSPORT_SESSION</code> (<code>0x2843</code>) — and compare how the <code>ready &rarr; draining &rarr; closed</code> Promise lifecycle and in-flight stream failure counts change under varying server drain grace periods.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="inspector-heading">
+    <h2 id="inspector-heading">Configure server retirement strategy &amp; grace period</h2>
+    <p class="note">Adjust the drain grace period and in-flight stream duration below to see how <code>DRAIN_WEBTRANSPORT_SESSION (0x78ae)</code> prevents stream resets compared to an immediate <code>CLOSE_WEBTRANSPORT_SESSION (0x2843)</code>.</p>
+
+    <div class="controls">
+      <label for="grace-range">Drain grace period: <strong id="grace-label">4.0 s</strong>
+        <input type="range" id="grace-range" min="0" max="8000" step="500" value="4000">
+      </label>
+      <label for="inflight-count">Active in-flight streams:
+        <select id="inflight-count">
+          <option value="6">6 streams</option>
+          <option value="12" selected>12 streams</option>
+          <option value="24">24 streams</option>
+        </select>
+      </label>
+      <label for="avg-duration">Max stream duration:
+        <select id="avg-duration">
+          <option value="2000">2.0 s</option>
+          <option value="3500" selected>3.5 s</option>
+          <option value="6000">6.0 s</option>
+        </select>
+      </label>
+      <button type="button" id="preset-optimal">Preset: Graceful (4.0s grace)</button>
+      <button type="button" id="preset-tight" class="secondary">Preset: Tight grace (1.5s)</button>
+    </div>
+
+    <div class="compare-grid">
+      <article class="capsule-box" aria-labelledby="cap-drain-title">
+        <h3 id="cap-drain-title">With <code>DRAIN_WEBTRANSPORT_SESSION</code> (<code>0x78ae</code>)</h3>
+        <div class="wire-bytes" tabindex="0" aria-label="DRAIN_WEBTRANSPORT_SESSION HTTP/3 capsule bytes">Capsule Type: 0x78ae (varint: 0x80 0x00 0x78 0xae)
+Capsule Length: 0x00 (0 payload bytes)</div>
+        <p><strong>Promise sequence:</strong> <code>wt.ready</code> (t=0s) &rarr; <code>wt.draining</code> (t=1.0s) &rarr; <code>wt.closed</code> (<span id="drain-closed-time">t=5.0s</span>)</p>
+        <p><strong>Streams completed cleanly:</strong> <strong id="drain-survived">12 / 12</strong></p>
+        <p><strong>Aborted streams (RESET_STREAM):</strong> <strong id="drain-failed">0</strong></p>
+      </article>
+
+      <article class="capsule-box" aria-labelledby="cap-close-title">
+        <h3 id="cap-close-title">Immediate <code>CLOSE_WEBTRANSPORT_SESSION</code> (<code>0x2843</code>)</h3>
+        <div class="wire-bytes" tabindex="0" aria-label="CLOSE_WEBTRANSPORT_SESSION HTTP/3 capsule bytes">Capsule Type: 0x2843 (varint: 0x40 0x28 0x43)
+Capsule Length: 0x11 | Code: 0x000001f7 | Msg: "Server shutdown"</div>
+        <p><strong>Promise sequence:</strong> <code>wt.ready</code> (t=0s) &rarr; <code>wt.draining</code> (never resolves) &rarr; <code>wt.closed</code> (t=1.0s)</p>
+        <p><strong>Streams completed cleanly:</strong> <strong id="close-survived">0 / 12</strong></p>
+        <p><strong>Aborted streams (RESET_STREAM):</strong> <strong id="close-failed">12</strong></p>
+      </article>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <caption>Promise lifecycle &amp; stream state timeline across the retirement window</caption>
+        <thead>
+          <tr>
+            <th scope="col">Timestamp</th>
+            <th scope="col">HTTP/3 Control Stream Event</th>
+            <th scope="col"><code>wt.ready</code></th>
+            <th scope="col"><code>wt.draining</code></th>
+            <th scope="col"><code>wt.closed</code></th>
+            <th scope="col">Client Action</th>
+          </tr>
+        </thead>
+        <tbody id="timeline-tbody"></tbody>
+      </table>
+    </div>
+
+    <output id="inspector-verdict" aria-live="polite"></output>
+  </section>
+
+  <section class="deferred-section"><h2>code path</h2>
+    <pre tabindex="0"><code>// Observing all three lifecycle promises on a WebTransport instance:
+const wt = new WebTransport("https://edge.example.com/session");
+
+wt.ready.then(() =&gt; {
+  console.log("[t=0.0s] Extended CONNECT 200 OK; session ready");
+});
+
+if ("draining" in wt) {
+  wt.draining.then(() =&gt; {
+    console.log("[0x78ae] DRAIN_WEBTRANSPORT_SESSION received; draining");
+  });
+}
+
+wt.closed.then(({ closeCode, reason }) =&gt; {
+  console.log("[0x2843] CLOSE_WEBTRANSPORT_SESSION:", closeCode, reason);
+});</code></pre>
+  </section>
+
+  <section class="deferred-section"><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/6427766428925952" target="_blank" rel="noopener">ChromeStatus entry (6427766428925952)</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransport-draining" target="_blank" rel="noopener">W3C WebTransport Specification: <code>draining</code> attribute</a></li>
+    <li><a href="../graceful-session-handover/">Graceful session handover</a></li>
+    <li><a href="../load-balancer-drain-budget/">Load-balancer drain budget</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const graceRange = document.getElementById('grace-range');
+  const graceLabel = document.getElementById('grace-label');
+  const inflightSelect = document.getElementById('inflight-count');
+  const durationSelect = document.getElementById('avg-duration');
+  const timelineTbody = document.getElementById('timeline-tbody');
+  const verdict = document.getElementById('inspector-verdict');
+
+  function recalculate() {
+    const graceMs = Number(graceRange.value);
+    const totalStreams = Number(inflightSelect.value);
+    const maxDurationMs = Number(durationSelect.value);
+
+    graceLabel.textContent = `${(graceMs / 1000).toFixed(1)} s`;
+
+    // Fraction of streams in-flight at t=1.0s that complete within graceMs
+    const survivalRatio = maxDurationMs === 0 ? 1 : Math.min(1, graceMs / maxDurationMs);
+    const survivedWithDrain = Math.round(totalStreams * survivalRatio);
+    const failedWithDrain = totalStreams - survivedWithDrain;
+
+    const closeTimestampSec = (1.0 + graceMs / 1000).toFixed(1);
+    document.getElementById('drain-closed-time').textContent = `t=${closeTimestampSec}s`;
+    document.getElementById('drain-survived').textContent = `${survivedWithDrain} / ${totalStreams}`;
+    document.getElementById('drain-failed').textContent = String(failedWithDrain);
+    document.getElementById('close-survived').textContent = `0 / ${totalStreams}`;
+    document.getElementById('close-failed').textContent = String(totalStreams);
+
+    timelineTbody.innerHTML = `
+      <tr>
+        <td>t = 0.0 s</td>
+        <td>Extended CONNECT 200 OK</td>
+        <td>resolved</td>
+        <td>pending</td>
+        <td>pending</td>
+        <td>Open ${totalStreams} bidirectional streams on Session A</td>
+      </tr>
+      <tr>
+        <td>t = 1.0 s</td>
+        <td>Capsule <code>0x78ae</code> (<code>DRAIN_WEBTRANSPORT_SESSION</code>)</td>
+        <td>resolved</td>
+        <td><strong>resolved</strong></td>
+        <td>pending</td>
+        <td>Dial Session B for new streams; let ${totalStreams} active streams drain</td>
+      </tr>
+      <tr>
+        <td>t = ${(1.0 + Math.min(graceMs, maxDurationMs) / 1000).toFixed(1)} s</td>
+        <td>Stream drain checkpoint</td>
+        <td>resolved</td>
+        <td>resolved</td>
+        <td>pending</td>
+        <td>${survivedWithDrain} of ${totalStreams} streams complete cleanly on Session A</td>
+      </tr>
+      <tr>
+        <td>t = ${closeTimestampSec} s</td>
+        <td>Capsule <code>0x2843</code> (<code>CLOSE_WEBTRANSPORT_SESSION</code>)</td>
+        <td>resolved</td>
+        <td>resolved</td>
+        <td><strong>resolved</strong></td>
+        <td>Session A closes (${failedWithDrain} streams aborted)</td>
+      </tr>
+    `;
+
+    const hasNative = 'draining' in (globalThis.WebTransport?.prototype ?? {});
+    verdict.textContent =
+      `Grace period ${(graceMs / 1000).toFixed(1)}s vs ${maxDurationMs / 1000}s max stream duration: ` +
+      `DRAIN_WEBTRANSPORT_SESSION (0x78ae) preserves ${survivedWithDrain}/${totalStreams} in-flight streams (${failedWithDrain} aborted), ` +
+      `whereas immediate CLOSE_WEBTRANSPORT_SESSION (0x2843) aborts all ${totalStreams} streams. ` +
+      `Browser native WebTransport.prototype.draining support: ${hasNative ? 'detected' : 'not present in this build'}.`;
+
+    window.showcaseTelemetry?.assert('capsule-timeline-calculated', true, {
+      graceMs,
+      totalStreams,
+      survivedWithDrain,
+      failedWithDrain,
+    });
+  }
+
+  graceRange.addEventListener('input', recalculate);
+  inflightSelect.addEventListener('change', recalculate);
+  durationSelect.addEventListener('change', recalculate);
+
+  document.getElementById('preset-optimal').addEventListener('click', () => {
+    graceRange.value = '4000';
+    durationSelect.value = '3500';
+    recalculate();
+  });
+
+  document.getElementById('preset-tight').addEventListener('click', () => {
+    graceRange.value = '1500';
+    durationSelect.value = '3500';
+    recalculate();
+  });
+
+  recalculate();
+})();
+</script>
+</body>
+</html>
