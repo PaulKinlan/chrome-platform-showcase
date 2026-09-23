@@ -55,6 +55,7 @@ const doMerge = Boolean(flag("--merge", { boolean: true }));
 const noServer = Boolean(flag("--no-server", { boolean: true }));
 let base = flag("--base") ?? "http://localhost:3000";
 const sampleN = Number(flag("--sample") ?? 0);
+const nextN = Number(flag("--next") ?? flag("--untested") ?? 0);
 const milestone = flag("--milestone");
 const explicitIds = args.filter((a) => !a.startsWith("--"));
 
@@ -65,12 +66,28 @@ if (explicitIds.length) {
   targets = manifest.filter((m) => explicitIds.includes(m.id));
 } else if (milestone) {
   targets = manifest.filter((m) => m.id.startsWith(`${milestone}/`));
+} else if (nextN > 0) {
+  // Prioritize untested or needs-review demos, newest milestone first, so
+  // batch runs (`--next 25 --merge`) systematically burn down the backlog.
+  const pending = manifest
+    .filter((m) => {
+      const sup = m.support ?? { desktop: "untested", mobile: "untested" };
+      const dDone = sup.desktop === "ok" || sup.desktop === "unsupported";
+      const mDone = sup.mobile === "ok" || sup.mobile === "unsupported";
+      return !dDone || !mDone;
+    })
+    .sort((a, b) => {
+      const ma = Number(a.id.slice(1).split("/")[0]) || 0;
+      const mb = Number(b.id.slice(1).split("/")[0]) || 0;
+      return mb - ma || a.id.localeCompare(b.id);
+    });
+  targets = pending.slice(0, nextN);
 } else if (sampleN > 0) {
   // Even spread across the sorted manifest so the sample spans milestones.
   const step = Math.max(1, Math.floor(manifest.length / sampleN));
   targets = manifest.filter((_, i) => i % step === 0).slice(0, sampleN);
 } else {
-  console.error("Specify ids, --milestone v<N>, or --sample <n>.");
+  console.error("Specify ids, --milestone v<N>, --next <n>, or --sample <n>.");
   Deno.exit(2);
 }
 if (!targets.length) {

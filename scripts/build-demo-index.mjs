@@ -53,6 +53,7 @@ export async function buildIndex(root = ROOT) {
   }
 
   const demos = {};
+  const probes = {};
   for (const [id, dirs] of [...folders.entries()].sort((a, b) => a[0] - b[0])) {
     const canonical = canonicalById.get(id);
     // Highest milestone as the fallback: for a feature listed in several
@@ -61,13 +62,38 @@ export async function buildIndex(root = ROOT) {
     const sorted = [...dirs].sort((a, b) =>
       Number(b.slice(1).split("/")[0]) - Number(a.slice(1).split("/")[0])
     );
-    demos[id] = canonical && dirs.includes(canonical) ? canonical : sorted[0];
+    const dir = canonical && dirs.includes(canonical) ? canonical : sorted[0];
+    demos[id] = dir;
+
+    try {
+      const suite = JSON.parse(await Deno.readTextFile(join(root, dir, "conformance.json")));
+      const assertions = (suite?.assertions ?? []).filter((a) =>
+        a && a.kind && a.kind !== "manual" && typeof a.test === "string"
+      );
+      const declarative = assertions.find((a) =>
+        a.kind === "css-supports" || a.kind === "exists" || a.kind === "typeof"
+      );
+      const safeScript = assertions.find((a) =>
+        (a.kind === "script" || a.kind === "throws") &&
+        !/\basync\b|\bawait\b|\bPromise\b|\bimport\s*\(|\bfetch\s*\(|\bWebSocket\b|\bXMLHttpRequest\b|\bWorker\b|\biframe\b|\bsetTimeout\b|\brequestAnimationFrame\b|\bshowOpenFilePicker\b|\bgetUserMedia\b|\brequestDevice\b|\bcredentials\b|\.src\s*=|\blocation\b/
+          .test(a.test)
+      );
+      const autoAssertion = declarative ?? safeScript;
+      if (autoAssertion) {
+        const probe = { kind: autoAssertion.kind, test: autoAssertion.test };
+        if (autoAssertion.expect) probe.expect = autoAssertion.expect;
+        probes[id] = probe;
+      }
+    } catch {
+      // No conformance.json or unreadable
+    }
   }
 
   return {
     generated: new Date().toISOString().slice(0, 10),
     count: Object.keys(demos).length,
     demos,
+    probes,
   };
 }
 

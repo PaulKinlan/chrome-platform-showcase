@@ -3,7 +3,13 @@
 // Portable across the responsive-check matrix and the cheap overflow-scan.
 
 export const CHROME_BIN = Deno.env.get("CHROME_BIN") ??
-  ["/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/opt/google/chrome/chrome"]
+  [
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/opt/google/chrome/chrome",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+  ]
     .find((p) => {
       try {
         Deno.statSync(p);

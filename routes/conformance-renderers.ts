@@ -10,35 +10,55 @@ export async function readConformance(path: string): Promise<ConformanceSuite | 
   }
 }
 
-export async function collectConformanceSuites(): Promise<ConformanceSuite[]> {
-  const out: ConformanceSuite[] = [];
-  try {
-    for await (const entry of Deno.readDir(".")) {
-      if (!entry.isDirectory || !/^v\d+$/.test(entry.name)) continue;
-      const release = entry.name;
-      for await (const fd of Deno.readDir(release)) {
-        if (!fd.isDirectory) continue;
-        const featureSuite = await readConformance(
-          `${release}/${fd.name}/conformance.json`,
-        );
-        if (featureSuite) out.push(featureSuite);
-        try {
-          for await (const cd of Deno.readDir(`${release}/${fd.name}`)) {
-            if (!cd.isDirectory) continue;
-            const conceptSuite = await readConformance(
-              `${release}/${fd.name}/${cd.name}/conformance.json`,
-            );
-            if (conceptSuite) out.push(conceptSuite);
+const SUITES_CACHE_TTL_MS = 60 * 1000;
+let suitesCache: { at: number; suites: ConformanceSuite[] } | null = null;
+let suitesInFlight: Promise<ConformanceSuite[]> | null = null;
+
+async function scanConformanceSuites(): Promise<ConformanceSuite[]> {
+  if (suitesInFlight) return suitesInFlight;
+  suitesInFlight = (async () => {
+    const out: ConformanceSuite[] = [];
+    try {
+      for await (const entry of Deno.readDir(".")) {
+        if (!entry.isDirectory || !/^v\d+$/.test(entry.name)) continue;
+        const release = entry.name;
+        for await (const fd of Deno.readDir(release)) {
+          if (!fd.isDirectory) continue;
+          const featureSuite = await readConformance(
+            `${release}/${fd.name}/conformance.json`,
+          );
+          if (featureSuite) out.push(featureSuite);
+          try {
+            for await (const cd of Deno.readDir(`${release}/${fd.name}`)) {
+              if (!cd.isDirectory) continue;
+              const conceptSuite = await readConformance(
+                `${release}/${fd.name}/${cd.name}/conformance.json`,
+              );
+              if (conceptSuite) out.push(conceptSuite);
+            }
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore
         }
       }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
+    suitesCache = { at: Date.now(), suites: out };
+    suitesInFlight = null;
+    return out;
+  })();
+  return suitesInFlight;
+}
+
+export async function collectConformanceSuites(): Promise<ConformanceSuite[]> {
+  if (suitesCache) {
+    if (Date.now() - suitesCache.at >= SUITES_CACHE_TTL_MS) {
+      scanConformanceSuites().catch(() => {});
+    }
+    return suitesCache.suites;
   }
-  return out;
+  return await scanConformanceSuites();
 }
 
 export function renderConformancePage(s: ConformanceSuite): string {

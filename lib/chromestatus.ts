@@ -12,18 +12,41 @@ const TTL_MS = 5 * 60 * 1000;
 const XSSI_PREFIX = ")]}'";
 
 const cache = new Map<string, { at: number; value: unknown }>();
+const inFlight = new Map<string, Promise<unknown>>();
+
+async function fetchAndCache<T>(path: string): Promise<T> {
+  const existing = inFlight.get(path);
+  if (existing) return existing as Promise<T>;
+
+  const promise = (async () => {
+    try {
+      const res = await fetch(BASE + path, { headers: { accept: "application/json" } });
+      if (!res.ok) throw new Error(`chromestatus ${path} returned ${res.status}`);
+      let text = await res.text();
+      if (text.startsWith(XSSI_PREFIX)) text = text.slice(XSSI_PREFIX.length).trimStart();
+      const parsed = JSON.parse(text) as T;
+      cache.set(path, { at: Date.now(), value: parsed });
+      return parsed;
+    } finally {
+      inFlight.delete(path);
+    }
+  })();
+
+  inFlight.set(path, promise);
+  return promise;
+}
 
 async function getJson<T>(path: string): Promise<T> {
   const hit = cache.get(path);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.value as T;
+  if (hit) {
+    if (Date.now() - hit.at >= TTL_MS) {
+      // Stale-while-revalidate: serve cached value immediately and refresh in background
+      fetchAndCache<T>(path).catch(() => {});
+    }
+    return hit.value as T;
+  }
 
-  const res = await fetch(BASE + path, { headers: { accept: "application/json" } });
-  if (!res.ok) throw new Error(`chromestatus ${path} returned ${res.status}`);
-  let text = await res.text();
-  if (text.startsWith(XSSI_PREFIX)) text = text.slice(XSSI_PREFIX.length).trimStart();
-  const parsed = JSON.parse(text) as T;
-  cache.set(path, { at: Date.now(), value: parsed });
-  return parsed;
+  return await fetchAndCache<T>(path);
 }
 
 // ----- /channels -----

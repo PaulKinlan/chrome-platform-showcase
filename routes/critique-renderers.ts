@@ -11,34 +11,54 @@ export async function readCritique(path: string): Promise<CritiqueReport | null>
   }
 }
 
-async function collectCritiques(): Promise<CritiqueReport[]> {
-  const out: CritiqueReport[] = [];
-  try {
-    for await (const entry of Deno.readDir(".")) {
-      if (!entry.isDirectory || !/^v\d+$/.test(entry.name)) continue;
-      const release = entry.name;
-      for await (const fd of Deno.readDir(release)) {
-        if (!fd.isDirectory) continue;
-        const featureSlug = fd.name;
-        const featureCrit = await readCritique(`${release}/${featureSlug}/_questions.json`);
-        if (featureCrit) out.push(featureCrit);
-        try {
-          for await (const cd of Deno.readDir(`${release}/${featureSlug}`)) {
-            if (!cd.isDirectory) continue;
-            const conceptCrit = await readCritique(
-              `${release}/${featureSlug}/${cd.name}/_questions.json`,
-            );
-            if (conceptCrit) out.push(conceptCrit);
+const CRITIQUES_CACHE_TTL_MS = 60 * 1000;
+let critiquesCache: { at: number; critiques: CritiqueReport[] } | null = null;
+let critiquesInFlight: Promise<CritiqueReport[]> | null = null;
+
+async function scanCritiques(): Promise<CritiqueReport[]> {
+  if (critiquesInFlight) return critiquesInFlight;
+  critiquesInFlight = (async () => {
+    const out: CritiqueReport[] = [];
+    try {
+      for await (const entry of Deno.readDir(".")) {
+        if (!entry.isDirectory || !/^v\d+$/.test(entry.name)) continue;
+        const release = entry.name;
+        for await (const fd of Deno.readDir(release)) {
+          if (!fd.isDirectory) continue;
+          const featureSlug = fd.name;
+          const featureCrit = await readCritique(`${release}/${featureSlug}/_questions.json`);
+          if (featureCrit) out.push(featureCrit);
+          try {
+            for await (const cd of Deno.readDir(`${release}/${featureSlug}`)) {
+              if (!cd.isDirectory) continue;
+              const conceptCrit = await readCritique(
+                `${release}/${featureSlug}/${cd.name}/_questions.json`,
+              );
+              if (conceptCrit) out.push(conceptCrit);
+            }
+          } catch {
+            // ignore — feature folder may not be readable in this isolate.
           }
-        } catch {
-          // ignore — feature folder may not be readable in this isolate.
         }
       }
+    } catch {
+      // ignore — root may not be readable.
     }
-  } catch {
-    // ignore — root may not be readable.
+    critiquesCache = { at: Date.now(), critiques: out };
+    critiquesInFlight = null;
+    return out;
+  })();
+  return critiquesInFlight;
+}
+
+async function collectCritiques(): Promise<CritiqueReport[]> {
+  if (critiquesCache) {
+    if (Date.now() - critiquesCache.at >= CRITIQUES_CACHE_TTL_MS) {
+      scanCritiques().catch(() => {});
+    }
+    return critiquesCache.critiques;
   }
-  return out;
+  return await scanCritiques();
 }
 
 function verdictBadge(state: string): string {

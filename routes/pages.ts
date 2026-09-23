@@ -896,31 +896,80 @@ function categoryTag(category: string): string {
   return short;
 }
 
-async function featureHasDemo(release: string, feature: FeatureSummary): Promise<boolean> {
-  // A feature is "built" once its folder index page exists. The feature index
-  // is what the routine writes after each concept page is in place.
+interface DemoProbe {
+  kind: string;
+  test: string;
+  expect?: string;
+}
+
+interface DemoIndexData {
+  demos: Record<string, string>;
+  probes: Record<string, DemoProbe>;
+}
+
+const BUILT_DIRS_TTL_MS = 60 * 1000;
+let builtDirsCache: { at: number; dirs: Set<string> } | null = null;
+
+async function getBuiltDirs(): Promise<Set<string>> {
+  if (builtDirsCache && Date.now() - builtDirsCache.at < BUILT_DIRS_TTL_MS) {
+    return builtDirsCache.dirs;
+  }
+  const dirs = new Set<string>();
   try {
-    await Deno.stat(`./${release}/${slugify(feature.name)}/index.html`);
+    for await (const entry of Deno.readDir(".")) {
+      if (!entry.isDirectory || !/^v\d+$/.test(entry.name)) continue;
+      const release = entry.name;
+      for await (const fd of Deno.readDir(release)) {
+        if (!fd.isDirectory) continue;
+        try {
+          const st = await Deno.stat(`./${release}/${fd.name}/index.html`);
+          if (st.isFile) dirs.add(`${release}/${fd.name}`);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch {
+    // Fallback if root readDir is restricted
+  }
+  builtDirsCache = { at: Date.now(), dirs };
+  return dirs;
+}
+
+async function featureHasDemo(release: string, feature: FeatureSummary): Promise<boolean> {
+  const slug = slugify(feature.name);
+  const dirs = await getBuiltDirs();
+  if (dirs.size > 0) return dirs.has(`${release}/${slug}`);
+  try {
+    await Deno.stat(`./${release}/${slug}/index.html`);
     return true;
   } catch {
     return false;
   }
 }
 
-// Feature id → the folder that demonstrates it, built by
-// `deno task demo-index` and kept honest by `deno task check-demo-index`.
-let demoIndexCache: Record<string, string> | null = null;
-async function getDemoIndex(): Promise<Record<string, string>> {
-  if (demoIndexCache) return demoIndexCache;
+// Feature id → the folder that demonstrates it + primary conformance probe,
+// built by `deno task demo-index` and kept honest by `deno task check-demo-index`.
+let demoIndexCache: { at: number; data: DemoIndexData } | null = null;
+async function getDemoIndexData(): Promise<DemoIndexData> {
+  if (demoIndexCache && Date.now() - demoIndexCache.at < BUILT_DIRS_TTL_MS) {
+    return demoIndexCache.data;
+  }
   try {
     const parsed = JSON.parse(await Deno.readTextFile("./demo-index.json"));
-    demoIndexCache = (parsed?.demos ?? {}) as Record<string, string>;
+    const data: DemoIndexData = {
+      demos: (parsed?.demos ?? {}) as Record<string, string>,
+      probes: (parsed?.probes ?? {}) as Record<string, DemoProbe>,
+    };
+    demoIndexCache = { at: Date.now(), data };
   } catch {
-    // A missing index must not take the site down: every feature then falls
-    // back to the same-milestone check, which is what this used to do.
-    demoIndexCache = {};
+    demoIndexCache = { at: Date.now(), data: { demos: {}, probes: {} } };
   }
-  return demoIndexCache;
+  return demoIndexCache.data;
+}
+
+async function getDemoIndex(): Promise<Record<string, string>> {
+  return (await getDemoIndexData()).demos;
 }
 
 export interface ResolvedDemo {
@@ -970,6 +1019,7 @@ export async function renderReleasePage(
     }</p></main></body></html>`;
   }
 
+  const { probes } = await getDemoIndexData();
   const status = statusBadgeFor(channels, milestone);
   const breadcrumbs = renderBreadcrumbs([
     { name: "Chrome platform showcase", path: "/" },
@@ -978,18 +1028,22 @@ export async function renderReleasePage(
   const sections = await Promise.all(features.groups.map(async (group) => {
     const cards = await Promise.all(group.features.map(async (f) => {
       const demo = await resolveDemo(release, f);
+      const probe = probes[String(f.id)];
       const summary = (f.summary ?? "").slice(0, 220);
-      // Title links to the demo wherever it lives (the thing you actually want
-      // to open); otherwise fall back to the ChromeStatus entry. ChromeStatus
-      // is always reachable via the button in the tags row.
       const titleHref = demo ? demo.href : chromeStatusUrl(f.id);
-      return `<li class="demo-card">
+      const probeAttrs = probe
+        ? ` data-probe-kind="${escapeHTML(probe.kind)}" data-probe-test="${
+          escapeHTML(probe.test)
+        }"${probe.expect ? ` data-probe-expect="${escapeHTML(probe.expect)}"` : ""}`
+        : "";
+      return `<li class="demo-card"${probeAttrs}>
         <h3><a href="${titleHref}"${demo ? "" : ' target="_blank" rel="noopener"'}>${
         escapeHTML(f.name)
       }</a></h3>
         <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
         <div class="demo-tags">
           <span class="tag">${escapeHTML(categoryTag(group.category))}</span>
+          ${probe ? `<span class="tag tag-compat" data-compat-badge hidden>checking…</span>` : ""}
           <a class="tag tag-chromestatus" href="${
         chromeStatusUrl(f.id)
       }" target="_blank" rel="noopener">ChromeStatus &nearr;</a>
@@ -1005,7 +1059,7 @@ export async function renderReleasePage(
         </div>
       </li>`;
     }));
-    return `<section>
+    return `<section data-release-group>
       <h3 class="group-title">${
       escapeHTML(categoryTag(group.category))
     } <span class="group-count">(${group.features.length})</span></h3>
@@ -1022,6 +1076,51 @@ export async function renderReleasePage(
   <link rel="stylesheet" href="/public/styles.css">
   ${breadcrumbs.canonical}
   ${breadcrumbs.structuredData}
+  <style>
+    .release-toolbar {
+      display: flex;
+      gap: var(--space-3);
+      align-items: center;
+      flex-wrap: wrap;
+      margin: var(--space-3) 0 var(--space-4);
+      padding: var(--space-3);
+      background: var(--bg-paper);
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+    }
+    .release-toolbar label {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+    .release-toolbar select {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      padding: 0.4rem 0.6rem;
+      background: var(--bg-paper);
+      color: var(--text-black);
+      border: 2px solid var(--border-black);
+    }
+    .release-toolbar .compat-summary {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+    .tag-compat-yes {
+      background: color-mix(in srgb, var(--accent-emerald) 15%, var(--bg-paper));
+      color: var(--accent-emerald);
+      border-color: var(--accent-emerald);
+    }
+    .tag-compat-no {
+      background: color-mix(in srgb, var(--accent-amber) 16%, var(--bg-paper));
+      color: var(--text-black);
+      border-color: var(--accent-amber);
+    }
+    .demo-card[hidden] { display: none; }
+  </style>
 </head>
 <body>
 <main>
@@ -1035,12 +1134,72 @@ export async function renderReleasePage(
 
   <section>
     <p>Per-feature demos below are built automatically, one feature per commit, and every distinct use case should become an interactive concept page.</p>
+    <div class="release-toolbar">
+      <label for="release-compat">Browser support:</label>
+      <select id="release-compat" aria-label="Filter features by live support in your browser">
+        <option value="">All features (${features.total})</option>
+        <option value="yes">Supported in my browser</option>
+        <option value="no">Flag / Canary / unsupported here</option>
+      </select>
+      <span id="release-compat-summary" class="compat-summary" role="status" aria-live="polite">Probing browser capabilities…</span>
+    </div>
   </section>
 
   <section>
     <h2>features (${features.total})</h2>
     ${sections.join("\n")}
   </section>
+
+  <script type="module">
+    import { runConformanceAssertion, withProbeRejectionsCaptured } from '/public/conformance-runner.js';
+
+    const cards = Array.from(document.querySelectorAll('.demo-card'));
+    const select = document.getElementById('release-compat');
+    const summary = document.getElementById('release-compat-summary');
+
+    function applyCompatFilter() {
+      const mode = select.value;
+      for (const card of cards) {
+        const state = card.dataset.compatState || 'unknown';
+        const show = !mode || state === mode;
+        card.hidden = !show;
+      }
+      for (const section of document.querySelectorAll('[data-release-group]')) {
+        const visibleInGroup = section.querySelectorAll('.demo-card:not([hidden])').length;
+        section.hidden = visibleInGroup === 0;
+      }
+    }
+
+    select.addEventListener('change', applyCompatFilter);
+
+    await withProbeRejectionsCaptured(async () => {
+      let supported = 0;
+      let probed = 0;
+      for (const card of cards) {
+        const kind = card.dataset.probeKind;
+        const test = card.dataset.probeTest;
+        const expect = card.dataset.probeExpect;
+        const badge = card.querySelector('[data-compat-badge]');
+        if (!kind || !test || !badge) continue;
+        probed++;
+        const res = await runConformanceAssertion(kind, test, expect);
+        card.dataset.compatState = res.ok ? 'yes' : 'no';
+        badge.hidden = false;
+        if (res.ok) {
+          supported++;
+          badge.textContent = 'supported here';
+          badge.classList.add('tag-compat-yes');
+        } else {
+          badge.textContent = 'flag / canary';
+          badge.classList.add('tag-compat-no');
+        }
+      }
+      summary.textContent = probed > 0
+        ? \`\${supported} / \${probed} probed features active in this browser\`
+        : 'Live capability check complete';
+      applyCompatFilter();
+    });
+  </script>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
@@ -1052,59 +1211,103 @@ export async function renderReleasePage(
 
 export async function renderFeaturesCatalogue(channels: Channels): Promise<string> {
   const known = [...await knownReleaseMilestones(channels)].sort((a, b) => b - a);
+  const { probes } = await getDemoIndexData();
 
   type Row = {
-    mstone: number;
+    canonicalMstone: number;
+    milestones: number[];
     id: number;
     name: string;
     summary: string;
     category: string;
-    hasDemo: boolean;
+    href: string;
+    probe?: DemoProbe;
   };
 
-  const rows: Row[] = [];
-  for (const m of known) {
-    try {
-      const feats = await getMilestoneFeatures(m);
-      for (const g of feats.groups) {
-        for (const f of g.features) {
-          const hasDemo = await featureHasDemo(`v${m}`, f);
-          // The catalogue is the index of what's actually been built. Pending
-          // features still appear on the per-release pages.
-          if (!hasDemo) continue;
-          rows.push({
-            mstone: m,
-            id: f.id,
-            name: f.name,
-            summary: f.summary ?? "",
-            category: g.category,
-            hasDemo,
-          });
-        }
+  // Fetch all milestones concurrently rather than blocking on a 28-request
+  // serial waterfall.
+  const milestoneResults = await Promise.all(
+    known.map(async (m) => {
+      try {
+        return { mstone: m, feats: await getMilestoneFeatures(m) };
+      } catch {
+        return null;
       }
-    } catch {
-      // skip milestones we can't fetch
+    }),
+  );
+
+  // Deduplicate by ChromeStatus feature ID (`f.id`), honoring the
+  // "One demo folder per feature" rule while recording every milestone the
+  // feature appears in so filtering by milestone works across re-listings.
+  const byId = new Map<number, Row>();
+  for (const item of milestoneResults) {
+    if (!item) continue;
+    const { mstone: m, feats } = item;
+    for (const g of feats.groups) {
+      for (const f of g.features) {
+        const demo = await resolveDemo(`v${m}`, f);
+        if (!demo) continue;
+        const canonicalMstone = Number(demo.release.replace(/^v/, "")) || m;
+        const existing = byId.get(f.id);
+        if (existing) {
+          if (!existing.milestones.includes(m)) existing.milestones.push(m);
+          if (demo.sameRelease) {
+            existing.canonicalMstone = canonicalMstone;
+            existing.href = demo.href;
+            existing.category = g.category;
+          }
+          continue;
+        }
+        const milestones = [canonicalMstone];
+        if (!milestones.includes(m)) milestones.push(m);
+        byId.set(f.id, {
+          canonicalMstone,
+          milestones,
+          id: f.id,
+          name: f.name,
+          summary: f.summary ?? "",
+          category: g.category,
+          href: demo.href,
+          probe: probes[String(f.id)],
+        });
+      }
     }
   }
 
+  const rows = [...byId.values()].sort(
+    (a, b) => b.canonicalMstone - a.canonicalMstone || a.name.localeCompare(b.name),
+  );
+
   const tableRows = rows.map((r) => {
-    const slug = slugify(r.name);
     const cat = categoryTag(r.category);
-    const demoCell = r.hasDemo
-      ? `<a class="tag tag-live" href="/v${r.mstone}/${slug}/">demo &rarr;</a>`
-      : `<span class="tag tag-pending">pending</span>`;
-    const search = `${r.name} ${r.summary} ${cat} v${r.mstone}`.toLowerCase();
-    return `<tr data-search="${escapeHTML(search)}" data-mstone="${r.mstone}" data-status="${
+    const otherMstones = r.milestones
+      .filter((m) => m !== r.canonicalMstone)
+      .sort((a, b) => b - a);
+    const lineageBadge = otherMstones.length > 0
+      ? ` <span class="tag" title="Also listed in Chrome ${otherMstones.join(", ")}">+${
+        otherMstones.map((m) => `v${m}`).join(", ")
+      }</span>`
+      : "";
+    const mstoneTokens = r.milestones.map((m) => `v${m}`).join(" ");
+    const search = `${r.name} ${r.summary} ${cat} ${mstoneTokens}`.toLowerCase();
+    const probeAttrs = r.probe
+      ? ` data-probe-kind="${escapeHTML(r.probe.kind)}" data-probe-test="${
+        escapeHTML(r.probe.test)
+      }"${r.probe.expect ? ` data-probe-expect="${escapeHTML(r.probe.expect)}"` : ""}`
+      : "";
+    return `<tr data-search="${
+      escapeHTML(search)
+    }" data-mstone="${r.canonicalMstone}" data-mstones="${r.milestones.join(",")}" data-status="${
       escapeHTML(cat)
-    }" data-built="${r.hasDemo}">
-      <td><a href="${
-      r.hasDemo ? `/v${r.mstone}/${slug}/` : `https://chromestatus.com/feature/${r.id}`
-    }"${r.hasDemo ? "" : ' target="_blank" rel="noopener"'}>${escapeHTML(r.name)}</a></td>
-      <td><span class="release-status">v${r.mstone}</span></td>
-      <td><span class="tag">${escapeHTML(cat)}</span></td>
+    }" data-built="true"${probeAttrs}>
+      <td><a href="${escapeHTML(r.href)}">${escapeHTML(r.name)}</a></td>
+      <td><span class="release-status">v${r.canonicalMstone}</span>${lineageBadge}</td>
+      <td><span class="tag">${escapeHTML(cat)}</span> ${
+      r.probe ? `<span class="tag tag-compat" data-compat-badge hidden>…</span>` : ""
+    }</td>
       <td>
         <a class="tag tag-chromestatus" href="https://chromestatus.com/feature/${r.id}" target="_blank" rel="noopener">ChromeStatus &nearr;</a>
-        ${demoCell}
+        <a class="tag tag-live" href="${escapeHTML(r.href)}">demo &rarr;</a>
       </td>
     </tr>`;
   }).join("");
@@ -1139,7 +1342,7 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
       border: 2px solid var(--border-black);
       outline: none;
     }
-    .filters input:focus { box-shadow: var(--thin-shadow); }
+    .filters input:focus, .filters select:focus { box-shadow: var(--thin-shadow); }
     .filters input[type=search] { flex: 1; min-width: 160px; }
     .features-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
     .features-table th, .features-table td { padding: 0.6rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border-black); vertical-align: top; }
@@ -1151,12 +1354,27 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
       color: var(--text-muted);
       background: var(--bg-stone);
     }
+    /* Defer off-screen rendering for rows below the fold (modern-web-guidance: defer-rendering-heavy-content) */
+    .features-table tbody tr:nth-child(n+25) {
+      content-visibility: auto;
+      contain-intrinsic-size: auto none auto 52px;
+    }
     .features-table tr.hidden { display: none; }
     .features-table td a { color: var(--text-black); text-decoration: underline; text-underline-offset: 3px; }
     .features-table td a:hover { color: var(--accent-blue); }
     .features-table td .tag, .features-table td .release-status { font-family: var(--font-mono); }
     .features-table td .release-status { background: var(--text-black); color: var(--bg-ivory); padding: 0.15rem 0.5rem; font-size: 0.75rem; }
-    .stats { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; }
+    .tag-compat-yes {
+      background: color-mix(in srgb, var(--accent-emerald) 15%, var(--bg-paper));
+      color: var(--accent-emerald);
+      border-color: var(--accent-emerald);
+    }
+    .tag-compat-no {
+      background: color-mix(in srgb, var(--accent-amber) 16%, var(--bg-paper));
+      color: var(--text-black);
+      border-color: var(--accent-amber);
+    }
+    .stats { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; display: flex; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
 
     @media (max-width: 640px) {
       main { padding-left: var(--space-4); padding-right: var(--space-4); }
@@ -1193,51 +1411,66 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
   <header class="lede-block">
     <p class="eyebrow">catalogue</p>
     <h1>all features</h1>
-    <p class="lede">Every feature with a demo available, across every milestone. Filter by name, milestone, or status. Pending features still show up on the per-release pages.</p>
+    <p class="lede">Every feature with a demo available, deduplicated to its canonical demo across every milestone. Filter by name, milestone, status, or whether the feature works live in your current browser.</p>
   </header>
 
-  <div class="filters">
-    <input type="search" id="q" placeholder="search by name, summary, category">
-    <select id="mstone">
+  <div class="filters" role="search" aria-label="Filter features catalogue">
+    <input type="search" id="q" aria-label="Search by name, summary, or category" placeholder="search by name, summary, category">
+    <select id="mstone" aria-label="Filter by Chrome milestone">
       <option value="">all milestones</option>
       ${mstoneOptions}
     </select>
-    <select id="status">
+    <select id="status" aria-label="Filter by shipping status">
       <option value="">any status</option>
       <option value="Shipped">Shipped</option>
       <option value="Origin Trial">Origin Trial</option>
       <option value="Dev Trial">Dev Trial</option>
       <option value="Stepped rollout">Stepped rollout</option>
     </select>
+    <select id="compat" aria-label="Filter by live support in your browser">
+      <option value="">any browser support</option>
+      <option value="yes">supported in my browser</option>
+      <option value="no">flag / canary required</option>
+    </select>
   </div>
 
-  <p class="stats"><span id="visible">${rows.length}</span> / ${rows.length} demos</p>
+  <p class="stats" role="status" aria-live="polite">
+    <span><span id="visible">${rows.length}</span> / ${rows.length} unique feature demos</span>
+    <span id="compat-stats">probing browser support…</span>
+  </p>
 
   <table class="features-table">
     <thead>
-      <tr><th>feature</th><th>milestone</th><th>status</th><th>demo</th></tr>
+      <tr><th>feature</th><th>milestone</th><th>status &amp; support</th><th>demo</th></tr>
     </thead>
     <tbody id="rows">${tableRows}</tbody>
   </table>
 
-  <script>
+  <script type="module">
+    import { runConformanceAssertion, withProbeRejectionsCaptured } from '/public/conformance-runner.js';
+
     const q = document.getElementById('q');
     const mstone = document.getElementById('mstone');
     const status = document.getElementById('status');
-    const rows = document.querySelectorAll('#rows tr');
+    const compat = document.getElementById('compat');
+    const rows = Array.from(document.querySelectorAll('#rows tr'));
     const visible = document.getElementById('visible');
+    const compatStats = document.getElementById('compat-stats');
 
     function applyFilter() {
       const qv = q.value.toLowerCase().trim();
       const mv = mstone.value;
       const sv = status.value;
+      const cv = compat.value;
       let count = 0;
       for (const row of rows) {
         const search = row.dataset.search;
+        const mstones = (row.dataset.mstones || row.dataset.mstone || '').split(',');
         const okq = !qv || search.includes(qv);
-        const okm = !mv || row.dataset.mstone === mv;
+        const okm = !mv || mstones.includes(mv);
         const oks = !sv || row.dataset.status === sv;
-        const show = okq && okm && oks;
+        const okc = !cv || row.dataset.compatState === cv;
+        const show = okq && okm && oks && okc;
         row.classList.toggle('hidden', !show);
         if (show) count++;
       }
@@ -1247,6 +1480,39 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
     q.addEventListener('input', applyFilter);
     mstone.addEventListener('change', applyFilter);
     status.addEventListener('change', applyFilter);
+    compat.addEventListener('change', applyFilter);
+
+    // Evaluate probes in non-blocking chunks to keep INP low (modern-web-guidance: interactions-in-complex-layouts)
+    await withProbeRejectionsCaptured(async () => {
+      let supported = 0;
+      let probed = 0;
+      const CHUNK = 40;
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const slice = rows.slice(i, i + CHUNK);
+        for (const row of slice) {
+          const kind = row.dataset.probeKind;
+          const test = row.dataset.probeTest;
+          const expect = row.dataset.probeExpect;
+          const badge = row.querySelector('[data-compat-badge]');
+          if (!kind || !test || !badge) continue;
+          probed++;
+          const res = await runConformanceAssertion(kind, test, expect);
+          row.dataset.compatState = res.ok ? 'yes' : 'no';
+          badge.hidden = false;
+          if (res.ok) {
+            supported++;
+            badge.textContent = 'supported';
+            badge.classList.add('tag-compat-yes');
+          } else {
+            badge.textContent = 'flag / canary';
+            badge.classList.add('tag-compat-no');
+          }
+        }
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      compatStats.textContent = \`\${supported} / \${probed} probed features active in your browser\`;
+      if (compat.value) applyFilter();
+    });
   </script>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
@@ -1271,38 +1537,41 @@ interface CategorizedRow {
 
 async function collectCategorizedRows(channels: Channels): Promise<CategorizedRow[]> {
   const known = [...await knownReleaseMilestones(channels)].sort((a, b) => b - a);
-  const rows: CategorizedRow[] = [];
-  for (const m of known) {
-    try {
-      const feats = await getMilestoneFeatures(m);
-      // Chromestatus puts the same feature in multiple groups when it's under
-      // several statuses (e.g. "Origin trial" + "In developer trial"). Dedupe
-      // by (milestone, slug) so we don't list the same demo twice on the
-      // category page.
-      const seen = new Set<string>();
-      for (const g of feats.groups) {
-        for (const f of g.features) {
-          const slug = slugify(f.name);
-          const key = `${m}:${slug}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          const demo = await resolveDemo(`v${m}`, f);
-          rows.push({
-            mstone: m,
-            id: f.id,
-            name: f.name,
-            summary: f.summary ?? "",
-            category: categoryForFeature(f.name, g.category),
-            hasDemo: demo?.sameRelease ?? false,
-            demo,
-          });
+  const milestoneBatches = await Promise.all(
+    known.map(async (m) => {
+      try {
+        const feats = await getMilestoneFeatures(m);
+        // Chromestatus puts the same feature in multiple groups when it's under
+        // several statuses (e.g. "Origin trial" + "In developer trial"). Dedupe
+        // by (milestone, slug) so we don't list the same demo twice on the
+        // category page.
+        const seen = new Set<string>();
+        const batch: CategorizedRow[] = [];
+        for (const g of feats.groups) {
+          for (const f of g.features) {
+            const slug = slugify(f.name);
+            const key = `${m}:${slug}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const demo = await resolveDemo(`v${m}`, f);
+            batch.push({
+              mstone: m,
+              id: f.id,
+              name: f.name,
+              summary: f.summary ?? "",
+              category: categoryForFeature(f.name, g.category),
+              hasDemo: demo?.sameRelease ?? false,
+              demo,
+            });
+          }
         }
+        return batch;
+      } catch {
+        return [] as CategorizedRow[];
       }
-    } catch {
-      // skip milestones we can't fetch
-    }
-  }
-  return rows;
+    }),
+  );
+  return milestoneBatches.flat();
 }
 
 export async function renderCategoriesIndex(channels: Channels): Promise<string> {
