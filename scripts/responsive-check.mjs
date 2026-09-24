@@ -6,7 +6,7 @@
 //   - mobile  ≈360×740, deviceScaleFactor 3, touch  (constrained phone)
 //   - desktop ≈1280×800, mouse + keyboard
 // Per class it loads the page, screenshots it, and asserts programmatically:
-//   - no horizontal overflow (documentElement.scrollWidth <= innerWidth + 1)
+//   - no horizontal overflow (documentElement.scrollWidth <= clientWidth + 1)
 //   - no off-viewport / clipped interactive controls
 //   - (mobile) primary tap targets ≈44px
 //   - zero uncaught console errors / exceptions
@@ -205,10 +205,21 @@ async function bootServer() {
 }
 
 // The in-page assertion the harness evaluates per class.
+//
+// The reference is the LAYOUT viewport (documentElement.clientWidth), not
+// window.innerWidth. Under mobile emulation Chrome expands innerWidth to fit wide
+// content in normal flow, so `scrollWidth - innerWidth` returns 0 for a page a
+// phone user cannot fit on screen (measured: innerWidth 1424 against clientWidth
+// 360 on a page with a 1400px block). clientWidth stays at the layout viewport and
+//
+//   scrollWidth - clientWidth
+//
+// is the user-visible truth. Controls are measured against the same reference, so
+// a control past the layout viewport counts as clipped rather than reachable.
 const PROBE = `(() => {
   const de = document.documentElement;
-  const overflow = de.scrollWidth - window.innerWidth;
-  const vw = window.innerWidth;
+  const vw = de.clientWidth;
+  const overflow = de.scrollWidth - vw;
   const controls = Array.from(document.querySelectorAll(
     'button, a[href], input, select, textarea, [role=button], [tabindex]'
   ));
@@ -220,7 +231,15 @@ const PROBE = `(() => {
     if (r.right > vw + 1 || r.left < -1) clipped++;
     if (Math.min(r.width, r.height) > 0 && Math.min(r.width, r.height) < 44) small++;
   }
-  return { overflow, scrollWidth: de.scrollWidth, innerWidth: vw, clipped, small, visible };
+  return {
+    overflow,
+    scrollWidth: de.scrollWidth,
+    layoutViewport: vw,
+    reportedInnerWidth: window.innerWidth,
+    clipped,
+    small,
+    visible,
+  };
 })()`;
 
 async function checkPage(conn, url, cls) {
