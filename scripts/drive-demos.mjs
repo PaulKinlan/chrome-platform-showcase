@@ -132,6 +132,35 @@ async function bootServer() {
   throw new Error("local server did not become ready");
 }
 
+// ── Screenshot settle and pair hashing ──────────────────────────────────────
+// The in-page driver resolves once it has exercised the controls, but that
+// promise can settle before the frame carrying the change has been painted, so
+// an immediate capture lands on the pre-interaction surface. Two animation
+// frames is the cheapest honest settle: the second callback is queued behind a
+// frame that already includes the mutation. This is not a sleep: a sleep either
+// under-waits or wastes time, while a frame callback is ordered against the very
+// work it is waiting for.
+async function settleFrames(conn, sessionId, frames = 2) {
+  const raf = (n) => n === 0 ? "resolve(true)" : `requestAnimationFrame(() => { ${raf(n - 1)} })`;
+  await conn.send("Runtime.evaluate", {
+    expression: `new Promise((resolve) => { ${raf(frames)} })`,
+    awaitPromise: true,
+    returnByValue: true,
+  }, sessionId).catch(() => {
+    // A page that refuses to paint a frame is not a driver failure; the pair
+    // hashing records what was actually captured either way.
+  });
+}
+
+// Short content hash for a captured PNG, so a before/after pair can be compared
+// byte-for-byte instead of being presented as proof by assumption.
+async function shortHash(bytes) {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest).slice(0, 8)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 // ── In-page interactive driver script ───────────────────────────────────────
 const IN_PAGE_DRIVER = `(async () => {
   const result = {
@@ -322,6 +351,7 @@ const results = [];
 let passedCount = 0;
 let failedCount = 0;
 let notDemonstratedCount = 0;
+let noVisualDeltaCount = 0;
 
 try {
   chrome = await launchChrome();
@@ -402,14 +432,13 @@ try {
 
     // Capture initial screenshot
     let initialShotPath = null;
+    let initialShotBytes = null;
     try {
       const shot = await conn.send("Page.captureScreenshot", { format: "png" }, sessionId);
       if (shot?.data) {
         initialShotPath = join(itemDir, "01-initial.png");
-        await Deno.writeFile(
-          initialShotPath,
-          Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
-        );
+        initialShotBytes = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
+        await Deno.writeFile(initialShotPath, initialShotBytes);
       }
     } catch {
       // non-fatal
@@ -439,20 +468,31 @@ try {
       driveError = e.message;
     }
 
-    // Capture after-interaction screenshot
+    // Capture after-interaction screenshot. Settle a frame first: without it the
+    // capture races the paint of the change the driver just made, which produced
+    // byte-identical before/after pairs that were then presented as proof.
+    await settleFrames(conn, sessionId);
     let afterShotPath = null;
+    let afterShotBytes = null;
     try {
       const shot = await conn.send("Page.captureScreenshot", { format: "png" }, sessionId);
       if (shot?.data) {
         afterShotPath = join(itemDir, "02-interactive.png");
-        await Deno.writeFile(
-          afterShotPath,
-          Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
-        );
+        afterShotBytes = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
+        await Deno.writeFile(afterShotPath, afterShotBytes);
       }
     } catch {
       // non-fatal
     }
+
+    // A pair that hashes the same is not evidence that anything happened. Two
+    // causes are possible and the images cannot distinguish them: the paint had
+    // not landed (the settle above addresses this) or the interaction legitimately
+    // returned the page to its starting state (two clicks that cancel out). Either
+    // way the pair must not be presented as proof, so it is labelled instead.
+    const beforeHash = initialShotBytes ? await shortHash(initialShotBytes) : null;
+    const afterHash = afterShotBytes ? await shortHash(afterShotBytes) : null;
+    const visualDelta = beforeHash && afterHash ? beforeHash !== afterHash : null;
 
     sessions.delete(sessionId);
     await conn.send("Target.closeTarget", { targetId }).catch(() => {});
@@ -485,17 +525,37 @@ try {
       screenshots: {
         initial: initialShotPath ? `${item.slug}/01-initial.png` : null,
         interactive: afterShotPath ? `${item.slug}/02-interactive.png` : null,
+        beforeHash,
+        afterHash,
       },
+      visualDelta,
+      visualDeltaNote: visualDelta === false
+        ? "NO-VISUAL-DELTA — before/after screenshots are byte-identical, so the pair is not proof of the interaction"
+        : null,
     };
 
     results.push(record);
+
+    // A driven row with a byte-identical pair is the surprising case worth counting
+    // loudly: the report would otherwise present the pair as evidence. Undriven rows
+    // (NO-CONTROLS / NO-EFFECT / NOT-DRIVEABLE) are already labelled not-proof by
+    // their status, so they get the per-row note but do not inflate this tally.
+    const wasDriven = record.controlsExercised > 0 || record.mutations > 0;
+    if (record.visualDelta === false && wasDriven) {
+      noVisualDeltaCount++;
+      console.warn(
+        `  NO-VISUAL-DELTA  ${item.url} — before/after screenshots are byte-identical (${record.screenshots.beforeHash}) after ${record.controlsExercised} control(s) and ${record.mutations} mutation(s); the pair is not proof of the interaction`,
+      );
+    }
 
     if (verdict.status === "PASS") {
       passedCount++;
       const actionSummary = record.actions.length
         ? record.actions.slice(0, 3).join(", ")
         : `${Object.keys(record.assertions ?? {}).length} assertion(s) held`;
-      console.log(`PASS  ${item.url} — ${actionSummary} (${record.mutations} mutations)`);
+      console.log(
+        `PASS  ${item.url} — ${actionSummary} (${record.mutations} mutations)`,
+      );
     } else if (verdict.status === "FAIL") {
       failedCount++;
       console.error(`FAIL  ${item.url} — ${verdict.reason}`);
@@ -606,6 +666,7 @@ const summaryJson = {
   lastRunTested: results.length,
   lastRunPassed: passedCount,
   lastRunNotDemonstrated: notDemonstratedCount,
+  lastRunNoVisualDelta: noVisualDeltaCount,
   lastRunFailed: failedCount,
   results: allResults,
 };
@@ -627,6 +688,8 @@ md +=
   `- **Latest Run:** ${results.length} tested (${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed)\n\n`;
 md +=
   `Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT** and **NOT-ASSERTED** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.\n\n`;
+md +=
+  `**NO-VISUAL-DELTA** is a caveat on a row, not a status: the before/after screenshots hash the same, so the pair is not proof of the interaction. It can mean the paint had not landed, or that the interaction legitimately returned the page to its starting state (for example a click that toggles a state and a second that toggles it back). The two are indistinguishable from the images, so neither is claimed.\n\n`;
 // Heading says what the table actually contains: driven passes, failures,
 // not-demonstrated rows and recovered artifacts all appear here.
 md += `## Indexed Demos\n\n`;
@@ -636,7 +699,11 @@ md += `| :--- | :---: | :---: | :---: | :--- |\n`;
 for (const r of allResults) {
   const proofLinks = [
     r.screenshots?.initial ? `[Initial](${r.screenshots.initial})` : "",
-    r.screenshots?.interactive ? `[Interactive](${r.screenshots.interactive})` : "",
+    r.visualDelta === false
+      ? "NO-VISUAL-DELTA (pair byte-identical)"
+      : r.screenshots?.interactive
+      ? `[Interactive](${r.screenshots.interactive})`
+      : "",
   ].filter(Boolean).join(" · ");
   md +=
     `| \`${r.url}\` | ${r.controlsFound} / ${r.controlsExercised} | ${r.mutations} | **${r.status}** | ${proofLinks} |\n`;
@@ -671,6 +738,11 @@ await Deno.writeTextFile(join(outDir, "REPORT.md"), md);
 
 console.log(
   `\nVerification complete this run: ${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed (of ${results.length} tested).`,
+  ...(noVisualDeltaCount
+    ? [
+      `\nNO-VISUAL-DELTA: ${noVisualDeltaCount} driven row(s) produced byte-identical before/after screenshots — not proof of the interaction; see the table.`,
+    ]
+    : []),
 );
 console.log(
   `Cumulative index: ${totalPassed} passed, ${notDemonstrated.length} not demonstrated, ${totalUnverified} unverified (${allResults.length}/${totalCatalogueConcepts} catalogue concepts indexed).`,
