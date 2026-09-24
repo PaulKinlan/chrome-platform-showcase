@@ -34,6 +34,11 @@
 //   deno task overflow-scan --sample 60 --merge  # write needs-review into sidecar
 //   deno task overflow-scan --concepts --sample 40 --classes both
 //   deno task overflow-scan --concepts --milestone v151 --stride 3 --classes both
+//
+// Without --base the harness picks a FREE port, so concurrent lanes cannot
+// collide. With --base it honours the port exactly and aborts if something else
+// already holds it — measuring another lane's server is never a useful result
+// (beads chrome-platform-showcase-bn2 and -7b0).
 
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
 import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
@@ -47,6 +52,7 @@ function flag(name) {
   return v && !v.startsWith("--") ? v : true;
 }
 const doMerge = Boolean(flag("--merge"));
+const noServer = Boolean(flag("--no-server"));
 const all = Boolean(flag("--all"));
 const concepts = Boolean(flag("--concepts"));
 const sampleN = Number(flag("--sample") ?? 0);
@@ -54,8 +60,8 @@ const milestone = flag("--milestone");
 const strideN = Number(flag("--stride") ?? 0);
 const classesArg = String(flag("--classes") ?? (concepts ? "both" : "mobile"));
 const perPageMs = Number(flag("--timeout-ms") ?? 8000);
-const port = 3000;
-const base = `http://localhost:${port}`;
+const explicitBase = flag("--base");
+let base = explicitBase ?? "http://localhost:3000";
 
 const CLASSES = {
   mobile: { width: 360, height: 740, deviceScaleFactor: 3, mobile: true },
@@ -140,36 +146,125 @@ else if (milestone) {
   console.error("Specify --all, --milestone v<N>, --sample <n>, or --concepts with one of those.");
   Deno.exit(2);
 }
-
-const server = new Deno.Command("deno", {
-  args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
-  env: { PORT: String(port) },
-  stdout: "null",
-  stderr: "null",
-}).spawn();
-for (let i = 0; i < 40; i++) {
-  try {
-    const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(1000) });
-    await r.body?.cancel();
-    if (r.ok) break;
-  } catch {
-    // not up
-  }
-  await new Promise((r) => setTimeout(r, 500));
+if (!targets.length) {
+  console.error("No matching built demos.");
+  Deno.exit(2);
 }
 
-const chrome = await launchChrome();
-const conn = await cdpConnection(chrome.wsUrl);
-const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
-const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
-await conn.send("Page.enable", {}, sessionId);
-await conn.send("Runtime.enable", {}, sessionId);
-await conn.send("Emulation.setDeviceMetricsOverride", {
-  width: 360,
-  height: 740,
-  deviceScaleFactor: 3,
-  mobile: true,
-}, sessionId);
+// ── Server guards (bn2 / 7b0 port collision & identity verification) ─────────
+let serverChild = null;
+
+function portIsFree(port) {
+  try {
+    const listener = Deno.listen({ port });
+    listener.close();
+    return true;
+  } catch (e) {
+    if (e instanceof Deno.errors.AddrInUse) return false;
+    throw e;
+  }
+}
+
+function findFreePort() {
+  for (let i = 0; i < 64; i++) {
+    const port = 3400 + Math.floor(Math.random() * 600);
+    if (portIsFree(port)) return port;
+  }
+  throw new Error("no free port found in 3400-3999 after 64 attempts");
+}
+
+async function assertServingThisTree() {
+  const targetId = typeof targets[0] === "string" ? targets[0] : targets[0].id;
+  const probe = `${base}/${targetId}/`;
+  let status = "no response";
+  try {
+    const r = await fetch(probe, { signal: AbortSignal.timeout(5000) });
+    await r.body?.cancel();
+    if (r.ok) return;
+    status = `HTTP ${r.status}`;
+  } catch (e) {
+    status = e?.message ?? String(e);
+  }
+  throw new Error(
+    `${base} is not serving this working tree (${probe} -> ${status}).\n` +
+      `  Refusing to measure: a server without these demos reports every page broken/overflowed, ` +
+      `and --merge would contaminate responsive-support.json.\n` +
+      `  Start a server from THIS worktree and pass --base http://localhost:<port> --no-server.`,
+  );
+}
+
+async function bootServer() {
+  if (noServer) {
+    await assertServingThisTree();
+    return;
+  }
+  const requested = explicitBase ? Number(new URL(base).port) || 3000 : null;
+  if (requested !== null && !portIsFree(requested)) {
+    throw new Error(
+      `port ${requested} is already in use, so this run would have measured whatever ` +
+        `is listening there instead of this worktree.\n` +
+        `  Free the port, omit --base to get a free one automatically, or point at that ` +
+        `server deliberately with --base http://localhost:${requested} --no-server.`,
+    );
+  }
+  const port = requested ?? findFreePort();
+  base = `http://localhost:${port}`;
+  serverChild = new Deno.Command("deno", {
+    args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
+    env: { PORT: String(port) },
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
+
+  for (let i = 0; i < 40; i++) {
+    try {
+      const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(1000) });
+      await r.body?.cancel();
+      if (r.ok) {
+        try {
+          await assertServingThisTree();
+          return;
+        } catch (err) {
+          if (serverChild) {
+            try {
+              serverChild.kill("SIGKILL");
+            } catch {
+              // ignore
+            }
+          }
+          throw err;
+        }
+      }
+    } catch (e) {
+      if (e.message && e.message.includes("is not serving this working tree")) throw e;
+      // waiting
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  if (serverChild) {
+    try {
+      serverChild.kill("SIGKILL");
+    } catch {
+      // ignore
+    }
+  }
+  throw new Error(`local server on port ${port} did not become ready`);
+}
+
+// ── Run scan ─────────────────────────────────────────────────────────────────
+try {
+  await bootServer();
+} catch (e) {
+  console.error(`overflow-scan: ${e.message}`);
+  if (serverChild) {
+    try {
+      serverChild.kill("SIGKILL");
+    } catch {
+      // ignore
+    }
+  }
+  Deno.exit(2);
+}
 
 const PROBE =
   // Page-level signal first, then the widest element whose ancestors all have a
@@ -245,7 +340,7 @@ const PROBE =
     };
   })()`;
 
-function evaluateWithin(sessionId, expression, ms) {
+function evaluateWithin(conn, sessionId, expression, ms) {
   const call = conn.send("Runtime.evaluate", { expression, returnByValue: true }, sessionId);
   // A page that stalls the renderer must not stall the scan: cdp.mjs would wait
   // its own 120s timeout and then reject. Race a budget and, crucially, keep a
@@ -257,141 +352,158 @@ function evaluateWithin(sessionId, expression, ms) {
   ]);
 }
 
-const rows = [];
-let overflow = 0, clean = 0, blocked = 0, unmeasured = 0;
-const update = {};
-for (const id of targets) {
-  const url = `${base}/${id}/`;
-  for (const cls of classList) {
-    const spec = CLASSES[cls];
-    let row = { page: id, class: cls };
-    try {
-      await conn.send("Emulation.setDeviceMetricsOverride", spec, sessionId);
-      const loaded = new Promise((res) => {
-        const onEvent = (m) => {
-          if (m.sessionId === sessionId && m.method === "Page.loadEventFired") res();
-        };
-        conn.onEvent(onEvent);
-      });
-      await conn.send("Page.navigate", { url }, sessionId);
-      await Promise.race([loaded, new Promise((r) => setTimeout(r, 6000))]);
-      await new Promise((r) => setTimeout(r, 300));
-      const res = await evaluateWithin(sessionId, PROBE, perPageMs);
-      if (res === "TIMEOUT") {
-        unmeasured++;
-        row = {
-          ...row,
-          overflow: null,
-          state: "unmeasured",
-          note: `no answer within ${perPageMs}ms`,
-        };
-      } else {
-        const v = res.result?.value;
-        if (!v) {
+let chrome = null;
+let conn = null;
+
+try {
+  chrome = await launchChrome();
+  conn = await cdpConnection(chrome.wsUrl);
+  const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
+  const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
+  await conn.send("Page.enable", {}, sessionId);
+  await conn.send("Runtime.enable", {}, sessionId);
+
+  const rows = [];
+  let overflow = 0, clean = 0, blocked = 0, unmeasured = 0;
+  const update = {};
+  for (const id of targets) {
+    const url = `${base}/${id}/`;
+    for (const cls of classList) {
+      const spec = CLASSES[cls];
+      let row = { page: id, class: cls };
+      try {
+        await conn.send("Emulation.setDeviceMetricsOverride", spec, sessionId);
+        const loaded = new Promise((res) => {
+          const onEvent = (m) => {
+            if (m.sessionId === sessionId && m.method === "Page.loadEventFired") res();
+          };
+          conn.onEvent(onEvent);
+        });
+        await conn.send("Page.navigate", { url }, sessionId);
+        await Promise.race([loaded, new Promise((r) => setTimeout(r, 6000))]);
+        await new Promise((r) => setTimeout(r, 300));
+        const res = await evaluateWithin(conn, sessionId, PROBE, perPageMs);
+        if (res === "TIMEOUT") {
           unmeasured++;
-          row = { ...row, overflow: null, state: "unmeasured", note: "no value" };
-        } else if (v.o > 1) {
-          overflow++;
           row = {
             ...row,
-            overflow: v.o,
-            state: "overflow",
-            culprit: v.past[0] ?? null,
-            textLine: v.textLine ?? null,
-            past: v.past,
-            layoutViewport: v.layoutViewport,
-            innerWidth: v.innerWidth,
-            visualViewport: v.visualViewport,
+            overflow: null,
+            state: "unmeasured",
+            note: `no answer within ${perPageMs}ms`,
           };
-          const culprit = v.past[0]
-            ? `${v.past[0].tag}.${v.past[0].cls}`
-            : v.textLine
-            ? `text line in ${v.textLine.tag}.${v.textLine.cls} (${v.textLine.width}px): "${v.textLine.text}"`
-            : "not attributable to an element (no element or text line past the layout viewport)";
-          console.log(`  OVERFLOW ${String(v.o).padStart(5)}px [${cls}] ${id} :: ${culprit}`);
         } else {
-          clean++;
-          row = { ...row, overflow: v.o, state: "clean" };
+          const v = res.result?.value;
+          if (!v) {
+            unmeasured++;
+            row = { ...row, overflow: null, state: "unmeasured", note: "no value" };
+          } else if (v.o > 1) {
+            overflow++;
+            row = {
+              ...row,
+              overflow: v.o,
+              state: "overflow",
+              culprit: v.past[0] ?? null,
+              textLine: v.textLine ?? null,
+              past: v.past,
+              layoutViewport: v.layoutViewport,
+              innerWidth: v.innerWidth,
+              visualViewport: v.visualViewport,
+            };
+            const culprit = v.past[0]
+              ? `${v.past[0].tag}.${v.past[0].cls}`
+              : v.textLine
+              ? `text line in ${v.textLine.tag}.${v.textLine.cls} (${v.textLine.width}px): "${v.textLine.text}"`
+              : "not attributable to an element (no element or text line past the layout viewport)";
+            console.log(`  OVERFLOW ${String(v.o).padStart(5)}px [${cls}] ${id} :: ${culprit}`);
+          } else {
+            clean++;
+            row = { ...row, overflow: v.o, state: "clean" };
+          }
         }
+      } catch (e) {
+        blocked++;
+        row = { ...row, overflow: null, state: "blocked", note: e.message };
+        console.log(`  BLOCKED [${cls}] ${id} — ${e.message}`);
       }
-    } catch (e) {
-      blocked++;
-      row = { ...row, overflow: null, state: "blocked", note: e.message };
-      console.log(`  BLOCKED [${cls}] ${id} — ${e.message}`);
+      rows.push(row);
+      // Feature mode keeps its sidecar seeding behaviour; a concept page has no
+      // feature-folder key, so concept mode reports instead.
+      if (!concepts && row.state === "overflow") {
+        update[id] = {
+          [cls]: "needs-review",
+          source: "overflow-scan",
+          lastChecked: new Date().toISOString().slice(0, 10),
+        };
+      }
     }
-    rows.push(row);
-    // Feature mode keeps its sidecar seeding behaviour; a concept page has no
-    // feature-folder key, so concept mode reports instead.
-    if (!concepts && row.state === "overflow") {
-      update[id] = {
-        [cls]: "needs-review",
-        source: "overflow-scan",
-        lastChecked: new Date().toISOString().slice(0, 10),
-      };
+  }
+
+  const dir = `${REPO_ROOT}/reports/responsive`;
+  await Deno.mkdir(dir, { recursive: true });
+  const reportPath = concepts ? `${dir}/concept-overflow-scan.json` : `${dir}/overflow-scan.json`;
+  await Deno.writeTextFile(
+    reportPath,
+    JSON.stringify(
+      {
+        generatedAt: new Date().toISOString(),
+        mode: concepts ? "concepts" : "features",
+        classes: classList,
+        perPageTimeoutMs: perPageMs,
+        scanned: targets.length,
+        pageClasses: targets.length * classList.length,
+        overflow,
+        clean,
+        blocked,
+        unmeasured,
+        // Per page-class rows so a desktop-only offender is visible as such; the
+        // 4va sweep found all but one offender were desktop-only.
+        rows,
+        ...(concepts ? {} : { flagged: update }),
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+
+  console.log(
+    `\noverflow-scan (${concepts ? "concepts" : "features"}, ${
+      classList.join("+")
+    }): ${targets.length} pages · ${
+      targets.length * classList.length
+    } page-classes · ${overflow} overflow · ${clean} clean · ${blocked} blocked · ${unmeasured} unmeasured`,
+  );
+  console.log(`report: ${reportPath}`);
+
+  if (doMerge && Object.keys(update).length) {
+    const tmp = await Deno.makeTempFile({ suffix: ".json" });
+    await Deno.writeTextFile(tmp, JSON.stringify(update, null, 2));
+    await new Deno.Command("deno", {
+      args: [
+        "run",
+        "--allow-read",
+        "--allow-write",
+        "--allow-run",
+        "--allow-env",
+        "scripts/responsive-support.mjs",
+        "merge",
+        tmp,
+      ],
+      stdout: "inherit",
+      stderr: "inherit",
+    }).spawn().status;
+    await Deno.remove(tmp).catch(() => {});
+  }
+} finally {
+  if (conn) conn.close?.();
+  if (chrome) await cleanupChrome(chrome);
+  if (serverChild) {
+    try {
+      serverChild.kill("SIGKILL");
+      await serverChild.status;
+    } catch {
+      // ignore
     }
   }
 }
 
-conn.close();
-await cleanupChrome(chrome);
-try {
-  server.kill();
-} catch {
-  // ignore
-}
-
-const dir = `${REPO_ROOT}/reports/responsive`;
-await Deno.mkdir(dir, { recursive: true });
-const reportPath = concepts ? `${dir}/concept-overflow-scan.json` : `${dir}/overflow-scan.json`;
-await Deno.writeTextFile(
-  reportPath,
-  JSON.stringify(
-    {
-      generatedAt: new Date().toISOString(),
-      mode: concepts ? "concepts" : "features",
-      classes: classList,
-      perPageTimeoutMs: perPageMs,
-      scanned: targets.length,
-      pageClasses: targets.length * classList.length,
-      overflow,
-      clean,
-      blocked,
-      unmeasured,
-      // Per page-class rows so a desktop-only offender is visible as such; the
-      // 4va sweep found all but one offender were desktop-only.
-      rows,
-      ...(concepts ? {} : { flagged: update }),
-    },
-    null,
-    2,
-  ) + "\n",
-);
-
-console.log(
-  `\noverflow-scan (${concepts ? "concepts" : "features"}, ${
-    classList.join("+")
-  }): ${targets.length} pages · ${
-    targets.length * classList.length
-  } page-classes · ${overflow} overflow · ${clean} clean · ${blocked} blocked · ${unmeasured} unmeasured`,
-);
-console.log(`report: ${reportPath}`);
-
-if (doMerge && Object.keys(update).length) {
-  const tmp = await Deno.makeTempFile({ suffix: ".json" });
-  await Deno.writeTextFile(tmp, JSON.stringify(update, null, 2));
-  await new Deno.Command("deno", {
-    args: [
-      "run",
-      "--allow-read",
-      "--allow-write",
-      "--allow-run",
-      "--allow-env",
-      "scripts/responsive-support.mjs",
-      "merge",
-      tmp,
-    ],
-    stdout: "inherit",
-    stderr: "inherit",
-  }).spawn().status;
-  await Deno.remove(tmp).catch(() => {});
-}
+Deno.exit(0);
