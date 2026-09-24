@@ -1,9 +1,11 @@
 # Interactive Demo Verification Report
 
-- **Last Updated:** 2026-09-24T09:49:32.313Z
+- **Last Updated:** 2026-09-24T10:03:11.280Z
 - **Catalogue Coverage:** 56 / 3893 concepts indexed (1.4%)
-- **Overall Status:** 25 passed, 31 unverified (recovered artifacts), 0 failed
-- **Latest Run:** 1 tested (1 passed, 0 failed)
+- **Overall Status:** 21 passed, 4 not demonstrated, 31 unverified (recovered artifacts), 0 failed
+- **Latest Run:** 1 tested (0 passed, 1 not demonstrated, 0 failed)
+
+Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT** and **NOT-ASSERTED** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.
 
 ## Indexed Demos
 
@@ -37,15 +39,15 @@
 | `/v150/accentcolor-and-accentcolortext-system-colors/titlebar-overlay-accent/` | 0 / 0 | 0 | **UNVERIFIED** | [Initial](v150--accentcolor-and-accentcolortext-system-colors--titlebar-overlay-accent/01-initial.png) · [Interactive](v150--accentcolor-and-accentcolortext-system-colors--titlebar-overlay-accent/02-interactive.png) |
 | `/v150/accentcolor-and-accentcolortext-system-colors/ui-components/` | 0 / 0 | 0 | **UNVERIFIED** | [Initial](v150--accentcolor-and-accentcolortext-system-colors--ui-components/01-initial.png) · [Interactive](v150--accentcolor-and-accentcolortext-system-colors--ui-components/02-interactive.png) |
 | `/v150/accentcolor-and-accentcolortext-system-colors/web-app-theme-preview/` | 0 / 0 | 0 | **UNVERIFIED** | [Initial](v150--accentcolor-and-accentcolortext-system-colors--web-app-theme-preview/01-initial.png) · [Interactive](v150--accentcolor-and-accentcolortext-system-colors--web-app-theme-preview/02-interactive.png) |
-| `/v150/algorithm-updates-in-webcrypto/chacha20-poly1305/` | 4 / 1 | 0 | **PASS** | [Initial](v150--algorithm-updates-in-webcrypto--chacha20-poly1305/01-initial.png) · [Interactive](v150--algorithm-updates-in-webcrypto--chacha20-poly1305/02-interactive.png) |
+| `/v150/algorithm-updates-in-webcrypto/chacha20-poly1305/` | 4 / 1 | 0 | **NO-EFFECT** | [Initial](v150--algorithm-updates-in-webcrypto--chacha20-poly1305/01-initial.png) · [Interactive](v150--algorithm-updates-in-webcrypto--chacha20-poly1305/02-interactive.png) |
 | `/v150/animatable-zoom/keyframe-zoom/` | 6 / 5 | 21 | **PASS** | [Initial](v150--animatable-zoom--keyframe-zoom/01-initial.png) · [Interactive](v150--animatable-zoom--keyframe-zoom/02-interactive.png) |
-| `/v150/case-sensitive-anchor-name-matching-in-quirks-mode/anchor-matching-demo/` | 0 / 0 | 0 | **PASS** | [Initial](v150--case-sensitive-anchor-name-matching-in-quirks-mode--anchor-matching-demo/01-initial.png) · [Interactive](v150--case-sensitive-anchor-name-matching-in-quirks-mode--anchor-matching-demo/02-interactive.png) |
+| `/v150/case-sensitive-anchor-name-matching-in-quirks-mode/anchor-matching-demo/` | 0 / 0 | 0 | **NO-CONTROLS** | [Initial](v150--case-sensitive-anchor-name-matching-in-quirks-mode--anchor-matching-demo/01-initial.png) · [Interactive](v150--case-sensitive-anchor-name-matching-in-quirks-mode--anchor-matching-demo/02-interactive.png) |
 | `/v150/comma-separated-container-queries/compatibility-lab/` | 4 / 4 | 8 | **PASS** | [Initial](v150--comma-separated-container-queries--compatibility-lab/01-initial.png) · [Interactive](v150--comma-separated-container-queries--compatibility-lab/02-interactive.png) |
 | `/v150/css-fit-content-function-for-sizing-properties/grid-track-comparison/` | 5 / 4 | 31 | **PASS** | [Initial](v150--css-fit-content-function-for-sizing-properties--grid-track-comparison/01-initial.png) · [Interactive](v150--css-fit-content-function-for-sizing-properties--grid-track-comparison/02-interactive.png) |
 | `/v150/css-fit-width-text/pull-quote/` | 7 / 5 | 18 | **PASS** | [Initial](v150--css-fit-width-text--pull-quote/01-initial.png) · [Interactive](v150--css-fit-width-text--pull-quote/02-interactive.png) |
 | `/v150/css-light-dark-with-image-values/list-style-bullets/` | 2 / 2 | 6 | **PASS** | [Initial](v150--css-light-dark-with-image-values--list-style-bullets/01-initial.png) · [Interactive](v150--css-light-dark-with-image-values--list-style-bullets/02-interactive.png) |
 | `/v150/css-url-request-modifiers/modifier-builder/` | 12 / 6 | 48 | **PASS** | [Initial](v150--css-url-request-modifiers--modifier-builder/01-initial.png) · [Interactive](v150--css-url-request-modifiers--modifier-builder/02-interactive.png) |
-| `/v150/deprecate-and-remove-attribution-reporting-api/removal-timeline/` | 0 / 0 | 0 | **PASS** | [Initial](v150--deprecate-and-remove-attribution-reporting-api--removal-timeline/01-initial.png) · [Interactive](v150--deprecate-and-remove-attribution-reporting-api--removal-timeline/02-interactive.png) |
+| `/v150/deprecate-and-remove-attribution-reporting-api/removal-timeline/` | 0 / 0 | 0 | **NO-CONTROLS** | [Initial](v150--deprecate-and-remove-attribution-reporting-api--removal-timeline/01-initial.png) · [Interactive](v150--deprecate-and-remove-attribution-reporting-api--removal-timeline/02-interactive.png) |
 | `/v150/deprecate-and-remove-related-website-sets-rws/rws-validator/` | 4 / 3 | 36 | **PASS** | [Initial](v150--deprecate-and-remove-related-website-sets-rws--rws-validator/01-initial.png) · [Interactive](v150--deprecate-and-remove-related-website-sets-rws--rws-validator/02-interactive.png) |
 | `/v150/email-verification-protocol/registration-flow/` | 0 / 0 | 0 | **UNVERIFIED** | [Initial](v150--email-verification-protocol--registration-flow/01-initial.png) · [Interactive](v150--email-verification-protocol--registration-flow/02-interactive.png) |
 | `/v150/email-verification-protocol/server-validator/` | 5 / 2 | 10 | **PASS** | [Initial](v150--email-verification-protocol--server-validator/01-initial.png) · [Interactive](v150--email-verification-protocol--server-validator/02-interactive.png) |
@@ -60,8 +62,15 @@
 | `/v150/relative-alpha-colors-css-color-5-alpha-function/gradient-opacity-builder/` | 8 / 3 | 35 | **PASS** | [Initial](v150--relative-alpha-colors-css-color-5-alpha-function--gradient-opacity-builder/01-initial.png) · [Interactive](v150--relative-alpha-colors-css-color-5-alpha-function--gradient-opacity-builder/02-interactive.png) |
 | `/v150/responsively-sized-iframe/dynamic-content-feed/` | 3 / 3 | 84 | **PASS** | [Initial](v150--responsively-sized-iframe--dynamic-content-feed/01-initial.png) · [Interactive](v150--responsively-sized-iframe--dynamic-content-feed/02-interactive.png) |
 | `/v150/speculative-load-measurement/speculation-rules-lab/` | 7 / 5 | 7 | **PASS** | [Initial](v150--speculative-load-measurement--speculation-rules-lab/01-initial.png) · [Interactive](v150--speculative-load-measurement--speculation-rules-lab/02-interactive.png) |
-| `/v150/update-text-selection-on-mouseup-before-dispatching-click-event/selection-readout/` | 1 / 0 | 0 | **PASS** | [Initial](v150--update-text-selection-on-mouseup-before-dispatching-click-event--selection-readout/01-initial.png) · [Interactive](v150--update-text-selection-on-mouseup-before-dispatching-click-event--selection-readout/02-interactive.png) |
+| `/v150/update-text-selection-on-mouseup-before-dispatching-click-event/selection-readout/` | 1 / 0 | 0 | **NOT-DRIVEABLE** | [Initial](v150--update-text-selection-on-mouseup-before-dispatching-click-event--selection-readout/01-initial.png) · [Interactive](v150--update-text-selection-on-mouseup-before-dispatching-click-event--selection-readout/02-interactive.png) |
 | `/v150/web-speech-api-unspoken-punctuation/dictation-comparison/` | 0 / 0 | 0 | **UNVERIFIED** | [Initial](v150--web-speech-api-unspoken-punctuation--dictation-comparison/01-initial.png) · [Interactive](v150--web-speech-api-unspoken-punctuation--dictation-comparison/02-interactive.png) |
 | `/v150/web-speech-api-unspoken-punctuation/punctuation-analyzer/` | 9 / 4 | 24 | **PASS** | [Initial](v150--web-speech-api-unspoken-punctuation--punctuation-analyzer/01-initial.png) · [Interactive](v150--web-speech-api-unspoken-punctuation--punctuation-analyzer/02-interactive.png) |
 | `/v151/window-drag/inheritance-debugger/` | 0 / 0 | 0 | **UNVERIFIED** | [Initial](v151--window-drag--inheritance-debugger/01-initial.png) · [Interactive](v151--window-drag--inheritance-debugger/02-interactive.png) |
 | `/v153/iterator-join/array-vs-accumulate/` | 0 / 0 | 0 | **UNVERIFIED** | [Initial](v153--iterator-join--array-vs-accumulate/01-initial.png) · [Interactive](v153--iterator-join--array-vs-accumulate/02-interactive.png) |
+
+## Not demonstrated (indexed, not evidence of working behaviour)
+
+- `/v150/algorithm-updates-in-webcrypto/chacha20-poly1305/` — **NO-EFFECT**: 1 control(s) exercised, no DOM mutation or readout change observed
+- `/v150/case-sensitive-anchor-name-matching-in-quirks-mode/anchor-matching-demo/` — **NO-CONTROLS**: no interactive controls found — reference page, not a driven demo
+- `/v150/deprecate-and-remove-attribution-reporting-api/removal-timeline/` — **NO-CONTROLS**: no interactive controls found — reference page, not a driven demo
+- `/v150/update-text-selection-on-mouseup-before-dispatching-click-event/selection-readout/` — **NOT-DRIVEABLE**: 1 control(s) found, none exercisable by the driver (gesture- or selection-dependent?)
