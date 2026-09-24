@@ -5,7 +5,7 @@ self.addEventListener("message", async (e) => {
   if (typeof self.Profiler !== "function") {
     self.postMessage({
       error:
-        "Profiler not available in this worker. This demo is served with Document-Policy: js-profiling; use a browser with JS Self-Profiling enabled.",
+        "Profiler not available in this worker. Chrome's main-thread Profiler (ProfilerAPI) is stable, but the dedicated-worker half (Blink feature ProfilerAPIForDedicatedWorker) is experimental and off by default. Launch Chrome with --enable-blink-features=ProfilerAPIForDedicatedWorker, or enable chrome://flags/#enable-experimental-web-platform-features. This page is already served with Document-Policy: js-profiling.",
     });
     return;
   }
