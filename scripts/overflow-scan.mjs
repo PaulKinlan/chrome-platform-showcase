@@ -47,7 +47,7 @@
 // (beads chrome-platform-showcase-bn2 and -7b0).
 
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
-import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
+import { cdpConnection, cleanupChrome, launchChrome, openPageSession } from "./lib/cdp.mjs";
 
 const args = [...Deno.args];
 function flag(name) {
@@ -66,6 +66,9 @@ const milestone = flag("--milestone");
 const strideN = Number(flag("--stride") ?? 0);
 const classesArg = String(flag("--classes") ?? (concepts ? "both" : "mobile"));
 const perPageMs = Number(flag("--timeout-ms") ?? 8000);
+// null means "not set": the effective budget is computed once the size of the
+// run is known, further down.
+const deadlineFlag = flag("--deadline-ms");
 const explicitBase = flag("--base");
 let base = explicitBase ?? "http://localhost:3000";
 
@@ -156,6 +159,29 @@ if (!targets.length) {
   console.error("No matching built demos.");
   Deno.exit(2);
 }
+
+// ── Whole-run deadline ───────────────────────────────────────────────────────
+// Per-page budgets protect against a slow page; this protects against a run that
+// makes no progress at all, which otherwise looks like a busy process rather than
+// a failure. An explicit --deadline-ms wins; otherwise it scales with the work
+// requested, because a fixed 15-minute budget aborts healthy long runs: measured
+// concept mode is 379ms per page-class (--concepts --milestone v145: 330
+// page-classes in 125s), so --concepts --all is ~7,800 page-classes and ~49
+// minutes. A deadline that fires on healthy work is one people learn to ignore.
+// 2000ms per page-class is ~2.4x the slowest measured rate (feature mode, 848ms
+// per page-class) and ~5x concept mode, and it still catches a true stall, which
+// makes no progress rather than slow progress. (Finding from the ly4 review.)
+const pageClasses = targets.length * classList.length;
+const runDeadlineMs = deadlineFlag !== null
+  ? Number(deadlineFlag)
+  : Math.max(15 * 60 * 1000, pageClasses * 2000);
+const deadlineSource = deadlineFlag !== null ? "explicit" : "scaled";
+const runStartedAt = Date.now();
+console.log(
+  `scan: ${targets.length} pages · ${pageClasses} page-classes · deadline ${
+    Math.round(runDeadlineMs / 1000)
+  }s (${deadlineSource})`,
+);
 
 // ── Server guards (bn2 / 7b0 port collision & identity verification) ─────────
 let serverChild = null;
@@ -360,43 +386,98 @@ function evaluateWithin(conn, sessionId, expression, ms) {
 
 let chrome = null;
 let conn = null;
+// One session is enough while pages answer. The loop below throws it away the
+// moment one stops answering: a wedged renderer blocks this session's whole
+// message queue, so the next Page.navigate would sit behind a call that never
+// resolves (measured: a 481-page audit stopped dead at 320/481 for 10+ minutes
+// with a live Chrome child). Recreating a target costs milliseconds.
+let page = null;
+let sessionResets = 0;
+let deadlineExit = false;
+async function recyclePageSession(metrics) {
+  await page.close();
+  page = await openPageSession(conn, { metrics });
+  sessionResets++;
+}
 
 try {
   chrome = await launchChrome();
   conn = await cdpConnection(chrome.wsUrl);
-  const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
-  const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
-  await conn.send("Page.enable", {}, sessionId);
-  await conn.send("Runtime.enable", {}, sessionId);
+  page = await openPageSession(conn, {
+    metrics: { width: 360, height: 740, deviceScaleFactor: 3, mobile: true },
+  });
 
   const rows = [];
   let overflow = 0, clean = 0, blocked = 0, unmeasured = 0;
+  let deadlineSkipped = 0;
   const update = {};
   for (const id of targets) {
     const url = `${base}/${id}/`;
+    // A stall used to be indistinguishable from work in progress: the process
+    // stays alive and prints nothing. A whole-run budget makes it loud instead.
+    if (Date.now() - runStartedAt > runDeadlineMs) {
+      deadlineSkipped++;
+      for (const cls of classList) {
+        rows.push({
+          page: id,
+          class: cls,
+          overflow: null,
+          state: "unmeasured",
+          note: `run deadline of ${runDeadlineMs}ms exceeded before this page was reached`,
+        });
+        unmeasured++;
+      }
+      continue;
+    }
     for (const cls of classList) {
       const spec = CLASSES[cls];
       let row = { page: id, class: cls };
       try {
-        await conn.send("Emulation.setDeviceMetricsOverride", spec, sessionId);
+        await conn.send("Emulation.setDeviceMetricsOverride", spec, page.sessionId);
         const loaded = new Promise((res) => {
-          const onEvent = (m) => {
-            if (m.sessionId === sessionId && m.method === "Page.loadEventFired") res();
-          };
-          conn.onEvent(onEvent);
+          const off = conn.onEvent((m) => {
+            if (m.sessionId === page.sessionId && m.method === "Page.loadEventFired") {
+              off();
+              res();
+            }
+          });
         });
-        await conn.send("Page.navigate", { url }, sessionId);
+        // Race the navigation too. Unraced, it is the call that hangs silently
+        // when the session queue is blocked behind a wedged renderer.
+        const nav = conn.send("Page.navigate", { url }, page.sessionId);
+        nav.catch(() => {});
+        const navRes = await Promise.race([
+          nav,
+          new Promise((resolve) => setTimeout(() => resolve("TIMEOUT"), perPageMs)),
+        ]);
+        if (navRes === "TIMEOUT") {
+          unmeasured++;
+          row = {
+            ...row,
+            overflow: null,
+            state: "unmeasured",
+            note: `navigation did not answer within ${perPageMs}ms (session recycled)`,
+          };
+          console.log(`  UNMEASURED [${cls}] ${id} — navigation silent, session recycled`);
+          await recyclePageSession(spec);
+          rows.push(row);
+          continue;
+        }
         await Promise.race([loaded, new Promise((r) => setTimeout(r, 6000))]);
         await new Promise((r) => setTimeout(r, 300));
-        const res = await evaluateWithin(conn, sessionId, PROBE, perPageMs);
+        const res = await evaluateWithin(conn, page.sessionId, PROBE, perPageMs);
         if (res === "TIMEOUT") {
           unmeasured++;
           row = {
             ...row,
             overflow: null,
             state: "unmeasured",
-            note: `no answer within ${perPageMs}ms`,
+            note: `no answer within ${perPageMs}ms (session recycled)`,
           };
+          console.log(`  UNMEASURED [${cls}] ${id} — renderer silent, session recycled`);
+          // The fix: the losing promise is still queued on this session, so the
+          // next navigate would sit behind it forever. Discard the renderer.
+          await recyclePageSession(spec);
         } else {
           const v = res.result?.value;
           if (!v) {
@@ -461,6 +542,13 @@ try {
         clean,
         blocked,
         unmeasured,
+        runDeadlineMs,
+        deadlineSource,
+        deadlineExceeded: deadlineSkipped > 0,
+        deadlineSkippedPages: deadlineSkipped,
+        // How often a wedged renderer had to be thrown away. Non-zero with a
+        // completed run is the fix working, not a failure.
+        sessionResets,
         // Per page-class rows so a desktop-only offender is visible as such; the
         // 4va sweep found all but one offender were desktop-only.
         rows,
@@ -480,6 +568,12 @@ try {
   );
   console.log(`report: ${reportPath}`);
 
+  // NOTE from the ly4 review (opus): this block is unreachable today — every path
+  // that sets doMerge exits 2 above while the ayg re-verification wave is pending,
+  // so it has not executed since nfy landed. Whoever re-enables --merge should
+  // also gate it on deadlineSkipped === 0, so a run that stopped at its deadline
+  // cannot write partial results into the sidecar. Do not add that condition now:
+  // it would be untested code guarding dead code.
   if (doMerge && Object.keys(update).length) {
     const tmp = await Deno.makeTempFile({ suffix: ".json" });
     await Deno.writeTextFile(tmp, JSON.stringify(update, null, 2));
@@ -499,6 +593,20 @@ try {
     }).spawn().status;
     await Deno.remove(tmp).catch(() => {});
   }
+
+  // Last, so a partial run still records the pages it did measure: the rows above
+  // are real measurements, but the run as a whole did not finish and must not
+  // look like it did. The exit happens after the finally block below, so the
+  // Chrome child and the server are still reaped first.
+  if (deadlineSkipped > 0) {
+    deadlineExit = true;
+    console.error(
+      `\nDEADLINE: run exceeded ${runDeadlineMs}ms; ${deadlineSkipped} page(s) were never measured.`,
+    );
+    console.error(
+      "The report is partial on purpose. Re-run with a larger --deadline-ms, or read the unmeasured rows — an unmeasured row means the renderer did not answer.",
+    );
+  }
 } finally {
   if (conn) conn.close?.();
   if (chrome) await cleanupChrome(chrome);
@@ -512,4 +620,4 @@ try {
   }
 }
 
-Deno.exit(0);
+Deno.exit(deadlineExit ? 1 : 0);

@@ -64,6 +64,9 @@ const sampleN = Number(flag("--sample") ?? 0);
 const nextN = Number(flag("--next") ?? flag("--untested") ?? 0);
 const milestone = flag("--milestone");
 const explicitIds = args.filter((a) => !a.startsWith("--"));
+// Per-page probe budget. A wedged renderer is the one thing a per-page target
+// cannot fix, so bound the call rather than inheriting CDP's 120s default.
+const perPageMs = Number(flag("--timeout-ms") ?? 8000);
 
 // ── select target ids ────────────────────────────────────────────────────────
 const manifest = buildFromDisk().filter((m) => m.status === "built");
@@ -369,10 +372,24 @@ async function checkPage(conn, url, cls) {
     } else {
       await Promise.race([loaded, new Promise((r) => setTimeout(r, 8000))]);
       await new Promise((r) => setTimeout(r, 1200)); // settle async work
-      const evalRes = await conn.send("Runtime.evaluate", {
+      // Budget the probe. Unbudgeted, a renderer that stops answering costs the
+      // full 120s CDP timeout before the catch below records the page; budgeted,
+      // it costs perPageMs and the page is reported the same way. The target is
+      // closed in the finally block either way, so the next page is unaffected.
+      const evalCall = conn.send("Runtime.evaluate", {
         expression: PROBE,
         returnByValue: true,
       }, sessionId);
+      evalCall.catch(() => {});
+      const evalRes = await Promise.race([
+        evalCall,
+        new Promise((resolve) => setTimeout(() => resolve("TIMEOUT"), perPageMs)),
+      ]);
+      if (evalRes === "TIMEOUT") {
+        throw new Error(
+          `renderer did not answer within ${perPageMs}ms (target closed, run continued)`,
+        );
+      }
       probe = evalRes.result?.value ?? null;
 
       // screenshot both classes

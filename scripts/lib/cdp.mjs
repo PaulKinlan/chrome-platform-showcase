@@ -111,5 +111,46 @@ export async function cdpConnection(wsUrl) {
       }, 120000);
     });
   }
-  return { ws, send, onEvent: (fn) => listeners.add(fn), close: () => ws.close() };
+  return {
+    ws,
+    send,
+    // Returns a disposer. Long sweeps add a load listener per page, so a caller
+    // that never removes one accumulates them for the whole run.
+    onEvent: (fn) => {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
+    close: () => ws.close(),
+  };
+}
+
+// One page target and its own flat session.
+//
+// A renderer that wedges — an infinite loop on the main thread, a blocked
+// parser — stops answering CDP, and because every message on a session shares
+// one ordered queue, the pending call also blocks the calls queued behind it.
+// A sweep that keeps one session for the whole run therefore cannot recover:
+// the next Page.navigate never resolves and the run stalls while looking busy
+// (measured 2026-09-24: a 481-page scan stopped dead at 320/481 for 10+ minutes
+// with a live Chrome child; killing it by PID was the only way out).
+//
+// Recreating a target costs milliseconds, so the sweep can throw the wedged
+// renderer away instead of inheriting its queue.
+export async function openPageSession(conn, { url = "about:blank", metrics } = {}) {
+  const { targetId } = await conn.send("Target.createTarget", { url });
+  const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
+  await conn.send("Page.enable", {}, sessionId);
+  await conn.send("Runtime.enable", {}, sessionId);
+  if (metrics) await conn.send("Emulation.setDeviceMetricsOverride", metrics, sessionId);
+  return {
+    targetId,
+    sessionId,
+    async close() {
+      try {
+        await conn.send("Target.closeTarget", { targetId });
+      } catch {
+        // already gone, or the queue is wedged and the call timed out
+      }
+    },
+  };
 }
