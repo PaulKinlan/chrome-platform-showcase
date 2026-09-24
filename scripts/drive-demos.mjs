@@ -48,7 +48,10 @@ const positional = args.find((a) => !a.startsWith("--"));
 let specCases = null;
 let targets = [];
 
-if (positional && (positional.endsWith(".mjs") || positional.endsWith(".js")) && existsSync(positional)) {
+if (
+  positional && (positional.endsWith(".mjs") || positional.endsWith(".js")) &&
+  existsSync(positional)
+) {
   const specPath = positional.startsWith("/") ? positional : `${Deno.cwd()}/${positional}`;
   const imported = await import(`file://${specPath}`);
   specCases = imported.cases ?? [];
@@ -94,7 +97,9 @@ if (positional && (positional.endsWith(".mjs") || positional.endsWith(".js")) &&
 }
 
 if (!specCases && targets.length === 0) {
-  console.error("No targets found. Specify a spec file, --milestone, --feature, --url, or --sample.");
+  console.error(
+    "No targets found. Specify a spec file, --milestone, --feature, --url, or --sample.",
+  );
   Deno.exit(2);
 }
 
@@ -237,6 +242,76 @@ const IN_PAGE_DRIVER = `(async () => {
   return result;
 })()`;
 
+// ── Verdict ─────────────────────────────────────────────────────────────────
+// A page that loads cleanly and is never touched is NOT the same result as one
+// driven through its controls, and a spec's own assertions must be able to fail
+// the case it belongs to.
+//
+// The previous verdict was `!driveError && errors.length === 0`. That recorded
+// `controlsExercised`, `mutations` and `stateChanged` and then graded none of
+// them, and never read `driveData.assert` at all — so a spec written specifically
+// to detect a missing Blink feature reported PASS identically with and without
+// the flag, and an untouched reference page scored the same as a demo driven
+// through seven controls (beads chrome-platform-showcase-6s3 and -aa5).
+//
+// Only FAIL means "something is broken". The not-demonstrated statuses mean
+// "this run is not evidence that the demo works" — a different claim, which must
+// not be reported as a pass.
+function gradeRun({ isSpecCase, driveData, driveError, errors }) {
+  if (driveError) return { status: "FAIL", reason: driveError };
+  if (errors.length) return { status: "FAIL", reason: errors.join("; ") };
+
+  // A spec case carries its own contract, so grade that and nothing else: spec
+  // scripts return their own shape and have no controlsFound/controlsExercised.
+  const assertMap = driveData && typeof driveData.assert === "object" && driveData.assert;
+  if (assertMap) {
+    const failed = Object.entries(assertMap).filter(([, ok]) => !ok).map(([name]) => name);
+    if (failed.length) {
+      return {
+        status: "FAIL",
+        reason: `assertion(s) failed: ${failed.join("; ")}`,
+        failedAssertions: failed,
+      };
+    }
+    return { status: "PASS" };
+  }
+  if (isSpecCase) {
+    return {
+      status: "NOT-ASSERTED",
+      reason: "spec case returned no `assert` map, so it asserted nothing",
+    };
+  }
+
+  // Generic driver: grade the interaction evidence it already collects.
+  const found = driveData?.controlsFound ?? 0;
+  const exercised = driveData?.controlsExercised ?? 0;
+  if (found === 0) {
+    return {
+      status: "NO-CONTROLS",
+      reason: "no interactive controls found — reference page, not a driven demo",
+    };
+  }
+  if (exercised === 0) {
+    return {
+      status: "NOT-DRIVEABLE",
+      reason:
+        `${found} control(s) found, none exercisable by the driver (gesture- or selection-dependent?)`,
+    };
+  }
+  if (!driveData?.stateChanged) {
+    return {
+      status: "NO-EFFECT",
+      reason: `${exercised} control(s) exercised, no DOM mutation or readout change observed`,
+    };
+  }
+  return { status: "PASS" };
+}
+
+// Indexed but not demonstrated. Kept out of the pass tally and listed separately,
+// as the showcase-auto-research SKILL requires for zero-control reference pages.
+// `UNVERIFIED` (disk-recovered, bead cix) keeps its own separate tally.
+const NOT_DEMONSTRATED_STATUSES = ["NO-CONTROLS", "NOT-DRIVEABLE", "NO-EFFECT", "NOT-ASSERTED"];
+
 // ── Main Execution ──────────────────────────────────────────────────────────
 await bootServer();
 console.log(`Server ready at ${base}`);
@@ -246,6 +321,7 @@ let conn = null;
 const results = [];
 let passedCount = 0;
 let failedCount = 0;
+let notDemonstratedCount = 0;
 
 try {
   chrome = await launchChrome();
@@ -261,7 +337,8 @@ try {
       conn.send("Page.handleJavaScriptDialog", { accept: true }, message.sessionId).catch(() => {});
     } else if (message.method === "Runtime.exceptionThrown") {
       state.errors.push(
-        message.params?.exceptionDetails?.exception?.description ?? message.params?.exceptionDetails?.text ?? "exception",
+        message.params?.exceptionDetails?.exception?.description ??
+          message.params?.exceptionDetails?.text ?? "exception",
       );
     } else if (message.method === "Runtime.consoleAPICalled" && message.params?.type === "error") {
       state.errors.push(
@@ -353,7 +430,8 @@ try {
       }, sessionId);
 
       if (evalRes.exceptionDetails) {
-        driveError = evalRes.exceptionDetails.exception?.description ?? evalRes.exceptionDetails.text;
+        driveError = evalRes.exceptionDetails.exception?.description ??
+          evalRes.exceptionDetails.text;
       } else {
         driveData = evalRes.result?.value ?? {};
       }
@@ -381,13 +459,21 @@ try {
 
     // Filter out expected benign browser notices if any, retain real errors
     const errors = state.errors.filter((err) => !err.includes("favicon.ico"));
-    const isSuccess = !driveError && errors.length === 0;
+    const verdict = gradeRun({
+      isSpecCase: Boolean(item.specScript),
+      driveData,
+      driveError,
+      errors,
+    });
 
     const record = {
       url: item.url,
       name: item.name,
       slug: item.slug,
-      status: isSuccess ? "PASS" : "FAIL",
+      status: verdict.status,
+      verdictReason: verdict.reason ?? null,
+      assertions: (driveData && typeof driveData.assert === "object" && driveData.assert) || null,
+      failedAssertions: verdict.failedAssertions ?? null,
       controlsFound: driveData?.controlsFound ?? 0,
       controlsExercised: driveData?.controlsExercised ?? 0,
       actions: driveData?.actions ?? [],
@@ -404,13 +490,19 @@ try {
 
     results.push(record);
 
-    if (isSuccess) {
+    if (verdict.status === "PASS") {
       passedCount++;
-      const actionSummary = record.actions.length ? record.actions.slice(0, 3).join(", ") : "loaded clean";
+      const actionSummary = record.actions.length
+        ? record.actions.slice(0, 3).join(", ")
+        : `${Object.keys(record.assertions ?? {}).length} assertion(s) held`;
       console.log(`PASS  ${item.url} — ${actionSummary} (${record.mutations} mutations)`);
-    } else {
+    } else if (verdict.status === "FAIL") {
       failedCount++;
-      console.error(`FAIL  ${item.url} — ${driveError || errors.join("; ")}`);
+      console.error(`FAIL  ${item.url} — ${verdict.reason}`);
+    } else {
+      // Not broken, but not demonstrated either. Say so rather than calling it a pass.
+      notDemonstratedCount++;
+      console.warn(`${verdict.status}  ${item.url} — ${verdict.reason}`);
     }
   }
 } finally {
@@ -492,6 +584,7 @@ const allResults = Array.from(mergedMap.values()).sort((a, b) => a.url.localeCom
 const totalPassed = allResults.filter((r) => r.status === "PASS").length;
 const totalUnverified = allResults.filter((r) => r.status === "UNVERIFIED").length;
 const totalFailed = allResults.filter((r) => r.status === "FAIL").length;
+const notDemonstrated = allResults.filter((r) => NOT_DEMONSTRATED_STATUSES.includes(r.status));
 
 // Total catalogue concepts denominator (per bead cix and mox)
 let totalCatalogueConcepts = 3893;
@@ -507,10 +600,12 @@ const summaryJson = {
   catalogueConceptsTotal: totalCatalogueConcepts,
   totalIndexed: allResults.length,
   passed: totalPassed,
+  notDemonstrated: notDemonstrated.length,
   unverified: totalUnverified,
   failed: totalFailed,
   lastRunTested: results.length,
   lastRunPassed: passedCount,
+  lastRunNotDemonstrated: notDemonstratedCount,
   lastRunFailed: failedCount,
   results: allResults,
 };
@@ -522,10 +617,19 @@ await Deno.writeTextFile(
 
 let md = `# Interactive Demo Verification Report\n\n`;
 md += `- **Last Updated:** ${new Date().toISOString()}\n`;
-md += `- **Catalogue Coverage:** ${allResults.length} / ${totalCatalogueConcepts} concepts indexed (${((allResults.length / totalCatalogueConcepts) * 100).toFixed(1)}%)\n`;
-md += `- **Overall Status:** ${totalPassed} passed, ${totalUnverified} unverified (recovered artifacts), ${totalFailed} failed\n`;
-md += `- **Latest Run:** ${results.length} tested (${passedCount} passed, ${failedCount} failed)\n\n`;
-md += `## Verified Demos\n\n`;
+md +=
+  `- **Catalogue Coverage:** ${allResults.length} / ${totalCatalogueConcepts} concepts indexed (${
+    ((allResults.length / totalCatalogueConcepts) * 100).toFixed(1)
+  }%)\n`;
+md +=
+  `- **Overall Status:** ${totalPassed} passed, ${notDemonstrated.length} not demonstrated, ${totalUnverified} unverified (recovered artifacts), ${totalFailed} failed\n`;
+md +=
+  `- **Latest Run:** ${results.length} tested (${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed)\n\n`;
+md +=
+  `Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT** and **NOT-ASSERTED** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.\n\n`;
+// Heading says what the table actually contains: driven passes, failures,
+// not-demonstrated rows and recovered artifacts all appear here.
+md += `## Indexed Demos\n\n`;
 md += `| Demo URL | Controls Found / Tested | Mutations | Status | Screenshot Proof |\n`;
 md += `| :--- | :---: | :---: | :---: | :--- |\n`;
 
@@ -534,7 +638,8 @@ for (const r of allResults) {
     r.screenshots?.initial ? `[Initial](${r.screenshots.initial})` : "",
     r.screenshots?.interactive ? `[Interactive](${r.screenshots.interactive})` : "",
   ].filter(Boolean).join(" · ");
-  md += `| \`${r.url}\` | ${r.controlsFound} / ${r.controlsExercised} | ${r.mutations} | **${r.status}** | ${proofLinks} |\n`;
+  md +=
+    `| \`${r.url}\` | ${r.controlsFound} / ${r.controlsExercised} | ${r.mutations} | **${r.status}** | ${proofLinks} |\n`;
 }
 
 const failedItems = allResults.filter((x) => x.status === "FAIL");
@@ -542,6 +647,9 @@ if (failedItems.length > 0) {
   md += `\n## Failures\n\n`;
   for (const r of failedItems) {
     md += `### \`${r.url}\`\n`;
+    if (r.failedAssertions?.length) {
+      md += `- **Failed assertion(s):** ${r.failedAssertions.map((a) => `\`${a}\``).join(", ")}\n`;
+    }
     if (r.driveError) md += `- **Drive Error:** \`${r.driveError}\`\n`;
     for (const err of r.consoleErrors ?? []) {
       md += `- **Console Error:** \`${err}\`\n`;
@@ -549,10 +657,27 @@ if (failedItems.length > 0) {
   }
 }
 
+// Listed separately and never folded into the pass count: the showcase
+// auto-research SKILL requires zero-control reference pages and blocked routes
+// to be reported apart from exercised demos.
+if (notDemonstrated.length > 0) {
+  md += `\n## Not demonstrated (indexed, not evidence of working behaviour)\n\n`;
+  for (const r of notDemonstrated) {
+    md += `- \`${r.url}\` — **${r.status}**: ${r.verdictReason ?? "no reason recorded"}\n`;
+  }
+}
+
 await Deno.writeTextFile(join(outDir, "REPORT.md"), md);
 
-console.log(`\nVerification complete: ${passedCount}/${results.length} demos passed this run.`);
-console.log(`Cumulative index: ${totalPassed} passed, ${totalUnverified} unverified (${allResults.length}/${totalCatalogueConcepts} catalogue concepts indexed).`);
+console.log(
+  `\nVerification complete this run: ${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed (of ${results.length} tested).`,
+);
+console.log(
+  `Cumulative index: ${totalPassed} passed, ${notDemonstrated.length} not demonstrated, ${totalUnverified} unverified (${allResults.length}/${totalCatalogueConcepts} catalogue concepts indexed).`,
+);
 console.log(`Reports merged into ${outDir}/REPORT.md and ${outDir}/verification-report.json`);
 
-Deno.exit(failedCount ? 1 : 0);
+// A spec case that asserted nothing is a broken spec, not a quiet pass — exit
+// non-zero so it cannot be cited as evidence (bead chrome-platform-showcase-6s3).
+const notAssertedCount = results.filter((r) => r.status === "NOT-ASSERTED").length;
+Deno.exit(failedCount || notAssertedCount ? 1 : 0);
