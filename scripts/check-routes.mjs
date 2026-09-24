@@ -6,10 +6,18 @@
 // FAILS (exit 1) on any destructive change that is not covered by a reviewed
 // migration record.
 //
-// Baseline = the catalogue at `origin/main`, derived straight from git so it
-// can't drift. If that ref is unavailable (offline/CI without a remote), it
-// falls back to the committed `.route-manifest.baseline.json` snapshot.
-// Current = the working tree.
+// Baseline = the catalogue at the branch's FORK POINT: the merge-base of
+// `origin/main` and `HEAD`. A branch is only responsible for what it changed, so
+// gating against the fork point stops a stale branch inheriting everything that
+// landed on main while it was open — main's newer support records looking like
+// the branch's regressions, main's newer demos looking like deletions, and main's
+// extra feature folders looking like files the branch touched. When the branch is
+// up to date (HEAD contains origin/main) the merge-base IS origin/main, so this
+// is unchanged behaviour for a current branch and for the merger running on main.
+// Derived straight from git so it can't drift; if git is unavailable
+// (offline/CI without a remote) it falls back to the committed
+// `.route-manifest.baseline.json` snapshot. `SHOWCASE_BASELINE_REF` still pins an
+// explicit ref and wins over the merge-base. Current = the working tree.
 //
 // FAIL when, going baseline -> current:
 //   1. a baseline published id is MISSING from current (deleted/renamed), OR
@@ -32,6 +40,7 @@
 // baseline; without it the gate falls back to .route-manifest.baseline.json.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import process from "node:process";
 import {
@@ -88,11 +97,11 @@ function idFromRoute(route) {
   return String(route).replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
-function loadBaseline() {
-  const ref = defaultBaselineRef();
+function loadBaseline(base) {
+  const ref = base.ref;
   try {
     const manifest = buildFromGitRef(ref);
-    if (manifest.length > 0) return { manifest, source: `git ${ref}` };
+    if (manifest.length > 0) return { manifest, source: base.label };
   } catch {
     // fall through to the committed snapshot
   }
@@ -108,6 +117,45 @@ function loadBaseline() {
   );
 }
 
+// Resolve the ref this branch should be gated against, plus enough context to
+// print it. `SHOWCASE_BASELINE_REF` overrides; otherwise the merge-base of
+// origin/main and HEAD; otherwise origin/main itself (e.g. no common ancestor).
+function branchBase() {
+  const configured = defaultBaselineRef();
+  if (configured !== "origin/main") {
+    return {
+      ref: configured,
+      label: `git ${configured} (explicit)`,
+      behind: null,
+      originMain: null,
+    };
+  }
+  const git = (args) =>
+    execFileSync("git", args, {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  try {
+    const originMain = git(["rev-parse", "origin/main"]);
+    const base = git(["merge-base", "origin/main", "HEAD"]);
+    if (!base) return { ref: configured, label: `git ${configured}`, behind: null, originMain };
+    const behind = Number(git(["rev-list", "--count", "HEAD..origin/main"]));
+    return {
+      ref: base,
+      label: base === originMain
+        ? `git origin/main ${originMain.slice(0, 12)} (HEAD is up to date)`
+        : `git merge-base ${base.slice(0, 12)} (fork point; origin/main ${
+          originMain.slice(0, 12)
+        })`,
+      behind,
+      originMain,
+    };
+  } catch {
+    return { ref: configured, label: `git ${configured}`, behind: null, originMain: null };
+  }
+}
+
 function index(manifest) {
   const map = new Map();
   for (const entry of manifest) map.set(entry.id, entry);
@@ -115,7 +163,8 @@ function index(manifest) {
 }
 
 function main() {
-  const { manifest: baseline, source } = loadBaseline();
+  const base = branchBase();
+  const { manifest: baseline, source } = loadBaseline(base);
   const current = buildFromDisk();
   const migrations = loadMigrations();
 
@@ -206,16 +255,14 @@ function main() {
   // read the `responsive-support.json` sidecar and the critique guidance field.
   const curSupport = loadSidecar();
   const baseSupport = (() => {
-    const ref = defaultBaselineRef();
     try {
-      return loadSidecarFromRef(ref);
+      return loadSidecarFromRef(base.ref);
     } catch {
       return {};
     }
   })();
   const cov = coverage(curSupport);
-  const ref = defaultBaselineRef();
-  const touched = changedFeatureIds(ref);
+  const touched = changedFeatureIds(base.ref);
 
   // (A) GLOBAL: any published demo recorded `broken` on a class it claims to
   // support fails the gate — a demo must never ship broken on a supported class.
@@ -275,6 +322,17 @@ function main() {
 
   process.stdout.write(
     `route regression gate (baseline: ${source})\n` +
+      (base.behind == null
+        ? ""
+        : `  base ${base.ref.slice(0, 12)} · origin/main ${
+          base.originMain?.slice(0, 12) ?? "?"
+        } · HEAD is ${
+          base.behind === 0 ? "up to date with" : `${base.behind} commit(s) behind`
+        } origin/main${
+          base.behind > 0
+            ? " (only this branch's own changes are gated; main's later landings are not charged to it)"
+            : ""
+        }\n`) +
       `  ${baseline.length} published baseline, ${current.length} current, ` +
       `+${added} added, ~${fixedInPlace} fixed-in-place, ` +
       `${removedCount === 0 ? "0 removed" : `${removedCount} migration record(s)`}\n` +
