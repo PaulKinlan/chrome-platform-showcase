@@ -150,12 +150,14 @@
 
   <div class="code-block"><span class="cc">// Production-safe Prompt API pattern</span>
 <span class="ck">async function</span> <span class="cv">safePrompt</span>(userInput, systemPrompt) {
-  <span class="cc">// 1. Feature-detect</span>
-  <span class="ck">if</span> (!window.ai?.languageModel) <span class="ck">return</span> { error: <span class="cv">'not-supported'</span> };
+  <span class="cc">// 1. Feature-detect standard global</span>
+  <span class="ck">if</span> (<span class="ck">typeof</span> LanguageModel === <span class="cv">'undefined'</span>) <span class="ck">return</span> { error: <span class="cv">'not-supported'</span> };
 
   <span class="cc">// 2. Check model availability</span>
-  <span class="ck">const</span> cap = <span class="ck">await</span> window.ai.languageModel.<span class="cv">capabilities</span>();
-  <span class="ck">if</span> (cap.available === <span class="cv">'no'</span>) <span class="ck">return</span> { error: <span class="cv">'model-unavailable'</span> };
+  <span class="ck">const</span> avail = <span class="ck">typeof</span> LanguageModel.<span class="cv">availability</span> === <span class="cv">'function'</span>
+    ? <span class="ck">await</span> LanguageModel.<span class="cv">availability</span>()
+    : <span class="cv">'available'</span>;
+  <span class="ck">if</span> (avail === <span class="cv">'unavailable'</span> || avail === <span class="cv">'no'</span>) <span class="ck">return</span> { error: <span class="cv">'model-unavailable'</span> };
 
   <span class="cc">// 3. Guard empty / malicious input</span>
   <span class="ck">const</span> sanitised = userInput.<span class="cv">trim</span>().<span class="cv">slice</span>(<span class="cv">0</span>, <span class="cv">8000</span>);
@@ -163,7 +165,7 @@
 
   <span class="cc">// 4. Limit context, stream, catch errors</span>
   <span class="ck">try</span> {
-    <span class="ck">const</span> session = <span class="ck">await</span> window.ai.languageModel.<span class="cv">create</span>({ systemPrompt });
+    <span class="ck">const</span> session = <span class="ck">await</span> LanguageModel.<span class="cv">create</span>({ systemPrompt });
     <span class="ck">const</span> stream = <span class="ck">await</span> session.<span class="cv">promptStreaming</span>(sanitised);
     <span class="ck">let</span> out = <span class="cv">''</span>;
     <span class="ck">for await</span> (<span class="ck">const</span> chunk <span class="ck">of</span> stream) out = chunk;
@@ -191,16 +193,18 @@
   let modelStatus = 'unknown';
 
   async function getStatus() {
-    if (!window.ai?.languageModel) return { available: false, reason: 'API not in window.ai' };
+    if (typeof LanguageModel === 'undefined') return { available: false, reason: 'LanguageModel not defined' };
     try {
-      const cap = await window.ai.languageModel.capabilities?.();
-      return { available: cap?.available !== 'no', status: cap?.available || 'unknown' };
+      const avail = typeof LanguageModel.availability === 'function'
+        ? await LanguageModel.availability()
+        : (typeof LanguageModel.capabilities === 'function' ? (await LanguageModel.capabilities())?.available : 'available');
+      return { available: avail !== 'no' && avail !== 'unavailable', status: avail || 'unknown' };
     } catch (e) { return { available: false, reason: e.message }; }
   }
 
   async function tryPrompt(prompt, options = {}) {
-    if (!window.ai?.languageModel) throw new Error('API not available');
-    const session = await window.ai.languageModel.create(options);
+    if (typeof LanguageModel === 'undefined') throw new Error('API not available');
+    const session = await LanguageModel.create(options);
     const stream = await session.promptStreaming(prompt);
     let out = '';
     for await (const chunk of stream) out = chunk;
@@ -210,10 +214,10 @@
   const TESTS = [
     {
       name: 'API feature detection',
-      desc: 'window.ai.languageModel exists; capabilities() resolves',
+      desc: 'LanguageModel exists; availability() resolves',
       run: async () => {
         const s = await getStatus();
-        if (!s.available && !window.ai?.languageModel) return { status: 'warn', msg: 'API absent — use server-side fallback' };
+        if (!s.available && typeof LanguageModel === 'undefined') return { status: 'warn', msg: 'API absent — use server-side fallback' };
         if (!s.available) return { status: 'warn', msg: `Model status: ${s.status || s.reason}` };
         return { status: 'pass', msg: `Available: ${s.status}` };
       },
@@ -296,7 +300,7 @@
       run: async () => {
         if (!apiAvailable) return { status: 'pass', msg: 'Pattern validated: session.prompt() called multiple times' };
         try {
-          const session = await window.ai.languageModel.create({});
+          const session = await LanguageModel.create({});
           await session.prompt('My name is Alex.');
           const out = await session.prompt('What is my name?');
           return out.toLowerCase().includes('alex')
@@ -313,7 +317,7 @@
       run: async () => {
         if (!apiAvailable) return { status: 'pass', msg: 'Pattern validated: check session.tokensSoFar < session.maxTokens' };
         try {
-          const session = await window.ai.languageModel.create({});
+          const session = await LanguageModel.create({});
           const hasTokenInfo = 'tokensSoFar' in session || 'maxTokens' in session;
           return hasTokenInfo
             ? { status: 'pass', msg: `tokensSoFar: ${session.tokensSoFar}, maxTokens: ${session.maxTokens}` }
@@ -329,7 +333,7 @@
       run: async () => {
         if (!apiAvailable) return { status: 'pass', msg: 'Pattern validated: pass signal to promptStreaming' };
         try {
-          const session = await window.ai.languageModel.create({});
+          const session = await LanguageModel.create({});
           const ctrl = new AbortController();
           const streamPromise = session.promptStreaming('Count from 1 to 1000 slowly', { signal: ctrl.signal });
           setTimeout(() => ctrl.abort(), 50);
@@ -349,16 +353,18 @@
     },
     {
       name: 'Model download trigger',
-      desc: 'available: "after-download" should trigger download, not fail',
+      desc: 'availability: "downloadable" indicates model must download',
       run: async () => {
-        if (!window.ai?.languageModel) return { status: 'warn', msg: 'API not available' };
+        if (typeof LanguageModel === 'undefined') return { status: 'warn', msg: 'API not available' };
         try {
-          const cap = await window.ai.languageModel.capabilities?.();
-          if (cap?.available === 'after-download') {
-            return { status: 'pass', msg: 'Model needs download; create() will trigger it — handle monitor events' };
+          const avail = typeof LanguageModel.availability === 'function'
+            ? await LanguageModel.availability()
+            : (await LanguageModel.capabilities?.())?.available;
+          if (avail === 'downloadable' || avail === 'after-download') {
+            return { status: 'pass', msg: 'Model needs download; create() with user gesture will trigger it' };
           }
-          if (cap?.available === 'readily') return { status: 'pass', msg: 'Model already available' };
-          return { status: 'warn', msg: `Availability: ${cap?.available || 'unknown'}` };
+          if (avail === 'available' || avail === 'readily') return { status: 'pass', msg: 'Model already available' };
+          return { status: 'warn', msg: `Availability: ${avail || 'unknown'}` };
         } catch (e) {
           return { status: 'warn', msg: e.message };
         }
@@ -372,8 +378,8 @@
         try {
           const opts = { temperature: 0, topK: 1 };
           const p = 'Say only the word "apple".';
-          const r1 = await (await window.ai.languageModel.create(opts)).prompt(p);
-          const r2 = await (await window.ai.languageModel.create(opts)).prompt(p);
+          const r1 = await (await LanguageModel.create(opts)).prompt(p);
+          const r2 = await (await LanguageModel.create(opts)).prompt(p);
           return r1.trim().toLowerCase() === r2.trim().toLowerCase()
             ? { status: 'pass', msg: `Deterministic: "${r1.trim().slice(0, 40)}"` }
             : { status: 'warn', msg: `Results differed: "${r1.trim().slice(0, 30)}" vs "${r2.trim().slice(0, 30)}"` };
@@ -388,7 +394,7 @@
       run: async () => {
         if (!apiAvailable) return { status: 'pass', msg: 'Guard validated: clamp/validate temperature before create()' };
         try {
-          await window.ai.languageModel.create({ temperature: 999 });
+          await LanguageModel.create({ temperature: 999 });
           return { status: 'warn', msg: 'No error for temperature=999 (UA may clamp silently)' };
         } catch (e) {
           return { status: 'pass', msg: 'Threw for invalid temperature: ' + e.message.slice(0, 60) };
@@ -402,7 +408,7 @@
         const longSys = 'You are helpful. '.repeat(500);
         if (!apiAvailable) return { status: 'pass', msg: `Guard validated: check token budget before create() (${longSys.length} chars)` };
         try {
-          const session = await window.ai.languageModel.create({ systemPrompt: longSys });
+          const session = await LanguageModel.create({ systemPrompt: longSys });
           return { status: 'pass', msg: 'Long system prompt accepted' };
         } catch (e) {
           return { status: 'pass', msg: 'Correctly rejected oversized system prompt: ' + e.message.slice(0, 60) };
@@ -415,7 +421,7 @@
       run: async () => {
         const fallback = (text) => `[Simulated summary of: "${text.slice(0,30)}…"]`;
         try {
-          const result = window.ai?.languageModel ? 'API present' : fallback('Test input text for summary');
+          const result = typeof LanguageModel !== 'undefined' ? 'API present' : fallback('Test input text for summary');
           if (!result) return { status: 'fail', msg: 'Fallback returned falsy' };
           return { status: 'pass', msg: 'Fallback executed without throw: ' + result.slice(0, 60) };
         } catch (e) {
@@ -499,23 +505,25 @@
   async function init() {
     renderRows();
     const el = document.getElementById('apiStatus');
-    if (!window.ai?.languageModel) {
+    if (typeof LanguageModel === 'undefined') {
       el.className = 'api-status status-fallback';
-      el.textContent = 'Prompt API (window.ai.languageModel) not available. Tests validate patterns and simulate results.';
+      el.textContent = 'Prompt API (LanguageModel) not available. Tests validate patterns and simulate results.';
     } else {
       try {
-        const cap = await window.ai.languageModel.capabilities?.();
-        if (cap?.available === 'no') {
+        const avail = typeof LanguageModel.availability === 'function'
+          ? await LanguageModel.availability()
+          : (await LanguageModel.capabilities?.())?.available;
+        if (avail === 'no' || avail === 'unavailable') {
           el.className = 'api-status status-fallback';
           el.textContent = 'Prompt API present but model not available on this device.';
         } else {
           apiAvailable = true;
           el.className = 'api-status status-live';
-          el.textContent = `Prompt API ready (${cap?.available || 'unknown'}). Tests run real inference.`;
+          el.textContent = `Prompt API ready (${avail || 'unknown'}). Tests run real inference.`;
         }
       } catch {
         el.className = 'api-status status-fallback';
-        el.textContent = 'capabilities() threw. API state unknown — tests will attempt real calls.';
+        el.textContent = 'availability() threw. API state unknown — tests will attempt real calls.';
       }
     }
   }

@@ -99,7 +99,8 @@ if (!targets.length) {
 let serverChild = null;
 async function bootServer() {
   if (noServer) return;
-  const port = 3000;
+  const parsedPort = Number(new URL(base).port) || 3847;
+  const port = parsedPort;
   base = `http://localhost:${port}`;
   serverChild = new Deno.Command("deno", {
     args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
@@ -352,7 +353,8 @@ async function main() {
   await cleanupChrome(chrome);
   if (serverChild) {
     try {
-      serverChild.kill();
+      serverChild.kill("SIGKILL");
+      await serverChild.status;
     } catch {
       // ignore
     }
@@ -405,3 +407,4 @@ async function writeReport(summary, full) {
 }
 
 await main();
+Deno.exit(0);
