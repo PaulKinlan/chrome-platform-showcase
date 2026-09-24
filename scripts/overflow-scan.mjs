@@ -74,6 +74,23 @@ if (concepts && doMerge) {
   );
   Deno.exit(2);
 }
+// Feature mode also refuses --merge while the sidecar's existing records predate the
+// layout-viewport signal (bead ayg). The signal is right and stays; what must not
+// happen is a bulk sweep rewriting shared verdicts ahead of the re-verification
+// wave: a `broken` write fails the route gate with no escape until the page is
+// fixed, and an `ok -> needs-review` write fails the monotonic check unless a
+// migration record names the id. Either way every lane's pre-push gate would fail
+// on files it never touched (the bn2 failure shape). Targeted runs stay available:
+// `responsive-check <id> --merge` records one demo the caller deliberately touched.
+if (doMerge && !concepts) {
+  console.error(
+    "--merge is disabled for the feature-mode sweep until the ayg re-verification wave lands.\n" +
+      "The measured signal is correct (layout viewport), but the existing sidecar records predate it, so a bulk write\n" +
+      "would flip ok -> needs-review/broken for pages no caller touched and fail every lane's check-routes gate.\n" +
+      "Record a specific demo you are actually working on with: deno task responsive-check <id> --merge",
+  );
+  Deno.exit(2);
+}
 
 // Concept pages: any v<N>/<feature>/<concept>/index.html.
 async function conceptPages() {
@@ -179,6 +196,32 @@ const PROBE =
       if (!inScroller) past.push({ tag: el.tagName, cls: String(el.className || "").slice(0, 24), right: Math.round(r.right), width: Math.round(r.width) });
       if (past.length >= 3) break;
     }
+    // An element walk cannot see a text line box: a long unbreakable token inside a
+    // box that itself fits (e.g. max-width:56ch with no overflow-wrap) overflows the
+    // layout viewport with no element box past the edge. Ranges do see it, so report
+    // the widest text line rather than asserting a cause the walk did not measure.
+    let textLine = null;
+    if (!past.length) {
+      const range = document.createRange();
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (!node.textContent.trim()) continue;
+        range.selectNodeContents(node);
+        for (const r of range.getClientRects()) {
+          if (r.width > 0 && (!textLine || r.right > textLine.right)) {
+            const host = node.parentElement;
+            textLine = {
+              right: Math.round(r.right),
+              width: Math.round(r.width),
+              tag: host ? host.tagName : null,
+              cls: host ? String(host.className || "").slice(0, 24) : null,
+              text: node.textContent.trim().slice(0, 60),
+            };
+          }
+        }
+      }
+    }
     return {
       o: de.scrollWidth - vw,
       sw: de.scrollWidth,
@@ -186,6 +229,7 @@ const PROBE =
       innerWidth: window.innerWidth,
       visualViewport: window.visualViewport ? Math.round(window.visualViewport.width) : null,
       past,
+      textLine,
     };
   })()`;
 
@@ -241,16 +285,18 @@ for (const id of targets) {
             overflow: v.o,
             state: "overflow",
             culprit: v.past[0] ?? null,
+            textLine: v.textLine ?? null,
             past: v.past,
             layoutViewport: v.layoutViewport,
             innerWidth: v.innerWidth,
             visualViewport: v.visualViewport,
           };
-          console.log(
-            `  OVERFLOW ${String(v.o).padStart(5)}px [${cls}] ${id} :: ${
-              v.past[0] ? `${v.past[0].tag}.${v.past[0].cls}` : "culprit inside a scroll container"
-            }`,
-          );
+          const culprit = v.past[0]
+            ? `${v.past[0].tag}.${v.past[0].cls}`
+            : v.textLine
+            ? `text line in ${v.textLine.tag}.${v.textLine.cls} (${v.textLine.width}px): "${v.textLine.text}"`
+            : "not attributable to an element (no element or text line past the layout viewport)";
+          console.log(`  OVERFLOW ${String(v.o).padStart(5)}px [${cls}] ${id} :: ${culprit}`);
         } else {
           clean++;
           row = { ...row, overflow: v.o, state: "clean" };
