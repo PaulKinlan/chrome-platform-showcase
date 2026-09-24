@@ -426,45 +426,124 @@ try {
   }
 }
 
-// ── Write Summary Reports ───────────────────────────────────────────────────
+// ── Merge & Write Summary Reports ───────────────────────────────────────────
+const reportPath = join(outDir, "verification-report.json");
+const mergedMap = new Map();
+
+// 1. Recover and load existing results from verification-report.json
+if (existsSync(reportPath)) {
+  try {
+    const raw = await Deno.readTextFile(reportPath);
+    const existing = JSON.parse(raw);
+    for (const r of existing.results ?? []) {
+      if (r?.url) mergedMap.set(r.url, r);
+    }
+  } catch (e) {
+    console.warn(`Warning: failed to read existing ${reportPath}: ${e.message}`);
+  }
+}
+
+// 2. Discover any valid screenshot directories on disk that may have been orphaned
+try {
+  for (const entry of Deno.readDirSync(outDir)) {
+    if (!entry.isDirectory) continue;
+    const initialShot = join(outDir, entry.name, "01-initial.png");
+    const afterShot = join(outDir, entry.name, "02-interactive.png");
+    if (existsSync(initialShot) && existsSync(afterShot)) {
+      const parts = entry.name.split("--");
+      if (parts.length >= 3) {
+        const milestone = parts[0];
+        const concept = parts[parts.length - 1];
+        const feature = parts.slice(1, -1).join("--");
+        const url = `/${milestone}/${feature}/${concept}/`;
+        if (!mergedMap.has(url)) {
+          mergedMap.set(url, {
+            url,
+            name: `${milestone}/${feature}/${concept}`,
+            slug: entry.name,
+            status: "UNVERIFIED",
+            controlsFound: 0,
+            controlsExercised: 0,
+            actions: ["recovered from disk screenshot artifacts"],
+            domMutated: false,
+            mutations: 0,
+            stateChanged: false,
+            consoleErrors: [],
+            driveError: null,
+            screenshots: {
+              initial: `${entry.name}/01-initial.png`,
+              interactive: `${entry.name}/02-interactive.png`,
+            },
+          });
+        }
+      }
+    }
+  }
+} catch {
+  // non-fatal
+}
+
+// 3. Merge new run results (monotonic update)
+for (const r of results) {
+  mergedMap.set(r.url, r);
+}
+
+const allResults = Array.from(mergedMap.values()).sort((a, b) => a.url.localeCompare(b.url));
+const totalPassed = allResults.filter((r) => r.status === "PASS").length;
+const totalUnverified = allResults.filter((r) => r.status === "UNVERIFIED").length;
+const totalFailed = allResults.filter((r) => r.status === "FAIL").length;
+
+// Total catalogue concepts denominator (per bead cix and mox)
+let totalCatalogueConcepts = 3893;
+try {
+  const manifest = buildFromDisk().filter((m) => m.status === "built");
+  const count = manifest.reduce((acc, f) => acc + f.concepts.length, 0);
+  if (count > 0) totalCatalogueConcepts = count;
+} catch {}
+
 const summaryJson = {
   timestamp: new Date().toISOString(),
-  base,
-  total: results.length,
-  passed: passedCount,
-  failed: failedCount,
-  results,
+  lastRunBase: base,
+  catalogueConceptsTotal: totalCatalogueConcepts,
+  totalIndexed: allResults.length,
+  passed: totalPassed,
+  unverified: totalUnverified,
+  failed: totalFailed,
+  lastRunTested: results.length,
+  lastRunPassed: passedCount,
+  lastRunFailed: failedCount,
+  results: allResults,
 };
 
 await Deno.writeTextFile(
-  join(outDir, "verification-report.json"),
+  reportPath,
   JSON.stringify(summaryJson, null, 2) + "\n",
 );
 
 let md = `# Interactive Demo Verification Report\n\n`;
-md += `- **Date:** ${new Date().toISOString()}\n`;
-md += `- **Base URL:** ${base}\n`;
-md += `- **Total Demos Verified:** ${results.length}\n`;
-md += `- **Passed:** ${passedCount} / ${results.length}\n`;
-md += `- **Failed:** ${failedCount} / ${results.length}\n\n`;
+md += `- **Last Updated:** ${new Date().toISOString()}\n`;
+md += `- **Catalogue Coverage:** ${allResults.length} / ${totalCatalogueConcepts} concepts indexed (${((allResults.length / totalCatalogueConcepts) * 100).toFixed(1)}%)\n`;
+md += `- **Overall Status:** ${totalPassed} passed, ${totalUnverified} unverified (recovered artifacts), ${totalFailed} failed\n`;
+md += `- **Latest Run:** ${results.length} tested (${passedCount} passed, ${failedCount} failed)\n\n`;
 md += `## Verified Demos\n\n`;
 md += `| Demo URL | Controls Found / Tested | Mutations | Status | Screenshot Proof |\n`;
 md += `| :--- | :---: | :---: | :---: | :--- |\n`;
 
-for (const r of results) {
+for (const r of allResults) {
   const proofLinks = [
-    r.screenshots.initial ? `[Initial](${r.screenshots.initial})` : "",
-    r.screenshots.interactive ? `[Interactive](${r.screenshots.interactive})` : "",
+    r.screenshots?.initial ? `[Initial](${r.screenshots.initial})` : "",
+    r.screenshots?.interactive ? `[Interactive](${r.screenshots.interactive})` : "",
   ].filter(Boolean).join(" · ");
   md += `| \`${r.url}\` | ${r.controlsFound} / ${r.controlsExercised} | ${r.mutations} | **${r.status}** | ${proofLinks} |\n`;
 }
 
-if (failedCount > 0) {
+const failedItems = allResults.filter((x) => x.status === "FAIL");
+if (failedItems.length > 0) {
   md += `\n## Failures\n\n`;
-  for (const r of results.filter((x) => x.status === "FAIL")) {
+  for (const r of failedItems) {
     md += `### \`${r.url}\`\n`;
     if (r.driveError) md += `- **Drive Error:** \`${r.driveError}\`\n`;
-    for (const err of r.consoleErrors) {
+    for (const err of r.consoleErrors ?? []) {
       md += `- **Console Error:** \`${err}\`\n`;
     }
   }
@@ -472,7 +551,8 @@ if (failedCount > 0) {
 
 await Deno.writeTextFile(join(outDir, "REPORT.md"), md);
 
-console.log(`\nVerification complete: ${passedCount}/${results.length} demos passed.`);
-console.log(`Reports saved to ${outDir}/REPORT.md and ${outDir}/verification-report.json`);
+console.log(`\nVerification complete: ${passedCount}/${results.length} demos passed this run.`);
+console.log(`Cumulative index: ${totalPassed} passed, ${totalUnverified} unverified (${allResults.length}/${totalCatalogueConcepts} catalogue concepts indexed).`);
+console.log(`Reports merged into ${outDir}/REPORT.md and ${outDir}/verification-report.json`);
 
 Deno.exit(failedCount ? 1 : 0);
