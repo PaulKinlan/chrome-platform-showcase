@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Expose ProgressEvent in service workers — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v157/">&larr; Chrome 157</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v157 · javascript · service workers</p>
+    <h1>Expose ProgressEvent in service workers</h1>
+    <p class="lede"><code>ProgressEvent</code> has always been available on the window and in dedicated and shared workers, but not inside a <code>ServiceWorkerGlobalScope</code> &mdash; so a service worker tracking a long <code>fetch()</code> had to invent its own progress message shape. Chrome 157 exposes the interface there too, aligning service workers with every other worker context and with the XMLHttpRequest Standard.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./scope-probe/">Global-scope probe</a></h3>
+      <p>Register a real service worker, ask it whether <code>ProgressEvent</code> exists in <em>its</em> global, and have it construct one with <code>lengthComputable</code>, <code>loaded</code> and <code>total</code>. The answer comes back over <code>postMessage</code> from inside the worker, not from a guess made on the page.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./scope-matrix/">Which scopes have it</a></h3>
+      <p>Probe <code>ProgressEvent</code> in four realms at once &mdash; window, dedicated worker, shared worker, service worker &mdash; and see exactly where the gap was. Each cell is a live construction attempt in that realm, not a support table.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./download-relay/">Streaming download relay</a></h3>
+      <p>The use case that motivated it: a service worker intercepts a download, counts bytes off the <code>ReadableStream</code>, and reports progress to the page as a real <code>ProgressEvent</code> rather than an ad-hoc object &mdash; with the pre-157 hand-rolled shape beside it for comparison.</p>
+    </li>
+  </ol></section>
+
+  <section>
+    <h2>why it was missing</h2>
+    <p><code>ProgressEvent</code> is defined by the XMLHttpRequest Standard, and its <code>[Exposed]</code> extended attribute historically listed <code>(Window,DedicatedWorker,SharedWorker)</code> &mdash; the realms where XHR itself lives. Service workers never had XHR, so the event came along for the ride and was left out.</p>
+    <p>But the interface is not really about XHR any more: it is the standard shape for &ldquo;this operation is <em>n</em> of <em>m</em> bytes through&rdquo;, and service workers are exactly where long transfers get intercepted. Without it, every service worker that wanted to report progress invented its own <code>{ loaded, total }</code> message and every page had to know that worker's private convention.</p>
+  </section>
+
+  <section>
+    <h2>the API</h2>
+    <pre tabindex="0"><code>// Inside the service worker (Chrome 157+)
+self.addEventListener("fetch", (event) =&gt; {
+  event.respondWith((async () =&gt; {
+    const response = await fetch(event.request);
+    const total = Number(response.headers.get("content-length")) || 0;
+    let loaded = 0;
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const reader = response.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          loaded += value.byteLength;
+
+          // The standard shape, constructible here for the first time:
+          const progress = new ProgressEvent("progress", {
+            lengthComputable: total &gt; 0,
+            loaded,
+            total,
+          });
+          const clients = await self.clients.matchAll();
+          for (const client of clients) {
+            client.postMessage({
+              type: progress.type,
+              lengthComputable: progress.lengthComputable,
+              loaded: progress.loaded,
+              total: progress.total,
+            });
+          }
+          controller.enqueue(value);
+        }
+        controller.close();
+      },
+    });
+
+    return new Response(stream, { headers: response.headers });
+  })());
+});</code></pre>
+    <p>The event still has to be serialised across <code>postMessage</code> &mdash; an <code>Event</code> is not structured-cloneable &mdash; but constructing it in the worker means the field names, types and <code>lengthComputable</code> semantics come from the platform rather than from a convention you documented in a README.</p>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5069584943153152" target="_blank" rel="noopener">ChromeStatus: Expose ProgressEvent in service workers</a></li>
+      <li><a href="https://xhr.spec.whatwg.org/#interface-progressevent" target="_blank" rel="noopener">XMLHttpRequest Standard &sect; ProgressEvent</a></li>
+      <li><a href="/v136/update-progressevent-to-use-double-type-for-loaded-and-total/">ProgressEvent loaded/total as double &mdash; Chrome 136</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

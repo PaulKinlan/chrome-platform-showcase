@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Streaming download relay — ProgressEvent in service workers — Chrome 157</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0; }
+    .controls button { min-height: 44px; }
+    .controls select { min-height: 44px; font-family: var(--font-mono); font-size: 0.78rem; padding: 0.4rem 0.6rem; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .bar-wrap {
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      height: 2.2rem;
+      position: relative;
+      margin: var(--space-3) 0;
+      overflow: hidden;
+    }
+    .bar {
+      background: var(--accent-blue);
+      height: 100%;
+      width: 0;
+      transition: width 80ms linear;
+    }
+    .bar-label {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-black);
+    }
+    .source-tag {
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      padding: 0.2rem 0.5rem;
+      border: 2px solid var(--border-black);
+      background: var(--bg-stone);
+      color: var(--text-black);
+      margin-left: var(--space-2);
+    }
+    .source-native { background: var(--bg-ivory); color: var(--demo-color-064e3b); }
+    .source-fallback { background: var(--bg-ivory); color: var(--demo-color-7f1d1d); }
+    .log {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      margin-top: var(--space-3);
+      max-height: 16rem;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .readout {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      padding: var(--space-3);
+      margin-top: var(--space-3);
+      overflow-wrap: anywhere;
+    }
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.8rem;
+      margin: var(--space-4) 0;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v157/expose-progressevent-in-service-workers/">&larr; ProgressEvent in service workers</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v157 · javascript · service workers</p>
+    <h1>Streaming download relay</h1>
+    <p class="lede">The use case that motivated the change. A service worker fetches a real same-origin asset, counts bytes off the response&rsquo;s <code>ReadableStream</code>, and reports progress to this page &mdash; building a genuine <code>ProgressEvent</code> to do it where the platform allows, and falling back to a hand-rolled object where it does not. The label above the bar says which one produced the numbers.</p>
+  </header>
+
+  <div class="note" id="support-note" role="status">Checking service worker support&hellip;</div>
+
+  <div class="stage">
+    <h2>Relay a download through the worker</h2>
+    <div class="controls">
+      <label for="asset" style="font-family:var(--font-mono);font-size:0.78rem;align-self:center;">asset:</label>
+      <select id="asset">
+        <option value="/public/styles.css">styles.css (~27 KB)</option>
+        <option value="/public/demo-telemetry.js">demo-telemetry.js (~8 KB)</option>
+        <option value="/public/conformance-panel.js">conformance-panel.js (~4 KB)</option>
+      </select>
+      <button type="button" id="start">Start relay</button>
+      <button type="button" id="cleanup">Unregister the worker</button>
+    </div>
+
+    <div class="bar-wrap">
+      <div class="bar" id="bar"></div>
+      <div class="bar-label" id="bar-label">idle</div>
+    </div>
+    <p style="font-family:var(--font-mono);font-size:0.75rem;margin:var(--space-2) 0;">
+      progress values came from:<span class="source-tag" id="source-tag">nothing yet</span>
+    </p>
+
+    <div class="readout" id="readout" role="status" aria-live="polite">Press <em>Start relay</em> to register the worker and stream an asset through it.</div>
+    <div class="log" id="log" aria-label="Relay message log">(no messages yet)</div>
+  </div>
+
+  <section>
+    <h2>what the worker does</h2>
+    <pre tabindex="0"><code>const response = await fetch(url);
+const total = Number(response.headers.get("content-length")) || 0;
+const reader = response.body.getReader();
+let loaded = 0;
+
+for (;;) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  loaded += value.byteLength;
+
+  // Chrome 157+: the standard shape, constructible in a service worker
+  const event = new ProgressEvent("progress", {
+    lengthComputable: total &gt; 0,
+    loaded,
+    total,
+  });
+
+  client.postMessage({
+    lengthComputable: event.lengthComputable,
+    loaded: event.loaded,
+    total: event.total,
+  });
+}</code></pre>
+    <p><code>lengthComputable</code> is set from whether the server actually sent a <code>content-length</code>, not hard-coded to <code>true</code> &mdash; that is the attribute&rsquo;s entire job, and a relay that always claims a known length is lying about the one field it exists to communicate.</p>
+  </section>
+
+  <section>
+    <h2>why the event rather than a plain object</h2>
+    <p>The values are identical either way; an <code>Event</code> cannot cross <code>postMessage</code>, so both paths end up sending a plain object. What changes is where the contract lives. With <code>ProgressEvent</code> in scope, the field names, their types, and the meaning of <code>lengthComputable</code> come from the XMLHttpRequest Standard. Without it, every worker invents its own shape and every page has to learn that worker&rsquo;s private convention &mdash; which is exactly the situation this feature ends.</p>
+    <p>It also composes with the Chrome 136 change that made <code>loaded</code> and <code>total</code> IDL <code>double</code>: a relay that forwards platform-constructed values inherits that precision instead of re-deriving it. See <a href="/v136/update-progressevent-to-use-double-type-for-loaded-and-total/">ProgressEvent loaded/total as double</a>.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">ProgressEvent in service workers</a> &mdash; feature index</li>
+      <li><a href="../scope-probe/">Global-scope probe</a></li>
+      <li><a href="../scope-matrix/">Which scopes have it</a></li>
+      <li><a href="https://chromestatus.com/feature/5069584943153152" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  const SCOPE = "/v157/expose-progressevent-in-service-workers/download-relay/";
+  const note = document.getElementById("support-note");
+  const readout = document.getElementById("readout");
+  const log = document.getElementById("log");
+  const bar = document.getElementById("bar");
+  const barLabel = document.getElementById("bar-label");
+  const sourceTag = document.getElementById("source-tag");
+
+  const swSupported = "serviceWorker" in navigator;
+  const secure = window.isSecureContext;
+
+  if (!swSupported) {
+    note.textContent =
+      "This browser exposes no navigator.serviceWorker, so no relay can run. Nothing below is simulated — " +
+      "the bar will stay at zero.";
+  } else if (!secure) {
+    note.textContent =
+      "Service workers need a secure context (https, or localhost). Registration will fail here, and the " +
+      "relay cannot run.";
+  } else {
+    note.textContent =
+      "Service workers are available. The relay registers one scoped to this directory, streams the chosen " +
+      "asset through it, and labels every progress value with whether a real ProgressEvent produced it.";
+  }
+
+  const lines = [];
+  function append(line) {
+    lines.push(line);
+    if (lines.length > 200) lines.shift();
+    log.textContent = lines.join("\n");
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function setSource(source) {
+    if (source === "ProgressEvent") {
+      sourceTag.textContent = "ProgressEvent (native)";
+      sourceTag.className = "source-tag source-native";
+    } else if (source) {
+      sourceTag.textContent = source + " (fallback)";
+      sourceTag.className = "source-tag source-fallback";
+    } else {
+      sourceTag.textContent = "nothing yet";
+      sourceTag.className = "source-tag";
+    }
+  }
+
+  function handleMessage(data) {
+    if (!data || !data.kind) return;
+
+    if (data.kind === "start") {
+      setSource(data.hasProgressEvent ? "ProgressEvent" : "hand-rolled object");
+      append(
+        "start · " + data.url +
+        " · content-length " + (data.lengthKnown ? data.total + " bytes" : "not sent by the server") +
+        " · ProgressEvent in worker: " + data.hasProgressEvent
+      );
+      readout.textContent = data.hasProgressEvent
+        ? "The worker reports ProgressEvent IS available in its global, so every value below was read off a real one."
+        : "The worker reports ProgressEvent is NOT available in its global. Every value below comes from a " +
+          "hand-rolled object — the pre-157 workaround, labelled as such rather than presented as the native path.";
+      return;
+    }
+
+    if (data.kind === "progress") {
+      setSource(data.source);
+      const pct = data.lengthComputable && data.total
+        ? Math.min(100, Math.round((data.loaded / data.total) * 100))
+        : null;
+      if (pct === null) {
+        bar.style.width = "100%";
+        barLabel.textContent = data.loaded + " bytes (length not computable)";
+      } else {
+        bar.style.width = pct + "%";
+        barLabel.textContent = pct + "% · " + data.loaded + " / " + data.total + " bytes";
+      }
+      append(
+        "progress · chunk " + data.chunks +
+        " · loaded " + data.loaded +
+        " · total " + data.total +
+        " · lengthComputable " + data.lengthComputable +
+        " · from " + data.source
+      );
+      return;
+    }
+
+    if (data.kind === "done") {
+      append("done · " + data.chunks + " chunk(s) · " + data.loaded + " bytes total");
+      readout.textContent =
+        "Relay finished: " + data.loaded + " bytes over " + data.chunks + " chunk(s). " +
+        (data.hasProgressEvent
+          ? "Progress was reported with a ProgressEvent constructed inside the service worker."
+          : "Progress was reported with a hand-rolled object, because this worker has no ProgressEvent.");
+      return;
+    }
+
+    if (data.kind === "error") {
+      append("error · " + data.error);
+      readout.textContent =
+        "The relay failed: " + data.error + ". That is a fetch or worker failure, not a ProgressEvent " +
+        "result — no conclusion about the feature should be drawn from it.";
+    }
+  }
+
+  if (swSupported) {
+    navigator.serviceWorker.addEventListener("message", (event) => handleMessage(event.data));
+  }
+
+  document.getElementById("start").addEventListener("click", async () => {
+    if (!swSupported || !secure) {
+      readout.textContent = "Cannot run: service workers are unavailable in this context.";
+      return;
+    }
+    lines.length = 0;
+    log.textContent = "(registering…)";
+    bar.style.width = "0";
+    barLabel.textContent = "starting";
+    setSource(null);
+
+    try {
+      const reg = await navigator.serviceWorker.register("./sw.js", { scope: SCOPE });
+      await navigator.serviceWorker.ready;
+      const worker = reg.active || navigator.serviceWorker.controller;
+      if (!worker) {
+        readout.textContent = "Registered, but no active worker to message.";
+        return;
+      }
+      const url = document.getElementById("asset").value;
+      worker.postMessage({ type: "relay", url });
+      readout.textContent = "Relaying " + url + " through the service worker…";
+    } catch (err) {
+      readout.textContent =
+        "Registration failed: " + (err && err.message ? err.message : String(err)) +
+        " — this is a setup failure, not a ProgressEvent result.";
+    }
+  });
+
+  document.getElementById("cleanup").addEventListener("click", async () => {
+    if (!swSupported) { readout.textContent = "navigator.serviceWorker is unavailable."; return; }
+    const regs = await navigator.serviceWorker.getRegistrations();
+    let removed = 0;
+    for (const reg of regs) {
+      if (reg.scope.endsWith(SCOPE)) { await reg.unregister(); removed++; }
+    }
+    bar.style.width = "0";
+    barLabel.textContent = "idle";
+    setSource(null);
+    readout.textContent = removed
+      ? "Unregistered " + removed + " worker(s) scoped to this page."
+      : "No worker was registered for this scope.";
+  });
+</script>
+</body>
+</html>
