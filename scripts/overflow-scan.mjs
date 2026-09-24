@@ -2,7 +2,10 @@
 // Cheap automated mobile-overflow scan for the mobile + desktop parity invariant.
 //
 // A fast sweep that loads each demo and checks only
-// `documentElement.scrollWidth <= innerWidth + 1`. Its ONLY job is to SEED
+// `documentElement.scrollWidth <= documentElement.clientWidth + 1` — the LAYOUT
+// viewport, not `window.innerWidth`. Under mobile emulation Chrome expands
+// innerWidth to fit wide content in normal flow, so the innerWidth form returns 0
+// for a page a phone user cannot fit on screen (bead ayg). Its ONLY job is to SEED
 // support records and flag obvious breakage — an overflow hit is written as
 // `needs-review` (NOT a pass, NOT `broken`); a clean automated result is left
 // `untested`. A real matrix pass via responsive-check is what flips a class to
@@ -14,9 +17,12 @@
 // and the default mode of this script all key off feature folders. Two rules
 // learned from the concept sweep that found the 4va/llk overflow backlog:
 //
-//   * BOTH classes matter. Of the offenders found across the concept pages, all
-//     but one were desktop-only, and the one that also broke mobile was the worst
-//     desktop case — a mobile-only sweep sees a fraction of this class of bug.
+//   * BOTH classes matter. Measure desktop and mobile; never assume a finding on
+//     one class describes the other. An earlier note here claimed concept-page
+//     offenders were almost all desktop-only. That came from the blind innerWidth
+//     signal and was retracted by its author: a full count of the 481 mobile-`ok`
+//     feature records found 63 offenders, 0 of them visible to innerWidth and all
+//     63 on mobile — the inverse of the withdrawn claim (beads 5yr, nfy).
 //   * The CULPRIT must skip scroll-container contents. A `<pre>` with
 //     `overflow-x: auto` inside a 184px box can carry 1000px of content and be
 //     perfectly correct; a naive element-rect sweep reports it forever.
