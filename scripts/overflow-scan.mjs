@@ -66,11 +66,9 @@ const milestone = flag("--milestone");
 const strideN = Number(flag("--stride") ?? 0);
 const classesArg = String(flag("--classes") ?? (concepts ? "both" : "mobile"));
 const perPageMs = Number(flag("--timeout-ms") ?? 8000);
-// Whole-run budget. Per-page budgets protect against a slow page; this protects
-// against a run that stops making progress, which otherwise looks like a busy
-// process rather than a failure.
-const runDeadlineMs = Number(flag("--deadline-ms") ?? 15 * 60 * 1000);
-const runStartedAt = Date.now();
+// null means "not set": the effective budget is computed once the size of the
+// run is known, further down.
+const deadlineFlag = flag("--deadline-ms");
 const explicitBase = flag("--base");
 let base = explicitBase ?? "http://localhost:3000";
 
@@ -161,6 +159,29 @@ if (!targets.length) {
   console.error("No matching built demos.");
   Deno.exit(2);
 }
+
+// ── Whole-run deadline ───────────────────────────────────────────────────────
+// Per-page budgets protect against a slow page; this protects against a run that
+// makes no progress at all, which otherwise looks like a busy process rather than
+// a failure. An explicit --deadline-ms wins; otherwise it scales with the work
+// requested, because a fixed 15-minute budget aborts healthy long runs: measured
+// concept mode is 379ms per page-class (--concepts --milestone v145: 330
+// page-classes in 125s), so --concepts --all is ~7,800 page-classes and ~49
+// minutes. A deadline that fires on healthy work is one people learn to ignore.
+// 2000ms per page-class is ~2.4x the slowest measured rate (feature mode, 848ms
+// per page-class) and ~5x concept mode, and it still catches a true stall, which
+// makes no progress rather than slow progress. (Finding from the ly4 review.)
+const pageClasses = targets.length * classList.length;
+const runDeadlineMs = deadlineFlag !== null
+  ? Number(deadlineFlag)
+  : Math.max(15 * 60 * 1000, pageClasses * 2000);
+const deadlineSource = deadlineFlag !== null ? "explicit" : "scaled";
+const runStartedAt = Date.now();
+console.log(
+  `scan: ${targets.length} pages · ${pageClasses} page-classes · deadline ${
+    Math.round(runDeadlineMs / 1000)
+  }s (${deadlineSource})`,
+);
 
 // ── Server guards (bn2 / 7b0 port collision & identity verification) ─────────
 let serverChild = null;
@@ -522,6 +543,7 @@ try {
         blocked,
         unmeasured,
         runDeadlineMs,
+        deadlineSource,
         deadlineExceeded: deadlineSkipped > 0,
         deadlineSkippedPages: deadlineSkipped,
         // How often a wedged renderer had to be thrown away. Non-zero with a
@@ -546,6 +568,12 @@ try {
   );
   console.log(`report: ${reportPath}`);
 
+  // NOTE from the ly4 review (opus): this block is unreachable today — every path
+  // that sets doMerge exits 2 above while the ayg re-verification wave is pending,
+  // so it has not executed since nfy landed. Whoever re-enables --merge should
+  // also gate it on deadlineSkipped === 0, so a run that stopped at its deadline
+  // cannot write partial results into the sidecar. Do not add that condition now:
+  // it would be untested code guarding dead code.
   if (doMerge && Object.keys(update).length) {
     const tmp = await Deno.makeTempFile({ suffix: ".json" });
     await Deno.writeTextFile(tmp, JSON.stringify(update, null, 2));
