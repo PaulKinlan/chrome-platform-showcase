@@ -193,13 +193,32 @@ async function bootServer() {
       const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(1000) });
       await r.body?.cancel();
       if (r.ok) {
-        await assertServingThisTree();
-        return;
+        try {
+          await assertServingThisTree();
+          return;
+        } catch (err) {
+          if (serverChild) {
+            try {
+              serverChild.kill("SIGKILL");
+            } catch {
+              // ignore
+            }
+          }
+          throw err;
+        }
       }
-    } catch {
+    } catch (e) {
+      if (e.message && e.message.includes("is not serving this working tree")) throw e;
       // not up yet
     }
     await new Promise((r) => setTimeout(r, 500));
+  }
+  if (serverChild) {
+    try {
+      serverChild.kill("SIGKILL");
+    } catch {
+      // ignore
+    }
   }
   throw new Error(`local server on port ${port} did not become ready`);
 }
@@ -416,6 +435,13 @@ async function main() {
   } catch (e) {
     // A setup failure is not a measurement. Exit before anything can be recorded.
     console.error(`responsive-check: ${e.message}`);
+    if (serverChild) {
+      try {
+        serverChild.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+    }
     Deno.exit(2);
   }
   let chrome;
