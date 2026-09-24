@@ -234,7 +234,7 @@ const PROBE = `(() => {
   return {
     overflow,
     scrollWidth: de.scrollWidth,
-    innerWidth: vw,
+    layoutViewport: vw,
     reportedInnerWidth: window.innerWidth,
     clipped,
     small,
