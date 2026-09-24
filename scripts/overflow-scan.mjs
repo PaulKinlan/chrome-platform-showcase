@@ -200,6 +200,13 @@ const PROBE =
     // box that itself fits (e.g. max-width:56ch with no overflow-wrap) overflows the
     // layout viewport with no element box past the edge. Ranges do see it, so report
     // the widest text line rather than asserting a cause the walk did not measure.
+    //
+    // The walk applies the SAME two filters as the element walk, because a text line
+    // inside a scroll container is not an offender (a <pre overflow-x:auto> holding a
+    // 725px line clips correctly and contributes 0 to document overflow), and a line
+    // that does not reach past the layout viewport is not one either. Dropping the
+    // viewport filter also made the honest "not attributable" fallback unreachable:
+    // some text line exists on every page, so textLine was never null.
     let textLine = null;
     if (!past.length) {
       const range = document.createRange();
@@ -207,9 +214,14 @@ const PROBE =
       let node;
       while ((node = walker.nextNode())) {
         if (!node.textContent.trim()) continue;
+        let inScroller = false;
+        for (let n = node.parentElement; n && n !== document.body; n = n.parentElement) {
+          if (getComputedStyle(n).overflowX !== "visible") { inScroller = true; break; }
+        }
+        if (inScroller) continue;
         range.selectNodeContents(node);
         for (const r of range.getClientRects()) {
-          if (r.width > 0 && (!textLine || r.right > textLine.right)) {
+          if (r.width > 0 && r.right > vw + 1 && (!textLine || r.right > textLine.right)) {
             const host = node.parentElement;
             textLine = {
               right: Math.round(r.right),
