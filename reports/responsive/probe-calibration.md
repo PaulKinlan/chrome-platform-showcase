@@ -32,7 +32,7 @@ scrollWidth - clientWidth      1064     <- the truth
 `documentElement.clientWidth` is the layout viewport and does not expand, so the signal becomes
 `scrollWidth - clientWidth`. Per-control `clipped` counting uses the same reference, because a
 control past the layout viewport is not reachable on a phone. Both numbers are reported in the probe
-result (`innerWidth` now carries the layout reference, `reportedInnerWidth` keeps the browser's own
+result (`layoutViewport` carries the layout reference, `reportedInnerWidth` keeps the browser's own
 value) so the reference is never implicit.
 
 ## Falsification test (reproducible, no merge)
