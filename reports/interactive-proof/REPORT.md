@@ -5,7 +5,7 @@
 - **Overall Status:** 25 passed, 31 unverified (recovered artifacts), 0 failed
 - **Latest Run:** 1 tested (1 passed, 0 failed)
 
-## Verified Demos
+## Indexed Demos
 
 | Demo URL | Controls Found / Tested | Mutations | Status | Screenshot Proof |
 | :--- | :---: | :---: | :---: | :--- |
