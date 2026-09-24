@@ -461,13 +461,13 @@ try {
             url,
             name: `${milestone}/${feature}/${concept}`,
             slug: entry.name,
-            status: "PASS",
+            status: "UNVERIFIED",
             controlsFound: 0,
             controlsExercised: 0,
-            actions: ["recovered from disk evidence"],
-            domMutated: true,
-            mutations: 1,
-            stateChanged: true,
+            actions: ["recovered from disk screenshot artifacts"],
+            domMutated: false,
+            mutations: 0,
+            stateChanged: false,
             consoleErrors: [],
             driveError: null,
             screenshots: {
@@ -490,6 +490,7 @@ for (const r of results) {
 
 const allResults = Array.from(mergedMap.values()).sort((a, b) => a.url.localeCompare(b.url));
 const totalPassed = allResults.filter((r) => r.status === "PASS").length;
+const totalUnverified = allResults.filter((r) => r.status === "UNVERIFIED").length;
 const totalFailed = allResults.filter((r) => r.status === "FAIL").length;
 
 // Total catalogue concepts denominator (per bead cix and mox)
@@ -504,8 +505,9 @@ const summaryJson = {
   timestamp: new Date().toISOString(),
   lastRunBase: base,
   catalogueConceptsTotal: totalCatalogueConcepts,
-  totalVerified: allResults.length,
+  totalIndexed: allResults.length,
   passed: totalPassed,
+  unverified: totalUnverified,
   failed: totalFailed,
   lastRunTested: results.length,
   lastRunPassed: passedCount,
@@ -520,8 +522,8 @@ await Deno.writeTextFile(
 
 let md = `# Interactive Demo Verification Report\n\n`;
 md += `- **Last Updated:** ${new Date().toISOString()}\n`;
-md += `- **Catalogue Coverage:** ${allResults.length} / ${totalCatalogueConcepts} concepts verified (${((allResults.length / totalCatalogueConcepts) * 100).toFixed(1)}%)\n`;
-md += `- **Overall Status:** ${totalPassed} passed, ${totalFailed} failed\n`;
+md += `- **Catalogue Coverage:** ${allResults.length} / ${totalCatalogueConcepts} concepts indexed (${((allResults.length / totalCatalogueConcepts) * 100).toFixed(1)}%)\n`;
+md += `- **Overall Status:** ${totalPassed} passed, ${totalUnverified} unverified (recovered artifacts), ${totalFailed} failed\n`;
 md += `- **Latest Run:** ${results.length} tested (${passedCount} passed, ${failedCount} failed)\n\n`;
 md += `## Verified Demos\n\n`;
 md += `| Demo URL | Controls Found / Tested | Mutations | Status | Screenshot Proof |\n`;
@@ -550,7 +552,7 @@ if (failedItems.length > 0) {
 await Deno.writeTextFile(join(outDir, "REPORT.md"), md);
 
 console.log(`\nVerification complete: ${passedCount}/${results.length} demos passed this run.`);
-console.log(`Cumulative index: ${totalPassed}/${allResults.length} passed (${allResults.length}/${totalCatalogueConcepts} catalogue concepts verified).`);
+console.log(`Cumulative index: ${totalPassed} passed, ${totalUnverified} unverified (${allResults.length}/${totalCatalogueConcepts} catalogue concepts indexed).`);
 console.log(`Reports merged into ${outDir}/REPORT.md and ${outDir}/verification-report.json`);
 
 Deno.exit(failedCount ? 1 : 0);
