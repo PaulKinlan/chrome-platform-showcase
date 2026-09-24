@@ -68,6 +68,22 @@ const explicitIds = args.filter((a) => !a.startsWith("--"));
 // cannot fix, so bound the call rather than inheriting CDP's 120s default.
 const perPageMs = Number(flag("--timeout-ms") ?? 8000);
 
+// Last-resort net: a page that stalls CDP must never take the run with it.
+// Deno 2.9 (measured, not assumed) supports the node-compat hook below but treats
+// BOTH globalThis.onunhandledrejection and addEventListener("unhandledrejection") as
+// silent no-ops, so using either would have looked like protection while the process
+// still died. Anything that reaches here is logged and counted, and the run still
+// finishes with a report; the count is printed and stored so it cannot hide.
+let unhandledRejections = 0;
+process.on("unhandledRejection", (reason) => {
+  unhandledRejections++;
+  console.error(
+    `responsive-check: unhandled rejection #${unhandledRejections} (continuing): ${
+      reason?.message ?? reason
+    }`,
+  );
+});
+
 // ── select target ids ────────────────────────────────────────────────────────
 const manifest = buildFromDisk().filter((m) => m.status === "built");
 let targets;
@@ -264,6 +280,24 @@ const PROBE = `(() => {
   };
 })()`;
 
+// Race a CDP call against a budget, and make sure the loser can never become an
+// unhandled rejection. An unbudgeted call on a browser that has stopped answering
+// costs cdp.mjs's 120s timeout, and a rejection raised from that timer is outside
+// the caller's await chain — which is how one unresponsive page killed a whole run
+// (dic) and printed a stack trace instead of a report.
+function withBudget(promise, ms, label) {
+  promise.catch(() => {});
+  let timer = null;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} did not answer within ${ms}ms`)), ms);
+    }),
+  ]).finally(() => {
+    if (timer !== null) clearTimeout(timer);
+  });
+}
+
 async function checkPage(conn, url, cls) {
   const spec = CLASSES[cls];
   const consoleErrors = [];
@@ -278,8 +312,56 @@ async function checkPage(conn, url, cls) {
   const probes = [];
   const probeRequests = new Set();
   const probeUrls = ["conformance-runner.js", "conformance-panel.js"];
-  const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
-  const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
+
+  let targetId = null;
+  let sessionId = null;
+  // Setup guard. Target creation and attachment used to happen before the try
+  // below, so a browser that stalled while handing out a target rejected outside
+  // any handler and ended the run; now a setup failure returns the same record
+  // shape as any other blocked page and the sweep moves on to the next one.
+  try {
+    const created = await withBudget(
+      conn.send("Target.createTarget", { url: "about:blank" }),
+      perPageMs,
+      "Target.createTarget",
+    );
+    targetId = created.targetId;
+    const attached = await withBudget(
+      conn.send("Target.attachToTarget", { targetId, flatten: true }),
+      perPageMs,
+      "Target.attachToTarget",
+    );
+    sessionId = attached.sessionId;
+    await conn.send("Page.enable", {}, sessionId);
+    await conn.send("Runtime.enable", {}, sessionId);
+    await conn.send("Log.enable", {}, sessionId);
+    await conn.send("Network.enable", {}, sessionId);
+    await conn.send("Emulation.setDeviceMetricsOverride", {
+      width: spec.width,
+      height: spec.height,
+      deviceScaleFactor: spec.deviceScaleFactor,
+      mobile: spec.mobile,
+    }, sessionId);
+    if (spec.mobile) {
+      await conn.send(
+        "Emulation.setTouchEmulationEnabled",
+        { enabled: true, maxTouchPoints: 5 },
+        sessionId,
+      )
+        .catch(() => {});
+    }
+  } catch (e) {
+    if (targetId) await conn.send("Target.closeTarget", { targetId }).catch(() => {});
+    return {
+      outcome: "blocked",
+      detail: `harness error: ${e.message}`,
+      probe: null,
+      consoleErrors: [],
+      netFailures: [],
+      cancelledRequests: 0,
+      conformanceProbeFailures: [],
+    };
+  }
 
   conn.onEvent((msg) => {
     if (msg.sessionId !== sessionId) return;
@@ -336,25 +418,6 @@ async function checkPage(conn, url, cls) {
     }
   });
 
-  await conn.send("Page.enable", {}, sessionId);
-  await conn.send("Runtime.enable", {}, sessionId);
-  await conn.send("Log.enable", {}, sessionId);
-  await conn.send("Network.enable", {}, sessionId);
-  await conn.send("Emulation.setDeviceMetricsOverride", {
-    width: spec.width,
-    height: spec.height,
-    deviceScaleFactor: spec.deviceScaleFactor,
-    mobile: spec.mobile,
-  }, sessionId);
-  if (spec.mobile) {
-    await conn.send(
-      "Emulation.setTouchEmulationEnabled",
-      { enabled: true, maxTouchPoints: 5 },
-      sessionId,
-    )
-      .catch(() => {});
-  }
-
   let outcome = "ok";
   let detail = "";
   let probe = null;
@@ -372,32 +435,26 @@ async function checkPage(conn, url, cls) {
     } else {
       await Promise.race([loaded, new Promise((r) => setTimeout(r, 8000))]);
       await new Promise((r) => setTimeout(r, 1200)); // settle async work
-      // Budget the probe. Unbudgeted, a renderer that stops answering costs the
-      // full 120s CDP timeout before the catch below records the page; budgeted,
-      // it costs perPageMs and the page is reported the same way. The target is
-      // closed in the finally block either way, so the next page is unaffected.
-      const evalCall = conn.send("Runtime.evaluate", {
-        expression: PROBE,
-        returnByValue: true,
-      }, sessionId);
-      evalCall.catch(() => {});
-      const evalRes = await Promise.race([
-        evalCall,
-        new Promise((resolve) => setTimeout(() => resolve("TIMEOUT"), perPageMs)),
-      ]);
-      if (evalRes === "TIMEOUT") {
-        throw new Error(
-          `renderer did not answer within ${perPageMs}ms (target closed, run continued)`,
-        );
-      }
+      // Budget the probe (see withBudget). A renderer that stops answering is
+      // reported for this page and the target is closed in the finally below, so
+      // the next page is unaffected.
+      const evalRes = await withBudget(
+        conn.send("Runtime.evaluate", { expression: PROBE, returnByValue: true }, sessionId),
+        perPageMs,
+        "renderer probe",
+      );
       probe = evalRes.result?.value ?? null;
 
       // screenshot both classes
       try {
-        const shot = await conn.send("Page.captureScreenshot", {
-          format: "png",
-          captureBeyondViewport: true,
-        }, sessionId);
+        const shot = await withBudget(
+          conn.send("Page.captureScreenshot", {
+            format: "png",
+            captureBeyondViewport: true,
+          }, sessionId),
+          perPageMs,
+          "Page.captureScreenshot",
+        );
         if (shot?.data) {
           const dir = `${REPO_ROOT}/reports/responsive/${
             url.replace(base, "").replace(/^\/+|\/+$/g, "") || "root"
@@ -524,6 +581,12 @@ async function main() {
     `\nresponsive-check: ${targets.length} demos · desktop ok ${okD}/${targets.length} · ` +
       `mobile ok ${okM}/${targets.length} · broken ${brokenN} · blocked ${blockedN}`,
   );
+  if (unhandledRejections > 0) {
+    console.error(
+      `responsive-check: ${unhandledRejections} unhandled rejection(s) during the run — ` +
+        "every page still produced a result, but this is a harness defect worth reporting.",
+    );
+  }
 
   if (doMerge && Object.keys(sidecarUpdate).length) {
     const tmp = await Deno.makeTempFile({ suffix: ".json" });
@@ -552,7 +615,18 @@ async function writeReport(summary, full) {
   await Deno.mkdir(dir, { recursive: true });
   await Deno.writeTextFile(
     `${dir}/last-run.json`,
-    JSON.stringify({ generatedAt: new Date().toISOString(), summary, full }, null, 2) + "\n",
+    JSON.stringify(
+      {
+        generatedAt: new Date().toISOString(),
+        // Persisted, not just printed: a run that swallowed a rejection should leave
+        // that fact in the evidence rather than only in a scrollback.
+        harness: { unhandledRejections, perPageTimeoutMs: perPageMs },
+        summary,
+        full,
+      },
+      null,
+      2,
+    ) + "\n",
   );
 }
 
