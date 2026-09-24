@@ -123,13 +123,32 @@ async function bootServer() {
       const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(1000) });
       await r.body?.cancel();
       if (r.ok) {
-        await assertServingThisTree();
-        return;
+        try {
+          await assertServingThisTree();
+          return;
+        } catch (err) {
+          if (serverChild) {
+            try {
+              serverChild.kill("SIGKILL");
+            } catch {
+              // ignore
+            }
+          }
+          throw err;
+        }
       }
-    } catch {
+    } catch (e) {
+      if (e.message && e.message.includes("is not serving this working tree")) throw e;
       // waiting
     }
     await new Promise((r) => setTimeout(r, 250));
+  }
+  if (serverChild) {
+    try {
+      serverChild.kill("SIGKILL");
+    } catch {
+      // ignore
+    }
   }
   throw new Error(`local server on port ${port} did not become ready`);
 }
@@ -139,6 +158,13 @@ try {
   await bootServer();
 } catch (e) {
   console.error(`overflow-scan: ${e.message}`);
+  if (serverChild) {
+    try {
+      serverChild.kill("SIGKILL");
+    } catch {
+      // ignore
+    }
+  }
   Deno.exit(2);
 }
 
