@@ -25,7 +25,12 @@
 //   deno task responsive-check v153/some-feature ...  # explicit ids
 //   deno task responsive-check --milestone v153       # a whole milestone
 //   deno task responsive-check --sample 12 --merge     # fold results into sidecar
-//   deno task responsive-check --base http://localhost:3000 --no-server  # reuse a server
+//   deno task responsive-check --base http://localhost:4000 --no-server  # reuse a server
+//
+// Without --base the harness picks a FREE port, so concurrent lanes cannot
+// collide. With --base it honours the port exactly and aborts if something else
+// already holds it — measuring another lane's server is never a useful result
+// (bead chrome-platform-showcase-bn2).
 //
 // Writes screenshots to reports/responsive/<id>/<class>.png and a run report to
 // reports/responsive/last-run.json. With --merge it also updates
@@ -53,7 +58,8 @@ function flag(name, { boolean = false } = {}) {
 }
 const doMerge = Boolean(flag("--merge", { boolean: true }));
 const noServer = Boolean(flag("--no-server", { boolean: true }));
-let base = flag("--base") ?? "http://localhost:3000";
+const explicitBase = flag("--base");
+let base = explicitBase ?? "http://localhost:3000";
 const sampleN = Number(flag("--sample") ?? 0);
 const nextN = Number(flag("--next") ?? flag("--untested") ?? 0);
 const milestone = flag("--milestone");
@@ -96,10 +102,84 @@ if (!targets.length) {
 }
 
 // ── boot a local server unless told to reuse one ──────────────────────────────
+//
+// This used to spawn a server on :3000 and then poll `GET /` until something
+// answered. When another lane already held that port the spawn lost the bind,
+// the poll succeeded against the FOREIGN server, every demo under test 404ed,
+// and the checker recorded `broken` for pages it never loaded — which --merge
+// then wrote into the shared, git-tracked responsive-support.json. check-routes
+// fails on any `broken` record for a supported class, so one lane's port
+// collision became every lane's red gate, and the obvious reaction ("the gate
+// says broken, record broken") writes the lie into main.
+//
+// Two guards, because the failure has two distinct faces:
+//   1. Bind the port ourselves before spawning. AddrInUse is the collision, and
+//      it is now a loud abort instead of a silent handover to someone else's
+//      server. Without --base we pick a free port so lanes cannot collide at all.
+//   2. Before measuring anything, fetch a demo this run is actually going to
+//      check. A 404 means the server is not serving this working tree — abort
+//      rather than record a result about another tree's files. This also covers
+//      --no-server, where the caller may point at the wrong server by hand.
 let serverChild = null;
+
+function portIsFree(port) {
+  try {
+    const listener = Deno.listen({ port });
+    listener.close();
+    return true;
+  } catch (e) {
+    if (e instanceof Deno.errors.AddrInUse) return false;
+    throw e;
+  }
+}
+
+// Only used when the caller did not pin a port. There is a small window between
+// the probe closing and the server binding; guard 2 catches the consequence if
+// anything slips into it.
+function findFreePort() {
+  for (let i = 0; i < 64; i++) {
+    const port = 3400 + Math.floor(Math.random() * 600);
+    if (portIsFree(port)) return port;
+  }
+  throw new Error("no free port found in 3400-3999 after 64 attempts");
+}
+
+// `targets` is already resolved and non-empty here, so any one of them is a page
+// this run will measure — the right identity probe for "is this my tree?".
+async function assertServingThisTree() {
+  const probe = `${base}/${targets[0].id}/`;
+  let status = "no response";
+  try {
+    const r = await fetch(probe, { signal: AbortSignal.timeout(5000) });
+    await r.body?.cancel();
+    if (r.ok) return;
+    status = `HTTP ${r.status}`;
+  } catch (e) {
+    status = e?.message ?? String(e);
+  }
+  throw new Error(
+    `${base} is not serving this working tree (${probe} -> ${status}).\n` +
+      `  Refusing to measure: a server without these demos reports every class broken, ` +
+      `and --merge would write that into responsive-support.json.\n` +
+      `  Start a server from THIS worktree and pass --base http://localhost:<port> --no-server.`,
+  );
+}
+
 async function bootServer() {
-  if (noServer) return;
-  const port = Number(new URL(base).port) || 3000;
+  if (noServer) {
+    await assertServingThisTree();
+    return;
+  }
+  const requested = explicitBase ? Number(new URL(base).port) || 3000 : null;
+  if (requested !== null && !portIsFree(requested)) {
+    throw new Error(
+      `port ${requested} is already in use, so this run would have measured whatever ` +
+        `is listening there instead of this worktree.\n` +
+        `  Free the port, omit --base to get a free one automatically, or point at that ` +
+        `server deliberately with --base http://localhost:${requested} --no-server.`,
+    );
+  }
+  const port = requested ?? findFreePort();
   base = `http://localhost:${port}`;
   serverChild = new Deno.Command("deno", {
     args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
@@ -112,13 +192,16 @@ async function bootServer() {
     try {
       const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(1000) });
       await r.body?.cancel();
-      if (r.ok) return;
+      if (r.ok) {
+        await assertServingThisTree();
+        return;
+      }
     } catch {
       // not up yet
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error("local server did not become ready");
+  throw new Error(`local server on port ${port} did not become ready`);
 }
 
 // The in-page assertion the harness evaluates per class.
@@ -309,7 +392,13 @@ async function checkPage(conn, url, cls) {
 
 // ── run ───────────────────────────────────────────────────────────────────────
 async function main() {
-  await bootServer();
+  try {
+    await bootServer();
+  } catch (e) {
+    // A setup failure is not a measurement. Exit before anything can be recorded.
+    console.error(`responsive-check: ${e.message}`);
+    Deno.exit(2);
+  }
   let chrome;
   try {
     chrome = await launchChrome();
