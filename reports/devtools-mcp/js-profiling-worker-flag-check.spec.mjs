@@ -1,12 +1,6 @@
 #!/usr/bin/env -S deno run --allow-read --allow-write --allow-run --allow-net --allow-env
-// Flag check: is the dedicated-worker half of JS Self-Profiling real in this
-// Chrome, and does the demo produce a profile when it is?
-//
-// The main-thread `Profiler` comes from `ProfilerAPI` (Blink status: stable).
-// The worker-global `Profiler` comes from `ProfilerAPIForDedicatedWorker`
-// (Blink status: experimental) — see Chromium's
-// third_party/blink/renderer/platform/runtime_enabled_features.json5. So this
-// spec is expected to FAIL on stock Chrome and PASS behind the flag:
+// Worker-profile check: does the demo either produce a real worker profile or
+// say truthfully why it cannot — without hanging?
 //
 //   deno task drive reports/devtools-mcp/js-profiling-worker-flag-check.spec.mjs \
 //     --base http://localhost:3000
@@ -14,46 +8,88 @@
 //     deno task drive reports/devtools-mcp/js-profiling-worker-flag-check.spec.mjs \
 //     --base http://localhost:3000
 //
-// The demo must stay honest in BOTH runs: with the flag off it has to say the
-// worker Profiler is unavailable rather than render an empty or fake table.
+// What is actually true in Chrome 152 (measured 2026-09-24, both configurations,
+// with `worker.onerror` + a CDP attach to the worker target — see the notes on
+// bead chrome-platform-showcase-aa5):
+//   - main thread: ProfilerAPI is stable, Profiler.stop() resolves with samples.
+//   - flag off: the worker global has no Profiler; the demo says so.
+//   - flag on (`ProfilerAPIForDedicatedWorker`): the worker global DOES expose
+//     Profiler, and construction then throws
+//     "NotSupportedError: Failed to construct 'Profiler': Document Policy is not
+//     enabled for this context" even though the worker script response carries
+//     document-policy: js-profiling. A blob: worker behaves identically.
+//   So "enable the flag and you get a worker profile" is FALSE, and the demo
+//   honest outcome is an explicit reason, never a profile it did not produce.
+//
+// The demo previously swallowed that constructor rejection (no try/catch in
+// worker.js), so the table sat on "running…" forever and this check's predecessor
+// still reported PASS — the placeholder satisfied a `table tr > 0` assertion
+// (bead chrome-platform-showcase-aa5). This version fails on exactly that.
+//
+// The script THROWS when an assertion is falsy (bead chrome-platform-showcase-6s3):
+// the current driver grades only "no exception + no console error" and never
+// reads the returned `assert` map, so returning the map alone could not fail.
 
 export const cases = [
   {
     url: "/v147/js-profiling-in-dedicated-workers/worker-profile/",
-    name: "clicking Profile worker produces a worker profile (needs ProfilerAPIForDedicatedWorker)",
+    name:
+      "Profile worker either yields a real profile or states the reason — never hangs or fakes one",
     script: `
       const mainThreadProfiler = typeof Profiler;
-      const button = Array.from(document.querySelectorAll("button"))
+      const button = document.querySelector("#go") ?? Array.from(document.querySelectorAll("button"))
         .find((b) => /profile worker/i.test(b.textContent || ""));
-      if (!button) return { assert: { "profile button exists": false }, mainThreadProfiler };
+      if (!button) throw new Error("worker-profile check: the Profile worker button was not found");
       button.click();
 
+      const readRows = () => Array.from(document.querySelectorAll("#tb tr")).map((tr) => {
+        const cells = Array.from(tr.children);
+        const samples = cells[1]?.textContent?.trim() ?? null;
+        return {
+          text: tr.innerText.replace(/\\s+/g, " ").trim(),
+          cellCount: cells.length,
+          count: samples !== null && /^\\d+$/.test(samples) ? Number(samples) : null,
+        };
+      });
+
+      const REASON = /Profiler not available in this worker|NotSupportedError|Document Policy|Profiler\\.stop\\(\\) failed|no samples/i;
       let rows = [];
-      for (let i = 0; i < 30; i++) {
+      let settled = false;
+      for (let i = 0; i < 60; i++) {
         await new Promise((r) => setTimeout(r, 500));
-        rows = Array.from(document.querySelectorAll("table tr"))
-          .map((tr) => tr.innerText.replace(/\\s+/g, " ").trim())
-          .filter((text) => text && !/^(FUNCTION|SAMPLES)/i.test(text));
-        if (rows.length) break;
+        rows = readRows();
+        // "running…" is the in-flight placeholder; any other content is a result.
+        if (rows.length && !rows.some((r) => /^running…?$/.test(r.text))) { settled = true; break; }
       }
 
-      const body = document.body.innerText;
-      const fallback = /Profiler not available in this worker/i.test(body);
-      const timedOut = /timed out|timeout/i.test(body);
+      const profileRows = rows.filter((r) => r.cellCount === 2 && r.count > 0);
+      const reasonRow = rows.find((r) => REASON.test(r.text)) ?? null;
+      const stuck = rows.some((r) => /^running…?$/.test(r.text));
+
+      const assert = {
+        "main thread Profiler exists": mainThreadProfiler === "function",
+        "the table left the in-flight state": settled && !stuck,
+        "outcome is a real profile row or an explicit reason":
+          profileRows.length > 0 || reasonRow !== null,
+        "no row arrives without either samples or a named reason":
+          rows.every((r) => r.cellCount === 2 || REASON.test(r.text)),
+      };
+      const failed = Object.entries(assert).filter(([, ok]) => !ok).map(([name]) => name);
+      if (failed.length) {
+        throw new Error(
+          "worker-profile check failed: " + failed.join("; ") +
+          " | rows=" + JSON.stringify(rows.map((r) => r.text.slice(0, 140))) +
+          " | mainThreadProfiler=" + mainThreadProfiler,
+        );
+      }
+
       return {
         mainThreadProfiler,
-        rows: rows.length,
-        firstRow: rows[0] || null,
-        fallbackShown: fallback,
-        fallbackText: fallback
-          ? rows.find((r) => /Profiler not available/i.test(r)) || null
-          : null,
-        assert: {
-          "main thread Profiler exists": mainThreadProfiler === "function",
-          "worker profile produced rows": rows.length > 0,
-          "no 'Profiler not available in this worker' fallback": !fallback,
-          "no timeout": !timedOut,
-        },
+        outcome: profileRows.length > 0
+          ? { kind: "profile", rows: profileRows.length }
+          : { kind: "explicit-reason", reason: reasonRow.text.slice(0, 200) },
+        rows: rows.map((r) => r.text.slice(0, 140)),
+        assert,
       };
     `,
   },
