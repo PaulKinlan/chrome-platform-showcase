@@ -48,6 +48,20 @@ what Chrome 152 does not implement; the conformance suites record the spec contr
   clipped it, so the third and fourth modes were unreachable on a phone. The grid now scrolls inside
   its own box (`overflow-x: auto`) and is focusable (`role="region"`, `aria-label`, `tabindex="0"`).
   Measured: 360px viewport, document overflow 320px → 0; grid 308px client / 654px scroll region.
+- `v147/js-profiling-in-dedicated-workers` — no page named the Blink flag for the worker half of JS
+  Self-Profiling, so the feature index gained an "enabling it" section and `worker-profile`'s fallback
+  and the explorer's worker notice name `ProfilerAPIForDedicatedWorker` and both enable routes. While
+  verifying that, the demo turned out to have a real bug: `worker.js` had no `try`/`catch` around
+  `new self.Profiler(...)`, so the flag-on `NotSupportedError` (Document Policy not enabled for the
+  worker context) was swallowed and the page sat on `running…` forever. Construction and `stop()` are
+  now wrapped and the page reports the exact reason. Evidence, per configuration, driving the demo's
+  own click: flag off → `Profiler not available in this worker …`; flag on → `Worker Profiler API is
+  present (ProfilerAPIForDedicatedWorker is enabled) but construction failed: NotSupportedError …`.
+  This correction is also why `reports/devtools-mcp/js-profiling-worker-flag-check.spec.mjs` was
+  rewritten: its first version asserted "the table has a row", which the `running…` placeholder
+  satisfied, so it passed on the hang (bead `chrome-platform-showcase-aa5`). It now asserts that the
+  table leaves the in-flight state with either a positive sample count or a named reason, and it
+  fails on the old behaviour.
 
 ## Follow-ups this sweep surfaced (not fixed here)
 
@@ -65,13 +79,18 @@ what Chrome 152 does not implement; the conformance suites record the spec contr
    152), `CSSTextDecorationSkipSpaces` (v150, stable in main — not in 152). Demos behind these should
    name the exact `--enable-blink-features=` / `chrome://flags/#…` step; several already do.
 3. **`v147/js-profiling-in-dedicated-workers`** — both pass 1 and pass 2 fail
-   `profiler-supported-in-dedicated-worker` (`false`). Cause: the assertion builds a **Blob**
-   dedicated worker and looks for `Profiler` inside it. The worker half of JS Self-Profiling is the
-   Blink feature `ProfilerAPIForDedicatedWorker` (status: experimental) while the main-thread
-   `ProfilerAPI` is stable, and Chrome 152 stable does not enable it — so a Blob worker cannot see
-   `Profiler` regardless of what the page sends. (`Document-Policy: js-profiling` *is* sent on the
-   feature's demo and conformance routes; three sibling assertions pass because of it, which is why
-   they show up as instrument false positives.) Driving the demo proves this is browser state, not a
-   broken demo: with the flag, the same click produces a real worker profile. The assertion is not
-   wrong — it describes the spec contract — but it is only observable behind the flag, so it is
-   **flagged for a human** rather than edited. The demo itself named no flag; that is fixed above.
+   `profiler-supported-in-dedicated-worker` (`false`). The assertion builds a **Blob** dedicated
+   worker and looks for `Profiler` inside it. The worker half of JS Self-Profiling is the Blink
+   feature `ProfilerAPIForDedicatedWorker` (status: experimental) while the main-thread `ProfilerAPI`
+   is stable, and Chrome 152 stable does not enable it, so a Blob worker cannot see `Profiler`
+   regardless of what the page sends. (`Document-Policy: js-profiling` *is* sent on the feature's demo
+   and conformance routes; three sibling assertions pass because of it, which is why they show up as
+   instrument false positives.) Driving the demo with the flag on does **not** produce a worker
+   profile: the worker global exposes `Profiler`, and construction then throws
+   `NotSupportedError: Failed to construct 'Profiler': Document Policy is not enabled for this
+   context` — the policy is not active in the dedicated-worker context in this build. The assertion is
+   not wrong (it describes the spec contract) and it is not reachable in Chrome 152 by any flag
+   route we found, so it is **flagged for a human** rather than edited. The demo's own bug in this
+   area — a swallowed constructor rejection that left the page on `running…` forever — is fixed above,
+   and 7 of the 8 real assertions in this feature's suite pass, so the feature is otherwise
+   demonstrated honestly (main-thread profiling works).
