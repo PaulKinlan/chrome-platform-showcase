@@ -15,12 +15,13 @@
 const PREFIX = "/spec-compliant-xml-mime-type-detection";
 
 // Strict token-only MIME pattern: one known top-level type, then a subtype
-// limited to RFC 6838 "restricted name" characters. No spaces, no semicolons
-// (parameters), no control characters — the value is embedded in a response
-// header, so validation IS the header-injection defence (headers also reject
-// CR/LF themselves; this keeps the surface minimal and the demo honest).
+// limited to RFC 6838 "restricted name" characters at its full 127-char
+// length. No spaces, no semicolons (parameters), no control characters — the
+// value is embedded in a response header, so validation IS the
+// header-injection defence (headers also reject CR/LF themselves; this keeps
+// the surface minimal and the demo honest).
 const MIME_PATTERN =
-  /^(application|audio|font|image|message|model|multipart|text|video)\/[a-z0-9][a-z0-9!#$&^_.+-]{0,62}$/i;
+  /^(application|audio|font|image|message|model|multipart|text|video)\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/i;
 
 // The body is deliberately inert, valid XML: no doctype, no scripts, no
 // stylesheet processing instruction. Served with nosniff so the declared
