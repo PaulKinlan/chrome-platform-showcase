@@ -1,6 +1,7 @@
 import { renderBreadcrumbs } from "../lib/breadcrumbs.ts";
 import { getChannels } from "../lib/chromestatus.ts";
 import { handleFeatureRequest as handleDpoServer } from "../v151/declarative-performance-observer/_server.ts";
+import { handleFeatureRequest as handleXmlMimeServer } from "../v158/spec-compliant-xml-mime-type-detection/_server.ts";
 import { escapeHTML } from "./html.ts";
 import { knownReleaseMilestones, renderReleasePage } from "./pages.ts";
 import {
@@ -22,6 +23,7 @@ export type FeatureServerHandler = (
 // or routine sessions.
 const STATIC_FEATURE_SERVERS: Record<string, FeatureServerHandler> = {
   "v151/declarative-performance-observer": handleDpoServer,
+  "v158/spec-compliant-xml-mime-type-detection": handleXmlMimeServer,
 };
 
 const dynamicFeatureServerCache = new Map<string, FeatureServerHandler | null>();
