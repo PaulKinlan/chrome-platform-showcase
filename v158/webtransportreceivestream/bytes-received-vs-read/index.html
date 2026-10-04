@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>bytesReceived vs bytesRead — WebTransportReceiveStream — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .model-label { background: var(--text-black); color: var(--bg-ivory); padding: var(--space-1) var(--space-2); font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; justify-self: start; text-transform: uppercase; letter-spacing: 0.06em; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button.secondary { background: var(--bg-stone); color: var(--text-black); }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .controls { display: grid; gap: var(--space-3); }
+    .controls .group { display: grid; gap: var(--space-1); }
+    .controls label { font-weight: 600; }
+    .controls .hint { color: var(--text-muted); font-size: 0.85rem; }
+    input[type="range"] { width: 100%; max-width: 420px; min-height: 44px; accent-color: var(--text-black); }
+    .meters { display: grid; gap: var(--space-2); }
+    .meter { display: grid; gap: 4px; }
+    .meter .label { display: flex; justify-content: space-between; gap: var(--space-2); font-size: 0.85rem; font-weight: 600; flex-wrap: wrap; }
+    .meter .label code { font-family: var(--font-mono); }
+    .bar { height: 20px; border: 2px solid var(--border-black); background: var(--bg-ivory); position: relative; overflow: hidden; }
+    .bar > span { position: absolute; inset: 0 auto 0 0; width: 0%; }
+    .bar.received > span { background: var(--accent-blue); }
+    .bar.read > span { background: var(--accent-emerald); }
+    .bar.backlog > span { background: var(--accent-rose); }
+    .probe-grid { display: grid; gap: var(--space-1); font-family: var(--font-mono); font-size: 0.84rem; }
+    .probe-grid span { overflow-wrap: anywhere; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransportReceiveStream</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v158 · webtransport · receive streams</p>
+    <h1>bytesReceived vs bytesRead</h1>
+    <p class="lede">Two counters, one diagnosis. <code>bytesReceived</code> is how much contiguous stream data the browser has taken off the network; <code>bytesRead</code> is how much your JavaScript has actually consumed. When the first races ahead of the second, the network is fine — <em>your consumer</em> is the bottleneck, and the gap is sitting in browser memory.</p>
+  </header>
+
+  <p class="note">The real counters come from <code>getStats()</code> on a live session's receive stream, which needs an HTTP/3 endpoint this showcase cannot reach — and this build's support is probed for real below. The rig underneath is therefore a <strong>clearly-labelled local stand-in</strong>: a genuine <code>ReadableStream</code> with a producer and consumer you control, where the two counters are maintained by the page at the exact points the spec defines them. The streams machinery is real; only the network is replaced.</p>
+
+  <section class="stage" aria-labelledby="probe-title">
+    <h2 id="probe-title">First, the real surface on this build</h2>
+    <div class="probe-grid">
+      <span id="probe-iface">WebTransportReceiveStream → …</span>
+      <span id="probe-getstats">WebTransportReceiveStream.prototype.getStats → …</span>
+      <span id="probe-fields">stats dictionary fields (spec) → bytesReceived, bytesRead</span>
+    </div>
+    <output id="probe-out" aria-live="polite"></output>
+  </section>
+
+  <section class="stage" aria-labelledby="rig-title">
+    <p class="model-label">local model — plain ReadableStream, no network</p>
+    <h2 id="rig-title">Watch the gap grow and drain</h2>
+    <div class="controls">
+      <div class="group">
+        <label for="produce-rate">producer: network delivery rate — <span id="produce-rate-val">40</span> KB/s</label>
+        <input type="range" id="produce-rate" min="0" max="100" value="40" step="5" aria-describedby="produce-hint">
+        <span class="hint" id="produce-hint">bytes the "network" hands the browser per second (drives the bytesReceived analogue)</span>
+      </div>
+      <div class="group">
+        <label for="consume-rate">consumer: how fast your code reads — <span id="consume-rate-val">40</span> KB/s</label>
+        <input type="range" id="consume-rate" min="0" max="100" value="40" step="5" aria-describedby="consume-hint">
+        <span class="hint" id="consume-hint">bytes the reader loop pulls per second (drives the bytesRead analogue)</span>
+      </div>
+      <div class="group" style="display:flex; flex-wrap:wrap; gap: var(--space-2);">
+        <button type="button" id="start">Start the stream</button>
+        <button type="button" id="stop" class="secondary" disabled>Stop</button>
+      </div>
+    </div>
+    <div class="meters" role="group" aria-label="live counters">
+      <div class="meter">
+        <p class="label"><span><code>bytesReceived</code> (analogue)</span><span id="received-val">0 KB</span></p>
+        <div class="bar received"><span id="received-bar"></span></div>
+      </div>
+      <div class="meter">
+        <p class="label"><span><code>bytesRead</code> (analogue)</span><span id="read-val">0 KB</span></p>
+        <div class="bar read"><span id="read-bar"></span></div>
+      </div>
+      <div class="meter">
+        <p class="label"><span>the gap = buffered in the browser</span><span id="gap-val">0 KB</span></p>
+        <div class="bar backlog"><span id="gap-bar"></span></div>
+      </div>
+    </div>
+    <output id="diagnosis" aria-live="polite">Not running. Set the consumer slower than the producer, start, and watch the gap — that is the slow-consumer signature getStats() exists to reveal.</output>
+  </section>
+
+  <section><h2>code path — what you would write against the real API</h2><pre tabindex="0"><code>async function watchBackpressure(stream /* WebTransportReceiveStream */) {
+  const { bytesReceived, bytesRead } = await stream.getStats();
+  const buffered = bytesReceived - bytesRead;      // bytesRead ≤ bytesReceived, always
+  if (buffered > HIGH_WATER) {
+    // the network is NOT the problem — our consumer is behind;
+    // shed work, skip frames, or move parsing off the main thread
+  }
+}
+// Firefox note: getStats() exists but currently rejects with
+// NotSupportedError — await it in a try/catch, not bare.</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5109912169480192" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#webtransportreceivestream" target="_blank" rel="noopener">Spec: WebTransportReceiveStream</a></li>
+    <li><a href="../subclass-probe/">The subclass, member by member</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wt-receivestream:counters]';
+  const iface = globalThis.WebTransportReceiveStream;
+  const hasIface = typeof iface === 'function';
+  const hasGetStats = hasIface && typeof iface.prototype.getStats === 'function';
+
+  document.getElementById('probe-iface').textContent = 'WebTransportReceiveStream → ' + typeof iface;
+  document.getElementById('probe-getstats').textContent = 'WebTransportReceiveStream.prototype.getStats → ' + (hasIface ? typeof iface.prototype.getStats : 'n/a (no interface)');
+  document.getElementById('probe-out').textContent = hasGetStats
+    ? 'This build has the real interface and getStats method. Calling it still needs an instance, and instances only come from an established session — so the rig below remains a labelled model even here.'
+    : 'This build has no WebTransportReceiveStream (pre-158 / unflagged — see the feature page banner for the WebTransportReceiveStream flag). The rig below shows what the counters mean; nothing on this page pretends to call the missing method.';
+  globalThis.showcaseTelemetry?.assert('wt-receivestream-stats-surface-probed', true, { hasIface, hasGetStats });
+
+  // ---- the labelled local model -----------------------------------------
+  const KB = 1024;
+  const CHUNK = 4 * KB;
+  const MAX_SHOWN = 400; // KB scale for the bars
+  let state = null;
+
+  const el = (id) => document.getElementById(id);
+  const produceRate = el('produce-rate');
+  const consumeRate = el('consume-rate');
+  produceRate.addEventListener('input', () => { el('produce-rate-val').textContent = produceRate.value; });
+  consumeRate.addEventListener('input', () => { el('consume-rate-val').textContent = consumeRate.value; });
+
+  function fmt(bytes) { return (bytes / KB).toFixed(0) + ' KB'; }
+
+  function paint() {
+    if (!state) return;
+    const { received, read } = state;
+    const gap = received - read;
+    el('received-val').textContent = fmt(received);
+    el('read-val').textContent = fmt(read);
+    el('gap-val').textContent = fmt(gap);
+    el('received-bar').style.width = Math.min(100, (received / KB) / MAX_SHOWN * 100) + '%';
+    el('read-bar').style.width = Math.min(100, (read / KB) / MAX_SHOWN * 100) + '%';
+    el('gap-bar').style.width = Math.min(100, (gap / KB) / MAX_SHOWN * 100) + '%';
+  }
+
+  // Deliberately coarse updates (every ~500ms) so the aria-live diagnosis is
+  // informative, not spam.
+  function diagnose() {
+    if (!state) return;
+    const gapKB = (state.received - state.read) / KB;
+    const p = Number(produceRate.value);
+    const c = Number(consumeRate.value);
+    const d = el('diagnosis');
+    if (gapKB > 24 && c < p) {
+      d.textContent = 'Backlog ' + gapKB.toFixed(0) + ' KB and growing: bytesReceived is outrunning bytesRead, so the consumer (' + c + ' KB/s) is the bottleneck, not the ' + p + ' KB/s network. This is the exact signature getStats() exposes.';
+    } else if (gapKB > 24) {
+      d.textContent = 'Backlog ' + gapKB.toFixed(0) + ' KB and draining: the consumer now outpaces delivery, so bytesRead is catching up to bytesReceived.';
+    } else {
+      d.textContent = 'Counters close together (gap ' + gapKB.toFixed(0) + ' KB): the consumer keeps up, so any slowness you felt would be the network, not the app.';
+    }
+  }
+
+  function start() {
+    stop(false);
+    const s = { received: 0, read: 0, queue: [], closed: false, timers: [] };
+    state = s;
+    // A REAL ReadableStream: producer enqueues; consumer pulls via a reader.
+    const stream = new ReadableStream({
+      start(controller) { s.controller = controller; },
+    });
+    s.timers.push(setInterval(() => {
+      const perTick = Number(produceRate.value) * KB / 5;
+      let sent = 0;
+      while (sent < perTick) {
+        const chunk = new Uint8Array(CHUNK);
+        s.controller.enqueue(chunk);
+        // the spec's definition point for bytesReceived: bytes the browser
+        // took off the network for this stream (here: entered the queue)
+        s.received += CHUNK;
+        sent += CHUNK;
+      }
+    }, 200));
+    const reader = stream.getReader();
+    s.reader = reader;
+    s.timers.push(setInterval(async () => {
+      const perTick = Number(consumeRate.value) * KB / 5;
+      let consumed = 0;
+      while (consumed < perTick && s.received - s.read > 0) {
+        const { value, done } = await reader.read();
+        if (done || !state || state !== s) return;
+        // the definition point for bytesRead: bytes the app pulled out
+        s.read += value.byteLength;
+        consumed += value.byteLength;
+      }
+    }, 200));
+    s.timers.push(setInterval(() => { paint(); }, 100));
+    s.timers.push(setInterval(() => { diagnose(); }, 1000));
+    el('start').disabled = true;
+    el('stop').disabled = false;
+    console.log(LOG, 'model started');
+  }
+
+  function stop(announce = true) {
+    if (!state) return;
+    for (const t of state.timers) clearInterval(t);
+    try { state.reader?.releaseLock(); } catch { /* fine */ }
+    const finalGap = state.received - state.read;
+    globalThis.showcaseTelemetry?.assert('wt-receivestream-model-invariant', state.read <= state.received, { received: state.received, read: state.read });
+    if (announce) {
+      el('diagnosis').textContent = 'Stopped. Final counters: received ' + fmt(state.received) + ', read ' + fmt(state.read) + ', buffered ' + fmt(finalGap) + '. The invariant bytesRead ≤ bytesReceived held throughout — the spec guarantees the same of the real counters.';
+    }
+    state = null;
+    el('start').disabled = false;
+    el('stop').disabled = true;
+    console.log(LOG, 'model stopped');
+  }
+
+  el('start').addEventListener('click', start);
+  el('stop').addEventListener('click', () => stop());
+  console.log(LOG, 'ready', 'hasIface=' + hasIface, 'hasGetStats=' + hasGetStats);
+})();
+</script>
+</body>
+</html>
