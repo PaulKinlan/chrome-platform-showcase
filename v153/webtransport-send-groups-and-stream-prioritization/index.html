@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransport send groups and stream prioritization — Chrome 153 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v153/">&larr; Chrome 153</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v153 · network · webtransport</p>
+    <h1>WebTransport send groups and stream prioritization</h1>
+    <p class="lede">Outgoing WebTransport streams grow a scheduling vocabulary: <code>transport.createSendGroup()</code> mints a <code>WebTransportSendGroup</code> to organise related streams, every outgoing stream becomes a <code>WebTransportSendStream</code> with mutable <code>sendGroup</code> and <code>sendOrder</code> attributes, and both streams and groups answer <code>getStats()</code> with <code>{ bytesWritten, bytesSent, bytesAcknowledged }</code> — all while send streams stay transferable to workers.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./surface-probe/">Three interfaces, one contract</a></h3>
+      <p>Interrogate the real objects: <code>createSendGroup</code> on the transport prototype, <code>WebTransportSendStream</code> as a <code>WritableStream</code> subclass with exactly the members the spec names, <code>WebTransportSendGroup</code> with its lone <code>getStats()</code>, and the illegal-constructor rules that make instances session-only.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./sendgroup-workbench/">The workbench: groups and stream options, called for real</a></h3>
+      <p>Call <code>createSendGroup()</code> on a connecting transport, await the group's real <code>getStats()</code>, open a <code>createUnidirectionalStream({ sendGroup, sendOrder })</code> attempt, and watch which dictionary members this build actually converts — every outcome real, including the failures.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./send-order-scheduler/">The scheduler, made visible</a></h3>
+      <p>The explainer's use cases — one stream per video frame, bandwidth split between a media group and a sync group — run in a labelled local model that implements the spec's strict-ordering sentence, after a real probe reports whether this build could do it natively.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Applications multiplex everything over one connection: frames of video, game state, file transfers, chat. Plain <code>WritableStream</code>s gave them no way to say which bytes matter more, so a burst of bulk traffic could starve the frame that should have painted next. <code>sendOrder</code> gives queued bytes a rank — among strictly-ordered streams, higher <code>sendOrder</code> drains first, FIFO within each stream — and <code>WebTransportSendGroup</code> scopes that ranking so one subsystem's priorities don't fight another's. Per-stream and per-group <code>getStats()</code> close the loop: <code>bytesAcknowledged</code> versus <code>bytesWritten</code> tells you whether the scheduling is actually landing. The W3C WebTransport WG reached consensus on the design at TPAC 2025; WebKit ships it in Safari 26.4, Firefox has <code>sendOrder</code> with groups in progress.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>const media = transport.createSendGroup();
+const frame = await transport.createUnidirectionalStream({
+  sendGroup: media,
+  sendOrder: frameNumber,        // newer frames outrank older ones
+});
+frame.sendOrder = frameNumber + 1000;   // mutable: promote mid-flight
+
+const { bytesWritten, bytesSent, bytesAcknowledged } = await frame.getStats();
+const groupTotals = await media.getStats();   // the same counters, aggregated</code></pre>
+  </section>
+
+  <!-- research notes (wt-builder, 2026-10-04)
+    Use-case portfolio: (1) basic/canonical+inspection = surface-probe (exact
+    prototype members, inheritance, illegal constructors, stats dictionary);
+    (2) practical+config+edge = sendgroup-workbench (real createSendGroup,
+    real group.getStats raced against a timeout, real
+    createUnidirectionalStream options attempt with throwing-getter
+    conversion check, honest failure states); (3) novel/advanced =
+    send-order-scheduler (explainer §6–8 use cases in a labelled local model
+    of the spec's strict-ordering rule, gated behind a real capability
+    probe). Not applicable without a live endpoint, recorded honestly:
+    obtaining a real WebTransportSendStream (createUnidirectionalStream only
+    resolves after establishment), observing real drain order on the wire,
+    per-stream/group stats on live traffic, and transferring a send stream
+    to a worker ([Transferable] — needs an instance).
+    Exact surface (spec IDL):
+      WebTransport.createSendGroup() -> WebTransportSendGroup;
+      [Transferable] WebTransportSendStream : WritableStream { attribute
+      WebTransportSendGroup? sendGroup; attribute long long sendOrder;
+      Promise<WebTransportSendStreamStats> getStats(); WebTransportWriter
+      getWriter(); };
+      WebTransportSendGroup { Promise<WebTransportSendStreamStats>
+      getStats(); };
+      dictionary WebTransportSendStreamStats { unsigned long long
+      bytesWritten, bytesSent, bytesAcknowledged };
+      options: WebTransportSendStreamOptions : WebTransportSendOptions
+      { boolean waitUntilAvailable = false } with sendGroup (null default) /
+      sendOrder (0 default).
+      Strict ordering (6.11): bytes queued on strictly ordered streams drain
+      ahead of bytes queued on strictly ordered streams with lower
+      sendOrder; unranked streams share bandwidth implementation-defined.
+    Flag findings (runtime_enabled_features.json5, fetched 2026-10-04):
+    WebTransportSendGroup, status "experimental" ->
+    --enable-blink-features=WebTransportSendGroup or
+    chrome://flags/#enable-experimental-web-platform-features.
+    Verified on headless Chromium 141 (predates the feature, also behind the
+    experimental flag): createSendGroup absent, WebTransportSendStream /
+    WebTransportSendGroup undefined, createUnidirectionalStream options not
+    converted — the pages exercise those honest-absent branches. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5235261159112704" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#webtransportsendstream" target="_blank" rel="noopener">WebTransport spec: WebTransportSendStream</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md#6-sending-video-one-stream-per-frame-or-segment-with-send-order" target="_blank" rel="noopener">Explainer §6: one stream per frame with send order</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md#7-sending-real-time-game-data-per-stream-with-send-order" target="_blank" rel="noopener">Explainer §7: real-time game data</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md#8-managing-bandwidth-with-send-groups" target="_blank" rel="noopener">Explainer §8: managing bandwidth with send groups</a></li>
+    <li><a href="https://crbug.com/568825278" target="_blank" rel="noopener">Chromium implementation bug</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
