@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Semantic-If command router — Decisions API — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    [hidden] { display: none !important; }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    .field { display: grid; gap: var(--space-1); }
+    .field label { font-weight: 700; font-size: 0.85rem; }
+    .field input { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font: inherit; min-height: 44px; width: 100%; box-sizing: border-box; }
+    .hint { color: var(--text-muted); font-size: 0.8rem; margin: 0; }
+    .commands { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+    .commands li { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-2) var(--space-3); display: grid; gap: 2px; }
+    .commands .label { font-family: var(--font-mono); font-weight: 700; }
+    .commands .desc { font-size: 0.82rem; color: var(--text-charcoal); }
+    .commands li.winner { background: var(--text-black); }
+    .commands li.winner .label, .commands li.winner .desc { color: var(--bg-ivory); }
+    .probbar { height: 0.5rem; background: var(--bg-stone); border: 1px solid var(--border-black); position: relative; margin-top: 4px; }
+    .probbar span { position: absolute; inset: 0 auto 0 0; background: var(--accent-blue); }
+    .commands li.winner .probbar { background: var(--text-charcoal); }
+    .commands li.winner .probbar span { background: var(--bg-ivory); }
+    .panel { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); display: grid; gap: var(--space-2); }
+    .panel h3 { margin: 0; font-size: 1rem; }
+    .panel.workaround { border-color: var(--accent-amber); }
+    .panel.workaround h3 { color: var(--accent-amber); }
+    .panel pre { margin: 0; background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-2); font-size: 0.74rem; overflow: auto; max-height: 16rem; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; min-width: 0; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Decisions API</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v157 · built-in ai · intent routing</p>
+    <h1>Semantic-If command router</h1>
+    <p class="lede">The explainer's second use case, built: a command palette that should understand <em>“let my coworkers view this file”</em> means <code>share_link</code> even though no keyword matches. The route button attempts the real three-step workflow — <code>availability()</code>, <code>create()</code>, <code>decide()</code> — and renders real probabilities when a model answers. When none exists, you get the honest absence, plus a look at why the pre-API workaround is not good enough.</p>
+  </header>
+
+  <p class="note">No released Chrome exposes <code>window.DecisionModel</code> yet (implementation CLs in review — see <a href="../surface-probe/">the surface probe</a> for the exact flag steps once a build carries them). The <a href="https://web-ai.studio/extension" target="_blank" rel="noopener">WebAI extension polyfill</a> provides the same surface today and this page will drive it for real if installed. Nothing below ever shows model output that did not come from a model.</p>
+
+  <section class="stage" aria-labelledby="router-title">
+    <h2 id="router-title">Route a goal</h2>
+    <div class="field">
+      <label for="goal">your goal, in your own words</label>
+      <input id="goal" type="text" value="let my coworkers view this file" autocomplete="off" aria-describedby="goal-hint">
+      <p class="hint" id="goal-hint">Try phrasings with no overlapping keywords: “get this to legal as a document”, “bin it”, “who else can see this?”.</p>
+    </div>
+    <button type="button" id="route">Attempt the real DecisionModel route</button>
+
+    <ul class="commands" id="commands" aria-label="Candidate commands with the model's probabilities"></ul>
+    <output id="status" aria-live="polite">Not routed yet.</output>
+
+    <div class="panel workaround" id="workaround" hidden>
+      <h3>The pre-API workaround (labelled as such — this is NOT DecisionModel output)</h3>
+      <p id="workaround-result" style="margin:0"></p>
+      <p class="hint" style="margin:0">A keyword matcher is what sites ship today: fast and local, but it scores “let my coworkers view this file” as zero for every command above, and one typo kills an exact match. That gap — not this matcher — is the argument for the API.</p>
+    </div>
+
+    <div class="panel" id="payload-panel">
+      <h3>The exact schema this page sends</h3>
+      <pre tabindex="0" id="payload"></pre>
+    </div>
+  </section>
+
+  <section><h2>acting on confidence</h2>
+    <p>The result is not just a winner: every option gets a calibrated probability and the question a <code>confidence</code>. The explainer's guidance, which this page applies when a model answers: act automatically above a threshold (here 0.85), offer suggestion chips when uncertain, and never treat confidence as authorization for a destructive action — <code>archive_doc</code> here would still confirm with the user at any confidence. A WebMCP-style agent could use the same schema to pick page tools; that composition needs an agent host, so this page stops at the routing decision itself.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5155080092385280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/explainers-by-googlers/decisions-api" target="_blank" rel="noopener">Explainer: Decisions API (use case 2)</a></li>
+    <li><a href="../guardrail-precheck/">Draft guardrail pre-check</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[decisions:router]';
+  const COMMANDS = [
+    { label: 'export_pdf', description: 'Download or save the document as a PDF' },
+    { label: 'share_link', description: 'Invite collaborators or copy a sharing link' },
+    { label: 'archive_doc', description: 'Move the document to trash or archive' },
+    { label: 'rename_doc', description: 'Change the document title' },
+  ];
+  const schemaFor = () => ({
+    context: 'Document editor command palette',
+    expectedInputs: [{ type: 'text', languages: ['en'] }],
+    questions: [{
+      id: 'command',
+      type: 'choice',
+      prompt: "Which command best fulfills the user's goal?",
+      options: COMMANDS.map((c) => ({ ...c })),
+    }],
+  });
+
+  const list = document.getElementById('commands');
+  const status = document.getElementById('status');
+
+  function renderCommands(result) {
+    list.innerHTML = '';
+    for (const c of COMMANDS) {
+      const li = document.createElement('li');
+      const label = document.createElement('span');
+      label.className = 'label';
+      label.textContent = c.label;
+      const desc = document.createElement('span');
+      desc.className = 'desc';
+      desc.textContent = c.description;
+      li.append(label, desc);
+      if (result) {
+        const p = result.probabilities?.[c.label];
+        if (typeof p === 'number') {
+          const bar = document.createElement('span');
+          bar.className = 'probbar';
+          bar.setAttribute('role', 'img');
+          bar.setAttribute('aria-label', `probability ${(p * 100).toFixed(1)} percent`);
+          const fill = document.createElement('span');
+          fill.style.width = `${Math.round(p * 100)}%`;
+          bar.append(fill);
+          desc.textContent = `${c.description} — p=${p.toFixed(3)}`;
+          li.append(bar);
+        }
+        if (result.label === c.label) li.classList.add('winner');
+      }
+      list.append(li);
+    }
+  }
+
+  function keywordWorkaround(goal) {
+    const words = goal.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    let best = null, bestScore = 0;
+    for (const c of COMMANDS) {
+      const hay = `${c.label} ${c.description}`.toLowerCase();
+      const score = words.filter((w) => hay.includes(w)).length;
+      if (score > bestScore) { best = c; bestScore = score; }
+    }
+    return best ? `Matched "${best.label}" on ${bestScore} shared keyword(s).` : 'Zero keyword overlap with ANY command — the matcher simply gives up on this phrasing.';
+  }
+
+  async function route() {
+    const goal = document.getElementById('goal').value.trim();
+    if (!goal) { status.textContent = 'Type a goal first.'; return; }
+    const schema = schemaFor();
+    document.getElementById('payload').textContent = JSON.stringify(schema, null, 2);
+    const workaround = document.getElementById('workaround');
+    workaround.hidden = false;
+    document.getElementById('workaround-result').textContent = keywordWorkaround(goal);
+
+    status.textContent = 'Attempting the real workflow: availability() → create() → decide()…';
+    let model = null;
+    try {
+      const availability = await DecisionModel.availability(schema);
+      if (availability === 'unavailable') {
+        status.textContent = 'DecisionModel exists here, and availability(schema) === "unavailable": this device or language cannot run the model. That is the real answer; no routing happened.';
+        globalThis.showcaseTelemetry?.assert('decisions-router-unavailable-branch', true, { availability });
+        renderCommands(null);
+        return;
+      }
+      status.textContent = `availability() → "${availability}". Creating a session${availability !== 'available' ? ' (this may trigger a model download — Chrome requires a user gesture for that, which this click provided)' : ''}…`;
+      model = await DecisionModel.create({
+        ...schema,
+        monitor(m) {
+          m.addEventListener('downloadprogress', (e) => {
+            status.textContent = `Downloading decision model: ${Math.round((e.loaded ?? 0) * 100)}%…`;
+          });
+        },
+      });
+      const t0 = performance.now();
+      const result = await model.decide(goal);
+      const ms = (performance.now() - t0).toFixed(1);
+      const command = result?.command;
+      if (!command || typeof command.label !== 'string') {
+        status.textContent = `decide() resolved in ${ms} ms but without the documented { command: { label, confidence, probabilities } } shape. Raw result: ${JSON.stringify(result)}`;
+        globalThis.showcaseTelemetry?.assert('decisions-router-shape', false, { raw: JSON.stringify(result).slice(0, 300) });
+        return;
+      }
+      renderCommands(command);
+      const confident = command.confidence >= 0.85;
+      status.textContent = `decide() in ${ms} ms → "${command.label}" with confidence ${command.confidence.toFixed(3)}. ${confident ? 'Above the 0.85 threshold: a real palette would run it now.' : 'Below 0.85: a real palette would offer suggestion chips instead of acting.'}`;
+      globalThis.showcaseTelemetry?.assert('decisions-router-decided', true, { label: command.label, confidence: command.confidence, ms });
+    } catch (error) {
+      renderCommands(null);
+      status.textContent = `The real call threw: ${error.name}: ${error.message}\n` +
+        (typeof globalThis.DecisionModel === 'undefined'
+          ? 'window.DecisionModel does not exist in this browser — the expected state on every released Chrome today (see the banner). The schema below is exactly what a supporting browser would receive.'
+          : 'DecisionModel exists but the workflow failed at the step above — the message is the provider’s own.');
+      globalThis.showcaseTelemetry?.assert('decisions-router-absent-branch', true, { error: error.name, has: typeof globalThis.DecisionModel });
+    } finally {
+      try { model?.destroy(); } catch { /* already gone */ }
+    }
+  }
+
+  renderCommands(null);
+  document.getElementById('payload').textContent = JSON.stringify(schemaFor(), null, 2);
+  document.getElementById('route').addEventListener('click', () => { route(); });
+  console.log(`${LOG} ready (DecisionModel=${typeof globalThis.DecisionModel})`);
+})();
+</script>
+</body>
+</html>

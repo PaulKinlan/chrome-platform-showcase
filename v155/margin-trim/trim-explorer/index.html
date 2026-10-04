@@ -11,6 +11,10 @@
     .values { display: flex; flex-wrap: wrap; gap: var(--space-2); padding: 0; margin: 0; list-style: none; }
     .values button { border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-black); padding: var(--space-2) var(--space-3); font: inherit; font-family: var(--font-mono); font-size: 0.85rem; font-weight: 700; min-height: 44px; }
     .values button[aria-pressed="true"] { background: var(--text-black); color: var(--bg-ivory); box-shadow: var(--thin-shadow); }
+    /* Keywords that were dropped from the css-box-4 grammar: kept pressable so the
+       page can show WHY nothing trims, but visibly marked as historical. */
+    .values button.gone { border-style: dashed; }
+    .values button .gone-tag { display: block; font-size: 0.65rem; font-weight: 400; font-family: inherit; }
     .controls { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: end; }
     label { display: grid; gap: var(--space-1); font-weight: 700; }
     label.inline { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; }
@@ -94,6 +98,10 @@
   };
   const SUPPORTED = CSS.supports('margin-trim', 'block');
   const VALUES = ['none', 'block', 'block-start', 'block-end', 'inline', 'inline-start', 'inline-end'];
+  // The current css-box-4 grammar is none | block | [ block-start || block-end ]
+  // (block containers + multicol only). The inline keywords existed in earlier
+  // drafts and are kept here as labelled history, not as live grammar.
+  const DRAFT_GRAMMAR = new Set(['none', 'block', 'block-start', 'block-end']);
   const box = document.getElementById('box');
   const detail = document.getElementById('detail');
   let current = 'none';
@@ -162,30 +170,58 @@
       kid.style.marginBlock = inlineFlow ? '' : `${margin}px`;
       kid.style.marginInline = inlineFlow ? `${margin}px` : '';
     }
-    box.style.marginTrim = current === 'none' ? '' : current;
+    // Clear before setting: CSSOM ignores an invalid assignment, so on an engine
+    // that supports margin-trim, assigning a removed keyword after a valid one
+    // would silently KEEP the previous valid value while the narration claims the
+    // declaration was dropped. Clearing first makes a removed keyword behave like
+    // the shipping parser: declaration gone, property back to none.
+    box.style.marginTrim = '';
+    if (current !== 'none') box.style.marginTrim = current;
+
+    // Two reasons a selected value cannot trim anything even on Chrome 155:
+    // the keyword is no longer in the grammar, or the container is a flex
+    // container, which margin-trim does not apply to in the current draft.
+    const specValue = DRAFT_GRAMMAR.has(current);
+    const containerApplies = !inlineFlow;
 
     document.getElementById('rule').textContent =
-      `.container {\n  padding: 20px;\n  margin-trim: ${current};\n}\n\n` +
+      `.container {\n  padding: 20px;\n  margin-trim: ${current};` +
+      (!specValue
+        ? ` /* removed from css-box-4 — a shipping parser drops this */`
+        : !containerApplies && current !== 'none'
+        ? ` /* applies to block + multicol containers, not flex */`
+        : '') +
+      `\n}\n\n` +
       `.container > * {\n  margin-${inlineFlow ? 'inline' : 'block'}: ${margin}px;\n}`;
 
     const measured = measure();
     const axis = inlineFlow ? 'inline' : 'block';
-    const affectsStart = current === axis || current === `${axis}-start`;
-    const affectsEnd = current === axis || current === `${axis}-end`;
+    const canTrim = specValue && containerApplies;
+    const affectsStart = canTrim && (current === 'block' || current === 'block-start');
+    const affectsEnd = canTrim && (current === 'block' || current === 'block-end');
 
     const body = document.getElementById('gaps');
     body.innerHTML = '';
+    // Why an edge the selected value names will still not trim, if so.
+    const inertReason = current === 'none'
+      ? ''
+      : !specValue
+      ? 'keyword removed from the grammar'
+      : !containerApplies
+      ? 'n/a — flex container'
+      : '';
     const rows = [
-      [`container ${axis}-start edge to first child`, measured.startGap, affectsStart, true],
-      ['between two adjacent children', measured.between, false, true],
+      [`container ${axis}-start edge to first child`, measured.startGap, affectsStart, true, true],
+      ['between two adjacent children', measured.between, false, true, false],
       [
         `last child to container ${axis}-end edge`,
         measured.endGap,
         affectsEnd,
         measured.endGapMeasurable,
+        true,
       ],
     ];
-    for (const [name, value, trimmedEdge, measurable] of rows) {
+    for (const [name, value, trimmedEdge, measurable, isEdge] of rows) {
       const tr = document.createElement('tr');
       const th = document.createElement('th');
       th.scope = 'row';
@@ -203,6 +239,8 @@
         ? 'trimmed'
         : trimmedEdge
         ? (margin === 0 ? 'no margin to trim' : 'not trimmed')
+        : isEdge && inertReason
+        ? inertReason
         : 'untouched';
       if (isTrimmed) state.className = 'trimmed';
       tr.append(th, td, state);
@@ -213,15 +251,19 @@
       ? `${measured.endGap}px`
       : `not measurable (the children overflow by ${measured.overflowPx}px, so the last one sits past the container's ${axis}-end edge)`;
 
-    detail.textContent = !SUPPORTED
+    detail.textContent = !specValue
+      ? `${current} was removed from the css-box-4 grammar — it now reads none | block | [ block-start || block-end ] — so a shipping parser drops the declaration and the gaps measure the same as none: ${axis}-start ${measured.startGap}px, ${axis}-end ${endText}. That is the spec talking, not this browser's age.`
+      : current !== 'none' && !containerApplies
+      ? `margin-trim applies to block containers and multi-column containers, and this inline row is a flex container — so ${current} trims nothing here even on a supporting engine: inline-start gap ${measured.startGap}px, inline-end gap ${endText}. Untick "lay children out inline" to see ${current} against a container it applies to.`
+      : !SUPPORTED
       ? `margin-trim is not supported here, so the ${axis}-start gap stays at ${measured.startGap}px and the ${axis}-end gap is ${endText} whatever value is selected. Those are the gaps the property removes.`
       : current === 'none'
       ? `No trimming: the first child pushes ${measured.startGap}px away from the container's padding and the ${axis}-end gap is ${endText}, on top of the 20px padding itself.`
       : `${current}: the ${axis}-start gap is ${measured.startGap}px and the ${axis}-end gap is ${endText}, while the gap between siblings stays at ${measured.between}px. The children never changed — only the container's instruction did.`;
 
-    console.log(`${LOG} value=${current} axis=${axis} start=${measured.startGap} end=${measured.endGap} between=${measured.between}`);
+    console.log(`${LOG} value=${current} axis=${axis} start=${measured.startGap} end=${measured.endGap} between=${measured.between} specValue=${specValue} applies=${containerApplies}`);
     window.showcaseTelemetry?.assert('trim-measured', true, {
-      value: current, ...measured, supported: SUPPORTED,
+      value: current, ...measured, supported: SUPPORTED, specValue, containerApplies,
     });
   }
 
@@ -233,6 +275,15 @@
     button.dataset.value = value;
     button.setAttribute('aria-pressed', String(value === current));
     button.textContent = value;
+    if (!DRAFT_GRAMMAR.has(value)) {
+      button.classList.add('gone');
+      button.setAttribute('aria-label', `${value} — removed from the draft grammar`);
+      const tag = document.createElement('span');
+      tag.className = 'gone-tag';
+      tag.textContent = 'removed';
+      tag.setAttribute('aria-hidden', 'true');
+      button.append(tag);
+    }
     button.addEventListener('click', () => {
       current = value;
       for (const other of list.querySelectorAll('button')) {

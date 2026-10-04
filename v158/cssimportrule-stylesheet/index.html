@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CSSImportRule.styleSheet — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v158/">&larr; Chrome 158</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v158 · css · cssom</p>
+    <h1>CSSImportRule.styleSheet</h1>
+    <p class="lede">For as long as Chromium has had a CSSOM, <code>CSSImportRule.styleSheet</code> was typed non-nullable — so an <code>@import</code> that failed to load handed script a phantom empty <code>CSSStyleSheet</code> instead of admitting there was nothing there. Chrome 158 makes the attribute nullable, as CSSOM declares it (<code>CSSStyleSheet?</code>): when an <code>@import</code> has no associated style sheet — its <code>supports()</code> condition is false, it has not finished loading, or the fetch failed — <code>styleSheet</code> returns <code>null</code>, matching Firefox and Safari.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./supports-gated-import/">The supports() gate</a></h3>
+      <p>Write a real <code>@import … supports(…)</code> into a live style element, then read the rule back out of the CSSOM: <code>supportsText</code>, <code>styleSheet</code>, and whether the imported sheet actually painted the proof card. Every condition is evaluated by this browser, and the readout tells you whether you are looking at the Chrome 158 nullable behavior or an older one.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./import-tree-inspector/">Import tree inspector</a></h3>
+      <p>Walk <code>document.styleSheets</code> recursively and table every <code>CSSImportRule</code> this page can reach — href, media, <code>layerName</code>, <code>supportsText</code>, and what <code>styleSheet</code> returned, including the cross-origin Google Fonts import whose rules this origin is not allowed to read. Add media-gated, layered, failing, and conditional imports and watch the tree change.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./load-failure-and-pending/">Pending, loaded, failed</a></h3>
+      <p>An <code>@import</code>'s <code>styleSheet</code> has a lifecycle: read it the instant the rule is inserted, watch the value settle as the fetch completes, and compare a sheet that loads against one that 404s. A millisecond-stamped timeline records exactly what this browser returned at every step — <code>null</code>, a real sheet, or the pre-158 phantom empty one.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./null-safe-traversal/">The null check your traversal needs</a></h3>
+      <p>The compat story, run live: a stylesheet auditor written before Chrome 158 chains straight into <code>rule.styleSheet.cssRules</code> and works by accident on the phantom sheet; on a nullable build the same code throws a real <code>TypeError</code>. Run the legacy auditor and the null-safe one against the same import tree and compare what actually happens in this browser.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>CSS Cascade 5 says a conditional <code>@import</code> whose <code>supports()</code> condition is false is never fetched and has no associated style sheet, and CSSOM types the attribute <code>CSSStyleSheet?</code> accordingly. Chromium's IDL predated that and promised a non-null sheet, so the engine manufactured one — a detached, empty <code>CSSStyleSheet</code> — for imports that failed to load. Firefox has returned <code>null</code> for years and WebKit made its IDL nullable in March 2025, so the phantom sheet was a Chromium-only quirk that code could silently depend on. The change aligns the getter with the spec and the other engines; the one migration note is that code which chained <code>rule.styleSheet.cssRules</code> without a null check may now need one — that is exactly what the fourth concept demonstrates.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>// CSSOM: https://drafts.csswg.org/cssom/#the-cssimportrule-interface
+interface CSSImportRule : CSSRule {
+  readonly attribute USVString href;
+  [SameObject, PutForwards=mediaText] readonly attribute MediaList media;
+  [SameObject] readonly attribute CSSStyleSheet? styleSheet;  // &lt;- nullable in 158
+  readonly attribute CSSOMString? layerName;
+  readonly attribute CSSOMString? supportsText;
+};
+
+const rule = sheet.cssRules[0];           // a CSSImportRule
+rule.styleSheet?.cssRules.length ?? 0;    // null-safe from Chrome 158 on</code></pre>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id: 5123480866783232 — listing name "CSSImportRule.styleSheet " (trailing space in
+    ChromeStatus), listed under v158 "Enabled by default"; chrome.status milestone_str 158.
+    Spec: CSSOM §the-cssimportrule-interface (styleSheet: CSSStyleSheet?), CSS Cascade 5
+    §conditional-import (false supports() => stylesheet never fetched, no associated sheet).
+    Implementation: CL 5065830 ([css] Allow CSSImportRule.styleSheet to be null) — makes the IDL
+    nullable, returns null when the import has no underlying sheet, aligns href to USVString, and
+    guards the change with runtime feature CSSImportRuleStyleSheetNullable (added by the same CL;
+    it does NOT exist in builds that predate the CL, so there is no flag to flip on older Chrome —
+    the banner on each concept says so honestly). WPT: css/cssom/cssimportrule.html gains a
+    supports(display:flex) / supports(not (display:flex)) pair.
+    Measured reality on Chromium 141 (this container, headless): (a) a false DECLARATION-form
+    condition (supports(display: pancake)) drops the whole rule from cssRules; (a2) a false
+    PARENTHESIZED condition (supports((display: pancake))) retains the rule but is wrongly FETCHED
+    (not applied), so styleSheet becomes the fetched sheet instead of null; (b) a failed import (404 or non-CSS MIME)
+    exposes a NON-NULL empty CSSStyleSheet (the phantom this feature removes); (c) a
+    just-inserted, still-loading import already reads null; (d) a loaded import reads the real
+    sheet. All of these states are surfaced live by the concepts, with settle windows so a pending
+    null is never mistaken for the nullable behavior.
+    Use-case portfolio: basic/canonical = supports-gated-import (the supports() gate + nullable
+    read); configuration/inspection = import-tree-inspector (recursive document.styleSheets walk,
+    cross-origin SecurityError edge via the Google Fonts import); edge/failure =
+    load-failure-and-pending (pending/loaded/failed lifecycle timeline); practical/migration =
+    null-safe-traversal (the interop_compat_risks null-check migration, run live). Novel/advanced
+    composition: not applicable as a separate page — the inspector already composes the surface
+    with layer()/media/cross-origin behavior, and no further distinct API surface exists on this
+    two-member change (source: CSSOM interface above; the whole delta is the nullable type).
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5123480866783232" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://drafts.csswg.org/cssom/#the-cssimportrule-interface" target="_blank" rel="noopener">CSSOM: the CSSImportRule interface</a></li>
+    <li><a href="https://drafts.csswg.org/css-cascade-5/#conditional-import" target="_blank" rel="noopener">CSS Cascade 5: conditional @import</a></li>
+    <li><a href="https://chromium-review.googlesource.com/c/chromium/src/+/5065830" target="_blank" rel="noopener">Implementation CL 5065830</a></li>
+    <li><a href="https://issues.chromium.org/issues/40266154" target="_blank" rel="noopener">Tracking bug 40266154</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

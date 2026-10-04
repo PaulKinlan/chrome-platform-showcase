@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransport Datagram writable streams and prioritization — Chrome 155 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v155/">&larr; Chrome 155</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v155 · network · webtransport</p>
+    <h1>WebTransport Datagram writable streams and prioritization</h1>
+    <p class="lede">The original datagram API gave every message one door: the single <code>transport.datagrams.writable</code>. Chrome 155 adds <code>datagrams.createWritable()</code>, which mints independent <code>WebTransportDatagramsWritable</code> streams — each with mutable <code>sendGroup</code> and <code>sendOrder</code> attributes — so urgent game input and bulk telemetry stop sharing one FIFO queue.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./createwritable-probe/">createWritable, probed and called</a></h3>
+      <p>Check the exact new members on the real prototypes, then actually call <code>createWritable()</code> on a connecting transport and inspect what comes back: a <code>WritableStream</code> subclass carrying <code>sendGroup: null</code> and <code>sendOrder: 0</code> defaults — next to an honest read of the legacy single-writable surface this build may still have.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./priority-lanes/">Priority lanes</a></h3>
+      <p>The product shape: an "urgent" writable and a "bulk" writable over one connection, options round-tripped for real, <code>sendOrder</code> raised mid-flight, real datagram writes queued against the connecting transport — or, on a build without the API, the same traffic pushed honestly through the one legacy door to show exactly what is missing.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./oversize-and-edge-rules/">The write rules at the edges</a></h3>
+      <p>Three normative rules, executed: a non-<code>BufferSource</code> write must reject with <code>TypeError</code>; a datagram larger than <code>maxDatagramSize</code> must be <em>silently discarded</em> (the promise resolves!); and <code>createWritable</code> must reject a <code>sendGroup</code> from a different transport.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>With one writable stream, every datagram waits behind every other datagram: a position update queued after a chunk of bulk state sync goes out after it, FIFO, no exceptions. Games, remote-desktop systems, and real-time media need classes of traffic — "send this now" versus "send this when idle". Multiple writables give each class its own queue, <code>sendOrder</code> ranks the queues (higher drains first among queued data in the same group), and FIFO still holds <em>within</em> each writable, so no class reorders its own messages. The same <code>WebTransportSendOptions</code> vocabulary drives stream prioritization, making datagrams and streams schedulable together. Chromium currently applies this ordering among datagram writables, and the API also reports the negotiated <code>maxDatagramSize</code> and discards oversized writes as the spec requires. The old single <code>datagrams.writable</code> remains in Chromium for compatibility — the spec itself has dropped it in favour of <code>createWritable()</code>.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>const dg = transport.datagrams;              // WebTransportDatagramDuplexStream
+
+const urgent = dg.createWritable({ sendOrder: 10 });
+const bulk   = dg.createWritable({ sendOrder: 1 });
+// both are WebTransportDatagramsWritable extends WritableStream
+
+urgent.getWriter().write(inputDelta);        // drains ahead of bulk's queue…
+bulk.getWriter().write(telemetryChunk);      // …but bulk stays FIFO internally
+
+bulk.sendOrder = 20;                         // mutable: promote mid-session
+dg.maxDatagramSize;                          // negotiated payload ceiling</code></pre>
+  </section>
+
+  <!-- research notes (wt-builder, 2026-10-04)
+    Use-case portfolio: (1) basic/canonical = createwritable-probe (exact
+    members on the real prototypes + a real createWritable call and
+    default-value inspection + legacy-surface read); (2) practical product +
+    configuration = priority-lanes (two lanes with sendOrder, options
+    round-trip via throwing getters, live mutation, real queued writes while
+    connecting per spec 4.3 note; honest legacy-door fallback on pre-155
+    builds); (3) edge/failure = oversize-and-edge-rules (TypeError rejection
+    for non-BufferSource, resolve-and-discard for oversized datagrams,
+    cross-transport sendGroup TypeError, closed-transport InvalidStateError).
+    Not applicable without a live endpoint, recorded honestly: observing
+    actual drain order on the wire between lanes (needs an HTTP/3 server to
+    accept the datagrams) and incoming/outgoing expiry interplay.
+    Exact surface (spec IDL):
+      WebTransportDatagramsWritable : WritableStream { attribute
+      WebTransportSendGroup? sendGroup; attribute long long sendOrder; }
+      WebTransportDatagramDuplexStream.createWritable(optional
+      WebTransportSendOptions options = {}) — sendGroup from another
+      transport => TypeError; state closed/failed => InvalidStateError.
+      writeDatagrams (4.3): non-BufferSource => reject TypeError; byteLength >
+      [[OutgoingMaxDatagramSize]] => RESOLVE undefined (silent discard);
+      writing while "connecting" is allowed and queued.
+      sendGroup setter: value from another transport => InvalidStateError.
+    Flag findings (runtime_enabled_features.json5, fetched 2026-10-04):
+    WebTransportDatagramsWritable, status "experimental", depends_on
+    WebTransportSendGroup -> --enable-blink-features=WebTransportSendGroup,WebTransportDatagramsWritable
+    or chrome://flags/#enable-experimental-web-platform-features.
+    Verified on headless Chromium 141 (predates the feature, also behind the
+    experimental flag): createWritable and WebTransportDatagramsWritable are
+    absent; the LEGACY datagrams.writable single stream exists and its
+    write-rule behaviour is exercised for real on the edge-rules page. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5183354944225280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#datagram-writable" target="_blank" rel="noopener">WebTransport spec: WebTransportDatagramsWritable</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md#5-sending-and-receiving-datagrams" target="_blank" rel="noopener">Explainer: sending and receiving datagrams</a></li>
+    <li><a href="https://issues.chromium.org/issues/547572475" target="_blank" rel="noopener">Chromium implementation bug</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

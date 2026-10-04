@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Priority lanes — WebTransport Datagram writable streams — Chrome 155 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button.secondary { background: var(--bg-stone); color: var(--text-black); }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    .lanes { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+    .lane { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); display: grid; gap: var(--space-2); align-content: start; }
+    .lane h3 { margin: 0; font-size: 1rem; display: flex; justify-content: space-between; gap: var(--space-2); flex-wrap: wrap; }
+    .lane .order { font-family: var(--font-mono); background: var(--text-black); color: var(--bg-ivory); padding: 2px 8px; font-size: 0.8rem; }
+    .lane .queue { font-family: var(--font-mono); font-size: 0.8rem; min-height: 2.2em; border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-2); overflow-wrap: anywhere; }
+    .lane label { font-weight: 600; display: grid; gap: 4px; }
+    .lane input[type="text"] { border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); padding: var(--space-2); font: var(--font-mono); font-size: 0.9rem; min-height: 44px; width: 100%; box-sizing: border-box; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+    .facts { font-family: var(--font-mono); font-size: 0.84rem; display: grid; gap: var(--space-1); }
+    .facts span { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport Datagram writable streams and prioritization</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v155 · webtransport · datagrams</p>
+    <h1>Priority lanes</h1>
+    <p class="lede">An urgent lane and a bulk lane over one connection. On a Chrome 155+ build this page creates two real <code>WebTransportDatagramsWritable</code> streams with different <code>sendOrder</code>s, writes real datagrams into their queues (legal while the transport is still connecting), and promotes a lane mid-flight by assigning its <code>sendOrder</code>. On an older build it pushes the same traffic through the one legacy door — so you can see exactly what the feature adds.</p>
+  </header>
+
+  <p class="note">Chrome targets this for <strong>Chrome 155</strong> behind <code>WebTransportDatagramsWritable</code> (+ its <code>WebTransportSendGroup</code> dependency): <code>--enable-blink-features=WebTransportSendGroup,WebTransportDatagramsWritable</code>, or <code>chrome://flags/#enable-experimental-web-platform-features</code>. No HTTP/3 endpoint is reachable here, so queued datagrams never hit a wire — what this page shows is the real client-side API: creation, options, mutation, and queueing. On-the-wire drain order between lanes needs a live server and is recorded as unexecuted, not simulated.</p>
+
+  <section class="stage" aria-labelledby="setup-title">
+    <h2 id="setup-title">Open the lanes</h2>
+    <div class="controls">
+      <button type="button" id="open">Create transport + lanes</button>
+      <button type="button" id="teardown" class="secondary" disabled>Tear down</button>
+    </div>
+    <div class="facts">
+      <span id="fact-api">API in use → …</span>
+      <span id="fact-max">datagrams.maxDatagramSize → …</span>
+      <span id="fact-state">connection → …</span>
+    </div>
+    <div class="lanes">
+      <div class="lane">
+        <h3><span>urgent lane</span><span class="order" id="urgent-order">sendOrder ?</span></h3>
+        <label>message to queue
+          <input type="text" id="urgent-msg" value="pos:12,8" autocomplete="off">
+        </label>
+        <button type="button" id="urgent-send" disabled>Queue on urgent lane</button>
+        <p class="queue" id="urgent-queue" aria-live="polite">no writes yet</p>
+      </div>
+      <div class="lane">
+        <h3><span>bulk lane</span><span class="order" id="bulk-order">sendOrder ?</span></h3>
+        <label>message to queue
+          <input type="text" id="bulk-msg" value="telemetry-chunk-0001" autocomplete="off">
+        </label>
+        <button type="button" id="bulk-send" disabled>Queue on bulk lane</button>
+        <p class="queue" id="bulk-queue" aria-live="polite">no writes yet</p>
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" id="promote" disabled>Promote bulk lane: bulk.sendOrder = 20</button>
+    </div>
+    <output id="status" aria-live="polite"></output>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const dg = transport.datagrams;
+const urgent = dg.createWritable({ sendOrder: 10 });
+const bulk   = dg.createWritable({ sendOrder: 1 });
+
+// FIFO within a lane; higher sendOrder drains first across lanes.
+urgent.getWriter();   // keep one writer per lane
+bulk.sendOrder = 20;  // live promotion — the attribute is mutable
+
+// Pre-155 the only option was one shared queue:
+const onlyDoor = dg.writable.getWriter();   // everything FIFO together</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5183354944225280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#datagram-writable" target="_blank" rel="noopener">Spec: datagram writables</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransportsendoptions-sendorder" target="_blank" rel="noopener">Spec: sendOrder</a></li>
+    <li><a href="../createwritable-probe/">createWritable, probed and called</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wt-dgwritable:lanes]';
+  const DEAD = 'https://127.0.0.1:44443/never';
+  const enc = new TextEncoder();
+  const hasWT = typeof WebTransport === 'function';
+  const el = (id) => document.getElementById(id);
+
+  let session = null;
+
+  function setButtons(open) {
+    el('open').disabled = open;
+    el('teardown').disabled = !open;
+    el('urgent-send').disabled = !open;
+    el('bulk-send').disabled = !open;
+    el('promote').disabled = !open || !session?.modern;
+  }
+
+  function orderText(which) {
+    if (!session) return 'sendOrder ?';
+    if (!session.modern) return 'no lanes on this build';
+    return 'sendOrder ' + session[which].sendOrder;
+  }
+
+  function refreshOrders() {
+    el('urgent-order').textContent = session?.modern ? orderText('urgent') : 'legacy: shared queue';
+    el('bulk-order').textContent = session?.modern ? orderText('bulk') : 'legacy: shared queue';
+  }
+
+  el('open').addEventListener('click', () => {
+    if (!hasWT) {
+      el('status').textContent = 'No WebTransport constructor in this browser — nothing to open.';
+      return;
+    }
+    let transport;
+    try {
+      transport = new WebTransport(DEAD);
+    } catch (error) {
+      el('status').textContent = 'Constructing the transport threw ' + (error.name ?? 'Error') + '.';
+      return;
+    }
+    transport.ready.catch(() => {});
+    const dg = transport.datagrams;
+    const modern = 'createWritable' in Object.getPrototypeOf(dg);
+    session = { transport, dg, modern, writes: { urgent: [], bulk: [] } };
+
+    el('fact-max').textContent = 'datagrams.maxDatagramSize → ' + dg.maxDatagramSize + ' bytes (pre-handshake value; renegotiated when a session establishes)';
+    el('fact-state').textContent = 'connection → connecting (will fail: nothing listens at 127.0.0.1:44443; queueing stays legal per spec 4.3)';
+    transport.closed.catch(() => {
+      if (session?.transport === transport) {
+        el('fact-state').textContent = 'connection → failed (WebTransportError, as expected with no endpoint). Queued datagrams died with the session — on a real server they would have drained by sendOrder.';
+      }
+    });
+
+    if (modern) {
+      try {
+        session.urgent = dg.createWritable({ sendOrder: 10 });
+        session.bulk = dg.createWritable({ sendOrder: 1 });
+        session.urgentWriter = session.urgent.getWriter();
+        session.bulkWriter = session.bulk.getWriter();
+        el('fact-api').textContent = 'API in use → createWritable(): two real WebTransportDatagramsWritable lanes';
+        el('status').textContent = 'Two lanes created with real sendOrder options (urgent 10, bulk 1). Queue messages into either; FIFO holds within a lane, sendOrder ranks the lanes.';
+      } catch (error) {
+        el('fact-api').textContent = 'API in use → createWritable threw ' + (error.name ?? 'Error') + ': ' + error.message;
+        session.modern = false;
+      }
+    }
+    if (!session.modern) {
+      const legacy = 'writable' in dg;
+      if (legacy) {
+        session.legacyWriter = dg.writable.getWriter();
+        el('fact-api').textContent = 'API in use → LEGACY single datagrams.writable (this build predates createWritable — see the banner for the flag). Both buttons below feed the ONE shared queue.';
+        el('status').textContent = 'This build has no lanes: both buttons write into the same legacy FIFO queue, which is exactly the limitation Chrome 155 removes. The writes below are still real.';
+      } else {
+        el('fact-api').textContent = 'API in use → none: neither createWritable nor the legacy writable exists here.';
+        el('status').textContent = 'No datagram writing surface at all on this build.';
+      }
+    }
+    refreshOrders();
+    setButtons(true);
+    globalThis.showcaseTelemetry?.assert('wt-dgwritable-lanes-open', true, { modern: session.modern });
+    console.log(LOG, 'opened', 'modern=' + session.modern);
+  });
+
+  async function queueWrite(which) {
+    if (!session) return;
+    const msg = el(which + '-msg').value || '(empty)';
+    const bytes = enc.encode(msg);
+    const writer = session.modern
+      ? session[which + 'Writer']
+      : session.legacyWriter;
+    if (!writer) {
+      el('status').textContent = 'No writer available on this build.';
+      return;
+    }
+    const label = which + ' #' + (session.writes[which].length + 1);
+    try {
+      const p = writer.write(bytes);
+      p.catch(() => {});
+      session.writes[which].push(msg);
+      const list = session.writes[which];
+      el(which + '-queue').textContent = list.map((m, i) => '#' + (i + 1) + ' ' + m).join('  ·  ');
+      el('status').textContent = 'write(' + bytes.byteLength + ' bytes) accepted into ' + (session.modern ? 'the ' + which + ' lane’s own queue' : 'the shared legacy queue') + ' (' + label + '). The promise settles when the datagram is sent or discarded — against this dead endpoint it dies with the session, honestly.';
+      globalThis.showcaseTelemetry?.assert('wt-dgwritable-lane-write', true, { which, bytes: bytes.byteLength, modern: session.modern });
+    } catch (error) {
+      el('status').textContent = 'write threw ' + (error.name ?? 'Error') + ': ' + error.message;
+      globalThis.showcaseTelemetry?.assert('wt-dgwritable-lane-write', false, { which, error: String(error) });
+    }
+    console.log(LOG, 'queued', which, bytes.byteLength);
+  }
+
+  el('urgent-send').addEventListener('click', () => queueWrite('urgent'));
+  el('bulk-send').addEventListener('click', () => queueWrite('bulk'));
+
+  el('promote').addEventListener('click', () => {
+    if (!session?.modern) return;
+    try {
+      session.bulk.sendOrder = 20;
+      refreshOrders();
+      const readBack = session.bulk.sendOrder;
+      el('status').textContent = 'bulk.sendOrder = 20 assigned and read back as ' + readBack + ' — the attribute is mutable on a live object, so a lane can be promoted mid-session without recreating it.';
+      globalThis.showcaseTelemetry?.assert('wt-dgwritable-promote', readBack === 20, { readBack });
+    } catch (error) {
+      el('status').textContent = 'Assigning sendOrder threw ' + (error.name ?? 'Error') + ': ' + error.message;
+      globalThis.showcaseTelemetry?.assert('wt-dgwritable-promote', false, { error: String(error) });
+    }
+  });
+
+  el('teardown').addEventListener('click', () => {
+    if (!session) return;
+    try { session.transport.close(); } catch { /* already failed */ }
+    session = null;
+    setButtons(false);
+    el('fact-api').textContent = 'API in use → …';
+    el('fact-max').textContent = 'datagrams.maxDatagramSize → …';
+    el('fact-state').textContent = 'connection → torn down';
+    el('urgent-queue').textContent = 'no writes yet';
+    el('bulk-queue').textContent = 'no writes yet';
+    el('urgent-order').textContent = 'sendOrder ?';
+    el('bulk-order').textContent = 'sendOrder ?';
+    el('status').textContent = 'Torn down.';
+    console.log(LOG, 'teardown');
+  });
+
+  console.log(LOG, 'ready', 'hasWT=' + hasWT);
+})();
+</script>
+</body>
+</html>

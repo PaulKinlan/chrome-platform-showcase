@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The scheduler, made visible — WebTransport send groups — Chrome 153 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .model-label { background: var(--text-black); color: var(--bg-ivory); padding: var(--space-1) var(--space-2); font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; justify-self: start; text-transform: uppercase; letter-spacing: 0.06em; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button.secondary { background: var(--bg-stone); color: var(--text-black); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    .queues { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+    .qgroup { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); display: grid; gap: var(--space-2); align-content: start; }
+    .qgroup h3 { margin: 0; font-size: 1rem; }
+    .qgroup ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-1); }
+    .qgroup li { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-1) var(--space-2); font-family: var(--font-mono); font-size: 0.78rem; display: flex; justify-content: space-between; gap: var(--space-2); flex-wrap: wrap; }
+    .qgroup li .so { font-weight: 700; }
+    .wire { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); min-height: 3em; }
+    .wire h3 { margin: 0 0 var(--space-2) 0; font-size: 1rem; }
+    .wire ol { margin: 0; padding-left: 1.4em; font-family: var(--font-mono); font-size: 0.8rem; }
+    .wire li.media { color: var(--accent-blue); font-weight: 700; }
+    .wire li.sync { color: var(--accent-emerald); font-weight: 700; }
+    .probe { font-family: var(--font-mono); font-size: 0.84rem; overflow-wrap: anywhere; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport send groups and stream prioritization</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v153 · webtransport · send streams</p>
+    <h1>The scheduler, made visible</h1>
+    <p class="lede">The spec's scheduling rule is one sentence: <em>bytes queued on strictly ordered streams are sent ahead of bytes queued on strictly ordered streams with lower send order</em> — FIFO within each stream, fairness across groups. This page runs the explainer's own use cases through that sentence so you can watch what the rule does to a congested connection.</p>
+  </header>
+
+  <p class="note">This is a <strong>labelled local model</strong>: observing real drain order needs an HTTP/3 server to receive the bytes, which this showcase cannot reach — and this build's native support is probed for real just below. The model implements exactly the spec's rule, nothing more; it is the explanation, and the probe is the evidence.</p>
+
+  <section class="stage" aria-labelledby="probe-title">
+    <h2 id="probe-title">First: could this build do it natively?</h2>
+    <p class="probe" id="probe-line">probing…</p>
+  </section>
+
+  <section class="stage" aria-labelledby="model-title">
+    <p class="model-label">local model — the spec's rule, no network</p>
+    <h2 id="model-title">Two send groups, one congested connection</h2>
+    <p>Explainer §6–8 in one scene: a <strong>media group</strong> sending one stream per video frame (newer frames get higher <code>sendOrder</code>, so a late joiner never waits for stale frames) and a <strong>sync group</strong> pushing two state blobs. Queue work, then drain the connection one chunk at a time.</p>
+    <div class="controls">
+      <button type="button" id="add-frame">Queue a video frame (media)</button>
+      <button type="button" id="add-sync">Queue a state blob (sync)</button>
+      <button type="button" id="drain">Drain one chunk</button>
+      <button type="button" id="reset" class="secondary">Reset</button>
+    </div>
+    <div class="queues">
+      <div class="qgroup"><h3>media group (frames)</h3><ul id="q-media"><li>empty</li></ul></div>
+      <div class="qgroup"><h3>sync group (state)</h3><ul id="q-sync"><li>empty</li></ul></div>
+    </div>
+    <div class="wire"><h3>sent on the wire, in order</h3><ol id="wire"></ol></div>
+    <output id="explain" aria-live="polite">Queue a few frames and blobs, then drain. Each drain step picks by the spec's rule: within each group the highest sendOrder wins; the two groups share the link fairly (round-robin here — the spec leaves cross-group division implementation-defined).</output>
+  </section>
+
+  <section><h2>code path — the real API this models</h2><pre tabindex="0"><code>const media = transport.createSendGroup();
+const sync  = transport.createSendGroup();
+
+async function sendFrame(bytes, frameNo) {
+  // One stream per frame; newer frames outrank older ones, so a slow link
+  // skips ahead instead of replaying the past (explainer §6).
+  const s = await transport.createUnidirectionalStream({
+    sendGroup: media,
+    sendOrder: frameNo,
+  });
+  const w = s.getWriter();
+  await w.write(bytes);
+  await w.close();
+}
+
+async function sendState(bytes) {
+  const s = await transport.createUnidirectionalStream({
+    sendGroup: sync, sendOrder: 0,       // unranked within its group
+  });
+  const w = s.getWriter();
+  await w.write(bytes);
+  await w.close();
+}</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5235261159112704" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransportsendoptions-sendorder" target="_blank" rel="noopener">Spec: sendOrder and strict ordering</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md#8-managing-bandwidth-with-send-groups" target="_blank" rel="noopener">Explainer §8: managing bandwidth with send groups</a></li>
+    <li><a href="../sendgroup-workbench/">The workbench</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wt-sendgroup:scheduler]';
+  const el = (id) => document.getElementById(id);
+
+  // Real probe first — the model never claims to be the platform.
+  const hasWT = typeof WebTransport === 'function';
+  const native = hasWT && 'createSendGroup' in WebTransport.prototype && typeof globalThis.WebTransportSendStream === 'function';
+  el('probe-line').textContent = !hasWT
+    ? 'typeof WebTransport → undefined: no WebTransport at all in this browser.'
+    : native
+    ? "'createSendGroup' in WebTransport.prototype → true, typeof WebTransportSendStream → function: this build has the native scheduler — the model below is still a model, but the code under it runs here for real (give it a live HTTP/3 server)."
+    : "'createSendGroup' in WebTransport.prototype → false: this build (pre-153 / unflagged) cannot run the scheduling natively — the banner's flag adds it. The model below is the spec's rule, labelled as a model.";
+  globalThis.showcaseTelemetry?.assert('wt-sendorder-model-probe', true, { hasWT, native });
+
+  let state = null;
+  function reset() {
+    state = { media: [], sync: [], wire: [], frameNo: 0, syncNo: 0, next: 'media' };
+    paint();
+    el('explain').textContent = 'Queue a few frames and blobs, then drain. Each drain step picks by the spec’s rule: within each group the highest sendOrder wins; the two groups share the link fairly (round-robin here — the spec leaves cross-group division implementation-defined).';
+  }
+
+  function paint() {
+    for (const g of ['media', 'sync']) {
+      const ul = el('q-' + g);
+      ul.innerHTML = '';
+      if (!state[g].length) {
+        const li = document.createElement('li');
+        li.textContent = 'empty';
+        ul.append(li);
+      } else {
+        // Display in drain order: highest sendOrder first (the spec's rule).
+        for (const item of [...state[g]].sort((a, b) => b.sendOrder - a.sendOrder)) {
+          const li = document.createElement('li');
+          const name = document.createElement('span');
+          name.textContent = item.name;
+          const so = document.createElement('span');
+          so.className = 'so';
+          so.textContent = 'sendOrder ' + item.sendOrder;
+          li.append(name, so);
+          ul.append(li);
+        }
+      }
+    }
+    const ol = el('wire');
+    ol.innerHTML = '';
+    for (const sent of state.wire) {
+      const li = document.createElement('li');
+      li.className = sent.group;
+      li.textContent = sent.name + ' (sendOrder ' + sent.sendOrder + ', ' + sent.group + ' group)';
+      ol.append(li);
+    }
+  }
+
+  el('add-frame').addEventListener('click', () => {
+    state.frameNo++;
+    state.media.push({ name: 'frame-' + state.frameNo, sendOrder: state.frameNo, group: 'media' });
+    el('explain').textContent = 'frame-' + state.frameNo + ' queued with sendOrder ' + state.frameNo + ' — each new frame outranks every older one, so the freshest frame always drains first within the media group.';
+    paint();
+  });
+
+  el('add-sync').addEventListener('click', () => {
+    state.syncNo++;
+    state.sync.push({ name: 'state-' + state.syncNo, sendOrder: 0, group: 'sync' });
+    el('explain').textContent = 'state-' + state.syncNo + ' queued with sendOrder 0 — unranked within its group, so sync blobs go FIFO among themselves (the model keeps queue order for ties, matching FIFO-within-a-stream).';
+    paint();
+  });
+
+  el('drain').addEventListener('click', () => {
+    const order = state.next === 'media' ? ['media', 'sync'] : ['sync', 'media'];
+    let picked = null;
+    for (const g of order) {
+      if (state[g].length) {
+        // The spec's sentence: highest sendOrder first; stable for ties.
+        let bestIdx = 0;
+        for (let i = 1; i < state[g].length; i++) {
+          if (state[g][i].sendOrder > state[g][bestIdx].sendOrder) bestIdx = i;
+        }
+        picked = state[g].splice(bestIdx, 1)[0];
+        break;
+      }
+    }
+    state.next = state.next === 'media' ? 'sync' : 'media';
+    if (!picked) {
+      el('explain').textContent = 'Both groups are empty — nothing to drain.';
+      return;
+    }
+    state.wire.push(picked);
+    el('explain').textContent = 'Drained ' + picked.name + ': ' + (picked.group === 'media'
+      ? 'the media group’s highest sendOrder (' + picked.sendOrder + ') went first — any older queued frame is still waiting, which is the point.'
+      : 'the sync group took its fair turn; within it, blobs drain FIFO because they share sendOrder 0.') + ' Groups alternate because cross-group bandwidth is divided fairly, not ranked.';
+    globalThis.showcaseTelemetry?.assert('wt-sendorder-model-drain', true, { picked: picked.name, so: picked.sendOrder });
+    paint();
+  });
+
+  el('reset').addEventListener('click', reset);
+  reset();
+  console.log(LOG, 'ready', 'native=' + native);
+})();
+</script>
+</body>
+</html>
