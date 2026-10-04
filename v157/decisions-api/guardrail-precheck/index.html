@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Draft guardrail pre-check — Decisions API — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    [hidden] { display: none !important; }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; }
+    .field { display: grid; gap: var(--space-1); }
+    .field label { font-weight: 700; font-size: 0.85rem; }
+    .field textarea { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font: inherit; min-height: 9rem; width: 100%; box-sizing: border-box; resize: vertical; }
+    .hint { color: var(--text-muted); font-size: 0.8rem; margin: 0; }
+    .checks { display: grid; gap: var(--space-2); }
+    .check { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); display: grid; gap: var(--space-1); }
+    .check h3 { margin: 0; font-size: 0.95rem; font-family: var(--font-mono); }
+    .check .q { font-size: 0.82rem; color: var(--text-charcoal); }
+    .check .a { font-family: var(--font-mono); font-size: 0.85rem; font-weight: 700; overflow-wrap: anywhere; }
+    .check .a.warn { color: var(--accent-rose); }
+    .check .a.ok { color: var(--accent-emerald); }
+    .check .a.idle { color: var(--text-muted); font-weight: 400; }
+    .panel pre { margin: 0; background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-2); font-size: 0.74rem; overflow: auto; max-height: 16rem; border: 2px solid var(--border-black); }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; min-width: 0; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Decisions API</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v157 · built-in ai · writing guardrails</p>
+    <h1>Draft guardrail pre-check</h1>
+    <p class="lede">Use case 3 from the explainer: a bug tracker that checks a draft <em>before</em> submission, on-device, so nobody learns about the missing repro steps — or the pasted API key — from a server round-trip. One schema, three questions, three question <em>types</em>: two <code>boolean</code> checks and one ordinal <code>score</code> whose <code>expectedScore</code> gives a severity estimate between the rubric points.</p>
+  </header>
+
+  <p class="note">The check button makes the real <code>DecisionModel</code> calls, exactly as written in the payload below. On every released Chrome today that throws <code>ReferenceError</code> — shown verbatim, because that is the platform's current answer (CLs in review; flag steps on <a href="../surface-probe/">the surface probe</a>; the <a href="https://web-ai.studio/extension" target="_blank" rel="noopener">WebAI extension polyfill</a> makes it answer for real today). The page never grades your draft with hidden heuristics and never fakes a model verdict.</p>
+
+  <section class="stage" aria-labelledby="draft-title">
+    <h2 id="draft-title">The draft</h2>
+    <div class="field">
+      <label for="draft">bug report draft</label>
+      <textarea id="draft" spellcheck="true" aria-describedby="draft-hint">The export button crashes the app every time.
+
+Steps: open any document, click Export, choose PDF — it crashes on the progress screen. Happens on 3 machines since yesterday's update. Our staging token is sk-test-9f82hs71 if you need to reproduce against the API.</textarea>
+      <p class="hint" id="draft-hint">This sample deliberately contains repro steps AND a pasted credential, so both booleans have something to find.</p>
+    </div>
+    <button type="button" id="check">Run the real pre-submission check</button>
+
+    <div class="checks">
+      <div class="check">
+        <h3>has_repro_steps · boolean</h3>
+        <p class="q">“Does the draft include steps to reproduce the issue?”</p>
+        <p class="a idle" id="a-repro">not checked</p>
+      </div>
+      <div class="check">
+        <h3>contains_credentials · boolean</h3>
+        <p class="q">“Does the draft contain personal contact info, API keys, or passwords?”</p>
+        <p class="a idle" id="a-pii">not checked</p>
+      </div>
+      <div class="check">
+        <h3>severity · score (1–4)</h3>
+        <p class="q">“Rate the severity from 1 (cosmetic) to 4 (critical).” — read off <code>expectedScore</code>, the probability-weighted value between the rubric points.</p>
+        <p class="a idle" id="a-sev">not checked</p>
+      </div>
+    </div>
+    <output id="status" aria-live="polite">Not checked yet.</output>
+
+    <div class="panel">
+      <h3 style="margin:0 0 var(--space-2)">The exact schema</h3>
+      <pre tabindex="0" id="payload"></pre>
+    </div>
+  </section>
+
+  <section><h2>why three types in one schema</h2>
+    <p>A schema with several questions is encoded once and answered in parallel — one pass, all three answers. <code>boolean</code> questions come back as the strings <code>"true"</code>/<code>"false"</code> with a confidence, so the form can nudge only when confident (the explainer uses 0.8; so does this page). The <code>score</code> question defines its own rubric in the option descriptions, and <code>expectedScore</code> weights the numeric labels by probability — a draft the model reads as between “major” and “critical” scores, say, 3.4 rather than being forced to a bucket. Guardrail decisions stay advisory: the page would never block submission on model output alone.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5155080092385280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/explainers-by-googlers/decisions-api" target="_blank" rel="noopener">Explainer: Decisions API (use case 3)</a></li>
+    <li><a href="../schema-playground/">Schema playground</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[decisions:guardrail]';
+  const SCHEMA = {
+    context: 'Bug report submission form pre-check',
+    expectedInputs: [{ type: 'text', languages: ['en'] }],
+    questions: [
+      { id: 'has_repro_steps', type: 'boolean', prompt: 'Does the draft include steps to reproduce the issue?' },
+      { id: 'contains_credentials', type: 'boolean', prompt: 'Does the draft contain personal contact info, API keys, or passwords?' },
+      {
+        id: 'severity',
+        type: 'score',
+        prompt: 'Rate the severity of the reported issue from 1 (cosmetic) to 4 (critical).',
+        options: [
+          { label: '1', description: 'Cosmetic: typo, spacing, minor visual issue' },
+          { label: '2', description: 'Minor: inconvenient but has a workaround' },
+          { label: '3', description: 'Major: blocks a common task' },
+          { label: '4', description: 'Critical: crash, data loss, or security exposure' },
+        ],
+      },
+    ],
+  };
+  document.getElementById('payload').textContent = JSON.stringify(SCHEMA, null, 2);
+  const status = document.getElementById('status');
+
+  function setAnswer(id, text, cls) {
+    const el = document.getElementById(id);
+    el.textContent = text;
+    el.className = `a ${cls}`;
+  }
+  function resetAnswers(text) {
+    for (const id of ['a-repro', 'a-pii', 'a-sev']) setAnswer(id, text, 'idle');
+  }
+
+  async function check() {
+    const draft = document.getElementById('draft').value;
+    if (!draft.trim()) { status.textContent = 'The draft is empty — type something to check.'; return; }
+    resetAnswers('checking…');
+    status.textContent = 'Attempting availability() → create() → decide() with the schema below…';
+    let model = null;
+    try {
+      const availability = await DecisionModel.availability(SCHEMA);
+      if (availability === 'unavailable') {
+        resetAnswers('model unavailable on this device');
+        status.textContent = 'DecisionModel.availability(schema) === "unavailable" — this device or language cannot run the model, so no check happened. That is the real answer.';
+        globalThis.showcaseTelemetry?.assert('decisions-guardrail-unavailable-branch', true, { availability });
+        return;
+      }
+      model = await DecisionModel.create({
+        ...SCHEMA,
+        monitor(m) {
+          m.addEventListener('downloadprogress', (e) => {
+            status.textContent = `Downloading decision model: ${Math.round((e.loaded ?? 0) * 100)}%…`;
+          });
+        },
+      });
+      const t0 = performance.now();
+      const result = await model.decide(draft);
+      const ms = (performance.now() - t0).toFixed(1);
+      const repro = result?.has_repro_steps, creds = result?.contains_credentials, sev = result?.severity;
+      if (!repro || !creds || !sev) {
+        status.textContent = `decide() resolved in ${ms} ms but missed a question id — raw result: ${JSON.stringify(result)}`;
+        globalThis.showcaseTelemetry?.assert('decisions-guardrail-shape', false, { raw: JSON.stringify(result).slice(0, 300) });
+        return;
+      }
+      const confident = (d) => d.confidence >= 0.8;
+      setAnswer('a-repro',
+        repro.label === 'true'
+          ? `yes (p=${(repro.probabilities?.true ?? 0).toFixed(3)})`
+          : confident(repro) ? `missing (confidence ${repro.confidence.toFixed(3)}) — nudge: add steps to reproduce` : `probably missing, but confidence ${repro.confidence.toFixed(3)} < 0.8 — no nudge`,
+        repro.label === 'true' ? 'ok' : 'warn');
+      setAnswer('a-pii',
+        creds.label === 'true'
+          ? (confident(creds) ? `credentials detected (confidence ${creds.confidence.toFixed(3)}) — warn before posting` : `possible credentials, confidence ${creds.confidence.toFixed(3)} < 0.8 — soft hint only`)
+          : `none detected (p=${(creds.probabilities?.false ?? 0).toFixed(3)})`,
+        creds.label === 'true' ? 'warn' : 'ok');
+      setAnswer('a-sev',
+        `expectedScore ${typeof sev.expectedScore === 'number' ? sev.expectedScore.toFixed(2) : '—'} on 1–4 · winning label "${sev.label}" (confidence ${sev.confidence.toFixed(3)})`,
+        'ok');
+      status.textContent = `decide() answered all three questions in one pass, in ${ms} ms, locally — the draft never left this page.`;
+      globalThis.showcaseTelemetry?.assert('decisions-guardrail-decided', true, { ms, repro: repro.label, creds: creds.label, sev: sev.label });
+    } catch (error) {
+      resetAnswers('unavailable — see status');
+      status.textContent = `The real call threw: ${error.name}: ${error.message}\n` +
+        (typeof globalThis.DecisionModel === 'undefined'
+          ? 'window.DecisionModel is absent in this browser — the expected state on every released Chrome today (see the banner). No heuristic stand-in graded your draft; the schema above is what a supporting browser would evaluate.'
+          : 'DecisionModel exists but the workflow failed at the step above.');
+      globalThis.showcaseTelemetry?.assert('decisions-guardrail-absent-branch', true, { error: error.name });
+    } finally {
+      try { model?.destroy(); } catch { /* already gone */ }
+    }
+  }
+
+  document.getElementById('check').addEventListener('click', () => { check(); });
+  console.log(`${LOG} ready (DecisionModel=${typeof globalThis.DecisionModel})`);
+})();
+</script>
+</body>
+</html>
