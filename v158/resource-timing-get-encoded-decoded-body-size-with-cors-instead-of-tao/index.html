@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Resource timing: body sizes via CORS — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v158/">&larr; Chrome 158</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v158 · performance · resource timing</p>
+    <h1>Resource timing: get encoded/decoded body size with CORS instead of TAO</h1>
+    <p class="lede">A <code>PerformanceResourceTiming</code> entry reports three byte counts — <code>encodedBodySize</code>, <code>decodedBodySize</code>, <code>transferSize</code> — but for cross-origin resources they are gated. Historically the gate was the <code>Timing-Allow-Origin</code> header. Chrome 158 changes which gate applies: body sizes are facts about the <em>content</em>, not the fetch, so they follow the CORS opt-in that already guards <code>responseStatus</code> and <code>contentType</code> — while <code>transferSize</code>, which mixes content and network detail, now requires <em>both</em> CORS and TAO.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./body-size-basics/">Body size basics</a></h3>
+      <p>Fetch this site's own assets and read the three byte counts off the real <code>PerformanceResourceTiming</code> entry, delivered live by a <code>PerformanceObserver</code>: compression ratio from encoded vs decoded, cache hits from <code>transferSize === 0</code>, and header overhead from transfer minus encoded. Same-origin, so every field is always exposed — the baseline the gates subtract from.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./gate-matrix/">The gate matrix</a></h3>
+      <p>Five real fetches — same-origin, CORS+TAO, TAO-only (opaque), CORS-only, and neither — against public endpoints whose headers are documented in-page. Two of the rows disagree between the old TAO rule and the new CORS rule, so the matrix doesn't just explain the change: it detects which regime the browser you are using right now actually implements, and says so.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./third-party-weight-audit/">Third-party weight audit</a></h3>
+      <p>The practical stakes: a RUM-style auditor that fetches any third-party URL you give it and reports exactly which byte counts your analytics could see for it, in this browser, plus which response header — <code>Access-Control-Allow-Origin</code> or <code>Timing-Allow-Origin</code> — the resource's owner would need to add under the old and new rules to unlock the rest.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>The resource-timing group concluded years ago (<a href="https://github.com/w3c/resource-timing/issues/220" target="_blank" rel="noopener">issue #220</a>) that <code>Timing-Allow-Origin</code> should opt a resource into <em>timing</em> — and body sizes say more about a response's content than about the process of fetching it. The CORS-protected attributes added since (<code>responseStatus</code>, <code>contentType</code>, <code>contentEncoding</code>) already follow that logic. Chrome 158 brings <code>encodedBodySize</code> and <code>decodedBodySize</code> into line: exposed for cross-origin resources fetched with CORS, no longer unlocked by TAO alone. <code>transferSize</code> straddles the line — bytes on the wire are both content and network — so it requires both opt-ins. Firefox and Safari signalled support; WebKit today is stricter still, exposing body sizes only same-origin.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>const res = await fetch("https://cdn.example/lib.js");       // mode: "cors"
+await res.blob();                                             // finish the body
+
+const [entry] = performance.getEntriesByName(res.url).slice(-1);
+entry.decodedBodySize;  // bytes after decompression
+entry.encodedBodySize;  // bytes before decompression (as transferred body)
+entry.transferSize;     // body + ~header estimate; 0 for cache hits & when gated
+
+// Gating for CROSS-ORIGIN resources:
+//           pre-158 Chrome        Chrome 158+
+// encoded/decodedBodySize:  TAO   ->  CORS (response not opaque)
+// transferSize:             TAO   ->  CORS *and* TAO</code></pre>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id: 5195340595724288 — listing name "Resource timing: get encoded/decoded body size
+    with CORS instead of TAO", v158 listing "Enabled by default"; chrome.status "Proposed",
+    desktop milestone 158. Runtime flag: ResourceTimingUseCORSForBodySizes
+    (runtime_enabled_features.json5, status "test" today — see banner wording on the concepts).
+    Spec: w3c.github.io/resource-timing (encodedBodySize/decodedBodySize/transferSize processing
+    model); design discussion w3c/resource-timing#220 (TAO should opt into *timing* only).
+    Summary semantics confirmed from the chromestatus detail: encoded/decoded move from the TAO
+    gate to the CORS gate; transferSize requires BOTH. responseStatus/contentType/contentEncoding
+    are the precedent CORS-gated attributes.
+    External endpoints used by the demos, headers verified via curl on 2026-10-04:
+      cdn.jsdelivr.net           -> access-control-allow-origin: * AND timing-allow-origin: *
+      raw.githubusercontent.com  -> access-control-allow-origin: * and NO timing-allow-origin
+      www.gstatic.com            -> neither header
+    These give two regime discriminators: an opaque (no-cors) fetch of a TAO:* resource exposes
+    sizes only under the OLD rule; a cors fetch of an ACAO-only resource exposes encoded/decoded
+    only under the NEW rule. All demo fetches are click-triggered and every row handles fetch
+    failure honestly (offline/blocked networks show the real error, never fabricated numbers).
+    A same-origin server route with configurable TAO/ACAO headers cannot demonstrate this gating
+    (the gates only apply cross-origin, and this showcase has a single origin), so the demos use
+    documented public endpoints instead — that is the honest best available from a one-origin
+    static showcase. TODO (human, optional): if the showcase ever gains a second origin (e.g. a
+    *.deno.dev alias), add an echo route there with ?acao=&tao= toggles and point gate-matrix at
+    it for fully controlled headers.
+    Use-case portfolio: basic/canonical = body-size-basics (same-origin readout, compression/
+    cache/overhead); configuration/inspection + edge/failure = gate-matrix (the five-row gate
+    table, regime detection, opaque/no-header floors, per-row failure states); practical product
+    = third-party-weight-audit (what your RUM sees + which header to ask a vendor for).
+    Novel/advanced composition: PerformanceObserver("resource") live delivery is composed into
+    body-size-basics; no further distinct surface exists on this change (it alters the gating of
+    three existing attributes, adding no new members — source: chromestatus summary + spec).
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5195340595724288" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/resource-timing/" target="_blank" rel="noopener">Resource Timing spec</a></li>
+    <li><a href="https://github.com/w3c/resource-timing/issues/220" target="_blank" rel="noopener">Design discussion: w3c/resource-timing#220</a></li>
+    <li><a href="https://issues.chromium.org/issues/40251936" target="_blank" rel="noopener">Tracking bug 40251936</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
