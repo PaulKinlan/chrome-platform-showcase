@@ -6,6 +6,7 @@
 
 import { handleDemoTelemetryRoute } from "../routes/demo-telemetry.ts";
 import { buildAliasLocation, handleAliasRoute } from "../routes/aliases.ts";
+import { renderCategoryCard, renderDemoCard } from "../routes/pages.ts";
 import { handlePublicRoute } from "../routes/public.ts";
 import {
   handleLegacyReleaseEndpoints,
@@ -505,6 +506,62 @@ section("alias location builder rejects non-printable or spaced locations", asyn
     buildAliasLocation({ to: "/v150/x/" }, "concept/", "?q=%E2%82%AC") ===
       "/v150/x/concept/?q=%E2%82%AC",
     `${label}: ordinary encoded query mangled`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 7. Milestone page cards escape every interpolated value for its HTML
+//    attribute context, including the demo and ChromeStatus hrefs.
+// ---------------------------------------------------------------------------
+
+section("demo card escapes href values in attributes", async () => {
+  const label = "demo card escapes href values in attributes";
+  const hostileHref = `/v151/feature" onmouseover="alert(1)`;
+  const card = renderDemoCard(
+    { id: 506123456, name: "Feature", summary: "Summary" },
+    { href: hostileHref, release: "v151", sameRelease: true },
+    undefined,
+    { category: "Enabled by default" },
+  );
+  assert(
+    !card.includes(`"${hostileHref}"`) && !card.includes('onmouseover="alert'),
+    `${label}: raw hostile href reached the attribute`,
+  );
+  assert(
+    card.includes('href="/v151/feature&quot; onmouseover=&quot;alert(1)"'),
+    `${label}: escaped href missing`,
+  );
+});
+
+section("demo card escapes the no-demo ChromeStatus href", async () => {
+  const label = "demo card escapes the no-demo ChromeStatus href";
+  const card = renderDemoCard(
+    { id: `5"x`, name: "Feature", summary: "" },
+    null,
+    undefined,
+    { category: "Enabled by default" },
+  );
+  assert(
+    !card.includes(`feature/5"x`) && card.includes("feature/5&quot;x"),
+    `${label}: raw id reached the attribute`,
+  );
+});
+
+section("category card escapes href values in attributes", async () => {
+  const label = "category card escapes href values in attributes";
+  const card = renderCategoryCard({
+    id: 506123456,
+    name: "Feature",
+    summary: "Summary",
+    demo: {
+      href: `/v151/feature" onmouseover="alert(1)`,
+      release: "v151",
+      sameRelease: true,
+    },
+  });
+  assert(
+    !card.includes('onmouseover="alert') && card.includes("&quot; onmouseover=&quot;"),
+    `${label}: raw hostile href reached the attribute`,
   );
 });
 
