@@ -1,4 +1,8 @@
+import { readBoundedText } from "../lib/request-body.ts";
+
 type JsonRecord = Record<string, unknown>;
+
+const TELEMETRY_BODY_LIMIT = 128 * 1024;
 
 interface DemoTelemetryEvent {
   id: string;
@@ -550,11 +554,14 @@ export async function handleDemoTelemetryRoute(req: Request): Promise<Response |
     if (!sameOriginTelemetry(req, url)) {
       return forbiddenResponse("Cross-site reports are not accepted.");
     }
-    const text = await req.text();
+    const body = await readBoundedText(
+      req,
+      TELEMETRY_BODY_LIMIT,
+      "Report payload too large.",
+    );
+    if (!body.ok) return body.response;
+    const text = body.text;
     const bodyBytes = new TextEncoder().encode(text).byteLength;
-    if (bodyBytes > 128 * 1024) {
-      return jsonResponse({ error: "Report payload too large." }, { status: 413 });
-    }
     let payload: JsonRecord = { kind: "browser.report", severity: "warning", page: "" };
     try {
       payload = normalizeBrowserReportPayload(JSON.parse(text || "[]"));
@@ -607,11 +614,10 @@ export async function handleDemoTelemetryRoute(req: Request): Promise<Response |
     return jsonResponse({ error: "Telemetry must be JSON." }, { status: 415 });
   }
 
-  const text = await req.text();
+  const body = await readBoundedText(req, TELEMETRY_BODY_LIMIT, "Telemetry payload too large.");
+  if (!body.ok) return body.response;
+  const text = body.text;
   const bodyBytes = new TextEncoder().encode(text).byteLength;
-  if (bodyBytes > 128 * 1024) {
-    return jsonResponse({ error: "Telemetry payload too large." }, { status: 413 });
-  }
 
   let payload: JsonRecord | null = null;
   try {

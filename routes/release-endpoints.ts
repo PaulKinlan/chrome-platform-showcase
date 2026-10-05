@@ -1,7 +1,13 @@
 // Legacy per-release server endpoints extracted from routes/release.ts.
 // New features should prefer co-located v<N>/<feature-slug>/_server.ts modules.
 
+import { readBoundedBody, readBoundedText } from "../lib/request-body.ts";
 import { escapeHTML } from "./html.ts";
+
+/** Byte cap for demo JSON/form POST bodies on public endpoints. */
+const DEMO_BODY_LIMIT = 1024 * 1024;
+/** Byte cap for telemetry-family POST bodies, matching the demo telemetry contract. */
+const TELEMETRY_BODY_LIMIT = 128 * 1024;
 
 export type AssetReader = (release: string, sub: string) => Promise<Response | null>;
 
@@ -522,9 +528,11 @@ async function renderCompressionDictionaryMeasureRoute(
     });
   }
 
+  const rawMeasure = await readBoundedText(req, DEMO_BODY_LIMIT);
+  if (!rawMeasure.ok) return rawMeasure.response;
   let body: Record<string, unknown>;
   try {
-    body = await req.json() as Record<string, unknown>;
+    body = JSON.parse(rawMeasure.text) as Record<string, unknown>;
   } catch {
     return jsonResponse({ error: "Expected a JSON request body." }, { status: 400 });
   }
@@ -878,6 +886,11 @@ interface WebAuthnSignalCredential {
   source: "webauthn-create";
 }
 
+interface WebAuthnSignalBody {
+  id?: string;
+  response?: { clientDataJSON?: string };
+}
+
 interface WebAuthnSignalSession {
   id: string;
   userId: string;
@@ -967,7 +980,14 @@ async function renderWebAuthnSignalRoute(req: Request, sub: string): Promise<Res
   }
 
   if (route === "/register" && req.method === "POST") {
-    const body = await req.json();
+    const rawRegister = await readBoundedText(req, DEMO_BODY_LIMIT);
+    if (!rawRegister.ok) return rawRegister.response;
+    let body: WebAuthnSignalBody;
+    try {
+      body = JSON.parse(rawRegister.text) as WebAuthnSignalBody;
+    } catch {
+      return jsonResponse({ error: "Expected a JSON request body." }, { status: 400, headers });
+    }
     const clientData = JSON.parse(
       new TextDecoder().decode(base64UrlDecode(body.response?.clientDataJSON ?? "")),
     );
@@ -992,7 +1012,7 @@ async function renderWebAuthnSignalRoute(req: Request, sub: string): Promise<Res
     }
     if (!session.credentials.some((credential) => credential.id === body.id)) {
       session.credentials.unshift({
-        id: body.id,
+        id: String(body.id ?? ""),
         createdAt: new Date().toISOString(),
         revokedAt: null,
         source: "webauthn-create",
@@ -1003,7 +1023,14 @@ async function renderWebAuthnSignalRoute(req: Request, sub: string): Promise<Res
   }
 
   if (route === "/revoke" && req.method === "POST") {
-    const body = await req.json();
+    const rawRevoke = await readBoundedText(req, DEMO_BODY_LIMIT);
+    if (!rawRevoke.ok) return rawRevoke.response;
+    let body: WebAuthnSignalBody;
+    try {
+      body = JSON.parse(rawRevoke.text) as WebAuthnSignalBody;
+    } catch {
+      return jsonResponse({ error: "Expected a JSON request body." }, { status: 400, headers });
+    }
     const credential = session.credentials.find((item) => item.id === body.id);
     if (!credential) {
       return jsonResponse({ error: "Credential not found." }, { status: 404, headers });
@@ -1211,7 +1238,9 @@ async function renderProtectedAudienceBiddingRoute(
     });
   }
 
-  const bytes = await req.arrayBuffer();
+  const bounded = await readBoundedBody(req, DEMO_BODY_LIMIT);
+  if (!bounded.ok) return bounded.response;
+  const bytes = bounded.bytes;
   return jsonResponse({
     received: true,
     receivedBytes: bytes.byteLength,
@@ -1492,9 +1521,11 @@ async function renderAttributionTriggerContextRoute(
     return jsonResponse({ error: "POST a trigger registration JSON body." }, { status: 405 });
   }
 
+  const rawTrigger = await readBoundedText(req, DEMO_BODY_LIMIT);
+  if (!rawTrigger.ok) return rawTrigger.response;
   let body: Record<string, unknown>;
   try {
-    body = await req.json();
+    body = JSON.parse(rawTrigger.text) as Record<string, unknown>;
   } catch {
     return jsonResponse({ error: "Expected JSON request body." }, { status: 400 });
   }
@@ -1708,7 +1739,9 @@ async function renderEmailVerificationRoute(req: Request, sub: string): Promise<
   const route = sub.slice(prefix.length);
 
   if (route === "/sample" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const aud = stringValue(body.expectedAud, "https://myapp.example.com");
     const nonce = stringValue(body.expectedNonce, "nonce-abc123");
     const email = stringValue(body.email, "alice@example-provider.com");
@@ -1728,7 +1761,9 @@ async function renderEmailVerificationRoute(req: Request, sub: string): Promise<
   }
 
   if (route === "/validate" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     return jsonResponse(
       await verifyEvpJwt(
         stringValue(body.token),
@@ -1794,7 +1829,9 @@ async function renderAutoPasskeyRoute(req: Request, sub: string): Promise<Respon
   if (route === "/state") return jsonResponse(autoPasskeyPayload(session), { headers });
 
   if (route === "/login" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const userName = stringValue(body.userName, "ada@example.com");
     const password = stringValue(body.password);
     if (!password) {
@@ -1829,7 +1866,9 @@ async function renderAutoPasskeyRoute(req: Request, sub: string): Promise<Respon
   }
 
   if (route === "/register" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const response = objectValue(body.response);
     const clientData = JSON.parse(
       new TextDecoder().decode(base64UrlDecode(stringValue(response.clientDataJSON))),
@@ -2288,7 +2327,9 @@ async function renderSpcAuthRoute(req: Request, sub: string): Promise<Response |
   if (route === "/state") return jsonResponse(spcAuthPayload(session), { headers });
 
   if (route === "/register-options" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     session.userName = stringValue(body.userName, session.userName);
     session.rpId = stringValue(body.rpId, webAuthnRpId(req)) || webAuthnRpId(req);
     session.registerChallenge = randomBase64Url(32);
@@ -2319,7 +2360,9 @@ async function renderSpcAuthRoute(req: Request, sub: string): Promise<Response |
 
   if (route === "/register" && req.method === "POST") {
     try {
-      const body = await requestJson(req);
+      const parsedBody = await requestJson(req);
+      if (!parsedBody.ok) return parsedBody.response;
+      const body = parsedBody.value;
       session.credential = await parseRegistrationResponse(req, session, body);
       session.registerChallenge = null;
       recordSpcAuthEvent(session, "registered", "Stored ES256 credential public key.");
@@ -2340,7 +2383,9 @@ async function renderSpcAuthRoute(req: Request, sub: string): Promise<Response |
         headers,
       });
     }
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     session.authChallenge = randomBase64Url(32);
     session.payment = {
       amount: stringValue(body.amount, "$42.00"),
@@ -2379,7 +2424,9 @@ async function renderSpcAuthRoute(req: Request, sub: string): Promise<Response |
 
   if (route === "/verify" && req.method === "POST") {
     try {
-      const body = await requestJson(req);
+      const parsedBody = await requestJson(req);
+      if (!parsedBody.ok) return parsedBody.response;
+      const body = parsedBody.value;
       const verification = await verifyWebAuthnAssertion(req, session, body);
       session.authChallenge = null;
       recordSpcAuthEvent(
@@ -2417,7 +2464,9 @@ async function renderSpcCheckoutRoute(req: Request, sub: string): Promise<Respon
   const route = sub.slice(prefix.length);
 
   if (route === "/orders" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const order = {
       id: `CPX-${randomBase64Url(5).toUpperCase()}`,
       method: stringValue(body.method, "card-fallback"),
@@ -2609,12 +2658,20 @@ function dbscSessionState(req: Request, session: DbscSession | null): Record<str
   };
 }
 
-async function requestJson(req: Request): Promise<Record<string, unknown>> {
+type RequestJson =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; response: Response };
+
+async function requestJson(req: Request): Promise<RequestJson> {
+  if (!req.headers.get("content-type")?.includes("application/json")) {
+    return { ok: true, value: {} };
+  }
+  const text = await readBoundedText(req, DEMO_BODY_LIMIT);
+  if (!text.ok) return text;
   try {
-    if (!req.headers.get("content-type")?.includes("application/json")) return {};
-    return await req.json();
+    return { ok: true, value: JSON.parse(text.text) as Record<string, unknown> };
   } catch {
-    return {};
+    return { ok: true, value: {} };
   }
 }
 
@@ -2653,7 +2710,9 @@ async function renderDbscRoute(req: Request, sub: string): Promise<Response | nu
         status: 400,
       });
     }
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const proof = req.headers.get("Secure-Session-Response") ?? String(body.proof ?? "");
     const verified = await verifyDbscJwt(proof, session.loginChallenge, null);
     if (!verified.ok) {
@@ -2723,7 +2782,9 @@ async function renderDbscRoute(req: Request, sub: string): Promise<Response | nu
   }
 
   if (route === "/refresh" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const session = getDbscSessionFromRequest(req) ??
       dbscSessions.get(String(body.sessionId ?? ""));
     if (!session?.publicKeyJwk) {
@@ -2904,7 +2965,9 @@ async function renderSpcBbkRoute(
   const route = sub.slice("/secure-payment-confirmation-browser-bound-keys".length);
 
   if (route === "/enroll" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const passkeyPublicJwk = body.passkeyPublicJwk as JsonWebKey | undefined;
     const browserBoundPublicJwk = body.browserBoundPublicJwk as JsonWebKey | undefined;
     if (
@@ -2948,12 +3011,19 @@ async function renderSpcBbkRoute(
   }
 
   if (route === "/state") {
-    const body = req.method === "POST" ? await requestJson(req) : {};
+    let body: Record<string, unknown> = {};
+    if (req.method === "POST") {
+      const parsedBody = await requestJson(req);
+      if (!parsedBody.ok) return parsedBody.response;
+      body = parsedBody.value;
+    }
     return jsonResponse(spcBbkEnrollmentState(getSpcBbkEnrollment(req, body)));
   }
 
   if (route === "/challenge" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const enrollment = getSpcBbkEnrollment(req, body);
     if (!enrollment) {
       return jsonResponse({ error: "Enroll keys before requesting a payment challenge." }, {
@@ -2986,7 +3056,9 @@ async function renderSpcBbkRoute(
   }
 
   if (route === "/verify" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const enrollment = getSpcBbkEnrollment(req, body);
     if (!enrollment) return jsonResponse({ error: "Enrollment not found." }, { status: 404 });
     const payload = String(body.payload ?? enrollment.pendingPayload ?? "");
@@ -3036,7 +3108,9 @@ async function renderSpcBbkRoute(
   }
 
   if (route === "/rotate" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const enrollment = getSpcBbkEnrollment(req, body);
     const newBrowserBoundPublicJwk = body.newBrowserBoundPublicJwk as JsonWebKey | undefined;
     const payload = String(body.payload ?? "");
@@ -3110,7 +3184,9 @@ async function renderFetchLaterRoute(req: Request, sub: string): Promise<Respons
   const route = sub.slice("/fetchlater-api".length);
 
   if ((route === "/log" || route === "/echo") && req.method === "POST") {
-    const text = await req.text();
+    const boundedText = await readBoundedText(req, DEMO_BODY_LIMIT);
+    if (!boundedText.ok) return boundedText.response;
+    const text = boundedText.text;
     let body: unknown = text;
     try {
       body = text ? JSON.parse(text) : null;
@@ -3190,7 +3266,13 @@ export async function renderProfileTelemetryRoute(
     });
   }
 
-  const text = await req.text();
+  const boundedProfile = await readBoundedText(
+    req,
+    TELEMETRY_BODY_LIMIT,
+    "Profiling payload too large.",
+  );
+  if (!boundedProfile.ok) return boundedProfile.response;
+  const text = boundedProfile.text;
   const bodyBytes = new TextEncoder().encode(text).byteLength;
   let payload: Record<string, unknown> = {};
   try {
@@ -3459,20 +3541,31 @@ async function verifyFedCmJwt(token: string): Promise<{
   return { ok: true, payload };
 }
 
-async function fedCmRequestBody(req: Request): Promise<URLSearchParams> {
+type FedCmRequestBody =
+  | { ok: true; params: URLSearchParams }
+  | { ok: false; response: Response };
+
+async function fedCmRequestBody(req: Request): Promise<FedCmRequestBody> {
   const contentType = req.headers.get("content-type") ?? "";
+  const raw = await readBoundedText(req, DEMO_BODY_LIMIT);
+  if (!raw.ok) return raw;
   if (contentType.includes("application/x-www-form-urlencoded")) {
-    return new URLSearchParams(await req.text());
+    return { ok: true, params: new URLSearchParams(raw.text) };
   }
   if (contentType.includes("application/json")) {
-    const json = await req.json();
+    let json: Record<string, unknown> = {};
+    try {
+      json = JSON.parse(raw.text || "{}") as Record<string, unknown>;
+    } catch {
+      json = {};
+    }
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(json)) {
       if (value != null) params.set(key, typeof value === "string" ? value : JSON.stringify(value));
     }
-    return params;
+    return { ok: true, params };
   }
-  return new URLSearchParams(await req.text());
+  return { ok: true, params: new URLSearchParams(raw.text) };
 }
 
 function fedCmCorsHeaders(req: Request): Headers {
@@ -3595,7 +3688,9 @@ async function renderFedCmRoute(req: Request, sub: string): Promise<Response | n
     if (!account) {
       return jsonResponse({ error: "No signed-in IdP account." }, { status: 401, headers });
     }
-    const body = await fedCmRequestBody(req);
+    const bodyResult = await fedCmRequestBody(req);
+    if (!bodyResult.ok) return bodyResult.response;
+    const body = bodyResult.params;
     const accountId = body.get("account_id") ?? account.id;
     const clientId = body.get("client_id") ?? FEDCM_CLIENT_ID;
     if (accountId !== account.id) {
@@ -3651,13 +3746,17 @@ async function renderFedCmRoute(req: Request, sub: string): Promise<Response | n
   }
 
   if (route === "/validate" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const result = await verifyFedCmJwt(String(body.token ?? ""));
     return jsonResponse(result, { status: result.ok ? 200 : 400 });
   }
 
   if (route === "/refresh" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const result = await verifyFedCmJwt(String(body.token ?? ""));
     if (!result.ok || !result.payload) return jsonResponse(result, { status: 400 });
     const now = Math.floor(Date.now() / 1000);
@@ -3671,7 +3770,9 @@ async function renderFedCmRoute(req: Request, sub: string): Promise<Response | n
   }
 
   if (route === "/delegated-api" && req.method === "POST") {
-    const body = await requestJson(req);
+    const parsedBody = await requestJson(req);
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.value;
     const action = String(body.action ?? "");
     const token = String(body.token ?? "");
     const requiredScopes: Record<string, string> = {
