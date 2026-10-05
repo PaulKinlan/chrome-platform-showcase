@@ -21,3 +21,17 @@ export function forbiddenResponse(reason: string): Response {
     },
   });
 }
+
+/**
+ * The origin allowed to make credentialed CORS requests to showcase
+ * endpoints: the site's own origin. When the request carries no Origin
+ * header the site origin is returned (same-origin requests). An explicit
+ * foreign Origin disables credentialed CORS for that response — the caller
+ * gets no access-control-allow-origin at all and the browser blocks the
+ * credentialed read.
+ */
+export function allowlistedCorsOrigin(req: Request, url: URL): string | null {
+  const origin = req.headers.get("origin");
+  if (!origin) return url.origin;
+  return origin === url.origin ? origin : null;
+}

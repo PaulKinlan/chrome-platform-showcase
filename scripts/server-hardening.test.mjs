@@ -280,6 +280,104 @@ section("profile reset accepts browser top-level navigation signal", async () =>
   assertStatus(res.status, 200, label);
 });
 
+// ---------------------------------------------------------------------------
+// 3. Credentialed CORS is allowlisted: an Origin is echoed with
+//    Access-Control-Allow-Credentials only when it is the showcase's own
+//    origin; foreign origins get no credentialed CORS headers at all.
+// ---------------------------------------------------------------------------
+
+function corsRequest(path, headers = {}) {
+  return new Request(`http://localhost:3000${path}`, { headers });
+}
+
+section("fedcm metadata echoes only the site's own origin with credentials", async () => {
+  const label = "fedcm metadata echoes only the site's own origin with credentials";
+  const own = corsRequest("/v148/agentic-federated-login/fedcm/client-metadata", {
+    "origin": "http://localhost:3000",
+  });
+  const resOwn = await handleLegacyReleaseEndpoints(
+    own,
+    "v148",
+    "/agentic-federated-login/fedcm/client-metadata",
+    noAsset,
+  );
+  assert(
+    resOwn.headers.get("access-control-allow-origin") === "http://localhost:3000" &&
+      resOwn.headers.get("access-control-allow-credentials") === "true",
+    `${label}: own-origin response missing credentialed CORS`,
+  );
+
+  const foreign = corsRequest("/v148/agentic-federated-login/fedcm/client-metadata", {
+    "origin": "https://foreign.example",
+  });
+  const resForeign = await handleLegacyReleaseEndpoints(
+    foreign,
+    "v148",
+    "/agentic-federated-login/fedcm/client-metadata",
+    noAsset,
+  );
+  assert(
+    resForeign.headers.get("access-control-allow-origin") === null,
+    `${label}: foreign origin was echoed: ${resForeign.headers.get("access-control-allow-origin")}`,
+  );
+  assert(
+    resForeign.headers.get("access-control-allow-credentials") === null,
+    `${label}: credentials offered to a foreign origin`,
+  );
+});
+
+section("fedcm preflight echoes only the site's own origin", async () => {
+  const label = "fedcm preflight echoes only the site's own origin";
+  const preflight = new Request(
+    "http://localhost:3000/v148/agentic-federated-login/fedcm/accounts",
+    {
+      method: "OPTIONS",
+      headers: {
+        "origin": "https://foreign.example",
+        "access-control-request-method": "POST",
+      },
+    },
+  );
+  const res = await handleLegacyReleaseEndpoints(
+    preflight,
+    "v148",
+    "/agentic-federated-login/fedcm/accounts",
+    noAsset,
+  );
+  assert(
+    res.headers.get("access-control-allow-origin") === null,
+    `${label}: foreign origin was echoed: ${res.headers.get("access-control-allow-origin")}`,
+  );
+  assert(
+    res.headers.get("access-control-allow-credentials") === null,
+    `${label}: credentials offered to a foreign origin`,
+  );
+});
+
+section("css url modifier credentialed mode echoes only the site's own origin", async () => {
+  const label = "css url modifier credentialed mode echoes only the site's own origin";
+  const sub = "/css-url-request-modifiers/crossorigin-integrity-demo/resource.svg";
+  const foreign = corsRequest(`/v150${sub}?cors=credentialed`, {
+    "origin": "https://foreign.example",
+  });
+  const resForeign = await handleLegacyReleaseEndpoints(foreign, "v150", sub, noAsset);
+  assert(
+    resForeign.headers.get("access-control-allow-origin") === null &&
+      resForeign.headers.get("access-control-allow-credentials") === null,
+    `${label}: foreign origin got credentialed CORS`,
+  );
+
+  const sameOrigin = corsRequest(`/v150${sub}?cors=credentialed`);
+  const resSame = await handleLegacyReleaseEndpoints(sameOrigin, "v150", sub, noAsset);
+  assert(
+    resSame.headers.get("access-control-allow-origin") === "http://localhost:3000" &&
+      resSame.headers.get("access-control-allow-credentials") === "true",
+    `${label}: same-origin request lost credentialed CORS`,
+  );
+});
+
+// ---- end of sections ----
+
 for (const { label, fn } of sections) {
   try {
     await fn();

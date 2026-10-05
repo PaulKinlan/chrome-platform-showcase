@@ -2,7 +2,11 @@
 // New features should prefer co-located v<N>/<feature-slug>/_server.ts modules.
 
 import { readBoundedBody, readBoundedText } from "../lib/request-body.ts";
-import { forbiddenResponse, sameOriginRequest } from "../lib/request-guards.ts";
+import {
+  allowlistedCorsOrigin,
+  forbiddenResponse,
+  sameOriginRequest,
+} from "../lib/request-guards.ts";
 import { escapeHTML } from "./html.ts";
 
 /** Byte cap for demo JSON/form POST bodies on public endpoints. */
@@ -81,9 +85,11 @@ function applyCssUrlModifierDemoCors(headers: Headers, req: Request, mode: strin
   }
 
   if (mode === "credentialed") {
-    const origin = req.headers.get("origin") ?? new URL(req.url).origin;
-    headers.set("access-control-allow-origin", origin);
-    headers.set("access-control-allow-credentials", "true");
+    const allowedOrigin = allowlistedCorsOrigin(req, new URL(req.url));
+    if (allowedOrigin) {
+      headers.set("access-control-allow-origin", allowedOrigin);
+      headers.set("access-control-allow-credentials", "true");
+    }
   }
 }
 
@@ -3574,14 +3580,17 @@ async function fedCmRequestBody(req: Request): Promise<FedCmRequestBody> {
 
 function fedCmCorsHeaders(req: Request): Headers {
   const headers = new Headers();
-  const origin = req.headers.get("origin") ?? new URL(req.url).origin;
-  headers.set("access-control-allow-origin", origin);
-  headers.set("access-control-allow-credentials", "true");
+  const allowedOrigin = allowlistedCorsOrigin(req, new URL(req.url));
+  if (allowedOrigin) {
+    headers.set("access-control-allow-origin", allowedOrigin);
+    headers.set("access-control-allow-credentials", "true");
+  }
   headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
   headers.set(
     "access-control-allow-headers",
     "content-type, sec-fetch-dest, x-showcase-fedcm-trace",
   );
+  headers.set("vary", "Origin");
   return headers;
 }
 
