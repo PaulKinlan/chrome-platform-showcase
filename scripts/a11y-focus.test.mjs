@@ -85,12 +85,24 @@ function ruleBlock(css, selectorFragment) {
     cards.length > 0 && cards.every((c) => /role="radio"/.test(c)),
   );
   check(
-    "every .uc-card is in the tab order",
-    cards.length > 0 && cards.every((c) => /tabindex="0"/.test(c)),
-  );
-  check(
     "every .uc-card exposes checked state",
     cards.length > 0 && cards.every((c) => /aria-checked="(true|false)"/.test(c)),
+  );
+  // APG roving tabindex: exactly one radio per group is tabbable (with no
+  // initial selection that is the first card); arrows move focus+selection.
+  check(
+    ".uc-card group uses roving tabindex (exactly one tab stop)",
+    cards.length > 0 &&
+      cards.filter((c) => /tabindex="0"/.test(c)).length === 1 &&
+      cards.every((c) => /tabindex="(0|-1)"/.test(c)),
+  );
+  check(
+    ".uc-card group moves focus and selection with arrow keys",
+    /["']Arrow(Right|Down|Left|Up)["']/.test(html),
+  );
+  check(
+    ".uc-card selection roves the tab stop",
+    /setAttribute\(["']tabindex["']/.test(html),
   );
   check(
     ".uc-card selection has a keyboard handler",
@@ -110,12 +122,24 @@ function ruleBlock(css, selectorFragment) {
     cards.length > 0 && cards.every((c) => /role="radio"/.test(c)),
   );
   check(
-    "every .tier-card is in the tab order",
-    cards.length > 0 && cards.every((c) => /tabindex="0"/.test(c)),
-  );
-  check(
     "every .tier-card exposes checked state",
     cards.length > 0 && cards.every((c) => /aria-checked="(true|false)"/.test(c)),
+  );
+  // APG roving tabindex: the checked card is the group's only tab stop.
+  check(
+    ".tier-card group uses roving tabindex (checked card is the one tab stop)",
+    cards.length > 0 &&
+      cards.every((c) => /tabindex="(0|-1)"/.test(c)) &&
+      cards.filter((c) => /tabindex="0"/.test(c)).length === 1 &&
+      cards.every((c) => /aria-checked="true"/.test(c) === /tabindex="0"/.test(c)),
+  );
+  check(
+    "tier-grid moves focus and selection with arrow keys",
+    /["']Arrow(Right|Down|Left|Up)["']/.test(html),
+  );
+  check(
+    "tier-grid selection roves the tab stop",
+    /setAttribute\(["']tabindex["']/.test(html),
   );
   check(
     "tier-grid has a keyboard handler",
@@ -127,11 +151,18 @@ function ruleBlock(css, selectorFragment) {
   const opts = [...html.matchAll(/<div class="dec-opt[ "][^>]*>/g)].map((m) => m[0]);
   check("decision wizard renders .dec-opt controls", opts.length === 12);
   check(
-    "every .dec-opt exposes a radio role, tab order and checked state",
+    "every .dec-opt exposes a radio role and checked state",
     opts.length > 0 &&
       opts.every((o) =>
-        /role="radio"/.test(o) && /tabindex="0"/.test(o) && /aria-checked="(true|false)"/.test(o)
+        /role="radio"/.test(o) && /tabindex="(0|-1)"/.test(o) &&
+        /aria-checked="(true|false)"/.test(o)
       ),
+  );
+  check(
+    "each .dec-options group has exactly one tab stop, on its checked option",
+    opts.length > 0 &&
+      opts.filter((o) => /tabindex="0"/.test(o)).length === 4 &&
+      opts.every((o) => /aria-checked="true"/.test(o) === /tabindex="0"/.test(o)),
   );
   check(
     "every .dec-options group is a labelled radiogroup",
