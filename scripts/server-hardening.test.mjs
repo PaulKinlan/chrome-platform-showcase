@@ -565,6 +565,28 @@ section("category card escapes href values in attributes", async () => {
   );
 });
 
+section("credentialed CORS echoes the loopback host pair", async () => {
+  const label = "credentialed CORS echoes the loopback host pair";
+  // Local demos fetch their resource from the other loopback name to make a
+  // genuinely cross-origin request against this same server; the pair must
+  // still get credentialed CORS while a real foreign origin does not.
+  const req = new Request(
+    "http://127.0.0.1:3000/v150/css-url-request-modifiers/crossorigin-integrity-demo/resource.svg?cors=credentialed",
+    { headers: { "origin": "http://localhost:3000" } },
+  );
+  const res = await handleLegacyReleaseEndpoints(
+    req,
+    "v150",
+    "/css-url-request-modifiers/crossorigin-integrity-demo/resource.svg",
+    noAsset,
+  );
+  assert(
+    res.headers.get("access-control-allow-origin") === "http://localhost:3000" &&
+      res.headers.get("access-control-allow-credentials") === "true",
+    `${label}: loopback pair lost credentialed CORS`,
+  );
+});
+
 // ---- end of sections ----
 
 for (const { label, fn } of sections) {

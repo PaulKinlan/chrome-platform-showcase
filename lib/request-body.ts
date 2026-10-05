@@ -52,9 +52,12 @@ export async function readBoundedBody(
   limitBytes: number,
   message?: string,
 ): Promise<BoundedBody> {
-  const declared = Number(req.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > limitBytes) {
-    return { ok: false, response: payloadTooLargeResponse(limitBytes, message) };
+  const declaredHeader = req.headers.get("content-length");
+  if (declaredHeader !== null) {
+    const declared = Number(declaredHeader);
+    if (Number.isFinite(declared) && declared > limitBytes) {
+      return { ok: false, response: payloadTooLargeResponse(limitBytes, message) };
+    }
   }
   if (!req.body) return { ok: true, bytes: new Uint8Array(0) };
 

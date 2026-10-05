@@ -22,18 +22,42 @@ export function forbiddenResponse(reason: string): Response {
   });
 }
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * http://localhost:3000 and http://127.0.0.1:3000 (and [::1]) name the same
+ * local listener. The browser treats the pair as genuinely cross-origin —
+ * which is exactly why local demos use it to exercise CORS against this
+ * same server — so credentialed CORS for the pair is still same-site.
+ */
+function loopbackEquivalent(a: string, b: string): boolean {
+  try {
+    const urlA = new URL(a);
+    const urlB = new URL(b);
+    return urlA.protocol === urlB.protocol &&
+      urlA.port === urlB.port &&
+      LOOPBACK_HOSTS.has(urlA.hostname) &&
+      LOOPBACK_HOSTS.has(urlB.hostname);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The origin allowed to make credentialed CORS requests to showcase
  * endpoints: the site's own origin. When the request carries no Origin
- * header the site origin is returned (same-origin requests). An explicit
- * foreign Origin disables credentialed CORS for that response — the caller
- * gets no access-control-allow-origin at all and the browser blocks the
+ * header the site origin is returned (same-origin requests), and the
+ * loopback host pair counts as the site itself. Any other explicit Origin
+ * disables credentialed CORS for that response — the caller gets no
+ * access-control-allow-origin at all and the browser blocks the
  * credentialed read.
  */
 export function allowlistedCorsOrigin(req: Request, url: URL): string | null {
   const origin = req.headers.get("origin");
   if (!origin) return url.origin;
-  return origin === url.origin ? origin : null;
+  if (origin === url.origin) return origin;
+  if (loopbackEquivalent(origin, url.origin)) return origin;
+  return null;
 }
 
 const headerOriginPattern = /^https?:\/\/[A-Za-z0-9.\-:%\[\]]+$/;
