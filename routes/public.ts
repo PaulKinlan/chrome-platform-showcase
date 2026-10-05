@@ -25,9 +25,32 @@ const MIME: Record<string, string> = {
   woff2: "font/woff2",
 };
 
+const PUBLIC_ROOT_URL = new URL("../public/", import.meta.url);
+
 async function readPublicAsset(path: string, url: URL): Promise<Response> {
   try {
-    const file = await Deno.readFile("." + path);
+    // Resolve the requested path against the public root and require the
+    // result to stay inside it, both lexically (URL resolution folds away
+    // dot segments) and, where the runtime supports realPath, against the
+    // canonical filesystem location (so a symlink planted inside public/
+    // cannot point the read outside the root).
+    const target = new URL(`.${path.slice("/public".length)}`, PUBLIC_ROOT_URL);
+    if (!target.href.startsWith(PUBLIC_ROOT_URL.href)) {
+      return new Response("Not found", { status: 404 });
+    }
+    let filePath = target.pathname;
+    try {
+      const realRoot = Deno.realPathSync(PUBLIC_ROOT_URL.pathname);
+      const realTarget = await Deno.realPath(filePath);
+      if (realTarget !== realRoot && !realTarget.startsWith(`${realRoot}/`)) {
+        return new Response("Not found", { status: 404 });
+      }
+      filePath = realTarget;
+    } catch {
+      // realPath is unavailable on some runtimes; lexical containment above
+      // still holds, and a missing file fails the read below.
+    }
+    const file = await Deno.readFile(filePath);
     const ext = path.split(".").pop() ?? "";
     const headers: Record<string, string> = {
       "content-type": MIME[ext] ?? "application/octet-stream",

@@ -5,6 +5,7 @@
 // attribute escaping on generated pages.
 
 import { handleDemoTelemetryRoute } from "../routes/demo-telemetry.ts";
+import { handlePublicRoute } from "../routes/public.ts";
 import {
   handleLegacyReleaseEndpoints,
   renderProfileTelemetryRoute,
@@ -417,6 +418,39 @@ section("storage-access allowed-origin accepts a well-formed origin", async () =
     header === 'retry; allowed-origin="https://partner.example"',
     `${label}: unexpected header value: ${header}`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// 5. Static asset serving resolves every request inside the public root: a
+//    path that resolves outside it (including via a symlink planted inside
+//    public/) is a 404, while normal assets keep serving.
+// ---------------------------------------------------------------------------
+
+section("public assets stay inside the public root", async () => {
+  const label = "public assets stay inside the public root";
+  // A symlink inside public/ pointing at a file outside the root. This is the
+  // only construction the URL parser's dot-segment normalisation cannot see.
+  const linkPath = new URL("../public/.hardening-test-link", import.meta.url).pathname;
+  await Deno.symlink(
+    new URL("../server.ts", import.meta.url).pathname,
+    linkPath,
+  );
+  try {
+    const escape = await handlePublicRoute(
+      new Request("http://localhost:3000/public/.hardening-test-link"),
+    );
+    assertStatus(escape?.status ?? 0, 404, `${label}: symlink escape`);
+
+    const normal = await handlePublicRoute(
+      new Request("http://localhost:3000/public/styles.css"),
+    );
+    assert(
+      normal?.status === 200 && normal.headers.get("content-type") === "text/css; charset=utf-8",
+      `${label}: styles.css no longer serves (${normal?.status})`,
+    );
+  } finally {
+    await Deno.remove(linkPath);
+  }
 });
 
 // ---- end of sections ----
