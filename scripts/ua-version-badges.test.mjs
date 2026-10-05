@@ -99,6 +99,56 @@ for (const page of UA_CH_PAGES) {
   );
 }
 
+// ── Runtime behaviour of chromiumMajorVersion() ─────────────────────────────
+// The honest-unknown path is the load-bearing claim of this fix: when the
+// browser reports no Chromium version (no UA-CH, empty brands, or only
+// GREASE entries), the helper must return null — never a guess. These stubs
+// pin that contract so a regression fails here, not just in an ad-hoc
+// browser run.
+{
+  await import("../public/chrome-compat.js");
+  const stub = (value) =>
+    Object.defineProperty(globalThis.navigator, "userAgentData", {
+      value,
+      configurable: true,
+    });
+
+  check(
+    "chromiumMajorVersion() returns null with no UA-CH support",
+    globalThis.chromiumMajorVersion() === null,
+  );
+  stub({ brands: [] });
+  check(
+    "chromiumMajorVersion() returns null for empty brands (spoofed/reduced UA)",
+    globalThis.chromiumMajorVersion() === null,
+  );
+  stub({ brands: [{ brand: "Not_A Brand", version: "99" }] });
+  check(
+    "chromiumMajorVersion() ignores GREASE-only brand lists",
+    globalThis.chromiumMajorVersion() === null,
+  );
+  stub({ brands: [{ brand: "Firefox", version: "144" }] });
+  check(
+    "chromiumMajorVersion() returns null for non-Chromium brands",
+    globalThis.chromiumMajorVersion() === null,
+  );
+  stub({
+    brands: [
+      { brand: "Not_A Brand", version: "99" },
+      { brand: "Google Chrome", version: "154" },
+    ],
+  });
+  check(
+    "chromiumMajorVersion() reads the real Chromium version past GREASE",
+    globalThis.chromiumMajorVersion() === 154,
+  );
+  stub({ brands: [{ brand: "Chromium", version: "garbage" }] });
+  check(
+    "chromiumMajorVersion() returns null for an unparseable version",
+    globalThis.chromiumMajorVersion() === null,
+  );
+}
+
 if (failures > 0) {
   console.error(`\n${failures} UA-badge check(s) failed`);
   Deno.exit(1);
