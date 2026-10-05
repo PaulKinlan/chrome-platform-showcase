@@ -5,6 +5,7 @@
 // attribute escaping on generated pages.
 
 import { handleDemoTelemetryRoute } from "../routes/demo-telemetry.ts";
+import { buildAliasLocation, handleAliasRoute } from "../routes/aliases.ts";
 import { handlePublicRoute } from "../routes/public.ts";
 import {
   handleLegacyReleaseEndpoints,
@@ -451,6 +452,60 @@ section("public assets stay inside the public root", async () => {
   } finally {
     await Deno.remove(linkPath);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 6. Alias redirect Location values are assembled from repo migration data
+//    plus the request suffix and raw query: the alias target must be
+//    site-relative and the assembled Location must be printable ASCII with no
+//    spaces or control characters, or the request is refused.
+// ---------------------------------------------------------------------------
+
+section("alias redirect serves the recorded move", async () => {
+  const label = "alias redirect serves the recorded move";
+  const res = await handleAliasRoute(
+    new Request(
+      "http://localhost:3000/v150/disable-svg-filters-on-plugins-and-cross-origin-or-restricted-iframes/",
+    ),
+  );
+  assert(
+    res?.status === 301 &&
+      res.headers.get("location") === "/v150/disable-svg-filters-on-plugins-and-iframes/",
+    `${label}: got ${res?.status} ${res?.headers.get("location")}`,
+  );
+});
+
+section("alias location builder keeps targets site-relative", async () => {
+  const label = "alias location builder keeps targets site-relative";
+  assert(
+    buildAliasLocation({ to: "//foreign.example/x" }, "/a/", "?q=1") === null,
+    `${label}: scheme-relative target accepted`,
+  );
+  assert(
+    buildAliasLocation({ to: "https://foreign.example/x" }, "", "") === null,
+    `${label}: absolute-URL target accepted`,
+  );
+});
+
+section("alias location builder rejects non-printable or spaced locations", async () => {
+  const label = "alias location builder rejects non-printable or spaced locations";
+  assert(
+    buildAliasLocation({ to: "/v150/x/" }, "", "?q=\r\nX-Injected: 1") === null,
+    `${label}: CRLF in raw search accepted`,
+  );
+  assert(
+    buildAliasLocation({ to: "/v150/x/" }, "", "?q=a b") === null,
+    `${label}: space in raw search accepted`,
+  );
+  assert(
+    buildAliasLocation({ to: "/v150/x/" }, "", "?q=\u0000") === null,
+    `${label}: control character in raw search accepted`,
+  );
+  assert(
+    buildAliasLocation({ to: "/v150/x/" }, "concept/", "?q=%E2%82%AC") ===
+      "/v150/x/concept/?q=%E2%82%AC",
+    `${label}: ordinary encoded query mangled`,
+  );
 });
 
 // ---- end of sections ----

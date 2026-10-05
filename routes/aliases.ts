@@ -45,6 +45,24 @@ function loadAliases(): Array<{ from: string; to: string }> {
 
 const ALIASES = loadAliases();
 
+/**
+ * Assembles the Location for an alias redirect from the repo's migration
+ * record plus the request's deeper path suffix and raw query string. The
+ * alias target must be site-relative, and the assembled Location must be
+ * printable ASCII without spaces or control characters; anything else is
+ * refused (null) and the caller answers 400.
+ */
+export function buildAliasLocation(
+  alias: { to: string },
+  suffix: string,
+  search: string,
+): string | null {
+  if (!alias.to.startsWith("/") || alias.to.startsWith("//")) return null;
+  const location = `${alias.to}${suffix}${search}`;
+  if (!/^[\x21-\x7E]+$/.test(location)) return null;
+  return location;
+}
+
 export function handleAliasRoute(req: Request): Response | null {
   if (ALIASES.length === 0) return null;
 
@@ -55,7 +73,10 @@ export function handleAliasRoute(req: Request): Response | null {
   for (const alias of ALIASES) {
     if (path === alias.from || path.startsWith(alias.from)) {
       const suffix = path.slice(alias.from.length);
-      const location = `${alias.to}${suffix}${url.search}`;
+      const location = buildAliasLocation(alias, suffix, url.search);
+      if (!location) {
+        return new Response("Bad request", { status: 400 });
+      }
       return new Response(null, {
         status: 301,
         headers: {
