@@ -1004,6 +1004,49 @@ async function resolveDemo(
   return { href: `/${dir}/`, release: elsewhere, sameRelease: false };
 }
 
+/**
+ * One feature card on a milestone page. All interpolated values — including
+ * the hrefs — are escaped for their HTML attribute context.
+ */
+export function renderDemoCard(
+  f: FeatureSummary,
+  demo: ResolvedDemo | null,
+  probe: DemoProbe | undefined,
+  group: { category: string },
+): string {
+  const summary = (f.summary ?? "").slice(0, 220);
+  const titleHref = demo ? demo.href : chromeStatusUrl(f.id);
+  const titleHrefAttr = escapeHTML(titleHref);
+  const chromeStatusHrefAttr = escapeHTML(chromeStatusUrl(f.id));
+  const probeAttrs = probe
+    ? ` data-probe-kind="${escapeHTML(probe.kind)}" data-probe-test="${escapeHTML(probe.test)}"${
+      probe.expect ? ` data-probe-expect="${escapeHTML(probe.expect)}"` : ""
+    }`
+    : "";
+  return `<li class="demo-card"${probeAttrs}>
+        <h3><a href="${titleHrefAttr}"${demo ? "" : ' target="_blank" rel="noopener"'}>${
+    escapeHTML(f.name)
+  }</a></h3>
+        <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
+        <div class="demo-tags">
+          <span class="tag">${escapeHTML(categoryTag(group.category))}</span>
+          ${probe ? `<span class="tag tag-compat" data-compat-badge hidden>checking…</span>` : ""}
+          <a class="tag tag-chromestatus" href="${chromeStatusHrefAttr}" target="_blank" rel="noopener">ChromeStatus &nearr;</a>
+          ${
+    demo
+      ? demo.sameRelease
+        ? `<a class="tag tag-live" href="${escapeHTML(demo.href)}">demo &rarr;</a>`
+        : `<a class="tag tag-live" href="${
+          escapeHTML(demo.href)
+        }" title="This feature is demonstrated in the milestone it shipped in">demo in ${
+          escapeHTML(demo.release)
+        } &rarr;</a>`
+      : `<span class="tag tag-pending">demo pending</span>`
+  }
+        </div>
+      </li>`;
+}
+
 export async function renderReleasePage(
   release: string,
   milestone: number,
@@ -1028,36 +1071,7 @@ export async function renderReleasePage(
   const sections = await Promise.all(features.groups.map(async (group) => {
     const cards = await Promise.all(group.features.map(async (f) => {
       const demo = await resolveDemo(release, f);
-      const probe = probes[String(f.id)];
-      const summary = (f.summary ?? "").slice(0, 220);
-      const titleHref = demo ? demo.href : chromeStatusUrl(f.id);
-      const probeAttrs = probe
-        ? ` data-probe-kind="${escapeHTML(probe.kind)}" data-probe-test="${
-          escapeHTML(probe.test)
-        }"${probe.expect ? ` data-probe-expect="${escapeHTML(probe.expect)}"` : ""}`
-        : "";
-      return `<li class="demo-card"${probeAttrs}>
-        <h3><a href="${titleHref}"${demo ? "" : ' target="_blank" rel="noopener"'}>${
-        escapeHTML(f.name)
-      }</a></h3>
-        <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
-        <div class="demo-tags">
-          <span class="tag">${escapeHTML(categoryTag(group.category))}</span>
-          ${probe ? `<span class="tag tag-compat" data-compat-badge hidden>checking…</span>` : ""}
-          <a class="tag tag-chromestatus" href="${
-        chromeStatusUrl(f.id)
-      }" target="_blank" rel="noopener">ChromeStatus &nearr;</a>
-          ${
-        demo
-          ? demo.sameRelease
-            ? `<a class="tag tag-live" href="${demo.href}">demo &rarr;</a>`
-            : `<a class="tag tag-live" href="${demo.href}" title="This feature is demonstrated in the milestone it shipped in">demo in ${
-              escapeHTML(demo.release)
-            } &rarr;</a>`
-          : `<span class="tag tag-pending">demo pending</span>`
-      }
-        </div>
-      </li>`;
+      return renderDemoCard(f, demo, probes[String(f.id)], group);
     }));
     return `<section data-release-group>
       <h3 class="group-title">${
@@ -1666,6 +1680,38 @@ export async function renderCategoriesIndex(channels: Channels): Promise<string>
 </html>`;
 }
 
+/**
+ * One feature card on a category page, with every interpolated value —
+ * including the hrefs — escaped for its HTML attribute context.
+ */
+export function renderCategoryCard(
+  r: { name: string; summary?: string | null; id: number | string; demo: ResolvedDemo | null },
+): string {
+  const summary = (r.summary ?? "").slice(0, 220);
+  return `<li class="demo-card">
+        <h3>${
+    r.demo ? `<a href="${escapeHTML(r.demo.href)}">${escapeHTML(r.name)}</a>` : escapeHTML(r.name)
+  }</h3>
+        <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
+        <div class="demo-tags">
+          <a class="tag" href="${
+    escapeHTML(`https://chromestatus.com/feature/${r.id}`)
+  }" target="_blank" rel="noopener">chromestatus</a>
+          ${
+    r.demo
+      ? r.demo.sameRelease
+        ? `<a class="tag tag-live" href="${escapeHTML(r.demo.href)}">demo &rarr;</a>`
+        : `<a class="tag tag-live" href="${
+          escapeHTML(r.demo.href)
+        }" title="This feature is demonstrated in the milestone it shipped in">demo in ${
+          escapeHTML(r.demo.release)
+        } &rarr;</a>`
+      : `<span class="tag tag-pending">demo pending</span>`
+  }
+        </div>
+      </li>`;
+}
+
 export async function renderCategoryPage(slug: string, channels: Channels): Promise<string | null> {
   const cat = CATEGORIES.find((c) => c.slug === slug);
   if (!cat) return null;
@@ -1682,27 +1728,7 @@ export async function renderCategoryPage(slug: string, channels: Channels): Prom
   }
 
   const milestoneSections = [...byMstone.entries()].map(([m, rs]) => {
-    const cards = rs.map((r) => {
-      const summary = (r.summary ?? "").slice(0, 220);
-      return `<li class="demo-card">
-        <h3>${
-        r.demo ? `<a href="${r.demo.href}">${escapeHTML(r.name)}</a>` : escapeHTML(r.name)
-      }</h3>
-        <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
-        <div class="demo-tags">
-          <a class="tag" href="https://chromestatus.com/feature/${r.id}" target="_blank" rel="noopener">chromestatus</a>
-          ${
-        r.demo
-          ? r.demo.sameRelease
-            ? `<a class="tag tag-live" href="${r.demo.href}">demo &rarr;</a>`
-            : `<a class="tag tag-live" href="${r.demo.href}" title="This feature is demonstrated in the milestone it shipped in">demo in ${
-              escapeHTML(r.demo.release)
-            } &rarr;</a>`
-          : `<span class="tag tag-pending">demo pending</span>`
-      }
-        </div>
-      </li>`;
-    }).join("");
+    const cards = rs.map((r) => renderCategoryCard(r)).join("");
     return `<section>
       <h3 class="group-title">Chrome ${m} <span class="group-count">(${rs.length})</span></h3>
       <ol class="demo-list">${cards}</ol>
