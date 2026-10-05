@@ -35,3 +35,17 @@ export function allowlistedCorsOrigin(req: Request, url: URL): string | null {
   if (!origin) return url.origin;
   return origin === url.origin ? origin : null;
 }
+
+const headerOriginPattern = /^https?:\/\/[A-Za-z0-9.\-:%\[\]]+$/;
+
+/**
+ * A value safe to embed inside a structured response header's quoted-string
+ * parameter: a well-formed absolute http(s) origin passes through, and
+ * anything else (wrong shape, quotes, controls, over-long) falls back to the
+ * site's own origin so a client-supplied header can never alter the
+ * structured header's meaning.
+ */
+export function validatedHeaderOrigin(raw: string | null, fallback: string): string {
+  if (raw && raw.length <= 255 && headerOriginPattern.test(raw)) return raw;
+  return fallback;
+}

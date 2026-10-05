@@ -6,6 +6,7 @@ import {
   allowlistedCorsOrigin,
   forbiddenResponse,
   sameOriginRequest,
+  validatedHeaderOrigin,
 } from "../lib/request-guards.ts";
 import { escapeHTML } from "./html.ts";
 
@@ -1093,7 +1094,7 @@ function renderStorageAccessHeadersRoute(req: Request, sub: string): Response | 
   const grant = url.searchParams.get("grant") === "1";
   const resource = url.searchParams.get("resource") ?? "fetch";
   const phase = url.searchParams.get("phase") ?? "initial";
-  const origin = req.headers.get("origin") ?? new URL(req.url).origin;
+  const origin = validatedHeaderOrigin(req.headers.get("origin"), url.origin);
   const responseHeaders: Record<string, string> = {
     "cache-control": "no-store",
     "content-type": "application/json; charset=utf-8",

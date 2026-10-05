@@ -376,6 +376,49 @@ section("css url modifier credentialed mode echoes only the site's own origin", 
   );
 });
 
+// ---------------------------------------------------------------------------
+// 4. The activate-storage-access structured header only ever carries a
+//    validated origin value: a syntactically invalid Origin falls back to the
+//    site's own origin and cannot alter the header's structure.
+// ---------------------------------------------------------------------------
+
+section("storage-access allowed-origin validates the reflected origin", async () => {
+  const label = "storage-access allowed-origin validates the reflected origin";
+  const hostile = corsRequest(
+    "/v130/storage-access-headers/probe?grant=1&activate=retry",
+    { "origin": `https://good.example" ; injected="yes` },
+  );
+  const res = await handleLegacyReleaseEndpoints(
+    hostile,
+    "v130",
+    "/storage-access-headers/probe",
+    noAsset,
+  );
+  const header = res.headers.get("activate-storage-access") ?? "";
+  assert(
+    header === 'retry; allowed-origin="http://localhost:3000"',
+    `${label}: unexpected header value: ${header}`,
+  );
+});
+
+section("storage-access allowed-origin accepts a well-formed origin", async () => {
+  const label = "storage-access allowed-origin accepts a well-formed origin";
+  const req = corsRequest("/v130/storage-access-headers/probe?grant=1&activate=retry", {
+    "origin": "https://partner.example",
+  });
+  const res = await handleLegacyReleaseEndpoints(
+    req,
+    "v130",
+    "/storage-access-headers/probe",
+    noAsset,
+  );
+  const header = res.headers.get("activate-storage-access") ?? "";
+  assert(
+    header === 'retry; allowed-origin="https://partner.example"',
+    `${label}: unexpected header value: ${header}`,
+  );
+});
+
 // ---- end of sections ----
 
 for (const { label, fn } of sections) {
