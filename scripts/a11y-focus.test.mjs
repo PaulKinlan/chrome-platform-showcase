@@ -29,6 +29,9 @@ function check(label, ok) {
 
 // Extract the declaration block of the first rule whose selector contains
 // `selectorFragment` (e.g. ".filter-btn" matches ".filter-btn { ... }").
+// Limitation: only works for flat CSS — a selector that appears ONLY inside a
+// nested block (@media/@supports) is not reachable, and that is deliberate:
+// these checks target base rules, and an unseen nested match fails closed.
 function ruleBlock(css, selectorFragment) {
   const re = new RegExp(
     `[^{}]*${selectorFragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^{}]*\\{([^{}]*)\\}`,
@@ -59,9 +62,8 @@ function ruleBlock(css, selectorFragment) {
   );
   const base = ruleBlock(html, ".filter-btn");
   check(
-    ".filter-btn base rule does not strip the outline without a replacement",
-    base === null || !/outline\s*:\s*none/.test(base) ||
-      /:focus-visible/.test(html),
+    ".filter-btn base rule exists and does not strip the outline",
+    base !== null && !/outline\s*:\s*none/.test(base),
   );
 }
 
@@ -72,17 +74,23 @@ function ruleBlock(css, selectorFragment) {
   );
   const cards = [...html.matchAll(/<div class="uc-card"[^>]*>/g)].map((m) => m[0]);
   check("use-case-sampler renders .uc-card controls", cards.length > 0);
+  // The cards are mutually exclusive (selecting one deselects the others),
+  // so they are radios inside a radiogroup, not independent toggle buttons.
   check(
-    "every .uc-card exposes a button role",
-    cards.length > 0 && cards.every((c) => /role="button"/.test(c)),
+    ".uc-card group exposes a labelled radiogroup role",
+    /<div class="use-case-grid" role="radiogroup" aria-label="[^"]+">/.test(html),
+  );
+  check(
+    "every .uc-card exposes a radio role",
+    cards.length > 0 && cards.every((c) => /role="radio"/.test(c)),
   );
   check(
     "every .uc-card is in the tab order",
     cards.length > 0 && cards.every((c) => /tabindex="0"/.test(c)),
   );
   check(
-    "every .uc-card exposes pressed state",
-    cards.length > 0 && cards.every((c) => /aria-pressed="(true|false)"/.test(c)),
+    "every .uc-card exposes checked state",
+    cards.length > 0 && cards.every((c) => /aria-checked="(true|false)"/.test(c)),
   );
   check(
     ".uc-card selection has a keyboard handler",
@@ -111,7 +119,24 @@ function ruleBlock(css, selectorFragment) {
   );
   check(
     "tier-grid has a keyboard handler",
-    /tier-grid[^;]*addEventListener\(["']key(down|up)["']/.test(html.replace(/\n/g, " ")),
+    /getElementById\(["']tier-grid["']\)\s*\.addEventListener\(["']key(down|up)["']/.test(html),
+  );
+
+  // The decision-wizard options in the same file are mutually exclusive per
+  // question: radios inside labelled radiogroups, keyboard-operable.
+  const opts = [...html.matchAll(/<div class="dec-opt[ "][^>]*>/g)].map((m) => m[0]);
+  check("decision wizard renders .dec-opt controls", opts.length === 12);
+  check(
+    "every .dec-opt exposes a radio role, tab order and checked state",
+    opts.length > 0 &&
+      opts.every((o) =>
+        /role="radio"/.test(o) && /tabindex="0"/.test(o) && /aria-checked="(true|false)"/.test(o)
+      ),
+  );
+  check(
+    "every .dec-options group is a labelled radiogroup",
+    (html.match(/<div class="dec-options"[^>]*role="radiogroup" aria-label="[^"]+"[^>]*>/g) || [])
+      .length === 4,
   );
 }
 
