@@ -2,6 +2,7 @@
 // New features should prefer co-located v<N>/<feature-slug>/_server.ts modules.
 
 import { readBoundedBody, readBoundedText } from "../lib/request-body.ts";
+import { forbiddenResponse, sameOriginRequest } from "../lib/request-guards.ts";
 import { escapeHTML } from "./html.ts";
 
 /** Byte cap for demo JSON/form POST bodies on public endpoints. */
@@ -3249,6 +3250,9 @@ export async function renderProfileTelemetryRoute(
   }
 
   if (path === "/telemetry/profile/reset" && req.method === "POST") {
+    if (!sameOriginRequest(req, new URL(req.url))) {
+      return forbiddenResponse("Cross-site telemetry resets are not accepted.");
+    }
     profileTelemetryEvents.splice(0);
     return jsonResponse({ reset: true, events: [] });
   }

@@ -1,4 +1,5 @@
 import { readBoundedText } from "../lib/request-body.ts";
+import { forbiddenResponse, sameOriginRequest } from "../lib/request-guards.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -109,10 +110,6 @@ function unauthorizedResponse(): Response {
   });
 }
 
-function forbiddenResponse(reason: string): Response {
-  return jsonResponse({ error: reason }, { status: 403 });
-}
-
 function isAuthorized(req: Request): boolean {
   const password = configuredPassword();
   if (!password) return false;
@@ -174,10 +171,7 @@ function sanitizePayload(payload: JsonRecord): JsonRecord {
 }
 
 function sameOriginTelemetry(req: Request, url: URL): boolean {
-  const secFetchSite = req.headers.get("sec-fetch-site");
-  if (secFetchSite && !["same-origin", "none"].includes(secFetchSite)) return false;
-  const origin = req.headers.get("origin");
-  return !origin || origin === url.origin;
+  return sameOriginRequest(req, url);
 }
 
 function validPagePath(page: string): boolean {

@@ -237,6 +237,49 @@ section("fedcm assertion body cap", async () => {
   assertStatus(res.status, 413, label);
 });
 
+// ---------------------------------------------------------------------------
+// 2. State-changing telemetry endpoints require a same-origin signal: a
+//    cross-site Origin (or Sec-Fetch-Site) is refused with 403.
+// ---------------------------------------------------------------------------
+
+section("profile reset refuses cross-site origin", async () => {
+  const label = "profile reset refuses cross-site origin";
+  const req = post("/telemetry/profile/reset", "", {
+    "origin": "https://foreign.example",
+    "sec-fetch-site": "cross-site",
+  });
+  const res = await renderProfileTelemetryRoute(req, "/telemetry/profile/reset");
+  assertStatus(res.status, 403, label);
+});
+
+section("profile reset refuses same-site-but-cross-origin signal", async () => {
+  const label = "profile reset refuses same-site-but-cross-origin signal";
+  const req = post("/telemetry/profile/reset", "", {
+    "origin": "https://foreign.example",
+    "sec-fetch-site": "same-site",
+  });
+  const res = await renderProfileTelemetryRoute(req, "/telemetry/profile/reset");
+  assertStatus(res.status, 403, label);
+});
+
+section("profile reset accepts same-origin origin header", async () => {
+  const label = "profile reset accepts same-origin origin header";
+  const req = post("/telemetry/profile/reset", "", {
+    "origin": "http://localhost:3000",
+    "sec-fetch-site": "same-origin",
+  });
+  const res = await renderProfileTelemetryRoute(req, "/telemetry/profile/reset");
+  const payload = await res.json();
+  assert(res.status === 200 && payload.reset === true, `${label}: got ${res.status}`);
+});
+
+section("profile reset accepts browser top-level navigation signal", async () => {
+  const label = "profile reset accepts browser top-level navigation signal";
+  const req = post("/telemetry/profile/reset", "", { "sec-fetch-site": "none" });
+  const res = await renderProfileTelemetryRoute(req, "/telemetry/profile/reset");
+  assertStatus(res.status, 200, label);
+});
+
 for (const { label, fn } of sections) {
   try {
     await fn();
