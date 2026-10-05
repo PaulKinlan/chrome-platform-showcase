@@ -40,6 +40,9 @@ const UA_CH_PAGES = [
   "v150/opaque-origin-for-data-urls/origin-isolation-demo/index.html",
   "v150/opaque-origin-for-data-urls/migration-patterns/index.html",
   "v150/update-text-selection-on-mouseup-before-dispatching-click-event/event-sequence-visualizer/index.html",
+  "v150/case-sensitive-anchor-name-matching-in-quirks-mode/anchor-matching-demo/index.html",
+  "v150/case-sensitive-anchor-name-matching-in-quirks-mode/fragment-tester/index.html",
+  "v150/deprecate-and-remove-related-website-sets-rws/rws-to-chips-migrator/index.html",
 ];
 
 const ALL_PAGES = [
@@ -93,6 +96,12 @@ const HONEST_UNKNOWN_STRINGS = {
     "Browser version not reported (no UA Client Hints). Interpret the probes below from observed capability results.",
   "v150/update-text-selection-on-mouseup-before-dispatching-click-event/event-sequence-visualizer/index.html":
     "Browser version unknown (no UA Client Hints) — run the sequence below and compare the immediate vs deferred reads",
+  "v150/case-sensitive-anchor-name-matching-in-quirks-mode/anchor-matching-demo/index.html":
+    "Browser version not reported (no UA Client Hints). The page still compares this document with the real BackCompat iframe result.",
+  "v150/case-sensitive-anchor-name-matching-in-quirks-mode/fragment-tester/index.html":
+    "Browser version not reported (no UA Client Hints). The iframe still reports its real BackCompat fragment target.",
+  "v150/deprecate-and-remove-related-website-sets-rws/rws-to-chips-migrator/index.html":
+    "Browser version not reported (no UA Client Hints) — the grid above shows the real API presence in this browser.",
 };
 
 for (const page of UA_CH_PAGES) {
