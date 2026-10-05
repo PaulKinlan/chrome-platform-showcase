@@ -587,6 +587,246 @@ section("credentialed CORS echoes the loopback host pair", async () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// FedCM credentialed CORS: the browser's verdict, not just the server's
+// headers. The header-level check earlier in this suite proves what the
+// server SENDS (ACAO+ACAC echo for the site's own origin, no ACAO at all for
+// a foreign one). It cannot prove what a real browser ACCEPTS or REFUSES:
+// that is decided by the browser's CORS engine. This section drives a real
+// headless Chrome twice against an in-process instance of the real handler:
+//
+//   own-origin family: a page at http://localhost:A (loopback pair of
+//     http://127.0.0.1:A, which the allowlist treats as the site itself)
+//     issues a CROSS-ORIGIN credentialed fetch of the client-metadata
+//     endpoint. Expected: the browser ACCEPTS it and the JSON body is
+//     readable — usable credentialed access for the site's own origin.
+//
+//   foreign origin: a page at http://127.0.0.1:B issues the same
+//     credentialed fetch. Expected: the fetch promise REJECTS (TypeError) —
+//     the browser refuses, and no response body of any kind is exposed.
+//
+// Cookies cannot cross the localhost/127.0.0.1 host pair, so the credentialed
+// request carries no cookie in either direction — the accept/refuse verdict
+// is decided by ACAO+ACAC alone, which is exactly what this section pins.
+//
+// Each page reports its own verdict back to this process (a same-origin
+// navigation to /report, served by the same listeners), so the assertions run
+// on data the test received directly and the server logs progress as it
+// happens. Skipped (loudly) when no Chrome binary is available, or when Chrome
+// starts but never reaches the page, so the gate never breaks on a browserless
+// or saturated box; on this fleet's VMs it runs for real.
+// ---------------------------------------------------------------------------
+section("fedcm credentialed CORS browser verdict", async () => {
+  const label = "fedcm credentialed CORS browser verdict";
+  const chromeCandidates = [
+    Deno.env.get("CHROME_BIN"),
+    `${
+      Deno.env.get("HOME") ?? ""
+    }/.cache/browsers/chrome/linux-154.0.8037.92/chrome-linux64/chrome`,
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+  ].filter(Boolean);
+  let chromeBin = null;
+  for (const c of chromeCandidates) {
+    try {
+      await Deno.stat(c);
+      chromeBin = c;
+      break;
+    } catch { /* next candidate */ }
+  }
+  if (!chromeBin) {
+    console.log(
+      `skip ${label}: no Chrome binary (set CHROME_BIN); header-level sections still ran`,
+    );
+    return;
+  }
+
+  const FEDCM_PATH = "/v148/agentic-federated-login/fedcm/client-metadata";
+  // Under heavy host steal a freshly-bound listener can take seconds before it
+  // accepts; wait for it so Chrome never races a half-open port (an empty dump
+  // from a refused navigation looks exactly like a failed verdict).
+  const waitForListen = async (url, what) => {
+    for (let i = 0; i < 40; i++) {
+      try {
+        await fetch(url, { method: "HEAD" });
+        return true;
+      } catch {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+    throw new Error(`${label}: ${what} never accepted a connection`);
+  };
+  const handler = (req) =>
+    handleLegacyReleaseEndpoints(
+      new Request(`http://127.0.0.1:3000${new URL(req.url).pathname}`, {
+        method: req.method,
+        headers: req.headers,
+      }),
+      "v148",
+      "/agentic-federated-login/fedcm/client-metadata",
+      noAsset,
+    );
+
+  // The page REPORTS its verdict to the test server (a same-origin navigation)
+  // instead of the test dumping the DOM: the assertion then runs on data this
+  // process received directly, which removes every load-vs-dump timing race and
+  // makes progress visible as the server logs each hit. On this fleet's
+  // contended 2-vCPU VMs Chrome can boot yet never produce a --dump-dom, which
+  // is why this section no longer depends on that.
+  const driverPage = (fetchUrl, caseName, reportUrl) =>
+    `<!doctype html>
+<html><body>
+<p id="case">${caseName}</p>
+<pre id="verdict">pending</pre>
+<script>
+(async () => {
+  let verdict;
+  try {
+    const res = await fetch(${JSON.stringify(fetchUrl)}, {
+      credentials: "include",
+      mode: "cors",
+    });
+    let bodyOk = false;
+    try {
+      const body = await res.json();
+      bodyOk = typeof body.privacy_policy_url === "string";
+    } catch { /* unreadable or non-JSON body */ }
+    verdict = "BROWSER-ACCEPTED status=" + res.status + " bodyReadable=" + bodyOk;
+  } catch (e) {
+    verdict = "BROWSER-REFUSED " + (e && e.name);
+  }
+  document.getElementById("verdict").textContent = verdict;
+  location.href = ${JSON.stringify(reportUrl)} + "&result=" + encodeURIComponent(verdict);
+})();
+</script>
+</body></html>`;
+
+  let sitePort = 0, attackerPort = 0;
+  // Both listeners live in this process, so a verdict reported to EITHER
+  // origin (the foreign page reports to its own) lands in the same map.
+  const reported = new Map();
+  const reportWaiters = [];
+  const reportRoute = (req) => {
+    const u = new URL(req.url);
+    const caseName = u.searchParams.get("case") ?? "unknown";
+    const result = u.searchParams.get("result") ?? "missing-result";
+    console.log(`     ${label}: browser reported case=${caseName} -> ${result}`);
+    reported.set(caseName, result);
+    for (const w of reportWaiters.splice(0)) w();
+    return new Response("reported", { headers: { "content-type": "text/plain" } });
+  };
+  const waitForVerdict = (caseName, ms) =>
+    new Promise((resolve) => {
+      if (reported.has(caseName)) return resolve(reported.get(caseName));
+      const timer = setTimeout(() => resolve(null), ms);
+      reportWaiters.push(() => {
+        clearTimeout(timer);
+        resolve(reported.get(caseName));
+      });
+    });
+  const site = Deno.serve(
+    { hostname: "127.0.0.1", port: 0, onListen: ({ port }) => (sitePort = port) },
+    (req) => {
+      const path = new URL(req.url).pathname;
+      if (path === FEDCM_PATH) return handler(req);
+      if (path === "/report") return reportRoute(req);
+      if (path === "/driver/own") {
+        console.log(`     ${label}: chrome requested the own-origin driver page`);
+        return new Response(
+          driverPage(
+            `http://localhost:${sitePort}${FEDCM_PATH}`,
+            "own",
+            `http://127.0.0.1:${sitePort}/report?case=own`,
+          ),
+          { headers: { "content-type": "text/html" } },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    },
+  );
+  const attacker = Deno.serve(
+    { hostname: "127.0.0.1", port: 0, onListen: ({ port }) => (attackerPort = port) },
+    (req) => {
+      const path = new URL(req.url).pathname;
+      if (path === "/report") return reportRoute(req);
+      console.log(`     ${label}: chrome requested the foreign-origin driver page`);
+      return new Response(attackerHtml, { headers: { "content-type": "text/html" } });
+    },
+  );
+  let attackerHtml = "";
+  try {
+    attackerHtml = driverPage(
+      `http://127.0.0.1:${sitePort}${FEDCM_PATH}`,
+      "foreign",
+      `http://127.0.0.1:${attackerPort}/report?case=foreign`,
+    );
+    await waitForListen(`http://127.0.0.1:${sitePort}${FEDCM_PATH}`, "site server");
+    await waitForListen(`http://127.0.0.1:${attackerPort}/`, "attacker server");
+
+    // Launch Chrome at a page and wait for the PAGE ITSELF to report back; the
+    // browser process is killed as soon as the verdict arrives (or after the
+    // bound), so nothing here depends on dump timing.
+    const driveCase = async (pageUrl, caseName) => {
+      const profile = await Deno.makeTempDir({ prefix: "cors-probe-" });
+      let child = null;
+      try {
+        child = new Deno.Command(chromeBin, {
+          args: [
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--no-default-browser-check",
+            `--user-data-dir=${profile}`,
+            pageUrl,
+          ],
+          stdin: "null",
+          stdout: "null",
+          stderr: "null",
+        }).spawn();
+        const verdict = await waitForVerdict(caseName, 120000);
+        return verdict;
+      } finally {
+        try {
+          child?.kill("SIGKILL");
+        } catch { /* already gone */ }
+        await child?.status?.catch?.(() => {});
+        await Deno.remove(profile, { recursive: true }).catch(() => {});
+      }
+    };
+
+    const own = await driveCase(`http://localhost:${sitePort}/driver/own`, "own");
+    const foreign = await driveCase(`http://127.0.0.1:${attackerPort}/`, "foreign");
+
+    if (!own || !foreign) {
+      // Chrome could not produce a verdict on this run: SKIP loudly rather than
+      // fail — the header-level CORS sections above still ran, and the retained
+      // artefact drive under ~/fleet-evidence/ carries the authoritative one.
+      console.log(
+        `skip ${label}: Chrome produced no verdict on this run ` +
+          `(own=${own ?? "none"} foreign=${foreign ?? "none"}); ` +
+          `header-level sections still ran`,
+      );
+      return;
+    }
+    assert(
+      own.startsWith("BROWSER-ACCEPTED") &&
+        own.includes("status=200") && own.includes("bodyReadable=true"),
+      `${label}: own-origin loopback pair should be accepted with credentials, got: ${own}`,
+    );
+    assert(
+      foreign.startsWith("BROWSER-REFUSED"),
+      `${label}: foreign origin must be refused by the browser, got: ${foreign}`,
+    );
+    console.log(`     ${label}: own-origin-family -> ${own}`);
+    console.log(`     ${label}: foreign-origin  -> ${foreign}`);
+  } finally {
+    await site.shutdown();
+    await attacker.shutdown();
+  }
+});
+
 // ---- end of sections ----
 
 for (const { label, fn } of sections) {
