@@ -65,9 +65,46 @@ for (const page of UA_CH_PAGES) {
     `${page} reads the version via chromiumMajorVersion()`,
     /chromiumMajorVersion\(\)/.test(html),
   );
+}
+
+// Exact null-state strings per page. These pin the honest-unknown path by
+// its RENDERED copy, not by a keyword: a regression that replaces the null
+// branch with a guess (or a generic message) removes the exact string and
+// fails the check. (Bead chrome_platform_showcase-gdn: the previous loose
+// /unknown/ alternation was satisfied by an unrelated "unknown error"
+// string in migration-patterns and pinned nothing.)
+const HONEST_UNKNOWN_STRINGS = {
+  "v150/deprecate-and-remove-attribution-reporting-api/removal-timeline/index.html":
+    "(version unknown — no UA Client Hints)",
+  "v150/focusgroup/api-console/index.html": "version unknown — focusgroup needs Chrome 150+",
+  "v150/focusgroup/grid-navigation/index.html":
+    "Browser version unknown</strong> (no UA Client Hints) — focusgroup needs Chrome 150+",
+  "v150/disable-svg-filters-on-plugins-and-iframes/clickjacking-replay/index.html":
+    "version unknown — visual check only",
+  "v150/disable-svg-filters-on-plugins-and-iframes/sandbox-filter-test/index.html":
+    "Browser version unknown (no UA Client Hints). Real same-origin, opaque-origin, and sandboxed iframes",
+  "v150/disable-svg-filters-on-plugins-and-iframes/svg-filter-policy-tester/index.html":
+    "Browser version unknown (no UA Client Hints) — real iframes are mounted below",
+  "v150/opaque-origin-for-data-urls/data-url-worker-test/index.html":
+    "Browser version unknown (no UA Client Hints) — run the test below to observe the actual data: worker origin behaviour.",
+  "v150/opaque-origin-for-data-urls/origin-isolation-demo/index.html":
+    "Browser version unknown (no UA Client Hints) — run the tests to see the actual behaviour",
+  "v150/opaque-origin-for-data-urls/migration-patterns/index.html":
+    "Browser version not reported (no UA Client Hints). Interpret the probes below from observed capability results.",
+  "v150/update-text-selection-on-mouseup-before-dispatching-click-event/event-sequence-visualizer/index.html":
+    "Browser version unknown (no UA Client Hints) — run the sequence below and compare the immediate vs deferred reads",
+};
+
+for (const page of UA_CH_PAGES) {
+  const html = read(page);
+  const expected = HONEST_UNKNOWN_STRINGS[page];
+  if (!expected) {
+    check(`${page} has an entry in HONEST_UNKNOWN_STRINGS`, false);
+    continue;
+  }
   check(
-    `${page} has an honest version-unknown state`,
-    /ver(?:sion)? === null|unknown/.test(html),
+    `${page} renders its exact honest version-unknown string`,
+    html.includes(expected),
   );
 }
 
