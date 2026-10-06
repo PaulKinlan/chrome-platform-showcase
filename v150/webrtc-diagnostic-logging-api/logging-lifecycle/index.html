@@ -54,14 +54,16 @@
   <header class="lede-block">
     <p class="eyebrow">v150 · WebRTC</p>
     <h1>Logging lifecycle</h1>
-    <p class="lede">A diagnostic-logging session is a tiny state machine. <code>startDiagnosticLogging()</code> begins recording and resolves with a UUID; <code>finishDiagnosticLogging()</code> finalises the local log; <code>cancelDiagnosticLogging()</code> throws the captured data away. The buttons below make the <em>real</em> calls — each is enabled only when it's valid to call.</p>
+    <p class="lede">A diagnostic-logging session is a tiny state machine built from three <strong>synchronous</strong> static methods on <code>RTCPeerConnection</code>. <code>startDiagnosticLogging()</code> begins recording and <em>returns</em> a session ID; <code>stopDiagnosticLogging()</code> finalises the local log; <code>cancelDiagnosticLogging()</code> discards it. Call any of them out of order and the spec requires an <code>InvalidStateError</code>. The buttons below make the <em>real</em> calls and report exactly what they return.</p>
   </header>
 
   <div class="flag-note" id="flagNote" hidden>
-    <strong><code>navigator.rtc</code> is not available in this browser.</strong><br>
-    Launch Chrome 150+ with <code>--enable-blink-features=RTCDiagnosticLogging</code>, or enable
+    <strong><code>RTCPeerConnection.startDiagnosticLogging()</code> is not available in this browser.</strong><br>
+    The current API is a static method on <code>RTCPeerConnection</code> (there is no <code>navigator.rtc</code>). Launch
+    Chrome 150+ with <code>--enable-blink-features=RTCDiagnosticLogging</code>, or enable
     <code>chrome://flags/#enable-experimental-web-platform-features</code> and reload over HTTPS/localhost.
     The buttons call the real API and report exactly what it returns.
+    <span id="legacyNote"></span>
   </div>
 
   <div class="machine" aria-hidden="true">
@@ -72,7 +74,7 @@
 
   <div class="ctrl-row">
     <button id="startBtn" type="button">startDiagnosticLogging()</button>
-    <button id="finishBtn" type="button" disabled>finishDiagnosticLogging()</button>
+    <button id="stopBtn" type="button" disabled>stopDiagnosticLogging()</button>
     <button id="cancelBtn" type="button" disabled>cancelDiagnosticLogging()</button>
   </div>
 
@@ -87,20 +89,23 @@
   <div class="log" id="log" aria-live="polite" role="log">(no calls yet)</div>
 
   <pre><code>// Before a call, start capturing WebRTC diagnostics
-const sessionId = await navigator.rtc.startDiagnosticLogging();
-// e.g. "530b630f-8b8b-41ae-b239-a3692fbb4970"
+const sessionId = RTCPeerConnection.startDiagnosticLogging();
+// returns "530b630f-8b8b-41ae-b239-a3692fbb4970" synchronously (a DOMString, not a Promise)
 
 // When the call ends normally, finalise the local log
-await navigator.rtc.finishDiagnosticLogging();
+RTCPeerConnection.stopDiagnosticLogging();
 
 // …or, if nothing useful happened, discard it
-await navigator.rtc.cancelDiagnosticLogging();
+RTCPeerConnection.cancelDiagnosticLogging();
+
+// All three throw InvalidStateError when called out of order:
+// start while a session is active, or stop/cancel with no active session.
 </code></pre>
 
   <section>
     <h2>see also</h2>
     <ul>
-      <li><a href="../bug-report-companion/">Bug-report companion</a> — <code>allowUpload</code> + metadata</li>
+      <li><a href="../bug-report-companion/">Bug-report companion</a> — metadata limits and the session-ID bug-report stamp</li>
       <li><a href="../capability-policy-probe/">Capability &amp; policy probe</a> — the full enablement gate</li>
     </ul>
   </section>
@@ -111,8 +116,25 @@ await navigator.rtc.cancelDiagnosticLogging();
   const $ = (id) => document.getElementById(id);
   const statusEl = $("status");
   const logEl = $("log");
-  const rtc = navigator.rtc;
-  const available = !!rtc && typeof rtc.startDiagnosticLogging === "function";
+
+  // The current surface: static methods on the RTCPeerConnection interface.
+  const PCO = globalThis.RTCPeerConnection;
+  const api = {
+    start: PCO && typeof PCO.startDiagnosticLogging === "function"
+      ? PCO.startDiagnosticLogging.bind(PCO)
+      : null,
+    stop: PCO && typeof PCO.stopDiagnosticLogging === "function"
+      ? PCO.stopDiagnosticLogging.bind(PCO)
+      : null,
+    cancel: PCO && typeof PCO.cancelDiagnosticLogging === "function"
+      ? PCO.cancelDiagnosticLogging.bind(PCO)
+      : null,
+  };
+  const available = !!(api.start && api.stop && api.cancel);
+
+  // The pre-rewrite surface Chrome 154 still exposes behind its flag: keep it
+  // visible and labelled rather than pretending it is the current API.
+  const legacy = !!(navigator.rtc && typeof navigator.rtc.finishDiagnosticLogging === "function");
 
   let logging = false;
   let logLines = [];
@@ -133,21 +155,20 @@ await navigator.rtc.cancelDiagnosticLogging();
   }
   function setButtons() {
     $("startBtn").disabled = !available || logging;
-    $("finishBtn").disabled = !available || !logging;
+    $("stopBtn").disabled = !available || !logging;
     $("cancelBtn").disabled = !available || !logging;
   }
 
-  async function start() {
-    $("startBtn").disabled = true;
+  function start() {
     setStatus("Calling startDiagnosticLogging()…");
     addLog("→ startDiagnosticLogging()");
     try {
-      const id = await rtc.startDiagnosticLogging();
+      const id = api.start();
       logging = true;
       $("sessionId").textContent = id;
       setMachine("logging");
-      addLog(`← resolved: "${id}"`);
-      setStatus("Logging started. Finish to finalise the log, or cancel to discard it.", "ok");
+      addLog(`← returned synchronously: "${id}" (${typeof id})`);
+      setStatus("Logging started. Stop to finalise the log, or cancel to discard it.", "ok");
       window.showcaseTelemetry?.assert("rtc-start-returns-id", typeof id === "string" && id.length > 0, { idLen: id.length });
     } catch (e) {
       addLog(`✗ ${e.name}: ${e.message}`);
@@ -158,18 +179,16 @@ await navigator.rtc.cancelDiagnosticLogging();
     }
   }
 
-  async function finish() {
-    $("finishBtn").disabled = true;
-    $("cancelBtn").disabled = true;
-    setStatus("Calling finishDiagnosticLogging()…");
-    addLog("→ finishDiagnosticLogging()");
+  function stop() {
+    setStatus("Calling stopDiagnosticLogging()…");
+    addLog("→ stopDiagnosticLogging()");
     try {
-      await rtc.finishDiagnosticLogging();
+      api.stop();
       logging = false;
       setMachine("done");
-      addLog("← resolved (log finalised on disk)");
-      setStatus("Session finalised. The diagnostic log is saved locally by the browser.", "ok");
-      window.showcaseTelemetry?.assert("rtc-finish", true, {});
+      addLog("← returned (log finalised on disk)");
+      setStatus("Session stopped. The diagnostic log is saved locally by the browser.", "ok");
+      window.showcaseTelemetry?.assert("rtc-stop", true, {});
     } catch (e) {
       addLog(`✗ ${e.name}: ${e.message}`);
       setStatus(`${e.name}: ${e.message}`, "err");
@@ -178,16 +197,14 @@ await navigator.rtc.cancelDiagnosticLogging();
     }
   }
 
-  async function cancel() {
-    $("finishBtn").disabled = true;
-    $("cancelBtn").disabled = true;
+  function cancel() {
     setStatus("Calling cancelDiagnosticLogging()…");
     addLog("→ cancelDiagnosticLogging()");
     try {
-      await rtc.cancelDiagnosticLogging();
+      api.cancel();
       logging = false;
       setMachine("done");
-      addLog("← resolved (captured data discarded)");
+      addLog("← returned (captured data discarded)");
       setStatus("Session cancelled. Captured data was discarded.", "ok");
       window.showcaseTelemetry?.assert("rtc-cancel", true, {});
     } catch (e) {
@@ -200,12 +217,17 @@ await navigator.rtc.cancelDiagnosticLogging();
 
   if (!available) {
     $("flagNote").hidden = false;
-    setStatus("navigator.rtc is not available — see the note above.", "warn");
-    logEl.textContent = "navigator.rtc unavailable — enable the flag to make real calls.";
+    if (legacy) {
+      $("legacyNote").innerHTML =
+        " This browser does expose the <em>pre-rewrite</em> <code>navigator.rtc</code> surface " +
+        "(<code>start</code>/<code>finish</code>/<code>cancel</code>); that is not the current API and this page does not call it.";
+    }
+    setStatus("RTCPeerConnection.startDiagnosticLogging() is not available — see the note above.", "warn");
+    logEl.textContent = "Static diagnostic-logging surface unavailable — enable the flag to make real calls.";
   }
   setButtons();
   $("startBtn").addEventListener("click", start);
-  $("finishBtn").addEventListener("click", finish);
+  $("stopBtn").addEventListener("click", stop);
   $("cancelBtn").addEventListener("click", cancel);
 </script>
 </body>
