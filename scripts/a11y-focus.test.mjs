@@ -246,11 +246,20 @@ for (
 }
 
 // ── 10 · the remaining outline:none class (bead chrome_platform_showcase-qpo) ──
-// Three more light-DOM base rules tie the global ring and win by source
-// order; the light-DOM .demo-input:focus rule in shadow-dom-scope beats the
-// global ring outright (0,2,0 vs 0,1,0); and the in-shadow .shadow-input is
-// unreachable by the document-level global rule, so it must carry its own
-// visible focus outline.
+// Mechanism differs per file even though the fix (delete outline:none) is
+// identical — recorded accurately so a future missing-ring regression is
+// diagnosed against the right model (corrected under
+// chrome_platform_showcase-9ie):
+//   - responsive-tags .tag-editor-input: base rule at (0,1,0) TIES the
+//     global :focus-visible ring and wins by SOURCE ORDER (styles.css is
+//     linked before the inline <style>).
+//   - min-max-compare .ctrl input[type="text"]: (0,2,1) — BEATS the global
+//     ring outright, no tie involved.
+//   - shadow-dom-scope .demo-input:focus: (0,2,0) also beats the global ring
+//     outright; the outline:none was on the :focus rule itself.
+//   - shadow-dom-scope .shadow-input: unreachable by the document-level
+//     global rule (shadow root), so it carries its own visible focus
+//     outline.
 for (
   const [page, selector] of [
     [
