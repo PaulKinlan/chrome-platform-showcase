@@ -5,18 +5,25 @@
 - **Overall Status:** 7 passed, 0 not demonstrated, 0 unverified (recovered artifacts), 0 failed
 - **Latest Run:** 7 tested (7 passed, 0 not demonstrated, 0 failed)
 
-Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT** and **NOT-ASSERTED** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.
+Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**,
+**NOT-DRIVEABLE**, **NO-EFFECT** and **NOT-ASSERTED** mean this run is not evidence that the demo
+works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot
+artifacts and were never driven.
 
-**NO-VISUAL-DELTA** is a caveat on a row, not a status: the before/after screenshots hash the same, so the pair is not proof of the interaction. It can mean the paint had not landed, or that the interaction legitimately returned the page to its starting state (for example a click that toggles a state and a second that toggles it back). The two are indistinguishable from the images, so neither is claimed.
+**NO-VISUAL-DELTA** is a caveat on a row, not a status: the before/after screenshots hash the same,
+so the pair is not proof of the interaction. It can mean the paint had not landed, or that the
+interaction legitimately returned the page to its starting state (for example a click that toggles a
+state and a second that toggles it back). The two are indistinguishable from the images, so neither
+is claimed.
 
 ## Indexed Demos
 
-| Demo URL | Controls Found / Tested | Mutations | Status | Screenshot Proof |
-| :--- | :---: | :---: | :---: | :--- |
-| `/v137/blob-url-partitioning-fetching-navigation/partition-inspector/` | 3 / 3 | 9 | **PASS** | [Initial](v137--blob-url-partitioning-fetching-navigation--partition-inspector/01-initial.png) · NO-VISUAL-DELTA (pair byte-identical) |
-| `/v139/corner-shaping-corner-shape-superellipse-squircle/superellipse-comparator/` | 2 / 2 | 13 | **PASS** | [Initial](v139--corner-shaping-corner-shape-superellipse-squircle--superellipse-comparator/01-initial.png) · [Interactive](v139--corner-shaping-corner-shape-superellipse-squircle--superellipse-comparator/02-interactive.png) |
-| `/v139/css-custom-functions/functional-design-tokens/` | 4 / 3 | 24 | **PASS** | [Initial](v139--css-custom-functions--functional-design-tokens/01-initial.png) · [Interactive](v139--css-custom-functions--functional-design-tokens/02-interactive.png) |
-| `/v139/fire-error-event-instead-of-throwing-for-csp-blocked-worker/catch-vs-onerror/` | 3 / 3 | 14 | **PASS** | [Initial](v139--fire-error-event-instead-of-throwing-for-csp-blocked-worker--catch-vs-onerror/01-initial.png) · [Interactive](v139--fire-error-event-instead-of-throwing-for-csp-blocked-worker--catch-vs-onerror/02-interactive.png) |
-| `/v139/softnavigation-performance-entry/observer-playground/` | 9 / 4 | 24 | **PASS** | [Initial](v139--softnavigation-performance-entry--observer-playground/01-initial.png) · [Interactive](v139--softnavigation-performance-entry--observer-playground/02-interactive.png) |
-| `/v139/webxr-depth-sensing-performance-improvements/raw-vs-smooth-router/` | 2 / 2 | 16 | **PASS** | [Initial](v139--webxr-depth-sensing-performance-improvements--raw-vs-smooth-router/01-initial.png) · [Interactive](v139--webxr-depth-sensing-performance-improvements--raw-vs-smooth-router/02-interactive.png) |
-| `/v143/upsert/upsert-counter-pattern/` | 4 / 3 | 21 | **PASS** | [Initial](v143--upsert--upsert-counter-pattern/01-initial.png) · [Interactive](v143--upsert--upsert-counter-pattern/02-interactive.png) |
+| Demo URL                                                                              | Controls Found / Tested | Mutations |  Status  | Screenshot Proof                                                                                                                                                                                                                      |
+| :------------------------------------------------------------------------------------ | :---------------------: | :-------: | :------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/v137/blob-url-partitioning-fetching-navigation/partition-inspector/`                |          3 / 3          |     9     | **PASS** | [Initial](v137--blob-url-partitioning-fetching-navigation--partition-inspector/01-initial.png) · NO-VISUAL-DELTA (pair byte-identical)                                                                                                |
+| `/v139/corner-shaping-corner-shape-superellipse-squircle/superellipse-comparator/`    |          2 / 2          |    13     | **PASS** | [Initial](v139--corner-shaping-corner-shape-superellipse-squircle--superellipse-comparator/01-initial.png) · [Interactive](v139--corner-shaping-corner-shape-superellipse-squircle--superellipse-comparator/02-interactive.png)       |
+| `/v139/css-custom-functions/functional-design-tokens/`                                |          4 / 3          |    24     | **PASS** | [Initial](v139--css-custom-functions--functional-design-tokens/01-initial.png) · [Interactive](v139--css-custom-functions--functional-design-tokens/02-interactive.png)                                                               |
+| `/v139/fire-error-event-instead-of-throwing-for-csp-blocked-worker/catch-vs-onerror/` |          3 / 3          |    14     | **PASS** | [Initial](v139--fire-error-event-instead-of-throwing-for-csp-blocked-worker--catch-vs-onerror/01-initial.png) · [Interactive](v139--fire-error-event-instead-of-throwing-for-csp-blocked-worker--catch-vs-onerror/02-interactive.png) |
+| `/v139/softnavigation-performance-entry/observer-playground/`                         |          9 / 4          |    24     | **PASS** | [Initial](v139--softnavigation-performance-entry--observer-playground/01-initial.png) · [Interactive](v139--softnavigation-performance-entry--observer-playground/02-interactive.png)                                                 |
+| `/v139/webxr-depth-sensing-performance-improvements/raw-vs-smooth-router/`            |          2 / 2          |    16     | **PASS** | [Initial](v139--webxr-depth-sensing-performance-improvements--raw-vs-smooth-router/01-initial.png) · [Interactive](v139--webxr-depth-sensing-performance-improvements--raw-vs-smooth-router/02-interactive.png)                       |
+| `/v143/upsert/upsert-counter-pattern/`                                                |          4 / 3          |    21     | **PASS** | [Initial](v143--upsert--upsert-counter-pattern/01-initial.png) · [Interactive](v143--upsert--upsert-counter-pattern/02-interactive.png)                                                                                               |
