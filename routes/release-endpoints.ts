@@ -1181,11 +1181,16 @@ function renderCompressionDictionaryEchoRoute(req: Request, sub: string): Respon
   if (!sub.startsWith(`${DICT_ECHO_BASE}/`)) return null;
   const route = sub.slice(DICT_ECHO_BASE.length);
   const url = new URL(req.url);
-  const origin = req.headers.get("origin");
+  // The echoed origin is an allowlist decision, never the raw request header:
+  // only the site's own origin (the loopback host pair counting as the site)
+  // is echoed, and any other explicit Origin gets no access-control-allow-origin
+  // at all so the browser blocks the read. This is the same guard the other
+  // CORS paths in this file use (see allowlistedCorsOrigin).
+  const allowedOrigin = allowlistedCorsOrigin(req, url);
   const cors: Record<string, string> = {
-    "access-control-allow-origin": origin ?? "*",
     "timing-allow-origin": "*",
   };
+  if (allowedOrigin) cors["access-control-allow-origin"] = allowedOrigin;
 
   if (route === "/reflect") {
     const token = url.searchParams.get("token") ?? "";

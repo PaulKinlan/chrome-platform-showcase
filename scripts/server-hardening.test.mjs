@@ -827,6 +827,55 @@ section("fedcm credentialed CORS browser verdict", async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Compression dictionary echo: the ACAO on this demo route is an allowlist
+// decision, not a reflection of the request's own Origin. Before this was
+// guarded, ANY origin string was echoed back verbatim — a foreign origin got
+// its own origin, `Origin: null` (sandboxed and data: documents) was granted
+// ACAO: null, and an over-long value passed through untouched. The site's own
+// origin and the loopback host pair must keep being echoed exactly as before,
+// because the v156 demos exercise the route from the site itself.
+// ---------------------------------------------------------------------------
+section("dictionary echo echoes only the site origin", async () => {
+  const label = "dictionary echo echoes only the site origin";
+  const SUB = "/compression-dictionary-transport-updates/dict-echo/events";
+  const acaoFor = async (origin) => {
+    const headers = origin === null ? undefined : { origin };
+    const res = await handleLegacyReleaseEndpoints(
+      new Request(`http://127.0.0.1:3000/v156${SUB}?token=t`, { headers }),
+      "v156",
+      SUB,
+      noAsset,
+    );
+    return res?.headers.get("access-control-allow-origin") ?? null;
+  };
+
+  assert(
+    await acaoFor("http://127.0.0.1:3000") === "http://127.0.0.1:3000",
+    `${label}: the site's own origin must still be echoed`,
+  );
+  assert(
+    await acaoFor("http://localhost:3000") === "http://localhost:3000",
+    `${label}: the loopback host pair must still be echoed`,
+  );
+  assert(
+    await acaoFor("https://evil.example") === null,
+    `${label}: a foreign origin received its own origin back in ACAO`,
+  );
+  assert(
+    await acaoFor("null") === null,
+    `${label}: a null (sandboxed/document) origin was granted ACAO: null`,
+  );
+  assert(
+    await acaoFor("https://" + "a".repeat(292) + ".example") === null,
+    `${label}: an over-long origin was reflected verbatim`,
+  );
+  assert(
+    await acaoFor(null) === "http://127.0.0.1:3000",
+    `${label}: a request with no Origin should receive the site origin, never a wildcard`,
+  );
+});
+
 // ---- end of sections ----
 
 for (const { label, fn } of sections) {
