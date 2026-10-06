@@ -41,7 +41,7 @@ function listDemoHtml(dir = REPO, out = [], depth = 0) {
       if (e.name.startsWith(".") || e.name === "node_modules") continue;
       if (depth === 0 && !/^v\d+$/.test(e.name)) continue;
       listDemoHtml(`${dir}${e.name}/`, out, depth + 1);
-    } else if (e.name.endsWith(".html")) out.push(`${dir}${e.name}`);
+    } else if (/\.(?:html|m?js)$/.test(e.name)) out.push(`${dir}${e.name}`);
   }
   return out;
 }
@@ -293,7 +293,7 @@ function codeEntities(js) {
 // them inside a <script>).
 function jsSrcdocTemplates(html) {
   const out = [];
-  const re = /\.srcdoc\s*=\s*`([\s\S]*?)`\s*;/g;
+  const re = /\.srcdoc\s*=\s*`([\s\S]*?)`/g;
   let m;
   while ((m = re.exec(html))) {
     const line = html.slice(0, m.index).split("\n").length;
@@ -317,7 +317,12 @@ function findingsFor(html) {
     }
   }
   for (const sd of [...srcdocs, ...jsSrcdocTemplates(html)]) {
-    const inner = tokenize(decodeEntities(sd.value));
+    // An HTML attribute's value is entity-decoded once by the HTML parser, so a
+    // correctly-escaped srcdoc attribute decodes to real JS. A JS template
+    // literal is NOT decoded by JS, and the srcdoc parse does not decode
+    // character references inside its <script>, so entities must survive to be
+    // seen here — decoding them first is exactly the false negative to avoid.
+    const inner = tokenize(sd.via === "js-template" ? sd.value : decodeEntities(sd.value));
     for (const s of inner.scripts) {
       if (SKIP_TYPE.test(s.type)) continue;
       for (const h of codeEntities(s.body)) {
@@ -333,13 +338,19 @@ let totalFindings = 0;
 const reported = [];
 for (const abs of files) {
   const rel = abs.slice(REPO.length);
-  for (const f of findingsFor(Deno.readTextFileSync(abs))) {
+  const text = Deno.readTextFileSync(abs);
+  const findings = rel.endsWith(".html") ? findingsFor(text) : codeEntities(text).map((h) => ({
+    line: text.slice(0, h.index).split("\n").length,
+    text: h.text,
+    where: "standalone script",
+  }));
+  for (const f of findings) {
     totalFindings++;
     reported.push(`${rel}:${f.line} — ${f.text} in ${f.where}`);
   }
 }
 check(
-  `${files.length} demo pages have no HTML-entity escapes in executable JavaScript`,
+  `${files.length} demo files have no HTML-entity escapes in executable JavaScript`,
   totalFindings === 0,
   reported.slice(0, 20).join("\n      ") +
     (reported.length > 20 ? `\n      …and ${reported.length - 20} more` : ""),
