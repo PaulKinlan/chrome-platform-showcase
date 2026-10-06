@@ -220,6 +220,31 @@ function ruleBlock(css, selectorFragment) {
   );
 }
 
+// ── 9 · no input strips the focus outline without a visible replacement ─────
+// (bead chrome_platform_showcase-0f2). These base rules used to carry
+// `outline: none`, which ties the global `:focus-visible` ring on specificity
+// and wins by source order — keyboard focus computed to outline-style: none.
+for (
+  const [page, selector] of [
+    [
+      "v150/expose-the-autocorrect-global-html-attribute/inheritance-tester/index.html",
+      ".node-input",
+    ],
+    [
+      "v150/css-fit-content-function-for-sizing-properties/responsive-tags/index.html",
+      ".ctrl-input",
+    ],
+  ]
+) {
+  const html = read(page);
+  const base = ruleBlock(html, selector);
+  check(
+    `${page} ${selector} does not strip the outline without a replacement`,
+    base === null || !/outline\s*:\s*none/.test(base) ||
+      ruleBlock(html, `${selector}:focus-visible`) !== null,
+  );
+}
+
 if (failures > 0) {
   console.error(`\n${failures} a11y focus check(s) failed`);
   Deno.exit(1);
