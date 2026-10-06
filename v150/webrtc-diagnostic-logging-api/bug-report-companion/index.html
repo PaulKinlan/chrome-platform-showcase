@@ -21,7 +21,6 @@
     .status-line.ok { color: var(--accent-emerald); }
     .status-line.err { color: var(--accent-rose); }
     .status-line.warn { color: var(--accent-amber); }
-    .opt-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); }
     .meta-table { width: 100%; border-collapse: collapse; border: 2px solid var(--border-black); margin-bottom: 0.6rem; }
     .meta-table th { background: var(--text-black); color: var(--bg-ivory); font-family: var(--font-mono); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; padding: 0.4rem 0.6rem; text-align: left; }
     .meta-table td { border-top: 1.5px solid var(--border-black); padding: 0.3rem 0.4rem; }
@@ -54,22 +53,19 @@
   <header class="lede-block">
     <p class="eyebrow">v150 · WebRTC</p>
     <h1>Bug-report companion</h1>
-    <p class="lede">When a user reports a broken call, you want the browser's diagnostics <em>and</em> your app's context lined up. Start a session with <code>allowUpload: true</code> so the user can share the log with the browser vendor, attach structured <code>metadata</code>, and stamp the returned session ID onto your bug report. The spec caps metadata at 5 entries with keys/values ≤ 100 characters — exceed it and Chromium currently rejects with a <code>RangeError</code> (<a href="https://chromium.googlesource.com/chromium/src/+/main/third_party/blink/renderer/modules/webrtc/rtc.cc" target="_blank" rel="noopener">rtc.cc</a>), while the WICG spec mandates a <code>TypeError</code> — a live spec/implementation divergence this demo surfaces as-is. Chromium measures the limit in UTF-8 bytes, so non-ASCII metadata can trip it sooner than the JavaScript character count below suggests.</p>
+    <p class="lede">When a user reports a broken call, you want the browser's diagnostics <em>and</em> your app's context lined up. Start a session with structured <code>metadata</code> and stamp the returned session ID onto your bug report. The current spec caps metadata at 5 entries with keys/values ≤ 100 characters — exceed it and <code>startDiagnosticLogging()</code> throws a <code>TypeError</code> synchronously, before any session starts. The rewrite dropped the old <code>allowUpload</code> option and the <code>finishDiagnosticLogging()</code> name: authorisation is implementation-defined, and the session is closed with <code>stopDiagnosticLogging()</code>.</p>
   </header>
 
   <div class="flag-note" id="flagNote" hidden>
-    <strong><code>navigator.rtc</code> is not available in this browser.</strong><br>
+    <strong><code>RTCPeerConnection.startDiagnosticLogging()</code> is not available in this browser.</strong><br>
     Launch Chrome 150+ with <code>--enable-blink-features=RTCDiagnosticLogging</code>, or enable
     <code>chrome://flags/#enable-experimental-web-platform-features</code> and reload over HTTPS/localhost.
     The start button calls the real API and shows exactly what it returns.
+    <span id="legacyNote"></span>
   </div>
 
   <fieldset>
     <legend>Session options</legend>
-    <div class="opt-row">
-      <input type="checkbox" id="allowUpload" checked>
-      <label for="allowUpload"><code>allowUpload</code> — let the user authorize sharing the log with the browser vendor</label>
-    </div>
     <p class="label" style="font-family:var(--font-mono);font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted);margin-bottom:0.4rem;">metadata (record&lt;string, string&gt;)</p>
     <table class="meta-table" aria-label="Session metadata entries">
       <thead><tr><th scope="col">Key</th><th scope="col">Value</th><th scope="col"></th></tr></thead>
@@ -83,7 +79,7 @@
 
   <div class="ctrl-row">
     <button id="startBtn" type="button">startDiagnosticLogging(options)</button>
-    <button id="finishBtn" type="button" disabled>finish &amp; keep</button>
+    <button id="stopBtn" type="button" disabled>stopDiagnosticLogging()</button>
   </div>
 
   <div class="status-line" id="status" role="status" aria-live="polite">Configure metadata and start a session.</div>
@@ -94,21 +90,22 @@
     <pre id="reportBody">Start a session to generate a bug-report stub.</pre>
   </div>
 
-  <pre><code>const id = await navigator.rtc.startDiagnosticLogging({
-  allowUpload: true,               // user may share the log with the vendor
+  <pre><code>const sessionId = RTCPeerConnection.startDiagnosticLogging({
   metadata: {                      // ≤ 5 entries, keys/values ≤ 100 chars
-    app: "acme-meet",
+    app: "acme-meet",              // otherwise a TypeError is thrown synchronously
     version: "4.7.1",
     callId: "c-88213",
   },
 });
-fileBugReport({ rtcDiagnosticId: id });   // attach ID, like a crash ID
+fileBugReport({ rtcDiagnosticId: sessionId });   // attach ID, like a crash ID
+
+RTCPeerConnection.stopDiagnosticLogging();       // finalise the local log
 </code></pre>
 
   <section>
     <h2>see also</h2>
     <ul>
-      <li><a href="../logging-lifecycle/">Logging lifecycle</a> — start / finish / cancel</li>
+      <li><a href="../logging-lifecycle/">Logging lifecycle</a> — start / stop / cancel</li>
       <li><a href="../capability-policy-probe/">Capability &amp; policy probe</a> — the enterprise-policy gate</li>
     </ul>
   </section>
@@ -119,8 +116,16 @@ fileBugReport({ rtcDiagnosticId: id });   // attach ID, like a crash ID
   const $ = (id) => document.getElementById(id);
   const statusEl = $("status");
   const metaBody = $("metaBody");
-  const rtc = navigator.rtc;
-  const available = !!rtc && typeof rtc.startDiagnosticLogging === "function";
+
+  const PCO = globalThis.RTCPeerConnection;
+  const startApi = PCO && typeof PCO.startDiagnosticLogging === "function"
+    ? PCO.startDiagnosticLogging.bind(PCO)
+    : null;
+  const stopApi = PCO && typeof PCO.stopDiagnosticLogging === "function"
+    ? PCO.stopDiagnosticLogging.bind(PCO)
+    : null;
+  const available = !!(startApi && stopApi);
+  const legacy = !!(navigator.rtc && typeof navigator.rtc.finishDiagnosticLogging === "function");
 
   let logging = false;
 
@@ -157,71 +162,77 @@ fileBugReport({ rtcDiagnosticId: id });   // attach ID, like a crash ID
   }
 
   function refreshCount() {
-    const meta = collectMetadata();
-    const entries = Object.entries(meta);
+    const entries = Object.entries(collectMetadata());
     const tooMany = entries.length > 5;
     const tooLong = entries.some(([k, v]) => k.length > 100 || v.length > 100);
     const note = $("countNote");
     note.textContent = `${entries.length} entr${entries.length === 1 ? "y" : "ies"} (max 5)` +
-      (tooMany ? " — too many: Chromium throws RangeError (spec: TypeError)" : "") +
-      (tooLong ? " — a key/value exceeds 100 chars: Chromium throws RangeError (spec: TypeError)" : "");
+      (tooMany ? " — too many: startDiagnosticLogging() throws TypeError" : "") +
+      (tooLong ? " — a key/value exceeds 100 chars: startDiagnosticLogging() throws TypeError" : "");
     note.className = "count-note" + (tooMany || tooLong ? " over" : "");
   }
 
-  async function start() {
+  function start() {
     if (!available) return;
+    const metadata = collectMetadata();
+    setStatus("Calling startDiagnosticLogging({ metadata })…");
+    // The current spec throws InvalidStateError if a session is already active,
+    // so the button is gated exactly like logging-lifecycle's state machine.
     $("startBtn").disabled = true;
-    const opts = { allowUpload: $("allowUpload").checked, metadata: collectMetadata() };
-    setStatus("Calling startDiagnosticLogging(options)…");
     try {
-      const id = await rtc.startDiagnosticLogging(opts);
+      const id = startApi({ metadata });
       logging = true;
-      $("finishBtn").disabled = false;
+      $("stopBtn").disabled = false;
       $("reportId").textContent = `rtc-log: ${id}`;
       $("reportBody").textContent = JSON.stringify({
         title: "Call froze after 30s",
         rtcDiagnosticId: id,
-        allowUpload: opts.allowUpload,
-        metadata: opts.metadata,
+        metadata,
       }, null, 2);
-      setStatus(`Session started with ${Object.keys(opts.metadata).length} metadata entr${Object.keys(opts.metadata).length === 1 ? "y" : "ies"}. ID stamped onto the report.`, "ok");
-      window.showcaseTelemetry?.assert("rtc-start-with-metadata", typeof id === "string" && id.length > 0, { entries: Object.keys(opts.metadata).length });
+      setStatus(`Session started synchronously with ${Object.keys(metadata).length} metadata entr${Object.keys(metadata).length === 1 ? "y" : "ies"}. ID stamped onto the report.`, "ok");
+      window.showcaseTelemetry?.assert("rtc-start-with-metadata", typeof id === "string" && id.length > 0, { entries: Object.keys(metadata).length });
     } catch (e) {
       setStatus(`${e.name}: ${e.message}`, "err");
-      // A RangeError here is Chromium's current behavior for over-limit metadata
-      // (rtc.cc RejectWithRangeError); the WICG spec mandates TypeError. Either name
-      // proves the limit is enforced.
-      const over = Object.keys(opts.metadata).length > 5 ||
-        Object.entries(opts.metadata).some(([k, v]) => k.length > 100 || v.length > 100);
-      window.showcaseTelemetry?.assert("rtc-metadata-limit-enforced", !over || e.name === "RangeError" || e.name === "TypeError", { error: e.name, over });
+      // The current spec throws TypeError for >5 entries or a key/value over 100
+      // chars. Report exactly what the implementation threw.
+      const over = Object.keys(metadata).length > 5 ||
+        Object.entries(metadata).some(([k, v]) => k.length > 100 || v.length > 100);
+      window.showcaseTelemetry?.assert("rtc-metadata-limit-enforced", !over || e.name === "TypeError", { error: e.name, over });
     } finally {
-      $("startBtn").disabled = !available;
+      // Re-enable start only when no session is active (a TypeError leaves the
+      // state machine idle and startable again).
+      $("startBtn").disabled = logging;
     }
   }
 
-  async function finish() {
-    if (!logging) return;
-    $("finishBtn").disabled = true;
+  function stop() {
+    if (!logging || !available) return;
     try {
-      await rtc.finishDiagnosticLogging();
+      stopApi();
       logging = false;
+      $("stopBtn").disabled = true;
+      $("startBtn").disabled = false;
       setStatus("Log finalised. Attach the bug report and its rtc-log ID to your issue tracker.", "ok");
-      window.showcaseTelemetry?.assert("rtc-finish", true, {});
+      window.showcaseTelemetry?.assert("rtc-stop", true, {});
     } catch (e) {
       setStatus(`${e.name}: ${e.message}`, "err");
-      $("finishBtn").disabled = false;
     }
   }
 
   seed.forEach(([k, v]) => addRow(k, v));
   if (!available) {
     $("flagNote").hidden = false;
-    setStatus("navigator.rtc is not available — see the note above. Metadata validation still previews below.", "warn");
+    if (legacy) {
+      $("legacyNote").innerHTML =
+        " This browser does expose the <em>pre-rewrite</em> <code>navigator.rtc</code> surface " +
+        "(<code>start</code>/<code>finish</code>/<code>cancel</code>, with <code>allowUpload</code>); that is not the current API and this page does not call it.";
+    }
+    setStatus("RTCPeerConnection.startDiagnosticLogging() is not available — see the note above. Metadata validation still previews below.", "warn");
     $("startBtn").disabled = true;
   }
   $("addRow").addEventListener("click", () => addRow());
   $("startBtn").addEventListener("click", start);
-  $("finishBtn").addEventListener("click", finish);
+  $("stopBtn").addEventListener("click", stop);
 </script>
 </body>
 </html>
