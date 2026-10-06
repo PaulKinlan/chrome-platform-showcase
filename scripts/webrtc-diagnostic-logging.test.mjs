@@ -97,8 +97,8 @@ check(
 );
 
 check(
-  "the three InvalidStateError contracts are asserted",
-  (conformanceRaw.match(/InvalidStateError/g) ?? []).length >= 3,
+  "the three InvalidStateError contracts are asserted in test payloads",
+  (assertionTests.match(/InvalidStateError/g) ?? []).length >= 3,
 );
 
 // ── 4. The demos call only the current surface ───────────────────────────────
@@ -109,7 +109,7 @@ function scripts(html) {
   return [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).join("\n");
 }
 
-for (const route of ROUTES) {
+for (const route of ROUTES.slice(1)) {
   const html = read(route);
   const code = scripts(html);
   check(`${route} references RTCPeerConnection`, /RTCPeerConnection/.test(html));
@@ -130,6 +130,13 @@ for (const route of ROUTES) {
     !/await\s+[\w.$]*\.?(start|stop|cancel)DiagnosticLogging/.test(code),
   );
 }
+
+// The feature index is copy only: it must carry no executable script that could
+// call either surface.
+check(
+  "the feature index carries no inline script",
+  scripts(read(ROUTES[0])) === "",
+);
 
 // ── 5. Each demo feature-detects the static surface honestly ─────────────────
 for (const route of ROUTES.slice(1)) {
