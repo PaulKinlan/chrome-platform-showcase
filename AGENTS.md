@@ -40,6 +40,11 @@ deno task auto-research   # Starts the local server and displays the quality/con
 `deno fmt` intentionally excludes HTML, CSS, and generated demo JSON/JS. Do not mass-format demo
 HTML or CSS unless the task specifically requires it.
 
+`deno task check` is the local full gate (and the task the VM fleet's `fleet-check` runs). It now
+includes `deno fmt --check`, so a tree that is green locally cannot fail CI on formatting. The
+parity is enforced by `scripts/gate-parity.test.mjs`, which reads `.github/workflows/ci.yml` and
+fails if CI enforces a formatter or type-check step that the full gate omits.
+
 ### Slashcommands (Trigger via chat)
 
 - `/auto-research` (or "run showcase"): Starts the complete, autonomous auto-research workflow
