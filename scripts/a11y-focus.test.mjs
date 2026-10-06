@@ -245,6 +245,55 @@ for (
   );
 }
 
+// ── 10 · the remaining outline:none class (bead chrome_platform_showcase-qpo) ──
+// Three more light-DOM base rules tie the global ring and win by source
+// order; the light-DOM .demo-input:focus rule in shadow-dom-scope beats the
+// global ring outright (0,2,0 vs 0,1,0); and the in-shadow .shadow-input is
+// unreachable by the document-level global rule, so it must carry its own
+// visible focus outline.
+for (
+  const [page, selector] of [
+    [
+      "v150/css-fit-content-function-for-sizing-properties/responsive-tags/index.html",
+      ".tag-editor-input",
+    ],
+    [
+      "v150/css-fit-content-function-for-sizing-properties/min-max-compare/index.html",
+      '.ctrl input[type="text"]',
+    ],
+    // js-api-inspector's .elem-input outline:none is deliberately absent:
+    // it is DEAD CSS (the class is defined but never applied to any
+    // element — verified by grep and by a browser probe finding no match in
+    // the live DOM), so it has no a11y impact and is a recorded negative,
+    // not a pinned rule.
+  ]
+) {
+  const html = read(page);
+  const base = ruleBlock(html, selector);
+  check(
+    `${page} ${selector} does not strip the outline without a replacement`,
+    base === null || !/outline\s*:\s*none/.test(base) ||
+      ruleBlock(html, `${selector}:focus-visible`) !== null,
+  );
+}
+{
+  const html = read(
+    "v150/expose-the-autocorrect-global-html-attribute/shadow-dom-scope/index.html",
+  );
+  const lightFocus = ruleBlock(html, ".demo-input:focus");
+  check(
+    "shadow-dom-scope .demo-input:focus does not cancel the global ring",
+    lightFocus !== null && !/outline\s*:\s*none/.test(lightFocus),
+  );
+  // The in-shadow control is unreachable by the document-level global rule,
+  // so its focus style must carry a visible outline of its own.
+  const shadowFocus = ruleBlock(html, ".shadow-input:focus");
+  check(
+    "shadow-dom-scope .shadow-input:focus has its own visible outline (shadow root)",
+    shadowFocus !== null && /outline\s*:\s*\d+px\s+solid/.test(shadowFocus),
+  );
+}
+
 if (failures > 0) {
   console.error(`\n${failures} a11y focus check(s) failed`);
   Deno.exit(1);
