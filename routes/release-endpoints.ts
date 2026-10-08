@@ -12,6 +12,7 @@ import {
 import { BoundedSessionStore } from "../lib/session-store.ts";
 import {
   evictOldestProbeRecords,
+  recordProbeDoc,
   SPECULATION_RULES_PROBE_MAX_RECORDS,
   SPECULATION_RULES_PROBE_TTL_MS,
   sweepExpiredProbeRecords,
@@ -1474,7 +1475,7 @@ function renderSpeculationRulesCspRoute(req: Request, sub: string): Response | n
     }
     const record = speculationRulesProbeRecord(token);
     const doc = url.searchParams.get("doc") || "/rules.json";
-    if (!record.ruleRequests.includes(doc)) record.ruleRequests.push(doc);
+    recordProbeDoc(record.ruleRequests, doc);
     const target = new URL(
       `${routePrefix}/spec-rules-csp/prefetch-target`,
       url.origin,
@@ -1500,7 +1501,7 @@ function renderSpeculationRulesCspRoute(req: Request, sub: string): Response | n
     if (validSpeculationRulesProbeToken(token)) {
       const record = speculationRulesProbeRecord(token);
       const doc = url.searchParams.get("doc") || "/rules.json";
-      if (!record.targetRequests.includes(doc)) record.targetRequests.push(doc);
+      recordProbeDoc(record.targetRequests, doc);
     }
     return new Response("prefetch target", {
       headers: {
