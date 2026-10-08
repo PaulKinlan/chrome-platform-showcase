@@ -3928,10 +3928,26 @@ async function renderV151CapabilityEcho(req: Request): Promise<Response> {
   return new Response(JSON.stringify(payload, null, 2), { headers });
 }
 
+// The two v151 echo fixtures put a request value straight into a response
+// header, so the value must fit that header's grammar. A Server-Timing
+// `desc="…"` is a quoted-string (no quote, backslash or control character),
+// and the allowlist sources this policy fixture demonstrates are `self`, `*`
+// and none. A value outside the grammar either silently rewrites the header the
+// demo is showing or makes the Headers constructor throw on a CR/LF, answering
+// the request with a 500; both are now a 400 with an explanation.
+const SERVER_TIMING_LABEL_RE = /^[A-Za-z0-9 ._:-]{1,64}$/;
+const PERMISSIONS_POLICY_SOURCE_RE = /^(self|\*|)$/;
+
 async function renderV151DelayedEcho(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const delay = Math.min(Math.max(Number(url.searchParams.get("delay") ?? 80), 0), 2000);
   const label = url.searchParams.get("label") ?? "resource";
+  if (!SERVER_TIMING_LABEL_RE.test(label)) {
+    return jsonResponse({
+      error:
+        "label must be 1-64 characters from A-Z a-z 0-9 space . _ : - so it can be carried in a Server-Timing desc quoted-string.",
+    }, { status: 400 });
+  }
   await new Promise((resolve) => setTimeout(resolve, delay));
   return jsonResponse({
     label,
@@ -3990,6 +4006,12 @@ function renderV151PolicyEcho(req: Request): Response {
   const local = url.searchParams.get("local") ?? "self";
   const loopback = url.searchParams.get("loopback") ?? "self";
   const allow = url.searchParams.get("allow") ?? "none";
+  if (!PERMISSIONS_POLICY_SOURCE_RE.test(local) || !PERMISSIONS_POLICY_SOURCE_RE.test(loopback)) {
+    return jsonResponse({
+      error:
+        "local and loopback must each be self, * or empty (none) — the allowlist sources this fixture demonstrates.",
+    }, { status: 400 });
+  }
   const policy = `local-network=(${local}), loopback-network=(${loopback})`;
   return jsonResponse({
     permissionsPolicy: policy,
