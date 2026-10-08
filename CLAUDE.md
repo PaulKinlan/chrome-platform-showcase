@@ -142,6 +142,12 @@ telemetry. Its job is the depth work the daily build routine is too busy to do:
   weekly routine consumes. (`routes/demo-telemetry.ts`.)
 - `GET /telemetry/demo/admin` — HTML dashboard, now including the top-failing-demos triage panel.
 - KV events self-expire after 90 days (`TELEMETRY_TTL_MS`) so the store no longer grows unbounded.
+- **Failed authentication is throttled per source** (`lib/auth-throttle.ts`): 10 failures, then one
+  further attempt per 10 seconds, refused with `429` + `Retry-After`. A 429 means "wait", never
+  "wrong password" — and because one source's budget is its own, a 429 arriving at a shared
+  address (proxy, NAT, corporate egress) means the failover is to wait out the interval, not to
+  re-check the password. A successful authentication clears the counter, so a correct password is
+  never punished for earlier failures; a source is never banned, only delayed.
 
 ## Durable demo compatibility contract — stable URLs · additive evolution · non-destructive
 
