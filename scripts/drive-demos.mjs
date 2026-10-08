@@ -26,6 +26,12 @@ import {
   NOT_DEMONSTRATED_STATUSES,
 } from "./lib/drive-effect.mjs";
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
+import {
+  BOOT_MAX_PORT_ATTEMPTS,
+  describeBootFailure,
+  portIsTaken,
+  trackBootChild,
+} from "./lib/server-boot.mjs";
 
 const args = [...Deno.args];
 function flag(name, fallback = null) {
@@ -113,31 +119,90 @@ if (!specCases && targets.length === 0) {
 
 // ── Server lifecycle ─────────────────────────────────────────────────────────
 let serverChild = null;
+const BOOT_POLL_MS = 250;
+const BOOT_POLL_ATTEMPTS = 40;
+
+function spawnServer(port) {
+  serverChild = new Deno.Command("deno", {
+    args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
+    env: { PORT: String(port) },
+    // Captured rather than discarded: the child's own output is the only thing
+    // that can explain a failed boot, and a full pipe would block it.
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  return trackBootChild(serverChild);
+}
+
+function killServerChild() {
+  if (!serverChild) return;
+  try {
+    serverChild.kill("SIGKILL");
+  } catch {
+    // already gone
+  }
+  serverChild = null;
+}
+
+// Poll GET / until the child answers, the child exits, or the bound elapses. A
+// child that has exited cannot become ready, and a port that answers while our
+// child is gone belongs to someone else — accepting it would drive the wrong
+// server and report ordinary-looking statuses for it, which is what happened
+// before this check existed.
+async function awaitServerReady(port) {
+  const boot = spawnServer(port);
+  const startedAt = Date.now();
+  const failed = (kind) => ({
+    ok: false,
+    kind,
+    exitCode: boot.exit.code,
+    stderrTail: boot.tails.stderr,
+    stdoutTail: boot.tails.stdout,
+    waitedMs: Date.now() - startedAt,
+  });
+  for (let i = 0; i < BOOT_POLL_ATTEMPTS; i++) {
+    if (boot.exit.exited) return failed("child-exited");
+    try {
+      const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(1000) });
+      await r.body?.cancel();
+      if (r.ok) return boot.exit.exited ? failed("child-exited") : { ok: true };
+    } catch {
+      // not up yet
+    }
+    await new Promise((r) => setTimeout(r, BOOT_POLL_MS));
+  }
+  return failed(boot.exit.exited ? "child-exited" : "timeout");
+}
+
 async function bootServer() {
   if (noServer) {
     base = base ?? "http://localhost:3000";
     return;
   }
-  const port = base ? Number(new URL(base).port) || 3000 : 3800 + Math.floor(Math.random() * 400);
-  base = `http://localhost:${port}`;
-  serverChild = new Deno.Command("deno", {
-    args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
-    env: { PORT: String(port) },
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
-
-  for (let i = 0; i < 40; i++) {
-    try {
-      const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(1000) });
-      await r.body?.cancel();
-      if (r.ok) return;
-    } catch {
-      // waiting
+  const pinnedPort = base ? Number(new URL(base).port) || 3000 : null;
+  const attempts = pinnedPort ? 1 : BOOT_MAX_PORT_ATTEMPTS;
+  const failures = [];
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const port = pinnedPort ?? 3800 + Math.floor(Math.random() * 400);
+    // Never spawn onto a port that already accepts connections.
+    if (await portIsTaken(port)) {
+      const message = describeBootFailure({ port, kind: "port-in-use" });
+      failures.push(message);
+      if (pinnedPort) throw new Error(message);
+      continue;
     }
-    await new Promise((r) => setTimeout(r, 250));
+    base = `http://localhost:${port}`;
+    const outcome = await awaitServerReady(port);
+    if (outcome.ok) return;
+    killServerChild();
+    const message = describeBootFailure({ port, ...outcome });
+    failures.push(message);
+    // A crash or a 10-second silent boot is not going to be fixed by another
+    // random port; only a takeover between the check above and the bind is worth
+    // retrying, and that shows up as the child exiting at once.
+    if (pinnedPort || outcome.kind === "timeout") throw new Error(message);
   }
-  throw new Error("local server did not become ready");
+  throw new Error(`could not start the local server:\n- ${failures.join("\n- ")}`);
 }
 
 // ── Screenshot settle and pair hashing ──────────────────────────────────────
