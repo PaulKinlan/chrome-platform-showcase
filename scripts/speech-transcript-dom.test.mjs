@@ -54,5 +54,5 @@ for (const [file, required] of Object.entries(files)) {
 console.log(
   `PASS — speech transcript DOM rendering (${assertions} assertions over ${
     Object.keys(files).length
-  } demos: no HTML-string composition, text nodes and replaceChildren in the render paths)`,
+  } demos: no prohibited HTML-writing calls found, expected text-node render code present)`,
 );
