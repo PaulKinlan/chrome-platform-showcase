@@ -1223,20 +1223,70 @@ export async function renderReleasePage(
 
 // ----- /features (flat, filterable catalogue) -----
 
+export interface FeatureCatalogueRow {
+  canonicalMstone: number;
+  milestones: number[];
+  id: number;
+  name: string;
+  summary: string;
+  category: string;
+  href: string;
+  probe?: DemoProbe;
+}
+
+/**
+ * Renders the rows of the /features catalogue table. The ChromeStatus-derived
+ * fields (id, name, summary, category) arrive from the upstream API, while the
+ * demo href and the probe attributes come from locally resolved demo data. All
+ * of them are escaped for the context they land in - including the
+ * ChromeStatus link, which is built from an upstream-supplied feature id.
+ * The id's shape is deliberately not validated: an unexpected value can only
+ * produce a malformed third-party link path, never an attribute escape,
+ * because the escaped value cannot leave the href attribute.
+ */
+export function renderFeatureCatalogueRows(rows: FeatureCatalogueRow[]): string {
+  return rows.map((r) => {
+    const cat = categoryTag(r.category);
+    const otherMstones = r.milestones
+      .filter((m) => m !== r.canonicalMstone)
+      .sort((a, b) => b - a);
+    const lineageBadge = otherMstones.length > 0
+      ? ` <span class="tag" title="Also listed in Chrome ${otherMstones.join(", ")}">+${
+        otherMstones.map((m) => `v${m}`).join(", ")
+      }</span>`
+      : "";
+    const mstoneTokens = r.milestones.map((m) => `v${m}`).join(" ");
+    const search = `${r.name} ${r.summary} ${cat} ${mstoneTokens}`.toLowerCase();
+    const probeAttrs = r.probe
+      ? ` data-probe-kind="${escapeHTML(r.probe.kind)}" data-probe-test="${
+        escapeHTML(r.probe.test)
+      }"${r.probe.expect ? ` data-probe-expect="${escapeHTML(r.probe.expect)}"` : ""}`
+      : "";
+    return `<tr data-search="${
+      escapeHTML(search)
+    }" data-mstone="${r.canonicalMstone}" data-mstones="${r.milestones.join(",")}" data-status="${
+      escapeHTML(cat)
+    }" data-built="true"${probeAttrs}>
+      <td><a href="${escapeHTML(r.href)}">${escapeHTML(r.name)}</a></td>
+      <td><span class="release-status">v${r.canonicalMstone}</span>${lineageBadge}</td>
+      <td><span class="tag">${escapeHTML(cat)}</span> ${
+      r.probe ? `<span class="tag tag-compat" data-compat-badge hidden>…</span>` : ""
+    }</td>
+      <td>
+        <a class="tag tag-chromestatus" href="${
+      escapeHTML(`https://chromestatus.com/feature/${r.id}`)
+    }" target="_blank" rel="noopener">ChromeStatus &nearr;</a>
+        <a class="tag tag-live" href="${escapeHTML(r.href)}">demo &rarr;</a>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
 export async function renderFeaturesCatalogue(channels: Channels): Promise<string> {
   const known = [...await knownReleaseMilestones(channels)].sort((a, b) => b - a);
   const { probes } = await getDemoIndexData();
 
-  type Row = {
-    canonicalMstone: number;
-    milestones: number[];
-    id: number;
-    name: string;
-    summary: string;
-    category: string;
-    href: string;
-    probe?: DemoProbe;
-  };
+  type Row = FeatureCatalogueRow;
 
   // Fetch all milestones concurrently rather than blocking on a 28-request
   // serial waterfall.
@@ -1292,39 +1342,7 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
     (a, b) => b.canonicalMstone - a.canonicalMstone || a.name.localeCompare(b.name),
   );
 
-  const tableRows = rows.map((r) => {
-    const cat = categoryTag(r.category);
-    const otherMstones = r.milestones
-      .filter((m) => m !== r.canonicalMstone)
-      .sort((a, b) => b - a);
-    const lineageBadge = otherMstones.length > 0
-      ? ` <span class="tag" title="Also listed in Chrome ${otherMstones.join(", ")}">+${
-        otherMstones.map((m) => `v${m}`).join(", ")
-      }</span>`
-      : "";
-    const mstoneTokens = r.milestones.map((m) => `v${m}`).join(" ");
-    const search = `${r.name} ${r.summary} ${cat} ${mstoneTokens}`.toLowerCase();
-    const probeAttrs = r.probe
-      ? ` data-probe-kind="${escapeHTML(r.probe.kind)}" data-probe-test="${
-        escapeHTML(r.probe.test)
-      }"${r.probe.expect ? ` data-probe-expect="${escapeHTML(r.probe.expect)}"` : ""}`
-      : "";
-    return `<tr data-search="${
-      escapeHTML(search)
-    }" data-mstone="${r.canonicalMstone}" data-mstones="${r.milestones.join(",")}" data-status="${
-      escapeHTML(cat)
-    }" data-built="true"${probeAttrs}>
-      <td><a href="${escapeHTML(r.href)}">${escapeHTML(r.name)}</a></td>
-      <td><span class="release-status">v${r.canonicalMstone}</span>${lineageBadge}</td>
-      <td><span class="tag">${escapeHTML(cat)}</span> ${
-      r.probe ? `<span class="tag tag-compat" data-compat-badge hidden>…</span>` : ""
-    }</td>
-      <td>
-        <a class="tag tag-chromestatus" href="https://chromestatus.com/feature/${r.id}" target="_blank" rel="noopener">ChromeStatus &nearr;</a>
-        <a class="tag tag-live" href="${escapeHTML(r.href)}">demo &rarr;</a>
-      </td>
-    </tr>`;
-  }).join("");
+  const tableRows = renderFeatureCatalogueRows(rows);
 
   const mstoneOptions = known.map((m) => `<option value="${m}">v${m}</option>`).join("");
 

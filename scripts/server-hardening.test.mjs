@@ -6,7 +6,8 @@
 
 import { handleDemoTelemetryRoute } from "../routes/demo-telemetry.ts";
 import { buildAliasLocation, handleAliasRoute } from "../routes/aliases.ts";
-import { renderCategoryCard, renderDemoCard } from "../routes/pages.ts";
+import { renderCategoryCard, renderDemoCard, renderFeatureCatalogueRows } from "../routes/pages.ts";
+import { renderConformanceRunAllPage } from "../routes/conformance-renderers.ts";
 import { handlePublicRoute } from "../routes/public.ts";
 import {
   handleLegacyReleaseEndpoints,
@@ -873,6 +874,63 @@ section("dictionary echo echoes only the site origin", async () => {
   assert(
     await acaoFor(null) === "http://127.0.0.1:3000",
     `${label}: a request with no Origin should receive the site origin, never a wildcard`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 7c. The feature catalogue table escapes the ChromeStatus href it builds from
+//     an upstream-supplied feature id, and the conformance run-all page escapes
+//     the milestone values it renders.
+// ---------------------------------------------------------------------------
+
+section("feature catalogue rows escape the upstream ChromeStatus id", async () => {
+  const label = "feature catalogue rows escape the upstream ChromeStatus id";
+  const rows = renderFeatureCatalogueRows([
+    {
+      canonicalMstone: 151,
+      milestones: [151],
+      id: '5"x',
+      name: "Feature",
+      summary: "Summary",
+      category: "Enabled by default",
+      href: '/v151/feature" onmouseover="alert(1)',
+    },
+  ]);
+  assert(
+    !rows.includes('feature/5"x') && rows.includes("feature/5&quot;x"),
+    `${label}: raw upstream id reached the href attribute`,
+  );
+  assert(
+    !rows.includes('onmouseover="alert') && rows.includes("&quot; onmouseover=&quot;"),
+    `${label}: raw upstream href reached the attribute`,
+  );
+});
+
+section("conformance run-all page escapes the release value", async () => {
+  const label = "conformance run-all page escapes the release value";
+  const hostile = 'v9" onmouseover="alert(1)';
+  const page = renderConformanceRunAllPage([
+    {
+      release: hostile,
+      featureSlug: "feature",
+      conceptSlug: null,
+      assertions: [{ id: "a1", description: "d", kind: "k", specSection: null }],
+    },
+  ]);
+  assert(
+    !page.includes('onmouseover="alert') && !page.includes(`value="${hostile}"`),
+    `${label}: raw hostile release reached a server-rendered attribute`,
+  );
+  assert(
+    page.includes('value="v9&quot; onmouseover=&quot;alert(1)"'),
+    `${label}: escaped release missing from the filter options`,
+  );
+  // The table rows are built in the page's own script, so assert on the
+  // template it ships: the milestone attribute must call the page's escaper.
+  assert(
+    page.includes('data-milestone="${escapeHTML(suite.release)}"') &&
+      !page.includes('data-milestone="${suite.release}"'),
+    `${label}: row template does not escape the milestone attribute`,
   );
 });
 
