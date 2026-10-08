@@ -2909,6 +2909,14 @@ interface SpcBbkEnrollment {
 }
 
 const SPC_BBK_COOKIE = "showcase_spc_bbk";
+
+// Display-length bound for the device label an enrollment keeps. The caller
+// controls deviceName up to the 1 MiB DEMO_BODY_LIMIT, it is retained for the
+// enrollment's lifetime, and both /enroll and /state echo it back — so without a
+// bound a full store (512 entries, 1e5) can park hundreds of megabytes of
+// label. The demo client only ever sends a short label (its longest is
+// "Primary checkout browser"), so bounding the retained value costs nothing.
+const SPC_BBK_DEVICE_NAME_MAX_LENGTH = 128;
 const spcBbkEnrollments = new BoundedSessionStore<SpcBbkEnrollment>();
 
 function spcBbkBasePath(req: Request): string {
@@ -2963,6 +2971,14 @@ function spcBbkJwkThumbprint(jwk: JsonWebKey): string {
   ).slice(0, 18);
 }
 
+// Keeps the stored label a display string: the first SPC_BBK_DEVICE_NAME_MAX_LENGTH
+// characters of whatever the caller sent, with the fixture's default when the
+// body omits the field. A longer label is truncated rather than rejected, so a
+// caller with a verbose name still enrolls.
+function spcBbkDeviceName(value: unknown): string {
+  return String(value ?? "Primary browser").slice(0, SPC_BBK_DEVICE_NAME_MAX_LENGTH);
+}
+
 function spcBbkEnrollmentState(enrollment: SpcBbkEnrollment | null) {
   if (!enrollment) return { enrolled: false };
   return {
@@ -3011,7 +3027,7 @@ async function renderSpcBbkRoute(
     const enrollment: SpcBbkEnrollment = {
       id: randomBase64Url(18),
       version: release,
-      deviceName: String(body.deviceName ?? "Primary browser"),
+      deviceName: spcBbkDeviceName(body.deviceName),
       createdAt: new Date().toISOString(),
       passkeyPublicJwk,
       browserBoundPublicJwk,
