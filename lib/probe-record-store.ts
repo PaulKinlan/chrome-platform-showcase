@@ -29,6 +29,53 @@ export interface AgedProbeRecord {
   createdAt: number;
 }
 
+// Each record also carries the doc references a probe observed (`ruleRequests`
+// from rules.json, `targetRequests` from prefetch-target). Those arrays were
+// deduped with an O(k) `includes` scan and never bounded in count or in the
+// length of a single entry, and the `doc` query value is caller-supplied with no
+// validation beyond the URL itself:
+//
+//   - one token, 5,000 distinct 200-character docs, retained 1.96 MiB in that
+//     single record, and the cost of appending grew with the array length (the
+//     last 4,000 prefix-sharing appends took 1,599 ms against 338 ms for the
+//     preceding 2,000);
+//   - docs of 8 KiB, 16 KiB and 32 KiB were all accepted by the route and by the
+//     HTTP layer, so the per-record ceiling was really just "however much the
+//     client sends".
+//
+// Both arrays are display-only: `probe-status` renders them so the demo can show
+// which speculative fetches the browser made. A demo run adds at most four docs
+// (the header-probe parser itself caps a `rules` value at four entries of 120
+// characters each), so the bounds below are far above what the demo needs while
+// making the retained size of a record constant.
+
+export const SPECULATION_RULES_PROBE_MAX_DOCS_PER_RECORD = 64;
+
+export const SPECULATION_RULES_PROBE_MAX_DOC_CHARS = 256;
+
+/**
+ * Record a distinct doc reference, bounded in both count and entry length, and
+ * report whether it was kept.
+ *
+ * An over-long entry is IGNORED rather than truncated: these strings are shown as
+ * the paths the browser requested, so a truncated one would display a path that
+ * was never fetched. Ignoring also keeps the `includes` dedupe scan bounded, which
+ * is what makes the per-append cost constant again.
+ */
+export function recordProbeDoc(
+  docs: string[],
+  doc: string,
+  limits: { maxDocs?: number; maxChars?: number } = {},
+): boolean {
+  const maxDocs = Math.max(1, limits.maxDocs ?? SPECULATION_RULES_PROBE_MAX_DOCS_PER_RECORD);
+  const maxChars = Math.max(1, limits.maxChars ?? SPECULATION_RULES_PROBE_MAX_DOC_CHARS);
+  if (doc.length === 0 || doc.length > maxChars) return false;
+  if (docs.length >= maxDocs) return false;
+  if (docs.includes(doc)) return false;
+  docs.push(doc);
+  return true;
+}
+
 /**
  * Drop expired records and report how many entries were visited.
  *
