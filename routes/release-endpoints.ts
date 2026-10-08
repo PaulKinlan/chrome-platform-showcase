@@ -1,6 +1,7 @@
 // Legacy per-release server endpoints extracted from routes/release.ts.
 // New features should prefer co-located v<N>/<feature-slug>/_server.ts modules.
 
+import { p256PublicJwkForStorage } from "../lib/jwk.ts";
 import { readBoundedBody, readBoundedText } from "../lib/request-body.ts";
 import {
   allowlistedCorsOrigin,
@@ -3029,8 +3030,8 @@ async function renderSpcBbkRoute(
       version: release,
       deviceName: spcBbkDeviceName(body.deviceName),
       createdAt: new Date().toISOString(),
-      passkeyPublicJwk,
-      browserBoundPublicJwk,
+      passkeyPublicJwk: p256PublicJwkForStorage(passkeyPublicJwk),
+      browserBoundPublicJwk: p256PublicJwkForStorage(browserBoundPublicJwk),
       pendingPayload: null,
       events: [],
     };
@@ -3181,7 +3182,7 @@ async function renderSpcBbkRoute(
       });
     }
 
-    enrollment.browserBoundPublicJwk = newBrowserBoundPublicJwk;
+    enrollment.browserBoundPublicJwk = p256PublicJwkForStorage(newBrowserBoundPublicJwk);
     enrollment.pendingPayload = null;
     spcBbkEvent(enrollment, "rotated", "Browser-bound public key rotated after old-key proof.");
     return jsonResponse({
