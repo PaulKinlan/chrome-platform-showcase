@@ -488,7 +488,7 @@ export function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
         const specLink = assertion.specSection
           ? \` <a class="spec-link" href="\${escapeHTML(assertion.specSection)}" target="_blank" rel="noopener">spec ↗</a>\`
           : "";
-        html.push(\`<tr data-index="\${index}" data-milestone="\${suite.release}" data-verdict="na">
+        html.push(\`<tr data-index="\${index}" data-milestone="\${escapeHTML(suite.release)}" data-verdict="na">
           <td><a href="\${escapeHTML(suiteUrl)}" target="_blank" rel="noopener"><strong>\${escapeHTML(suite.release)}</strong> · \${escapeHTML(suite.featureSlug)}</a></td>
           <td><code>\${escapeHTML(assertion.id)}</code></td>
           <td>\${escapeHTML(assertion.description)}\${specLink}</td>
