@@ -25,6 +25,61 @@
 
 export const BOOT_TAIL_MAX_CHARS = 2000;
 export const BOOT_MAX_PORT_ATTEMPTS = 5;
+export const BOOT_POLL_MS = 250;
+export const BOOT_POLL_ATTEMPTS = 40;
+export const BOOT_READY_BOUND_MS = BOOT_POLL_MS * BOOT_POLL_ATTEMPTS;
+
+/**
+ * Readiness outcomes. `READY` is the only one that lets the driver proceed.
+ */
+export const READINESS = {
+  READY: "ready",
+  WAIT: "wait",
+  CHILD_EXITED: "child-exited",
+  /** Something answered on the port, but not the server we started. */
+  STRANGER: "stranger",
+  TIMEOUT: "timeout",
+};
+
+/**
+ * Does the child itself say it is listening on this port?
+ *
+ * `server.ts` prints `Listening on http://localhost:<port>` once it has bound, so
+ * the child's OWN output is proof that it owns the port — which is what makes
+ * readiness decidable rather than inferred. Nothing else can produce that line
+ * for that port: a process that failed to bind prints the bind error instead and
+ * exits.
+ */
+export function serverReportsListening(stdout, port) {
+  if (!stdout || !port) return false;
+  const escaped = String(port).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`Listening on https?://[^\\s]*:${escaped}(?![0-9])`).test(stdout);
+}
+
+/**
+ * Decide whether a driver may treat the server as ready. Pure, so the timing
+ * window that cannot be forced in real time can still be tested exactly.
+ *
+ * Fail-closed on purpose:
+ *   - a child that has exited is never ready, even if something answers the port;
+ *   - an answered port is NOT readiness unless the child reported listening on
+ *     it, so a process that took the port after the preflight cannot be accepted;
+ *   - a port that answers while the child stays silent is only called a stranger
+ *     once the bound elapses, so a slow flush of the child's own line is given
+ *     the whole window rather than failing early.
+ */
+export function assessReadiness({
+  httpAnswered = false,
+  childExited = false,
+  listeningReported = false,
+  waitedMs = 0,
+  boundMs = BOOT_READY_BOUND_MS,
+} = {}) {
+  if (childExited) return READINESS.CHILD_EXITED;
+  if (httpAnswered && listeningReported) return READINESS.READY;
+  if (waitedMs >= boundMs) return httpAnswered ? READINESS.STRANGER : READINESS.TIMEOUT;
+  return READINESS.WAIT;
+}
 
 /** Keep the last `maxChars` of a growing capture. */
 export function appendTail(current, chunk, maxChars = BOOT_TAIL_MAX_CHARS) {
@@ -128,6 +183,9 @@ export function describeBootFailure({
     return `the local server process exited with code ${
       exitCode ?? "unknown"
     } and never became ready on port ${port}${output}`;
+  }
+  if (kind === "stranger") {
+    return `port ${port} answers HTTP, but the local server never reported listening on it, so another process is serving that port${output}`;
   }
   return `the local server did not answer on port ${port} within ${
     Math.round(waitedMs)

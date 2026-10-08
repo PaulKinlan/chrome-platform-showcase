@@ -27,9 +27,15 @@ import {
 } from "./lib/drive-effect.mjs";
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
 import {
+  assessReadiness,
   BOOT_MAX_PORT_ATTEMPTS,
+  BOOT_POLL_ATTEMPTS,
+  BOOT_POLL_MS,
+  BOOT_READY_BOUND_MS,
   describeBootFailure,
   portIsTaken,
+  READINESS,
+  serverReportsListening,
   trackBootChild,
 } from "./lib/server-boot.mjs";
 
@@ -119,8 +125,6 @@ if (!specCases && targets.length === 0) {
 
 // ── Server lifecycle ─────────────────────────────────────────────────────────
 let serverChild = null;
-const BOOT_POLL_MS = 250;
-const BOOT_POLL_ATTEMPTS = 40;
 
 function spawnServer(port) {
   serverChild = new Deno.Command("deno", {
@@ -144,11 +148,15 @@ function killServerChild() {
   serverChild = null;
 }
 
-// Poll GET / until the child answers, the child exits, or the bound elapses. A
-// child that has exited cannot become ready, and a port that answers while our
-// child is gone belongs to someone else — accepting it would drive the wrong
-// server and report ordinary-looking statuses for it, which is what happened
-// before this check existed.
+// Poll until the CHILD reports it is listening and answers, or the bound elapses.
+//
+// Readiness is decided by `assessReadiness` and is fail-closed: it requires the
+// child's own "Listening on http://localhost:<port>" line, so a process that took
+// the port after the preflight — the window between the preflight and the bind —
+// can never be accepted as the server. A child that has exited is never ready
+// even if the port answers. Accepting a stranger silently was the worst failure
+// this code had: the driver drove the wrong server and reported ordinary-looking
+// statuses with exit 0.
 async function awaitServerReady(port) {
   const boot = spawnServer(port);
   const startedAt = Date.now();
@@ -161,17 +169,32 @@ async function awaitServerReady(port) {
     waitedMs: Date.now() - startedAt,
   });
   for (let i = 0; i < BOOT_POLL_ATTEMPTS; i++) {
-    if (boot.exit.exited) return failed("child-exited");
+    let httpAnswered = false;
     try {
       const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(1000) });
       await r.body?.cancel();
-      if (r.ok) return boot.exit.exited ? failed("child-exited") : { ok: true };
+      httpAnswered = true;
     } catch {
       // not up yet
     }
+    const verdict = assessReadiness({
+      httpAnswered,
+      childExited: boot.exit.exited,
+      listeningReported: serverReportsListening(boot.tails.stdout, port),
+      waitedMs: Date.now() - startedAt,
+      boundMs: BOOT_READY_BOUND_MS,
+    });
+    if (verdict === READINESS.READY) return { ok: true };
+    if (verdict !== READINESS.WAIT) return failed(verdict);
     await new Promise((r) => setTimeout(r, BOOT_POLL_MS));
   }
-  return failed(boot.exit.exited ? "child-exited" : "timeout");
+  return failed(
+    assessReadiness({
+      childExited: boot.exit.exited,
+      waitedMs: BOOT_READY_BOUND_MS,
+      boundMs: BOOT_READY_BOUND_MS,
+    }),
+  );
 }
 
 async function bootServer() {

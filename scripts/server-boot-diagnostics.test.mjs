@@ -22,9 +22,13 @@
 
 import {
   appendTail,
+  assessReadiness,
+  BOOT_READY_BOUND_MS,
   BOOT_TAIL_MAX_CHARS,
   describeBootFailure,
   portIsTaken,
+  READINESS,
+  serverReportsListening,
   trackBootChild,
 } from "./lib/server-boot.mjs";
 
@@ -197,6 +201,19 @@ await asyncSection(
         stderrTail: boot.tails.stderr,
       });
       assert(message.includes("already in use"), "the reported failure carries that explanation");
+      // The stranger was answering the whole time; readiness must still refuse.
+      assert(
+        assessReadiness({
+          httpAnswered: true,
+          childExited: boot.exit.exited,
+          listeningReported: serverReportsListening(boot.tails.stdout, port),
+        }) !== READINESS.READY,
+        "a port held by another process must never be accepted as ready",
+      );
+      assert(
+        !serverReportsListening(boot.tails.stdout, port),
+        "the real child must never claim it is listening on a port it could not bind",
+      );
     } finally {
       await occupier.shutdown();
       if (child) {
@@ -205,6 +222,124 @@ await asyncSection(
         } catch {
           // already gone
         }
+      }
+    }
+  },
+);
+
+section("the child's own listening line is what proves it owns the port", () => {
+  const real = "Listening on http://localhost:4102\n";
+  assert(serverReportsListening(real, 4102), "the line the real server prints must be recognised");
+  assert(!serverReportsListening(real, 4103), "a different port must not match");
+  assert(!serverReportsListening(real, 410), "a port prefix must not match");
+  assert(!serverReportsListening("", 4102), "no output means no proof");
+  assert(
+    !serverReportsListening("error: Uncaught (in promise) AddrInUse: Address already in use", 4102),
+    "a bind failure is not a listening report",
+  );
+});
+
+section("TOCTOU: a port taken after the preflight can never be accepted as ready", () => {
+  // The window the preflight cannot close: something else takes the port after we
+  // checked it and before the child binds. These are exactly the inputs that occur
+  // then — the stranger answers, the child has not reported listening — and the
+  // decision must never be READY, at any point in the window.
+  const at = (waitedMs) =>
+    assessReadiness({
+      httpAnswered: true,
+      childExited: false,
+      listeningReported: false,
+      waitedMs,
+      boundMs: BOOT_READY_BOUND_MS,
+    });
+  assert(at(0) === READINESS.WAIT, "early in the window it waits rather than accepting");
+  assert(at(BOOT_READY_BOUND_MS / 2) === READINESS.WAIT, "it still waits mid-window");
+  assert(
+    at(BOOT_READY_BOUND_MS) === READINESS.STRANGER,
+    "once the bound elapses it reports a stranger, not readiness",
+  );
+  assert(
+    at(BOOT_READY_BOUND_MS * 10) === READINESS.STRANGER,
+    "and it stays a stranger however long it waits",
+  );
+});
+
+section(
+  "fail-closed precedence: a dead child is never ready, and readiness needs both facts",
+  () => {
+    assert(
+      assessReadiness({
+        httpAnswered: true,
+        listeningReported: true,
+        childExited: true,
+      }) === READINESS.CHILD_EXITED,
+      "a child that exited is not ready even if the port answers and once reported listening",
+    );
+    assert(
+      assessReadiness({ httpAnswered: true, listeningReported: true }) === READINESS.READY,
+      "the child's own report plus an answer IS readiness",
+    );
+    assert(
+      assessReadiness({ httpAnswered: false, listeningReported: true }) === READINESS.WAIT,
+      "listening without an answer is not readiness yet",
+    );
+    assert(
+      assessReadiness({ httpAnswered: false, waitedMs: BOOT_READY_BOUND_MS }) === READINESS.TIMEOUT,
+      "a silent port is a slow boot, not a stranger",
+    );
+  },
+);
+
+section("a stranger on the port is described without blaming the child", () => {
+  const message = describeBootFailure({ port: 4104, kind: "stranger" });
+  assert(message.includes("4104"), `the port must be named, got: ${message}`);
+  assert(
+    message.includes("another process is serving that port"),
+    `it must name the observed situation, got: ${message}`,
+  );
+  assert(
+    !message.includes("exited with code"),
+    "the child has not exited in this case, so it must not be described as exiting",
+  );
+});
+
+await asyncSection(
+  "the real server reports listening on the port it bound (so the proof is real)",
+  async () => {
+    // If server.ts ever stops printing that line, readiness would fail closed and
+    // every drive would break — so the dependency is asserted here rather than
+    // discovered in the field.
+    const port = await ephemeralPort();
+    const child = new Deno.Command("deno", {
+      args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
+      env: { PORT: String(port) },
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const boot = trackBootChild(child);
+    try {
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline && !serverReportsListening(boot.tails.stdout, port)) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      assert(
+        serverReportsListening(boot.tails.stdout, port),
+        `the real server must report listening on ${port}, got: ${boot.tails.stdout.slice(0, 200)}`,
+      );
+      assert(!boot.exit.exited, "and it must still be running");
+      assert(
+        assessReadiness({
+          httpAnswered: true,
+          childExited: boot.exit.exited,
+          listeningReported: serverReportsListening(boot.tails.stdout, port),
+        }) === READINESS.READY,
+        "the real child's own report satisfies readiness",
+      );
+    } finally {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already gone
       }
     }
   },
