@@ -2513,7 +2513,15 @@ const DBSC_LONG_COOKIE = "showcase_dbsc";
 const DBSC_SHORT_COOKIE = "showcase_dbsc_short";
 const DBSC_DEFAULT_PATH = "/v145/device-bound-session-credentials";
 const DBSC_SHORT_COOKIE_MAX_AGE = 90;
-const dbscSessions = new BoundedSessionStore<DbscSession>();
+/** Long-lived demo cookie lifetime — the "long-lived" half of the DBSC narrative. */
+const DBSC_LONG_COOKIE_MAX_AGE = 60 * 60 * 24 * 30;
+// The server-side session is bounded by entry count and by this TTL, which
+// matches the long-lived cookie the demo itself sets (30 days) rather than the
+// 6-hour default used by the other fixtures — an aggressive default here would
+// silently contradict the long-lived-vs-short-lived story the demo tells.
+const dbscSessions = new BoundedSessionStore<DbscSession>({
+  ttlMs: DBSC_LONG_COOKIE_MAX_AGE * 1000,
+});
 
 function dbscPath(req: Request): string {
   const pathname = new URL(req.url).pathname;
@@ -2701,7 +2709,7 @@ async function renderDbscRoute(req: Request, sub: string): Promise<Response | nu
     const headers = new Headers();
     headers.set(
       "set-cookie",
-      `${DBSC_LONG_COOKIE}=${session.id}; ${dbscCookieAttributes(req, 60 * 60 * 24 * 30)}`,
+      `${DBSC_LONG_COOKIE}=${session.id}; ${dbscCookieAttributes(req, DBSC_LONG_COOKIE_MAX_AGE)}`,
     );
     headers.set("Secure-Session-Registration", dbscRegistrationHeader(req, session));
     return jsonResponse({
