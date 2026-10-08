@@ -479,8 +479,10 @@ await asyncSection(
     telemetryAuthThrottle.reset();
     // The fail-closed path. When the platform gives us no peer there is no trustworthy
     // source identity, and a header must not be promoted into one, so every such
-    // request lands in the single documented bucket: visible to everyone, bypassable by
-    // nobody. A DIFFERENT forwarded-for on every request must change nothing.
+    // request lands in the single documented bucket: visible to everyone, and not bypassable by
+    // rotating request headers — though shared, so one client can delay the others in it (churn
+    // from other identified peers could also evict it, exactly as the eviction section shows for
+    // any key). A DIFFERENT forwarded-for on every request must change nothing.
     const statuses = [];
     for (let i = 0; i < AUTH_THROTTLE_MAX_FAILURES + 1; i++) {
       const res = await handleDemoTelemetryRoute(
