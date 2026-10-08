@@ -131,45 +131,33 @@ section("one source exhausting its budget does not affect any other (no shared d
   assert(throttle.check("someone-else-2").allowed, "and so is another");
 });
 
-section("per-source state is bounded: capped sources, capped key length, idle eviction", () => {
+section("per-source state is bounded, and an idle source is really forgotten", () => {
   const clock = fakeClock();
-  const throttle = createAuthThrottle({ now: clock.now, maxSources: 4, ttlMs: 1000 });
-  for (let i = 0; i < 50; i++) throttle.recordFailure(`source-${i}`);
-  assert(throttle.size() === 4, `the source map must stay capped, got ${throttle.size()}`);
-  // An idle source is dropped rather than remembered.
-  clock.advance(2000);
-  const before = throttle.size();
-  throttle.check("brand-new-source");
+  // Room to spare: 3 sources against a cap of 8, so the cap cannot explain what the
+  // assertions below observe.
+  const throttle = createAuthThrottle({
+    now: clock.now,
+    maxSources: 8,
+    ttlMs: 1000,
+    refillMs: 10_000,
+  });
+  for (let i = 0; i < 3; i++) throttle.recordFailure(`source-${i}`);
+  assert(throttle.size() === 3, `expected 3 tracked sources, got ${throttle.size()}`);
+  // Spend one source's whole budget, then let it go idle past the TTL. The refill
+  // interval is deliberately much longer than the idle window, so the ONLY way this
+  // key can be allowed again is the idle-drop branch — with that branch removed the
+  // key stays spent and this assertion fails.
+  const idle = "source-0";
+  for (let i = 0; i < AUTH_THROTTLE_MAX_FAILURES; i++) throttle.recordFailure(idle);
+  assert(!throttle.check(idle).allowed, "the idle source is spent before going idle");
+  clock.advance(2001);
   assert(
-    throttle.size() <= 4,
-    `an idle sweep must not let the map grow past the cap (was ${before})`,
+    throttle.check(idle).allowed,
+    "an idle source must be forgotten, not remembered as spent",
   );
-  const long = "9".repeat(AUTH_THROTTLE_KEY_MAX_CHARS + 50);
-  assert(
-    sourceKeyFrom(new Headers(), long).length === AUTH_THROTTLE_KEY_MAX_CHARS,
-    "a hostile-length address must not become an unbounded key",
-  );
-});
-
-section("the source key comes from the socket peer, and ignores what the client wrote", () => {
-  // The classic bypass: a client rotating the leftmost x-forwarded-for entry to
-  // get a fresh budget per request. Only the rightmost entry is the proxy's, so
-  // the leftmost must never be used, and the socket peer wins outright.
-  const spoofed = new Headers({ "x-forwarded-for": "1.1.1.1, 2.2.2.2, 3.3.3.3" });
-  assert(
-    sourceKeyFrom(spoofed, "203.0.113.9") === "203.0.113.9",
-    "the unforgeable socket peer is preferred",
-  );
-  assert(
-    sourceKeyFrom(spoofed) === "3.3.3.3",
-    "without a peer, the rightmost (proxy-appended) hop is used",
-  );
-  assert(sourceKeyFrom(new Headers()) === "unknown", "with neither, one shared bucket");
-  const rotated = new Headers({ "x-forwarded-for": "9.9.9.9" });
-  assert(
-    sourceKeyFrom(rotated) === "9.9.9.9" && sourceKeyFrom(rotated, "203.0.113.9") === "203.0.113.9",
-    "a client-supplied value cannot override the peer",
-  );
+  // And the cap still holds when many distinct sources arrive at once.
+  for (let i = 0; i < 50; i++) throttle.recordFailure(`flood-${i}`);
+  assert(throttle.size() === 8, `the cap must hold under a flood, got ${throttle.size()}`);
 });
 
 const PROTECTED = [
@@ -312,43 +300,102 @@ await asyncSection("one source's exhaustion leaves another source working", asyn
 });
 
 await asyncSection(
-  "no response echoes the credential, and unconfigured looks the same",
+  "no response echoes the credential, and configured is indistinguishable",
   async () => {
     const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
     telemetryAuthThrottle.reset();
     const peer = "192.0.2.99";
     const wrong = "sup3r-s3cret-attempt-value";
-    const res = await handleDemoTelemetryRoute(
+    const configured = await handleDemoTelemetryRoute(
       request("/telemetry/demo/events", { headers: basic(wrong) }),
       { remoteAddr: peer },
     );
-    const body = await res.text();
-    assert(!body.includes(wrong), "the supplied credential must never be echoed");
+    const configuredBody = await configured.text();
+    assert(!configuredBody.includes(wrong), "the supplied credential must never be echoed");
     assert(
-      !body.includes(TEST_PASSWORD),
+      !configuredBody.includes(TEST_PASSWORD),
       "and the configured one must never appear in a response",
     );
-    // With no password configured the same refusal shape is returned, so a client
-    // cannot use the response to learn whether the surface is configured at all.
+    // The refusal for a WRONG password while one is configured must be byte-identical
+    // to the refusal while none is configured, or the response itself tells an attacker
+    // whether the surface is configured. (Unrelated and pre-existing: the GET
+    // /telemetry/demo docs route publishes passwordConfigured; that is not introduced
+    // here and is not what this section claims.)
     Deno.env.delete("showcase_password");
     Deno.env.delete("SHOWCASE_PASSWORD");
     telemetryAuthThrottle.reset();
     const unconfigured = await handleDemoTelemetryRoute(
-      request("/telemetry/demo/events", { headers: basic(TEST_PASSWORD) }),
+      request("/telemetry/demo/events", { headers: basic(wrong) }),
       { remoteAddr: peer },
     );
+    const unconfiguredBody = await unconfigured.text();
     Deno.env.set("showcase_password", TEST_PASSWORD);
     assert(
-      unconfigured?.status === 401,
-      `unconfigured must look like a failed attempt, got ${unconfigured?.status}`,
+      unconfigured?.status === configured?.status,
+      `unconfigured must look like a failed attempt (${unconfigured?.status} vs ${configured?.status})`,
     );
-    const unconfiguredBodies = await unconfigured.text();
     assert(
-      !unconfiguredBodies.includes(TEST_PASSWORD),
-      "the attempt must not appear anywhere even when unconfigured",
+      unconfiguredBody === configuredBody,
+      "the two refusals must be identical, or the response reveals whether a password is set",
+    );
+    assert(
+      !unconfiguredBody.includes(wrong),
+      "and the attempt must not appear anywhere even when unconfigured",
     );
   },
 );
+
+await asyncSection("a client cannot rotate its own key with x-forwarded-for", async () => {
+  const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
+  telemetryAuthThrottle.reset();
+  const peer = "192.0.2.44";
+  // A different, attacker-chosen forwarded-for on EVERY request: if the key were
+  // taken from the header each request would land in a fresh bucket and never
+  // throttle. Every request here shares one peer, so they must share one budget.
+  const statuses = [];
+  for (let i = 0; i < AUTH_THROTTLE_MAX_FAILURES + 2; i++) {
+    const res = await handleDemoTelemetryRoute(
+      request("/telemetry/demo/events", {
+        headers: { ...basic("wrong"), "x-forwarded-for": `10.0.0.${i}` },
+      }),
+      { remoteAddr: peer },
+    );
+    statuses.push(res?.status);
+  }
+  assert(
+    statuses.includes(429),
+    `rotating the header must not buy a fresh budget, got ${statuses.join(",")}`,
+  );
+  const spentWithAnotherValue = await handleDemoTelemetryRoute(
+    request("/telemetry/demo/events", {
+      headers: { ...basic(TEST_PASSWORD), "x-forwarded-for": "172.16.0.1" },
+    }),
+    { remoteAddr: peer },
+  );
+  assert(
+    spentWithAnotherValue?.status === 429,
+    `the peer is the key, so another header value cannot change the answer, got ${spentWithAnotherValue?.status}`,
+  );
+});
+
+section("stated limit: while a flood continues, each refilled token is taken by it", () => {
+  // The honest, executable statement of what a source-keyed throttle cannot do: two
+  // clients behind one address are one source, so an operator sharing an address with
+  // a flooding attacker is not guaranteed an attempt while the flood lasts. Asserted
+  // rather than glossed over; recovery once the flood STOPS is covered above.
+  const clock = fakeClock();
+  const throttle = createAuthThrottle({ now: clock.now, refillMs: 10_000 });
+  const sharedAddress = "198.51.100.7";
+  for (let i = 0; i < AUTH_THROTTLE_MAX_FAILURES; i++) throttle.recordFailure(sharedAddress);
+  assert(!throttle.check(sharedAddress).allowed, "spent by the flood");
+  clock.advance(10_000);
+  assert(throttle.check(sharedAddress).allowed, "the refilled attempt goes to whoever asks first");
+  throttle.recordFailure(sharedAddress); // the flooder asks first, and fails
+  assert(
+    !throttle.check(sharedAddress).allowed,
+    "so a second client on that address is refused again: no attempt is reserved for it",
+  );
+});
 
 if (failures > 0) {
   console.error(`\nauth throttle tests: ${failures} section(s) failed`);

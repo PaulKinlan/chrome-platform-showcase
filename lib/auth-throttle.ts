@@ -25,11 +25,27 @@
 // successfully after the interval instead of being permanently locked out, while
 // still capping an attacker to one guess per interval per source.
 //
-// Known limit, stated rather than hidden: a source key is only as good as its
-// trust anchor. An attacker with many distinct addresses, or one who can rotate
-// the key, gets the full budget per key. A global cap would fix that by making one
-// attacker's flood everyone's problem — which is the shared denial this design is
-// required to avoid — so the trade is deliberate.
+// Two limits are stated rather than hidden.
+//
+// 1. A source key is only as good as its trust anchor. The key is the socket peer
+//    and nothing else — never a request header, which the client chooses. So a
+//    client the platform cannot attribute (no peer) shares the "unknown" bucket with
+//    every other such client, and an attacker with many distinct addresses gets a
+//    full budget per address. A global cap would fix the latter by making one
+//    attacker's flood everyone's problem — the shared denial this design is required
+//    to avoid — so the trade is deliberate.
+//
+// 2. Recovery is guaranteed when a flood stops, not while it continues. A source
+//    over budget under a continuous flood of failures from the same address — an
+//    attacker behind the operator's own NAT or proxy, say — can consume each
+//    refilled token before the operator's own attempt arrives, so the operator is
+//    not guaranteed a comparison at any finite time while that flood lasts. No
+//    source-keyed throttle can tell those two clients apart without a second
+//    identity, so this is inherent to the approach rather than an oversight. The
+//    escape hatches: the buckets are in memory, so restarting the service restores
+//    access immediately, and a separately trusted operator channel can be added if
+//    a hard guarantee is ever needed. Recovery after the flood stops is verified;
+//    recovery *during* a flood is not claimed.
 
 export const AUTH_THROTTLE_MAX_FAILURES = 10;
 export const AUTH_THROTTLE_REFILL_MS = 10_000;
@@ -47,23 +63,17 @@ type Bucket = { tokens: number; updatedAt: number };
 /**
  * Which source does this request come from?
  *
- * `remoteAddr` is the socket peer, which the client cannot forge, so it is
- * preferred. `x-forwarded-for` is client-supplied: only the RIGHTMOST entry is
- * added by the proxy in front of us, and the leftmost entry is the classic
- * rate-limit bypass, so anything the client could have written is ignored. If
- * neither is available every such request shares one bucket — which delays but
- * never bans, so the failure mode is a wait rather than a lockout.
+ * The socket peer, and nothing else. A request header must never be used:
+ * `x-forwarded-for` is client-supplied, so keying on it would let one client rotate
+ * its own key and spend a fresh budget per request — a throttle bypassable by the
+ * very attacker it exists to stop, which is worse than no throttle because it looks
+ * like protection. The deployment is therefore required to expose a peer address
+ * (Deno Deploy does, and so does the local runtime). When it does not, every such
+ * request shares one bucket: visible, and never bypassable.
  */
-export function sourceKeyFrom(headers: Headers, remoteAddr?: string | null): string {
+export function sourceKeyFrom(remoteAddr?: string | null): string {
   const peer = (remoteAddr ?? "").trim();
-  if (peer) return peer.slice(0, AUTH_THROTTLE_KEY_MAX_CHARS);
-  const forwarded = headers.get("x-forwarded-for");
-  if (forwarded) {
-    const hops = forwarded.split(",").map((hop) => hop.trim()).filter(Boolean);
-    const rightmost = hops[hops.length - 1];
-    if (rightmost) return rightmost.slice(0, AUTH_THROTTLE_KEY_MAX_CHARS);
-  }
-  return "unknown";
+  return peer ? peer.slice(0, AUTH_THROTTLE_KEY_MAX_CHARS) : "unknown";
 }
 
 export interface AuthThrottleOptions {

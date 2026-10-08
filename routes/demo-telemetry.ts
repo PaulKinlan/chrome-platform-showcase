@@ -131,7 +131,7 @@ function throttledResponse(retryAfterSeconds: number): Response {
  * Returns a response to send, or null to continue.
  */
 function checkAccess(req: Request, remoteAddr?: string | null): Response | null {
-  const key = sourceKeyFrom(req.headers, remoteAddr);
+  const key = sourceKeyFrom(remoteAddr);
   const decision = telemetryAuthThrottle.check(key);
   if (!decision.allowed) return throttledResponse(decision.retryAfterSeconds);
   if (isAuthorized(req)) {
