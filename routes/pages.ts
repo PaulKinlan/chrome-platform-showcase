@@ -1345,7 +1345,9 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
 
   const tableRows = renderFeatureCatalogueRows(rows);
 
-  const mstoneOptions = known.map((m) => `<option value="${m}">v${m}</option>`).join("");
+  const mstoneOptions = known.map((m) =>
+    `<option value="${escapeHTML(String(m))}">v${escapeHTML(String(m))}</option>`
+  ).join("");
 
   return `<!doctype html>
 <html lang="en">

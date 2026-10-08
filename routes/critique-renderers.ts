@@ -98,7 +98,9 @@ export async function renderCritiquesIndex(): Promise<string> {
       <td class="num">${c.openQuestions.length}</td>
       <td>${
       c.openQuestions.map((q) =>
-        `<span class="qchip qchip-${q.severity ?? "minor"}">${escapeHTML(q.title)}</span>`
+        `<span class="qchip qchip-${escapeHTML(String(q.severity ?? "minor"))}">${
+          escapeHTML(q.title)
+        }</span>`
       ).join("")
     }</td>
     </tr>`;
@@ -170,7 +172,11 @@ export function renderCritiqueDetail(c: CritiqueReport): string {
       c.openQuestions.map((q) =>
         `<li>
       <h3>${escapeHTML(q.title)}${
-          q.severity ? ` <span class="qchip qchip-${q.severity}">${q.severity}</span>` : ""
+          q.severity
+            ? ` <span class="qchip qchip-${escapeHTML(String(q.severity))}">${
+              escapeHTML(String(q.severity))
+            }</span>`
+            : ""
         }</h3>
       <p>${escapeHTML(q.detail)}</p>
       ${
@@ -253,9 +259,11 @@ export function renderCritiqueDetail(c: CritiqueReport): string {
 
   ${guidance}
 
-  <p><a href="https://chromestatus.com/feature/${c.chromestatusId}" target="_blank" rel="noopener">ChromeStatus #${c.chromestatusId}</a> · <a href="/${
-    escapeHTML(c.release)
-  }/${escapeHTML(c.featureSlug)}/${
+  <p><a href="${
+    escapeHTML(`https://chromestatus.com/feature/${c.chromestatusId}`)
+  }" target="_blank" rel="noopener">ChromeStatus #${
+    escapeHTML(String(c.chromestatusId))
+  }</a> · <a href="/${escapeHTML(c.release)}/${escapeHTML(c.featureSlug)}/${
     c.conceptSlug ? escapeHTML(c.conceptSlug) + "/" : ""
   }">view the page being critiqued &rarr;</a></p>
 

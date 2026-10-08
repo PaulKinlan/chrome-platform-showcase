@@ -7,6 +7,8 @@
 import { handleDemoTelemetryRoute } from "../routes/demo-telemetry.ts";
 import { buildAliasLocation, handleAliasRoute } from "../routes/aliases.ts";
 import { renderCategoryCard, renderDemoCard, renderFeatureCatalogueRows } from "../routes/pages.ts";
+import { renderConformancePage } from "../routes/conformance-renderers.ts";
+import { renderCritiqueDetail } from "../routes/critique-renderers.ts";
 import { renderConformanceRunAllPage } from "../routes/conformance-renderers.ts";
 import { handlePublicRoute } from "../routes/public.ts";
 import {
@@ -931,6 +933,84 @@ section("conformance run-all page escapes the release value", async () => {
     page.includes('data-milestone="${escapeHTML(suite.release)}"') &&
       !page.includes('data-milestone="${suite.release}"'),
     `${label}: row template does not escape the milestone attribute`,
+  );
+});
+
+// 8. Conformance and critique pages escape values that arrive from repo JSON
+//    (conformance.json / _questions.json), which is parsed without validation.
+// ---------------------------------------------------------------------------
+
+section("conformance page escapes the ChromeStatus id", async () => {
+  const label = "conformance page escapes the ChromeStatus id";
+  const html = renderConformancePage({
+    release: "v151",
+    featureSlug: "feature",
+    chromestatusId: '5"x',
+    generatedAt: "2026-10-08T00:00:00Z",
+    author: "test",
+    assertions: [],
+  });
+  assert(!html.includes('feature/5"x'), `${label}: raw id reached the href`);
+  assert(html.includes("/feature/5&quot;x"), `${label}: escaped href missing`);
+
+  // The visible link text is a SEPARATE sink from the href, so assert it too:
+  // without this, deleting the text escape would leave this section passing.
+  const textHtml = renderConformancePage({
+    release: "v151",
+    featureSlug: "feature",
+    chromestatusId: "5<script>alert(1)</script>",
+    generatedAt: "2026-10-08T00:00:00Z",
+    author: "test",
+    assertions: [],
+  });
+  assert(
+    !textHtml.includes("<script>alert(1)</script>"),
+    `${label}: raw id reached the link text`,
+  );
+  assert(
+    textHtml.includes("&lt;script&gt;alert(1)&lt;/script&gt;"),
+    `${label}: link text was not encoded`,
+  );
+});
+
+section("critique detail escapes the severity chip and the ChromeStatus link", async () => {
+  const label = "critique detail escapes the severity chip and the ChromeStatus link";
+  const html = renderCritiqueDetail({
+    release: "v151",
+    featureSlug: "feature",
+    chromestatusId: '5"x',
+    reviewedAt: "2026-10-08T00:00:00Z",
+    reviewer: "test",
+    rubric: { spec_match: { state: "pass", rationale: "checked" } },
+    openQuestions: [
+      { title: "q", detail: "d", severity: 'minor" onmouseover="alert(1)' },
+    ],
+  });
+  assert(
+    !html.includes('onmouseover="alert'),
+    `${label}: raw severity reached the class attribute or the chip text`,
+  );
+  assert(!html.includes('feature/5"x'), `${label}: raw id reached the href`);
+  assert(html.includes("&quot; onmouseover=&quot;"), `${label}: escaped severity missing`);
+  assert(html.includes("/feature/5&quot;x"), `${label}: escaped href missing`);
+
+  // Same again for the critique link text, which is a separate sink.
+  const textHtml = renderCritiqueDetail({
+    release: "v151",
+    featureSlug: "feature",
+    chromestatusId: "5<script>alert(1)</script>",
+    reviewedAt: "2026-10-08T00:00:00Z",
+    reviewer: "test",
+    rubric: { spec_match: { state: "pass", rationale: "checked" } },
+    openQuestions: [],
+  });
+  assert(
+    !textHtml.includes("<script>alert(1)</script>"),
+    `${label}: raw id reached the link text`,
+  );
+  assert(
+    textHtml.includes("&lt;script&gt;alert(1)&lt;/script&gt;"),
+    `${label}: link text was not encoded`,
   );
 });
 
