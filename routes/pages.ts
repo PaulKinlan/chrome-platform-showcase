@@ -1240,9 +1240,10 @@ export interface FeatureCatalogueRow {
  * demo href and the probe attributes come from locally resolved demo data. All
  * of them are escaped for the context they land in - including the
  * ChromeStatus link, which is built from an upstream-supplied feature id.
- * The id's shape is deliberately not validated: an unexpected value can only
- * produce a malformed third-party link path, never an attribute escape,
- * because the escaped value cannot leave the href attribute.
+ * The id's shape is deliberately not validated: an unexpected value may
+ * produce an unintended ChromeStatus path, query or fragment, but it cannot
+ * escape the quoted attribute or change its fixed origin, because the escaped
+ * value cannot leave the href attribute.
  */
 export function renderFeatureCatalogueRows(rows: FeatureCatalogueRow[]): string {
   return rows.map((r) => {
