@@ -17,7 +17,14 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
-import { classifyDriveEffect, describeActions, EFFECT_KIND } from "./lib/drive-effect.mjs";
+import {
+  classifyDriveEffect,
+  describeActions,
+  DRIVE_STATUS,
+  EFFECT_KIND,
+  gradeEffectOutcome,
+  NOT_DEMONSTRATED_STATUSES,
+} from "./lib/drive-effect.mjs";
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
 
 const args = [...Deno.args];
@@ -303,7 +310,15 @@ const IN_PAGE_DRIVER = `(async () => {
 // Only FAIL means "something is broken". The not-demonstrated statuses mean
 // "this run is not evidence that the demo works" — a different claim, which must
 // not be reported as a pass.
-function gradeRun({ isSpecCase, driveData, driveError, errors, visualDelta = null }) {
+function gradeRun({
+  isSpecCase,
+  driveData,
+  driveError,
+  errors,
+  visualDelta = null,
+  beforeHash = null,
+  afterHash = null,
+}) {
   if (driveError) return { status: "FAIL", reason: driveError };
   if (errors.length) return { status: "FAIL", reason: errors.join("; ") };
 
@@ -353,20 +368,17 @@ function gradeRun({ isSpecCase, driveData, driveError, errors, visualDelta = nul
   // only paint (canvas, WebGL), and the before/after screenshots are then the only
   // evidence there is. Discarding a differing pair because the DOM was quiet
   // reported NO-EFFECT for demos that plainly responded (bead c3p).
-  if (!effect.hasEffect) {
-    return {
-      status: "NO-EFFECT",
-      reason:
-        `${exercised} control(s) exercised, no DOM mutation, readout change or visual change observed`,
-    };
-  }
-  return { status: "PASS", effect };
+  //
+  // But a differing pair is NON-CAUSAL — an animation, clock or autoplay produces
+  // one identically — so it is NOT an ordinary pass either. It is reported as
+  // VISUAL-ONLY, a not-demonstrated status carrying both hashes and that limit.
+  const outcome = gradeEffectOutcome({ effect, exercised, beforeHash, afterHash });
+  return outcome.status === DRIVE_STATUS.PASS ? { status: DRIVE_STATUS.PASS, effect } : outcome;
 }
 
-// Indexed but not demonstrated. Kept out of the pass tally and listed separately,
-// as the showcase-auto-research SKILL requires for zero-control reference pages.
-// `UNVERIFIED` (disk-recovered, bead cix) keeps its own separate tally.
-const NOT_DEMONSTRATED_STATUSES = ["NO-CONTROLS", "NOT-DRIVEABLE", "NO-EFFECT", "NOT-ASSERTED"];
+// The not-demonstrated status list (including VISUAL-ONLY) lives in
+// ./lib/drive-effect.mjs, where the test can assert that a visual-only effect is
+// not counted as a pass.
 
 // ── Main Execution ──────────────────────────────────────────────────────────
 await bootServer();
@@ -533,6 +545,8 @@ try {
       driveError,
       errors,
       visualDelta,
+      beforeHash,
+      afterHash,
     });
     const effect = verdict.effect ?? classifyDriveEffect({
       interactions: driveData?.interactions ?? [],
@@ -605,13 +619,16 @@ try {
           record.actions.slice(0, 3).join(", "),
         )
         : `${Object.keys(record.assertions ?? {}).length} assertion(s) held`;
-      const visualOnly = effect.kind === EFFECT_KIND.VISUAL;
-      if (visualOnly) visualOnlyCount++;
-      const caveat = visualOnly
-        ? " [visual change only — no DOM mutation or readout change; see the row note]"
-        : "";
+      const caveat = "";
       console.log(
         `PASS  ${item.url} — ${actionSummary} (${record.mutations} mutations)${caveat}`,
+      );
+    } else if (verdict.status === DRIVE_STATUS.VISUAL_ONLY) {
+      // Not a pass and not a failure: the pair differs but cannot be attributed, so
+      // the row is counted apart and flagged for review.
+      visualOnlyCount++;
+      console.warn(
+        `  VISUAL-ONLY  ${item.url} — screenshots differ (${record.screenshots.beforeHash} -> ${record.screenshots.afterHash}) with no DOM mutation or readout change; a differing pair is non-causal, so this needs review rather than a pass`,
       );
     } else if (verdict.status === "FAIL") {
       failedCount++;
@@ -724,7 +741,7 @@ const summaryJson = {
   lastRunPassed: passedCount,
   lastRunNotDemonstrated: notDemonstratedCount,
   lastRunNoVisualDelta: noVisualDeltaCount,
-  lastRunVisualOnlyPassed: visualOnlyCount,
+  lastRunVisualOnly: visualOnlyCount,
   lastRunFailed: failedCount,
   results: allResults,
 };
@@ -745,11 +762,13 @@ md +=
 md +=
   `- **Latest Run:** ${results.length} tested (${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed)\n\n`;
 md +=
-  `Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT** and **NOT-ASSERTED** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.\n\n`;
+  `Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT**, **NOT-ASSERTED** and **VISUAL-ONLY** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.\n\n`;
 md +=
   `**NO-VISUAL-DELTA** is a caveat on a row, not a status: the before/after screenshots hash the same, so the pair is not proof of the interaction. When the run's per-action evidence identifies the cause it is named — a control whose effect was returned to its initial state by a later reset control — otherwise the pair is simply not claimed: the paint may not have landed.\n\n`;
 md +=
-  `**Per-action evidence.** The driver records what each control did, so a mutation total is never presented without attribution, and a later reset cannot be mistaken for the whole run having done nothing. A run whose only evidence is a differing screenshot pair (a control that paints — canvas or WebGL — with no DOM mutation and no readout change) is a **PASS** carrying an explicit note: the pair shows the page changed after a control was used, but cannot by itself attribute the change to the control.\n\n`;
+  `**Per-action evidence.** The driver records what each control did, so a mutation total is never presented without attribution, and a later reset cannot be mistaken for the whole run having done nothing.\n\n`;
+md +=
+  `**VISUAL-ONLY** covers the case where the only signal is that the screenshots differ — a control that paints without touching the DOM, or ambient motion. A differing pair is **non-causal**: an animation, a clock or an autoplay produces one identically, so it is not evidence that the control did anything, and the row is reported for review with both hashes rather than counted as a pass.\n\n`;
 // Heading says what the table actually contains: driven passes, failures,
 // not-demonstrated rows and recovered artifacts all appear here.
 md += `## Indexed Demos\n\n`;
@@ -759,7 +778,9 @@ md += `| :--- | :---: | :---: | :---: | :--- |\n`;
 for (const r of allResults) {
   const proofLinks = [
     r.screenshots?.initial ? `[Initial](${r.screenshots.initial})` : "",
-    r.visualDelta === false
+    r.status === DRIVE_STATUS.VISUAL_ONLY
+      ? `pair differs (${r.screenshots?.beforeHash} -> ${r.screenshots?.afterHash}) — non-causal, needs review`
+      : r.visualDelta === false
       ? (r.resetBy
         ? `NO-VISUAL-DELTA (effect on ${
           r.effectiveActions?.[0] ?? "a control"
@@ -809,7 +830,7 @@ console.log(
     : []),
   ...(visualOnlyCount
     ? [
-      `\nVISUAL-ONLY PASS: ${visualOnlyCount} row(s) passed on a differing screenshot pair with no DOM mutation or readout change — the pair does not attribute the change to the control; see the row notes.`,
+      `\nVISUAL-ONLY: ${visualOnlyCount} row(s) produced a differing screenshot pair with no DOM mutation or readout change — a differing pair is NON-CAUSAL, so these are NOT passes and need review; see the row notes.`,
     ]
     : []),
 );

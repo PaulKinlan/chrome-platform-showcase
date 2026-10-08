@@ -15,13 +15,26 @@
 //     graded not-demonstrated, and the run contradicted itself.
 //
 // So classification is per action now, and the visual signal takes part in the
-// decision. Two properties matter as much as the fix: a genuine no-op demo must
-// still report NO-EFFECT, and a differing screenshot pair must never be promoted
-// into an attribution it cannot support.
+// decision. Three properties matter as much as the fix: a genuine no-op demo must
+// still report NO-EFFECT, an absent screenshot must never count as a change, and a
+// differing pair must never be promoted into an attribution it cannot support.
+//
+// On that last point the project ruling is explicit (coord, 2026-10-08): a
+// differing pair is NON-CAUSAL, because an animation, a clock or an autoplay
+// produces one identically. A visual-only effect is therefore NOT an ordinary
+// PASS — it is reported as VISUAL-ONLY, carries both hashes and the causal limit,
+// and is kept out of the pass count.
 //
 // Run: deno task test-drive-effect
 
-import { classifyDriveEffect, describeActions, EFFECT_KIND } from "./lib/drive-effect.mjs";
+import {
+  classifyDriveEffect,
+  describeActions,
+  DRIVE_STATUS,
+  EFFECT_KIND,
+  gradeEffectOutcome,
+  NOT_DEMONSTRATED_STATUSES,
+} from "./lib/drive-effect.mjs";
 
 let failures = 0;
 function section(name, fn) {
@@ -129,9 +142,85 @@ section("a control that only paints is a visual effect, not NO-EFFECT", () => {
   assertEqual(effect.kind, EFFECT_KIND.VISUAL, "it is visual-kind, not dom-kind");
   assertEqual(effect.effectiveActions, [], "no action-level effect was observed");
   assert(
-    effect.note?.includes("cannot attribute"),
-    `a visual-only effect must carry its attribution limit, got: ${effect.note}`,
+    effect.note?.includes("NON-CAUSAL") && effect.note?.includes("cannot attribute"),
+    `a visual-only effect must carry its non-causality limit, got: ${effect.note}`,
   );
+});
+
+section("a visual-only effect is graded VISUAL-ONLY, never PASS", () => {
+  // The ruling: a differing pair is non-causal, so it must not be folded into the
+  // pass count. The row keeps both hashes so the reviewer can look at the pair.
+  const effect = classifyDriveEffect({
+    interactions: [{ action: "click: Run", mutations: 0, readoutsAfter: IDLE }],
+    readoutsBefore: IDLE,
+    visualDelta: true,
+  });
+  const outcome = gradeEffectOutcome({
+    effect,
+    exercised: 1,
+    beforeHash: "711590282133ce74",
+    afterHash: "9e8b1d60f4c2f37e",
+  });
+  assert(outcome.status !== DRIVE_STATUS.PASS, "a differing pair must not be an ordinary pass");
+  assertEqual(outcome.status, DRIVE_STATUS.VISUAL_ONLY, "it is its own status");
+  assert(
+    outcome.reason.includes("711590282133ce74") && outcome.reason.includes("9e8b1d60f4c2f37e"),
+    `the reason must carry BOTH hashes, got: ${outcome.reason}`,
+  );
+  assert(
+    outcome.reason.includes("NON-CAUSAL") && outcome.reason.includes("needs review"),
+    `the reason must state the causal limit and the need for review, got: ${outcome.reason}`,
+  );
+  assert(
+    NOT_DEMONSTRATED_STATUSES.includes(DRIVE_STATUS.VISUAL_ONLY),
+    "VISUAL-ONLY must be a not-demonstrated status so it stays out of the pass tally",
+  );
+  assert(
+    !NOT_DEMONSTRATED_STATUSES.includes(DRIVE_STATUS.PASS),
+    "PASS must never be listed as not-demonstrated",
+  );
+});
+
+section("only an action-level effect is graded PASS", () => {
+  const dom = gradeEffectOutcome({
+    effect: classifyDriveEffect({
+      interactions: [{ action: "click: Run", mutations: 2, readoutsAfter: RAN }],
+      readoutsBefore: IDLE,
+      visualDelta: true,
+    }),
+    exercised: 1,
+  });
+  assertEqual(dom.status, DRIVE_STATUS.PASS, "an attributable effect is a pass");
+  const nothing = gradeEffectOutcome({
+    effect: classifyDriveEffect({
+      interactions: [{ action: "click: Run", mutations: 0, readoutsAfter: IDLE }],
+      readoutsBefore: IDLE,
+      visualDelta: false,
+    }),
+    exercised: 1,
+  });
+  assertEqual(nothing.status, DRIVE_STATUS.NO_EFFECT, "nothing at all stays NO-EFFECT");
+  // No screenshot captured: not a change, so still NO-EFFECT rather than VISUAL-ONLY.
+  const noShot = gradeEffectOutcome({
+    effect: classifyDriveEffect({
+      interactions: [{ action: "click: Run", mutations: 0, readoutsAfter: IDLE }],
+      readoutsBefore: IDLE,
+      visualDelta: null,
+    }),
+    exercised: 1,
+  });
+  assertEqual(noShot.status, DRIVE_STATUS.NO_EFFECT, "an uncaptured pair is not a visual effect");
+  // A visual-only row without hashes still states the limit rather than naming a pair.
+  const hashless = gradeEffectOutcome({
+    effect: classifyDriveEffect({
+      interactions: [{ action: "click: Run", mutations: 0, readoutsAfter: IDLE }],
+      readoutsBefore: IDLE,
+      visualDelta: true,
+    }),
+    exercised: 2,
+  });
+  assertEqual(hashless.status, DRIVE_STATUS.VISUAL_ONLY, "still VISUAL-ONLY without hashes");
+  assert(hashless.reason.includes("2 control"), "the exercised count is reported");
 });
 
 section("nothing changed at all still reports no effect", () => {

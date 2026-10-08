@@ -32,6 +32,28 @@ export const EFFECT_KIND = {
   NONE: "none",
 };
 
+/**
+ * Driver outcomes. `VISUAL-ONLY` is deliberately NOT a pass: a differing
+ * screenshot pair is non-causal (an animation, a clock or an autoplay produces
+ * one identically), so the row is reported for review rather than counted.
+ */
+export const DRIVE_STATUS = {
+  PASS: "PASS",
+  VISUAL_ONLY: "VISUAL-ONLY",
+  NO_EFFECT: "NO-EFFECT",
+};
+
+// Indexed but not demonstrated: kept out of the pass tally and listed separately,
+// as the showcase-auto-research SKILL requires for zero-control reference pages.
+// `UNVERIFIED` (disk-recovered, bead cix) keeps its own separate tally.
+export const NOT_DEMONSTRATED_STATUSES = [
+  "NO-CONTROLS",
+  "NOT-DRIVEABLE",
+  "NO-EFFECT",
+  "NOT-ASSERTED",
+  DRIVE_STATUS.VISUAL_ONLY,
+];
+
 /** Two readout snapshots are "moved" when their captured text differs. */
 export function readoutsMoved(before, after) {
   return JSON.stringify(before ?? []) !== JSON.stringify(after ?? []);
@@ -100,7 +122,7 @@ export function classifyDriveEffect(
       `the effect observed on ${first} was returned to the initial state by ${resetBy}, so the before/after screenshots are byte-identical — the earlier effect was real, and the pair is not proof of it`;
   } else if (kind === EFFECT_KIND.VISUAL) {
     note =
-      "the before/after screenshots differ, so the page changed after a control was used, but no DOM mutation or readout change was observed — the pair alone cannot attribute that change to the control";
+      "the before/after screenshots differ, so the page changed after a control was used, but no DOM mutation or readout change was observed — a differing pair is NON-CAUSAL (an animation, clock or autoplay looks the same), so it cannot attribute the change to the control";
   }
 
   return {
@@ -109,6 +131,31 @@ export function classifyDriveEffect(
     effectiveActions,
     resetBy,
     note,
+  };
+}
+
+/**
+ * Turn an effect classification into a run outcome.
+ *
+ * Only an action-level effect is a PASS. A visual-only effect is reported as
+ * `VISUAL-ONLY`, which is a not-demonstrated status: it is shown with BOTH
+ * screenshot hashes and the causal limit attached, and it is never folded into
+ * the pass count.
+ */
+export function gradeEffectOutcome({ effect, exercised = 0, beforeHash = null, afterHash = null }) {
+  if (effect?.kind === EFFECT_KIND.DOM) return { status: DRIVE_STATUS.PASS };
+  if (effect?.kind === EFFECT_KIND.VISUAL) {
+    const pair = beforeHash && afterHash ? ` (${beforeHash} -> ${afterHash})` : "";
+    return {
+      status: DRIVE_STATUS.VISUAL_ONLY,
+      reason:
+        `${exercised} control(s) exercised, no DOM mutation and no readout change; the before/after screenshots differ${pair} — a differing pair is NON-CAUSAL (an animation, clock or autoplay looks the same), so this is not evidence that the control did anything and needs review`,
+    };
+  }
+  return {
+    status: DRIVE_STATUS.NO_EFFECT,
+    reason:
+      `${exercised} control(s) exercised, no DOM mutation, readout change or screenshot change observed`,
   };
 }
 
