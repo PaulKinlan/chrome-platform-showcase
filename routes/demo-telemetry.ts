@@ -125,8 +125,11 @@ function throttledResponse(retryAfterSeconds: number): Response {
  * Order matters. The throttle is consulted BEFORE the credential comparison, so an
  * over-budget source costs nothing to refuse, and the comparison is exactly what an
  * attacker is trying to spend. A successful authentication clears the source's
- * record, so a valid credential is never refused for earlier failures; an
- * over-budget source waits at most one refill interval rather than being banned.
+ * record, so a valid credential is not refused BECAUSE of earlier failures once an
+ * attempt is available; an over-budget source waits at most one refill interval
+ * rather than being banned. While a competing flood from the same address consumes
+ * each refilled attempt, even a valid credential is refused — that limit is stated in
+ * lib/auth-throttle.ts and asserted in the suite.
  *
  * Returns a response to send, or null to continue.
  */

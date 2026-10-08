@@ -11,9 +11,9 @@
 //
 //   - per source, so one client cannot spend another client's budget;
 //   - no shared denial: a source over budget waits; it does not stop anyone else;
-//   - no self-lockout: the refusal is a delay, never a ban, and a VALID credential
-//     always clears the record — so an operator cannot be shut out by their own
-//     fumbling, or by someone else's flood from a shared address;
+//   - no self-lockout from the operator's OWN fumbling: the refusal is a delay, never
+//     a ban, and a successful authentication clears the record. This does NOT extend
+//     to a competing flood from the same address — see limit 2 below;
 //   - bounded memory: the map is capped and idle sources are dropped, the key is
 //     length-capped, and no per-source state can grow without both;
 //   - no new information: an over-budget refusal is identical whether or not a
@@ -43,9 +43,10 @@
 //    source-keyed throttle can tell those two clients apart without a second
 //    identity, so this is inherent to the approach rather than an oversight. The
 //    escape hatches: the buckets are in memory, so restarting the service restores
-//    access immediately, and a separately trusted operator channel can be added if
-//    a hard guarantee is ever needed. Recovery after the flood stops is verified;
-//    recovery *during* a flood is not claimed.
+//    access immediately (though a continuing flood spends it again), and a separately
+//    trusted operator channel can be added if a hard guarantee is ever needed.
+//    Recovery after a flood stops is verified; recovery *during* a flood is not, and
+//    is not claimed anywhere.
 
 export const AUTH_THROTTLE_MAX_FAILURES = 10;
 export const AUTH_THROTTLE_REFILL_MS = 10_000;
@@ -69,7 +70,10 @@ type Bucket = { tokens: number; updatedAt: number };
  * very attacker it exists to stop, which is worse than no throttle because it looks
  * like protection. The deployment is therefore required to expose a peer address
  * (Deno Deploy does, and so does the local runtime). When it does not, every such
- * request shares one bucket: visible, and never bypassable.
+ * request shares one bucket: visible, and never bypassable — but shared, so one client
+ * can delay every other client in it. That is why the deployment is required to
+ * supply a peer, and why that requirement is a tracked check rather than an
+ * assumption.
  */
 export function sourceKeyFrom(remoteAddr?: string | null): string {
   const peer = (remoteAddr ?? "").trim();

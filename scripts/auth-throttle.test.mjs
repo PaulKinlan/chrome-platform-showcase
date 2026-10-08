@@ -7,9 +7,16 @@
 // endpoint, against a password the operator chooses.
 //
 // The properties that matter are not "does it block" but the three constraints
-// together: per-source, denial-safe for everyone else, and impossible to lock the
-// operator out of their own admin surface. Each has its own section below, and the
-// route-level sections drive the real handler rather than the helper.
+// together: per-source, denial-safe for everyone else, and no lockout from the
+// operator's own fumbling. Each has its own section below, and the route-level
+// sections drive the real handler rather than the helper. What it does NOT do is
+// guarantee an attempt to an operator who shares an address with a client that is
+// flooding it: that limit is stated and asserted at the end of this file.
+//
+// Two things this file deliberately does not claim either: that recovery is possible
+// DURING a continuing flood from the operator's own address, and that the deployment
+// is guaranteed to supply a socket peer (the per-source property depends on that, and
+// the empirical check is tracked as separate work).
 //
 // Run: deno task test-auth-throttle
 
@@ -106,7 +113,7 @@ section("the bucket refills, so an over-budget source recovers without intervent
   assert(throttle.check(key).allowed, "and a long idle period refills to full");
 });
 
-section("a valid credential is never refused for earlier failures (no self-lockout)", () => {
+section("a success clears the record, so earlier failures do not accumulate", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now });
   const key = "10.0.0.1";
@@ -158,6 +165,62 @@ section("per-source state is bounded, and an idle source is really forgotten", (
   // And the cap still holds when many distinct sources arrive at once.
   for (let i = 0; i < 50; i++) throttle.recordFailure(`flood-${i}`);
   assert(throttle.size() === 8, `the cap must hold under a flood, got ${throttle.size()}`);
+});
+
+section("Retry-After is honest: bounded, non-growing, and waiting it out is sufficient", () => {
+  const clock = fakeClock();
+  const throttle = createAuthThrottle({ now: clock.now, refillMs: 10_000 });
+  const key = "203.0.113.200";
+  for (let i = 0; i < AUTH_THROTTLE_MAX_FAILURES; i++) throttle.recordFailure(key);
+  const first = throttle.check(key);
+  assert(!first.allowed, "the source is spent");
+  const advertised = first.retryAfterSeconds;
+  assert(
+    advertised >= 1 && advertised <= 10,
+    `Retry-After must be a sane number of seconds, got ${advertised}`,
+  );
+  // It must not grow while nothing changes, and above all it must not LIE: waiting
+  // exactly the advertised time has to be enough. A header that buys more waiting
+  // than it asks for turns a throttle into a lockout.
+  assert(
+    throttle.check(key).retryAfterSeconds <= advertised,
+    "Retry-After must not grow while nothing changes",
+  );
+  clock.advance(advertised * 1000);
+  assert(
+    throttle.check(key).allowed,
+    `waiting the advertised ${advertised}s must be enough to attempt again`,
+  );
+});
+
+section("eviction cannot hand a spent source a fresh budget of its own making", () => {
+  // Coord's eviction question, answered concretely. Because keys come from peers and
+  // never from headers, a source cannot manufacture keys to churn its own state away.
+  // (An attacker with many REAL addresses still gets a budget per address — that is
+  // limit 1, inherent to per-source throttling — but eviction adds nothing to it: each
+  // address is capped independently either way, and being evicted only ever resets a
+  // source's OWN failures, which is a change in that source's favour and hurts nobody
+  // else.)
+  const clock = fakeClock();
+  const throttle = createAuthThrottle({
+    now: clock.now,
+    maxSources: 4,
+    ttlMs: 60_000,
+    refillMs: 10_000,
+  });
+  const attacker = "198.51.100.66";
+  for (let i = 0; i < AUTH_THROTTLE_MAX_FAILURES; i++) throttle.recordFailure(attacker);
+  assert(!throttle.check(attacker).allowed, "the source is spent");
+  // 200 further requests from the SAME source: no new key can be created, so the spent
+  // state can be neither evicted nor duplicated away.
+  for (let i = 0; i < 200; i++) {
+    assert(!throttle.check(attacker).allowed, `request ${i + 1} must still be refused`);
+    throttle.recordFailure(attacker);
+  }
+  assert(throttle.size() <= 4, `the map must never exceed its cap, got ${throttle.size()}`);
+  // And with the map full of other sources the cap still holds (oldest evicted).
+  for (let i = 0; i < 50; i++) throttle.recordFailure(`other-${i}`);
+  assert(throttle.size() === 4, `the cap must hold under churn, got ${throttle.size()}`);
 });
 
 const PROTECTED = [
@@ -396,6 +459,33 @@ section("stated limit: while a flood continues, each refilled token is taken by 
     "so a second client on that address is refused again: no attempt is reserved for it",
   );
 });
+
+await asyncSection(
+  "without a peer, every request shares one bounded anonymous bucket",
+  async () => {
+    const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
+    telemetryAuthThrottle.reset();
+    // The fail-closed path. When the platform gives us no peer there is no trustworthy
+    // source identity, and a header must not be promoted into one, so every such
+    // request lands in the single documented bucket: visible to everyone, bypassable by
+    // nobody. A DIFFERENT forwarded-for on every request must change nothing.
+    const statuses = [];
+    for (let i = 0; i < AUTH_THROTTLE_MAX_FAILURES + 1; i++) {
+      const res = await handleDemoTelemetryRoute(
+        request("/telemetry/demo/events", {
+          headers: { ...basic("wrong"), "x-forwarded-for": `10.1.${i}.1` },
+        }),
+        {},
+      );
+      statuses.push(res?.status);
+    }
+    assert(
+      statuses.includes(429),
+      `anonymous requests must share one budget, got ${statuses.join(",")}`,
+    );
+    assert(sourceKeyFrom() === "unknown", "and that shared state is the documented bucket");
+  },
+);
 
 if (failures > 0) {
   console.error(`\nauth throttle tests: ${failures} section(s) failed`);
