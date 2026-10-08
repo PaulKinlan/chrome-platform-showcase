@@ -200,6 +200,27 @@ section("a reset does not claim a byte-identical pair when the screenshots diffe
     !twice.note?.includes("byte-identical"),
     `a run that changed the page again must not claim an identical pair, got: ${twice.note}`,
   );
+  // No pair captured at all: neither claim is available, so neither is made. The
+  // sign-off flagged that the differing branch was previously taken here, which
+  // asserted a difference the run never saw.
+  const uncaptured = classifyDriveEffect({
+    interactions: [
+      { action: "click: Run", mutations: 3, readoutsAfter: RAN },
+      { action: "click: Clear", mutations: 2, readoutsAfter: IDLE },
+    ],
+    readoutsBefore: IDLE,
+    visualDelta: null,
+  });
+  assert(
+    !uncaptured.note?.includes("byte-identical") &&
+      !uncaptured.note?.includes("screenshots differ"),
+    `an uncaptured pair must not be described either way, got: ${uncaptured.note}`,
+  );
+  assert(
+    uncaptured.note?.includes("no before/after pair was captured"),
+    `it must say no pair exists, got: ${uncaptured.note}`,
+  );
+  assert(uncaptured.resetBy === "click: Clear", "the reset is still reported");
 });
 
 section("a readout-only change is an effect even with no DOM mutation", () => {

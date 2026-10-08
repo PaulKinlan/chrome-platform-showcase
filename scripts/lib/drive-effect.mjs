@@ -127,9 +127,15 @@ export function classifyDriveEffect(
     // The pair is only byte-identical when the reset was the last thing that
     // happened. A later action — or the ambient motion a differing pair cannot be
     // distinguished from — makes that claim false, so it is not made.
+    const undone =
+      `the effect observed on ${resetTarget} was returned to the initial state by ${resetBy}`;
     note = visualDelta === false
-      ? `the effect observed on ${resetTarget} was returned to the initial state by ${resetBy}, so the before/after screenshots are byte-identical — the earlier effect was real, and the pair is not proof of it`
-      : `the effect observed on ${resetTarget} was returned to the initial state by ${resetBy}; the screenshots differ, but the pair shows whatever happened after the reset, so it is not proof of that effect`;
+      ? `${undone}, so the before/after screenshots are byte-identical — the earlier effect was real, and the pair is not proof of it`
+      : visualDelta === true
+      ? `${undone}; the screenshots differ, but the pair shows whatever happened after the reset, so it is not proof of that effect`
+      // No pair was captured. Saying "the screenshots differ" here would assert
+      // something the run never saw.
+      : `${undone}; no before/after pair was captured, so there is no screenshot evidence either way`;
   } else if (kind === EFFECT_KIND.VISUAL) {
     note =
       "the before/after screenshots differ, so the page changed after a control was used, but no DOM mutation or readout change was observed — a differing pair is NON-CAUSAL (an animation, clock or autoplay looks the same), so it cannot attribute the change to the control";
