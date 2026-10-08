@@ -114,7 +114,8 @@ export async function renderCritiquesIndex(): Promise<string> {
   <title>self-critique — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    main { max-width: 1100px; }
+    main { max-width: 1100px; overflow-x: clip; }
+    .table-scroll { width: 100%; min-width: 0; max-width: 100%; overflow-x: auto; contain: inline-size; box-sizing: border-box; }
     table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.85rem; }
     th, td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border-black); text-align: left; vertical-align: top; }
     th { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); background: var(--bg-stone); }
@@ -139,6 +140,7 @@ export async function renderCritiquesIndex(): Promise<string> {
     <p class="updated-line">${scored.length} pages reviewed · ${totalConcepts} concepts · ${totalQuestions} open questions</p>
   </header>
 
+  <div class="table-scroll" tabindex="0" role="region" aria-label="Open questions per page">
   <table>
     <thead>
       <tr>
@@ -153,6 +155,7 @@ export async function renderCritiquesIndex(): Promise<string> {
     `<tr><td colspan="4">No critiques yet. Run the reviewer pass to populate this page.</td></tr>`
   }</tbody>
   </table>
+  </div>
 
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
