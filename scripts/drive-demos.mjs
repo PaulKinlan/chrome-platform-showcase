@@ -625,8 +625,12 @@ try {
       );
     } else if (verdict.status === DRIVE_STATUS.VISUAL_ONLY) {
       // Not a pass and not a failure: the pair differs but cannot be attributed, so
-      // the row is counted apart and flagged for review.
+      // the row is counted apart and flagged for review. It must ALSO be counted as
+      // not demonstrated — the per-run line said "0 not demonstrated" while listing
+      // a VISUAL-ONLY row, which is the same kind of dishonest tally the status was
+      // introduced to avoid.
       visualOnlyCount++;
+      notDemonstratedCount++;
       console.warn(
         `  VISUAL-ONLY  ${item.url} — screenshots differ (${record.screenshots.beforeHash} -> ${record.screenshots.afterHash}) with no DOM mutation or readout change; a differing pair is non-causal, so this needs review rather than a pass`,
       );
