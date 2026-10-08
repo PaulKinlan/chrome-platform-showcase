@@ -10,6 +10,12 @@ import {
   validatedHeaderOrigin,
 } from "../lib/request-guards.ts";
 import { BoundedSessionStore } from "../lib/session-store.ts";
+import {
+  evictOldestProbeRecords,
+  SPECULATION_RULES_PROBE_MAX_RECORDS,
+  SPECULATION_RULES_PROBE_TTL_MS,
+  sweepExpiredProbeRecords,
+} from "../lib/probe-record-store.ts";
 import { escapeHTML } from "./html.ts";
 
 /** Byte cap for demo JSON/form POST bodies on public endpoints. */
@@ -1361,15 +1367,15 @@ const speculationRulesProbeRecords = new Map<
 
 function speculationRulesProbeRecord(token: string) {
   const now = Date.now();
-  for (const [key, record] of speculationRulesProbeRecords) {
-    if (now - record.createdAt > 5 * 60 * 1000) {
-      speculationRulesProbeRecords.delete(key);
-    }
-  }
+  // Only the expired prefix is visited (see lib/probe-record-store.ts), so this
+  // is O(expired) rather than the O(n) full sweep it used to be, and the store
+  // cannot grow past SPECULATION_RULES_PROBE_MAX_RECORDS.
+  sweepExpiredProbeRecords(speculationRulesProbeRecords, now, SPECULATION_RULES_PROBE_TTL_MS);
   const existing = speculationRulesProbeRecords.get(token);
   if (existing) return existing;
   const record = { createdAt: now, pageLoads: 0, ruleRequests: [], targetRequests: [] };
   speculationRulesProbeRecords.set(token, record);
+  evictOldestProbeRecords(speculationRulesProbeRecords, SPECULATION_RULES_PROBE_MAX_RECORDS);
   return record;
 }
 
