@@ -18,7 +18,13 @@ import { handleReleaseRoute } from "./routes/release.ts";
 
 const PORT = Number(Deno.env.get("PORT") ?? 3000);
 
-type RouteHandler = (req: Request) => Response | Promise<Response | null> | null;
+// The connection context a route may use for per-source decisions. `remoteAddr`
+// is the socket peer, which a client cannot forge (see lib/auth-throttle.ts).
+type RouteContext = { remoteAddr?: string | null };
+type RouteHandler = (
+  req: Request,
+  context?: RouteContext,
+) => Response | Promise<Response | null> | null;
 
 const routes: RouteHandler[] = [
   handleAliasRoute,
@@ -36,9 +42,10 @@ const routes: RouteHandler[] = [
   handleReleaseRoute,
 ];
 
-Deno.serve({ port: PORT }, async (req) => {
+Deno.serve({ port: PORT }, async (req, info) => {
+  const context: RouteContext = { remoteAddr: info?.remoteAddr?.hostname ?? null };
   for (const route of routes) {
-    const response = await route(req);
+    const response = await route(req, context);
     if (response) return response;
   }
 

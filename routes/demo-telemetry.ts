@@ -1,4 +1,5 @@
 import { readBoundedText } from "../lib/request-body.ts";
+import { sourceKeyFrom, telemetryAuthThrottle } from "../lib/auth-throttle.ts";
 import { forbiddenResponse, sameOriginRequest } from "../lib/request-guards.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -108,6 +109,40 @@ function unauthorizedResponse(): Response {
       "www-authenticate": 'Basic realm="chrome-platform-showcase telemetry", charset="UTF-8"',
     },
   });
+}
+
+function throttledResponse(retryAfterSeconds: number): Response {
+  // Deliberately says nothing about whether a password is configured, and sends no
+  // www-authenticate: this is a wait, not an invitation to retry immediately.
+  return jsonResponse({
+    error: "Too many failed authentication attempts from this source. Try again later.",
+  }, { status: 429, headers: { "retry-after": String(retryAfterSeconds) } });
+}
+
+/**
+ * Gate a protected telemetry request.
+ *
+ * Order matters. The throttle is consulted BEFORE the credential comparison, so an
+ * over-budget source costs nothing to refuse, and the comparison is exactly what an
+ * attacker is trying to spend. A successful authentication clears the source's
+ * record, so a valid credential is not refused BECAUSE of earlier failures once an
+ * attempt is available; an over-budget source waits at most one refill interval
+ * rather than being banned. While a competing flood from the same address consumes
+ * each refilled attempt, even a valid credential is refused — that limit is stated in
+ * lib/auth-throttle.ts and asserted in the suite.
+ *
+ * Returns a response to send, or null to continue.
+ */
+function checkAccess(req: Request, remoteAddr?: string | null): Response | null {
+  const key = sourceKeyFrom(remoteAddr);
+  const decision = telemetryAuthThrottle.check(key);
+  if (!decision.allowed) return throttledResponse(decision.retryAfterSeconds);
+  if (isAuthorized(req)) {
+    telemetryAuthThrottle.recordSuccess(key);
+    return null;
+  }
+  telemetryAuthThrottle.recordFailure(key);
+  return unauthorizedResponse();
 }
 
 function isAuthorized(req: Request): boolean {
@@ -510,25 +545,32 @@ function renderAdminDashboard(
 </html>`;
 }
 
-export async function handleDemoTelemetryRoute(req: Request): Promise<Response | null> {
+export async function handleDemoTelemetryRoute(
+  req: Request,
+  context?: { remoteAddr?: string | null },
+): Promise<Response | null> {
+  const remoteAddr = context?.remoteAddr ?? null;
   const url = new URL(req.url);
   if (!url.pathname.startsWith("/telemetry/demo")) return null;
 
   if (url.pathname === "/telemetry/demo/events" && req.method === "GET") {
-    if (!isAuthorized(req)) return unauthorizedResponse();
+    const denied = checkAccess(req, remoteAddr);
+    if (denied) return denied;
     const limit = Math.min(Number(url.searchParams.get("limit") ?? 50), 1000);
     return jsonResponse(await readRecentEvents(limit));
   }
 
   if (url.pathname === "/telemetry/demo/admin" && req.method === "GET") {
-    if (!isAuthorized(req)) return unauthorizedResponse();
+    const denied = checkAccess(req, remoteAddr);
+    if (denied) return denied;
     const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 1000);
     const { storage, events } = await readRecentEvents(limit);
     return htmlResponse(renderAdminDashboard(events, storage, limit));
   }
 
   if (url.pathname === "/telemetry/demo/triage" && req.method === "GET") {
-    if (!isAuthorized(req)) return unauthorizedResponse();
+    const denied = checkAccess(req, remoteAddr);
+    if (denied) return denied;
     const scan = Math.min(Number(url.searchParams.get("scan") ?? 2000), 5000);
     const { storage, events } = await readRecentEvents(scan);
     const triage = buildTriage(events);
@@ -536,7 +578,8 @@ export async function handleDemoTelemetryRoute(req: Request): Promise<Response |
   }
 
   if (url.pathname === "/telemetry/demo/reset" && req.method === "POST") {
-    if (!isAuthorized(req)) return unauthorizedResponse();
+    const denied = checkAccess(req, remoteAddr);
+    if (denied) return denied;
     recentDemoTelemetry.splice(0);
     return jsonResponse({
       reset: true,
