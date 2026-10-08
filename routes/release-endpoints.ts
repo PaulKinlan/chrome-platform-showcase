@@ -1591,7 +1591,32 @@ async function renderAttributionTriggerContextRoute(
 // ----- Email Verification Protocol server validator -----
 
 let evpKeyPairPromise: Promise<CryptoKeyPair> | null = null;
-const evpUsedNonces = new Set<string>();
+
+// Replay cache for the validator's nonces. The nonce is caller-supplied - the
+// sample token echoes whatever `expectedNonce` the request sent, and
+// `stringValue` puts no bound on its length - so the cache must not retain the
+// raw value. It stores a fixed-size SHA-256 fingerprint instead: hashing rather
+// than truncating or refusing keeps distinct nonces distinct at any length,
+// which is exactly what replay rejection depends on.
+//
+// The TTL has to outlive the token it guards. A nonce becomes replayable only
+// once its entry is gone, so a TTL shorter than the token lifetime would let a
+// still-valid token be replayed after eviction; EVP_SAMPLE_TOKEN_TTL_SECONDS is
+// the lifetime the sample issuer mints, and the test suite asserts this TTL
+// exceeds it. With fingerprints the cache is bounded in time, in size (4096
+// entries of 64 hex characters) and in per-entry cost.
+export const EVP_SAMPLE_TOKEN_TTL_SECONDS = 300;
+export const EVP_NONCE_REPLAY_TTL_MS = 15 * 60 * 1000;
+export const EVP_NONCE_REPLAY_MAX_ENTRIES = 4096;
+const evpUsedNonces = new BoundedSessionStore<true>({
+  ttlMs: EVP_NONCE_REPLAY_TTL_MS,
+  maxEntries: EVP_NONCE_REPLAY_MAX_ENTRIES,
+});
+
+async function evpNonceFingerprint(nonce: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(nonce));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 function getEvpKeyPair(): Promise<CryptoKeyPair> {
   evpKeyPairPromise ??= crypto.subtle.generateKey(
@@ -1691,6 +1716,10 @@ async function verifyEvpJwt(
     signatureOk = false;
   }
 
+  const nonceFingerprint = typeof payload.nonce === "string"
+    ? await evpNonceFingerprint(payload.nonce)
+    : null;
+
   checks.push(
     {
       title: "Signature verifies against provider JWK",
@@ -1727,7 +1756,7 @@ async function verifyEvpJwt(
       title: "Nonce has not been replayed",
       detail: "Server keeps a nonce replay cache and marks successful nonces as used.",
       value: `nonce = "${payload.nonce ?? "(missing)"}"`,
-      pass: typeof payload.nonce === "string" && !evpUsedNonces.has(payload.nonce),
+      pass: nonceFingerprint !== null && !evpUsedNonces.has(nonceFingerprint),
     },
     {
       title: "Email claim is present",
@@ -1744,7 +1773,7 @@ async function verifyEvpJwt(
   );
 
   const valid = checks.every((check) => check.pass === true);
-  if (valid && typeof payload.nonce === "string") evpUsedNonces.add(payload.nonce);
+  if (valid && nonceFingerprint) evpUsedNonces.set(nonceFingerprint, true);
   return { valid, checks, header, payload };
 }
 
@@ -1764,14 +1793,14 @@ async function renderEmailVerificationRoute(req: Request, sub: string): Promise<
     const token = await signEvpJwt({
       iss: "https://mail.example-provider.com",
       aud,
-      exp: now + 300,
+      exp: now + EVP_SAMPLE_TOKEN_TTL_SECONDS,
       iat: now - 10,
       email,
       email_verified: true,
       nonce,
       sub: email,
     });
-    evpUsedNonces.delete(nonce);
+    evpUsedNonces.delete(await evpNonceFingerprint(nonce));
     return jsonResponse({ token });
   }
 
