@@ -10,7 +10,9 @@
 // This throttles FAILURES per source. It has to satisfy all of these at once:
 //
 //   - per source, so one client cannot spend another client's budget;
-//   - no shared denial: a source over budget waits; it does not stop anyone else;
+//   - no shared denial BETWEEN IDENTIFIABLE SOURCES: a source over budget waits, and it
+//     does not stop another source from being served. This is only as strong as the
+//     identity behind it — see the limits below;
 //   - no self-lockout from the operator's OWN fumbling: the refusal is a delay, never
 //     a ban, and a successful authentication clears the record. This does NOT extend
 //     to a competing flood from the same address — see limit 2 below;
@@ -19,11 +21,11 @@
 //   - no new information: an over-budget refusal is identical whether or not a
 //     password is configured, and no credential is ever logged or echoed.
 //
-// The bucket refills, so an over-budget source may still make one comparison per
-// refill interval. That is deliberate: it is what lets a legitimate operator whose
-// address is shared with an attacker (a proxy, a NAT, a corporate egress) retry
-// successfully after the interval instead of being permanently locked out, while
-// still capping an attacker to one guess per interval per source.
+// The bucket refills, so an over-budget source gets another OPPORTUNITY to be compared
+// once per refill interval. An opportunity, not a reservation, and not a guarantee: it
+// goes to whoever asks first, so under a continuing flood from the same address the
+// flooder normally takes it (limit 2). That refill is what keeps the refusal from being
+// a permanent ban, and it is what caps an attacker to one guess per interval per source.
 //
 // Two limits are stated rather than hidden.
 //
@@ -42,11 +44,11 @@
 //    not guaranteed a comparison at any finite time while that flood lasts. No
 //    source-keyed throttle can tell those two clients apart without a second
 //    identity, so this is inherent to the approach rather than an oversight. The
-//    escape hatches: the buckets are in memory, so restarting the service restores
-//    access immediately (though a continuing flood spends it again), and a separately
-//    trusted operator channel can be added if a hard guarantee is ever needed.
-//    Recovery after a flood stops is verified; recovery *during* a flood is not, and
-//    is not claimed anywhere.
+//    escape hatches: the buckets are in memory, so restarting the service resets them
+//    (a continuing flood then spends the new budget again, so it is not a lasting
+//    guarantee while the flood runs), and a separately trusted operator channel can be
+//    added if a hard guarantee is ever needed. Recovery after a flood stops is verified;
+//    recovery *during* a flood is not, and is not claimed anywhere.
 
 export const AUTH_THROTTLE_MAX_FAILURES = 10;
 export const AUTH_THROTTLE_REFILL_MS = 10_000;
@@ -68,12 +70,11 @@ type Bucket = { tokens: number; updatedAt: number };
  * `x-forwarded-for` is client-supplied, so keying on it would let one client rotate
  * its own key and spend a fresh budget per request — a throttle bypassable by the
  * very attacker it exists to stop, which is worse than no throttle because it looks
- * like protection. The deployment is therefore required to expose a peer address
- * (Deno Deploy does, and so does the local runtime). When it does not, every such
- * request shares one bucket: visible, and never bypassable — but shared, so one client
- * can delay every other client in it. That is why the deployment is required to
- * supply a peer, and why that requirement is a tracked check rather than an
- * assumption.
+ * like protection. The deployment is therefore required to expose a peer address: the
+ * local runtime does, and Deno documents Deploy as doing so, but that is a stated
+ * expectation pending the tracked empirical check, not a verified result. When no peer
+ * is available, every such request shares one bucket: visible, and never bypassable —
+ * but shared, so one client can delay every other client in it.
  */
 export function sourceKeyFrom(remoteAddr?: string | null): string {
   const peer = (remoteAddr ?? "").trim();

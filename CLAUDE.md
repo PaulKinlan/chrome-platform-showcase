@@ -146,14 +146,17 @@ telemetry. Its job is the depth work the daily build routine is too busy to do:
   further attempt per 10 seconds, refused with `429` + `Retry-After`. The source is the connection's
   peer address, never a request header, so it cannot be rotated to buy a fresh budget. A 429 means
   "wait", never "wrong password". A successful authentication clears the counter, so a correct
-  password is not punished for earlier failures, and a source is delayed rather than banned.
-  Two things to know if you are ever throttled: one address shares one budget, so anyone behind the
-  same proxy, NAT or corporate egress shares yours — and while another client on that address is
-  flooding the endpoint it can take each refilled attempt before yours arrives, so you may be
-  refused repeatedly until that flood stops. Restarting the service clears the in-memory counters
-  immediately, which is the reliable way back in (a continuing flood will spend them again). This
-  depends on the deployment supplying a peer address, which Deno Deploy does; the empirical check
-  is tracked as separate work.
+  password is not punished for earlier failures, and a source is delayed rather than banned. Two
+  things to know if you are ever throttled. (1) One address shares one budget, so anyone behind the
+  same proxy, NAT or corporate egress shares yours. (2) While another client on that address is
+  flooding the endpoint it takes each refilled attempt before yours can arrive, so during that flood
+  you can be refused indefinitely — recovery is only guaranteed once the flood stops, and no attempt
+  is reserved for you. Restarting the service clears the in-memory counters, which lets you back in
+  until the flood spends the new budget again; it is not a lasting guarantee while a flood
+  continues. This per-source behaviour depends on the deployment supplying a distinct peer address:
+  the local runtime does, and Deno documents Deploy as doing so, but that is an expectation until
+  the tracked empirical check confirms it. Were no peer supplied, every request would share one
+  bucket and one client could delay all others.
 
 ## Durable demo compatibility contract — stable URLs · additive evolution · non-destructive
 

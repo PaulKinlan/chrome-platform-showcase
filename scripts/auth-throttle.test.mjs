@@ -167,7 +167,7 @@ section("per-source state is bounded, and an idle source is really forgotten", (
   assert(throttle.size() === 8, `the cap must hold under a flood, got ${throttle.size()}`);
 });
 
-section("Retry-After is honest: bounded, non-growing, and waiting it out is sufficient", () => {
+section("the advertised wait is bounded, non-growing, and sufficient at the decision level", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now, refillMs: 10_000 });
   const key = "203.0.113.200";
@@ -193,35 +193,44 @@ section("Retry-After is honest: bounded, non-growing, and waiting it out is suff
   );
 });
 
-section("eviction cannot hand a spent source a fresh budget of its own making", () => {
-  // Coord's eviction question, answered concretely. Because keys come from peers and
-  // never from headers, a source cannot manufacture keys to churn its own state away.
-  // (An attacker with many REAL addresses still gets a budget per address — that is
-  // limit 1, inherent to per-source throttling — but eviction adds nothing to it: each
-  // address is capped independently either way, and being evicted only ever resets a
-  // source's OWN failures, which is a change in that source's favour and hurts nobody
-  // else.)
-  const clock = fakeClock();
-  const throttle = createAuthThrottle({
-    now: clock.now,
-    maxSources: 4,
-    ttlMs: 60_000,
-    refillMs: 10_000,
-  });
-  const attacker = "198.51.100.66";
-  for (let i = 0; i < AUTH_THROTTLE_MAX_FAILURES; i++) throttle.recordFailure(attacker);
-  assert(!throttle.check(attacker).allowed, "the source is spent");
-  // 200 further requests from the SAME source: no new key can be created, so the spent
-  // state can be neither evicted nor duplicated away.
-  for (let i = 0; i < 200; i++) {
-    assert(!throttle.check(attacker).allowed, `request ${i + 1} must still be refused`);
-    throttle.recordFailure(attacker);
-  }
-  assert(throttle.size() <= 4, `the map must never exceed its cap, got ${throttle.size()}`);
-  // And with the map full of other sources the cap still holds (oldest evicted).
-  for (let i = 0; i < 50; i++) throttle.recordFailure(`other-${i}`);
-  assert(throttle.size() === 4, `the cap must hold under churn, got ${throttle.size()}`);
-});
+section(
+  "eviction: one source cannot churn its own state away, but other peers' churn resets it",
+  () => {
+    // Coordinator's eviction question, answered precisely — including the part that does
+    // not flatter the design. Keys come from peers and never from headers, so a source
+    // cannot manufacture keys to churn its OWN spent state away. But eviction is
+    // oldest-updated, so enough churn from OTHER sources evicts the spent entry and the
+    // same address starts over with a full budget without waiting out the refill. That is
+    // a real limit of a capped map and is asserted below rather than claimed away. It only
+    // ever resets a source's own failures (so it denies nobody), and it does not change the
+    // bound for an attacker who can appear as many real addresses: that is limit 1.
+    const clock = fakeClock();
+    const throttle = createAuthThrottle({
+      now: clock.now,
+      maxSources: 4,
+      ttlMs: 60_000,
+      refillMs: 10_000,
+    });
+    const attacker = "198.51.100.66";
+    for (let i = 0; i < AUTH_THROTTLE_MAX_FAILURES; i++) throttle.recordFailure(attacker);
+    assert(!throttle.check(attacker).allowed, "the source is spent");
+    // 200 further requests from the SAME source cannot create a key, so the spent state
+    // survives every one of them.
+    for (let i = 0; i < 200; i++) {
+      assert(!throttle.check(attacker).allowed, `request ${i + 1} must still be refused`);
+      throttle.recordFailure(attacker);
+    }
+    assert(throttle.size() <= 4, `the map must never exceed its cap, got ${throttle.size()}`);
+    // Now churn from other sources, which is what an attacker with many addresses (or a
+    // busy service) produces. The cap holds, and the spent entry is evicted.
+    for (let i = 0; i < 50; i++) throttle.recordFailure(`other-${i}`);
+    assert(throttle.size() === 4, `the cap must hold under churn, got ${throttle.size()}`);
+    assert(
+      throttle.check(attacker).allowed,
+      "an evicted source gets a fresh budget without waiting, which is the stated limit",
+    );
+  },
+);
 
 const PROTECTED = [
   ["/telemetry/demo/events", "GET"],
@@ -484,6 +493,38 @@ await asyncSection(
       `anonymous requests must share one budget, got ${statuses.join(",")}`,
     );
     assert(sourceKeyFrom() === "unknown", "and that shared state is the documented bucket");
+  },
+);
+
+await asyncSection(
+  "the 429 advertises the decision's own wait, not a formatter's guess",
+  async () => {
+    const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
+    telemetryAuthThrottle.reset();
+    const peer = "198.51.100.9";
+    for (let i = 0; i < AUTH_THROTTLE_MAX_FAILURES; i++) {
+      await handleDemoTelemetryRoute(
+        request("/telemetry/demo/events", { headers: basic("wrong") }),
+        { remoteAddr: peer },
+      );
+    }
+    const res = await handleDemoTelemetryRoute(
+      request("/telemetry/demo/events", { headers: basic("wrong") }),
+      { remoteAddr: peer },
+    );
+    assert(res?.status === 429, `expected 429 once spent, got ${res?.status}`);
+    const header = res.headers.get("retry-after");
+    // Tie the emitted header to the decision, so a response formatter that invents its own
+    // number (say a hardcoded 1 while ten seconds are actually required) cannot pass. The
+    // end-to-end proof that waiting the advertised time is enough lives in the real-HTTP
+    // verification script, which sleeps the advertised seconds and expects a 200.
+    const decision = telemetryAuthThrottle.check(peer);
+    assert(!decision.allowed, "the source is still spent, so a wait is what is advertised");
+    assert(
+      header === String(decision.retryAfterSeconds),
+      `the header must be the decision's own value (${decision.retryAfterSeconds}), got ${header}`,
+    );
+    assert(Number(header) >= 1, `the advertised wait must never be zero, got ${header}`);
   },
 );
 
