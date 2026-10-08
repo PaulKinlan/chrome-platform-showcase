@@ -149,14 +149,16 @@ telemetry. Its job is the depth work the daily build routine is too busy to do:
   password is not punished for earlier failures, and a source is delayed rather than banned. Two
   things to know if you are ever throttled. (1) One address shares one budget, so anyone behind the
   same proxy, NAT or corporate egress shares yours. (2) While another client on that address is
-  flooding the endpoint it takes each refilled attempt before yours can arrive, so during that flood
-  you can be refused indefinitely — recovery is only guaranteed once the flood stops, and no attempt
-  is reserved for you. Restarting the service clears the in-memory counters, which lets you back in
-  until the flood spends the new budget again; it is not a lasting guarantee while a flood
-  continues. This per-source behaviour depends on the deployment supplying a distinct peer address:
-  the local runtime does, and Deno documents Deploy as doing so, but that is an expectation until
-  the tracked empirical check confirms it. Were no peer supplied, every request would share one
-  bucket and one client could delay all others.
+  flooding the endpoint it takes each refilled attempt before yours can arrive, so there is NO
+  guaranteed progress during such a flood — recovery is only guaranteed once the flood stops, and no
+  attempt is reserved for you. Restarting the service clears the in-memory counters, but that is a
+  production change requiring the owner's approval (never something an agent should do on its own),
+  and it is not a lasting guarantee while a flood continues, because the new budget gets spent the
+  same way. This per-source behaviour depends on the deployment supplying a distinct peer address.
+  That is verified locally only (Deno 2.9.7 does supply the socket peer); for Deno Deploy it is
+  documented behaviour but unverified from here, and the empirical check is tracked as separate
+  owned work. Were no peer supplied, every request would share one bucket, so one client could delay
+  all others — fail-safe against bypass, but shared.
 
 ## Durable demo compatibility contract — stable URLs · additive evolution · non-destructive
 

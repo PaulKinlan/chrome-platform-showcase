@@ -45,10 +45,11 @@
 //    source-keyed throttle can tell those two clients apart without a second
 //    identity, so this is inherent to the approach rather than an oversight. The
 //    escape hatches: the buckets are in memory, so restarting the service resets them
-//    (a continuing flood then spends the new budget again, so it is not a lasting
-//    guarantee while the flood runs), and a separately trusted operator channel can be
-//    added if a hard guarantee is ever needed. Recovery after a flood stops is verified;
-//    recovery *during* a flood is not, and is not claimed anywhere.
+//    (a production change, and a continuing flood then spends the new budget again, so it
+//    is not a lasting guarantee while the flood runs), and a separately trusted operator
+//    channel can be added if a hard guarantee is ever needed. Recovery after a flood stops
+//    is verified. There is NO guaranteed progress while a flood from the same address is
+//    active — that is not claimed here, in the tests, or in the operator documentation.
 
 export const AUTH_THROTTLE_MAX_FAILURES = 10;
 export const AUTH_THROTTLE_REFILL_MS = 10_000;
@@ -70,11 +71,12 @@ type Bucket = { tokens: number; updatedAt: number };
  * `x-forwarded-for` is client-supplied, so keying on it would let one client rotate
  * its own key and spend a fresh budget per request — a throttle bypassable by the
  * very attacker it exists to stop, which is worse than no throttle because it looks
- * like protection. The deployment is therefore required to expose a peer address: the
- * local runtime does, and Deno documents Deploy as doing so, but that is a stated
- * expectation pending the tracked empirical check, not a verified result. When no peer
- * is available, every such request shares one bucket: visible, and never bypassable —
- * but shared, so one client can delay every other client in it.
+ * like protection. The deployment is therefore required to expose a peer address. That is
+ * verified LOCALLY only (Deno 2.9.7 supplies the socket peer); for the deployment it is
+ * Deno's documented behaviour but is NOT verified here, and the empirical check is
+ * separate tracked work. When no peer is available, every such request shares one bucket:
+ * visible, and never bypassable — but shared, so one client can delay every other client
+ * in it.
  */
 export function sourceKeyFrom(remoteAddr?: string | null): string {
   const peer = (remoteAddr ?? "").trim();
