@@ -8,6 +8,7 @@ import {
   sameOriginRequest,
   validatedHeaderOrigin,
 } from "../lib/request-guards.ts";
+import { BoundedSessionStore } from "../lib/session-store.ts";
 import { escapeHTML } from "./html.ts";
 
 /** Byte cap for demo JSON/form POST bodies on public endpoints. */
@@ -383,7 +384,7 @@ interface PrefetchBudgetSession {
   entries: PrefetchBudgetEntry[];
 }
 
-const prefetchBudgetSessions = new Map<string, PrefetchBudgetSession>();
+const prefetchBudgetSessions = new BoundedSessionStore<PrefetchBudgetSession>();
 
 function getPrefetchBudgetSession(key: string): PrefetchBudgetSession {
   const existing = prefetchBudgetSessions.get(key);
@@ -909,7 +910,7 @@ interface WebAuthnSignalSession {
 }
 
 const WEBAUTHN_SIGNAL_COOKIE = "showcase_webauthn_signal";
-const webAuthnSignalSessions = new Map<string, WebAuthnSignalSession>();
+const webAuthnSignalSessions = new BoundedSessionStore<WebAuthnSignalSession>();
 
 function getWebAuthnSignalSession(req: Request): {
   session: WebAuthnSignalSession;
@@ -1800,7 +1801,7 @@ interface AutoPasskeySession {
 }
 
 const AUTO_PASSKEY_COOKIE = "showcase_auto_passkey";
-const autoPasskeySessions = new Map<string, AutoPasskeySession>();
+const autoPasskeySessions = new BoundedSessionStore<AutoPasskeySession>();
 
 function getAutoPasskeySession(req: Request): { session: AutoPasskeySession; headers: Headers } {
   const headers = new Headers();
@@ -1978,7 +1979,7 @@ interface SpcAuthSession {
 }
 
 const SPC_AUTH_COOKIE = "showcase_spc_auth";
-const spcAuthSessions = new Map<string, SpcAuthSession>();
+const spcAuthSessions = new BoundedSessionStore<SpcAuthSession>();
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -2512,7 +2513,15 @@ const DBSC_LONG_COOKIE = "showcase_dbsc";
 const DBSC_SHORT_COOKIE = "showcase_dbsc_short";
 const DBSC_DEFAULT_PATH = "/v145/device-bound-session-credentials";
 const DBSC_SHORT_COOKIE_MAX_AGE = 90;
-const dbscSessions = new Map<string, DbscSession>();
+/** Long-lived demo cookie lifetime — the "long-lived" half of the DBSC narrative. */
+const DBSC_LONG_COOKIE_MAX_AGE = 60 * 60 * 24 * 30;
+// The server-side session is bounded by entry count and by this TTL, which
+// matches the long-lived cookie the demo itself sets (30 days) rather than the
+// 6-hour default used by the other fixtures — an aggressive default here would
+// silently contradict the long-lived-vs-short-lived story the demo tells.
+const dbscSessions = new BoundedSessionStore<DbscSession>({
+  ttlMs: DBSC_LONG_COOKIE_MAX_AGE * 1000,
+});
 
 function dbscPath(req: Request): string {
   const pathname = new URL(req.url).pathname;
@@ -2700,7 +2709,7 @@ async function renderDbscRoute(req: Request, sub: string): Promise<Response | nu
     const headers = new Headers();
     headers.set(
       "set-cookie",
-      `${DBSC_LONG_COOKIE}=${session.id}; ${dbscCookieAttributes(req, 60 * 60 * 24 * 30)}`,
+      `${DBSC_LONG_COOKIE}=${session.id}; ${dbscCookieAttributes(req, DBSC_LONG_COOKIE_MAX_AGE)}`,
     );
     headers.set("Secure-Session-Registration", dbscRegistrationHeader(req, session));
     return jsonResponse({
@@ -2900,7 +2909,7 @@ interface SpcBbkEnrollment {
 }
 
 const SPC_BBK_COOKIE = "showcase_spc_bbk";
-const spcBbkEnrollments = new Map<string, SpcBbkEnrollment>();
+const spcBbkEnrollments = new BoundedSessionStore<SpcBbkEnrollment>();
 
 function spcBbkBasePath(req: Request): string {
   return new URL(req.url).pathname.match(/^\/v\d+\/secure-payment-confirmation-browser-bound-keys/)
