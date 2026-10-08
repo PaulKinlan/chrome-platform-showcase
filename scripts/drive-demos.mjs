@@ -575,6 +575,7 @@ try {
       effectKind: effect.kind,
       effectiveActions: effect.effectiveActions.map((step) => step.action),
       resetBy: effect.resetBy,
+      resetTarget: effect.resetTarget,
       effectNote: effect.note,
       consoleErrors: errors,
       driveError,
@@ -604,7 +605,7 @@ try {
         `  NO-VISUAL-DELTA  ${item.url} — ${
           effect.resetBy
             ? `the pair is byte-identical because the effect observed on ${
-              effect.effectiveActions[0]?.action ?? "a control"
+              effect.resetTarget ?? "a control"
             } was returned to its initial state by ${effect.resetBy}; the earlier effect was real, but the pair is not proof of it`
             : `before/after screenshots are byte-identical (${record.screenshots.beforeHash}) after ${record.controlsExercised} control(s) and ${record.mutations} mutation(s); the pair is not proof of the interaction`
         }`,
@@ -621,7 +622,7 @@ try {
         : `${Object.keys(record.assertions ?? {}).length} assertion(s) held`;
       const caveat = "";
       console.log(
-        `PASS  ${item.url} — ${actionSummary} (${record.mutations} mutations)${caveat}`,
+        `PASS  ${item.url} — ${actionSummary} (run total: ${record.mutations} mutations)${caveat}`,
       );
     } else if (verdict.status === DRIVE_STATUS.VISUAL_ONLY) {
       // Not a pass and not a failure: the pair differs but cannot be attributed, so
@@ -776,7 +777,8 @@ md +=
 // Heading says what the table actually contains: driven passes, failures,
 // not-demonstrated rows and recovered artifacts all appear here.
 md += `## Indexed Demos\n\n`;
-md += `| Demo URL | Controls Found / Tested | Mutations | Status | Screenshot Proof |\n`;
+md +=
+  `| Demo URL | Controls Found / Tested | Mutations (run total) | Status | Screenshot Proof |\n`;
 md += `| :--- | :---: | :---: | :---: | :--- |\n`;
 
 for (const r of allResults) {
@@ -786,9 +788,7 @@ for (const r of allResults) {
       ? `pair differs (${r.screenshots?.beforeHash} -> ${r.screenshots?.afterHash}) — non-causal, needs review`
       : r.visualDelta === false
       ? (r.resetBy
-        ? `NO-VISUAL-DELTA (effect on ${
-          r.effectiveActions?.[0] ?? "a control"
-        } reset by ${r.resetBy})`
+        ? `NO-VISUAL-DELTA (effect on ${r.resetTarget ?? "a control"} reset by ${r.resetBy})`
         : "NO-VISUAL-DELTA (pair byte-identical)")
       : r.screenshots?.interactive
       ? `[Interactive](${r.screenshots.interactive})`

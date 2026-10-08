@@ -94,6 +94,12 @@ export function classifyDriveEffect(
   // the DOM and left the readouts at their initial values, after some earlier
   // action had moved them. That action is why the screenshot pair is
   // byte-identical — not because nothing happened.
+  //
+  // The action the reset UNDID is the one that last moved the readouts, which is
+  // not the same as the first action to have any effect at all: a theme toggle or
+  // a mute button can mutate the DOM without touching a readout, and naming that
+  // as the reset's target would blame the wrong control.
+  let resetTarget = null;
   if (effectiveActions.length) {
     let movedYet = false;
     for (const interaction of interactions) {
@@ -101,6 +107,7 @@ export function classifyDriveEffect(
       const moved = readoutsMoved(readoutsBefore, interaction?.readoutsAfter);
       if (moved) {
         movedYet = true;
+        resetTarget = interaction?.action ?? null;
         continue;
       }
       if (movedYet && mutations > 0) {
@@ -114,12 +121,15 @@ export function classifyDriveEffect(
   const kind = hasDomEffect
     ? EFFECT_KIND.DOM
     : (visualDelta ? EFFECT_KIND.VISUAL : EFFECT_KIND.NONE);
-  const first = effectiveActions[0]?.action ?? null;
 
   let note = null;
-  if (resetBy && first) {
-    note =
-      `the effect observed on ${first} was returned to the initial state by ${resetBy}, so the before/after screenshots are byte-identical — the earlier effect was real, and the pair is not proof of it`;
+  if (resetBy && resetTarget) {
+    // The pair is only byte-identical when the reset was the last thing that
+    // happened. A later action — or the ambient motion a differing pair cannot be
+    // distinguished from — makes that claim false, so it is not made.
+    note = visualDelta === false
+      ? `the effect observed on ${resetTarget} was returned to the initial state by ${resetBy}, so the before/after screenshots are byte-identical — the earlier effect was real, and the pair is not proof of it`
+      : `the effect observed on ${resetTarget} was returned to the initial state by ${resetBy}; the screenshots differ, but the pair shows whatever happened after the reset, so it is not proof of that effect`;
   } else if (kind === EFFECT_KIND.VISUAL) {
     note =
       "the before/after screenshots differ, so the page changed after a control was used, but no DOM mutation or readout change was observed — a differing pair is NON-CAUSAL (an animation, clock or autoplay looks the same), so it cannot attribute the change to the control";
@@ -130,6 +140,7 @@ export function classifyDriveEffect(
     kind,
     effectiveActions,
     resetBy,
+    resetTarget,
     note,
   };
 }

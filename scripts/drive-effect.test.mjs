@@ -102,10 +102,10 @@ section("a run followed by a reset keeps the earlier effect AND names the reset"
   );
 });
 
-section("a reset action with no earlier effect is not reported as a reset", () => {
+section("no action is reported as a reset unless a readout actually moved first", () => {
   // Clearing an already-empty list changes nothing. Calling that a reset would
   // invent an effect that never happened, so this must stay a no-op.
-  const effect = classifyDriveEffect({
+  const noop = classifyDriveEffect({
     interactions: [
       { action: "click: Clear", mutations: 0, readoutsAfter: IDLE },
       { action: "click: Clear", mutations: 0, readoutsAfter: IDLE },
@@ -113,9 +113,93 @@ section("a reset action with no earlier effect is not reported as a reset", () =
     readoutsBefore: IDLE,
     visualDelta: false,
   });
-  assert(!effect.hasEffect, "clearing nothing is not an effect");
-  assertEqual(effect.kind, EFFECT_KIND.NONE, "and not a visual one either");
-  assertEqual(effect.resetBy, null, "a no-op must never be called a reset");
+  assert(!noop.hasEffect, "clearing nothing is not an effect");
+  assertEqual(noop.kind, EFFECT_KIND.NONE, "and not a visual one either");
+  assertEqual(noop.resetBy, null, "a no-op must never be called a reset");
+  // A MUTATING action that leaves the readouts alone is still not a reset when no
+  // readout ever moved: there was no readout effect for it to undo.
+  const mutating = classifyDriveEffect({
+    interactions: [
+      { action: "click: Clear", mutations: 2, readoutsAfter: IDLE },
+      { action: "click: Clear", mutations: 2, readoutsAfter: IDLE },
+    ],
+    readoutsBefore: IDLE,
+    visualDelta: false,
+  });
+  assertEqual(mutating.resetBy, null, "mutating without a moved readout is not a reset");
+  assertEqual(mutating.resetTarget, null, "and it has no target");
+});
+
+section("the reset is attributed to the action whose effect it undid, not the first one", () => {
+  // A theme toggle can mutate the DOM without touching any readout. Naming it as
+  // the target of a later Clear would blame the wrong control.
+  const effect = classifyDriveEffect({
+    interactions: [
+      { action: "click: Toggle Theme", mutations: 1, readoutsAfter: IDLE },
+      { action: "click: Run", mutations: 3, readoutsAfter: RAN },
+      { action: "click: Clear", mutations: 2, readoutsAfter: IDLE },
+    ],
+    readoutsBefore: IDLE,
+    visualDelta: false,
+  });
+  assertEqual(effect.resetBy, "click: Clear", "the resetting action is named");
+  assertEqual(
+    effect.resetTarget,
+    "click: Run",
+    "the target is the action whose readout effect was undone, not the first effective action",
+  );
+  assert(
+    effect.note?.includes("click: Run") && !effect.note?.includes("Toggle Theme"),
+    `the note must not blame the theme toggle, got: ${effect.note}`,
+  );
+});
+
+section("a reset does not claim a byte-identical pair when the screenshots differ", () => {
+  // Run then Clear ends where it started, but Run-Clear-Run does not. Claiming
+  // "byte-identical" from the reset alone asserts something the run never saw.
+  const single = classifyDriveEffect({
+    interactions: [
+      { action: "click: Run", mutations: 3, readoutsAfter: RAN },
+      { action: "click: Clear", mutations: 2, readoutsAfter: IDLE },
+    ],
+    readoutsBefore: IDLE,
+    visualDelta: false,
+  });
+  assert(
+    single.note?.includes("byte-identical"),
+    "a pair that really is identical may say so",
+  );
+  const differs = classifyDriveEffect({
+    interactions: [
+      { action: "click: Run", mutations: 3, readoutsAfter: RAN },
+      { action: "click: Clear", mutations: 2, readoutsAfter: IDLE },
+    ],
+    readoutsBefore: IDLE,
+    visualDelta: true,
+  });
+  assert(
+    !differs.note?.includes("byte-identical"),
+    `the note must not claim a byte-identical pair when the pair differs, got: ${differs.note}`,
+  );
+  assert(
+    differs.note?.includes("not proof"),
+    "it must still say the pair is not proof of the earlier effect",
+  );
+  // The reviewer's Run-Clear-Run case: the page ends changed, so the pair shows
+  // whatever came after the reset rather than the effect that was undone.
+  const twice = classifyDriveEffect({
+    interactions: [
+      { action: "click: Run", mutations: 3, readoutsAfter: RAN },
+      { action: "click: Clear", mutations: 2, readoutsAfter: IDLE },
+      { action: "click: Run", mutations: 3, readoutsAfter: RAN },
+    ],
+    readoutsBefore: IDLE,
+    visualDelta: true,
+  });
+  assert(
+    !twice.note?.includes("byte-identical"),
+    `a run that changed the page again must not claim an identical pair, got: ${twice.note}`,
+  );
 });
 
 section("a readout-only change is an effect even with no DOM mutation", () => {
