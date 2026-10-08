@@ -7,15 +7,18 @@
 // response was a 401 with no Retry-After, about 583M guesses/day. The endpoints
 // are public, so online guessing was limited only by the operator's password.
 //
-// This throttles FAILURES per source. It has to satisfy all of these at once:
+// This throttles FAILURES per source. What it holds, stated exactly:
 //
-//   - per source, so one client cannot spend another client's budget;
-//   - no shared denial BETWEEN IDENTIFIABLE SOURCES: a source over budget waits, and it
-//     does not stop another source from being served. This is only as strong as the
-//     identity behind it — see the limits below;
-//   - no self-lockout from the operator's OWN fumbling: the refusal is a delay, never
-//     a ban, and a successful authentication clears the record. This does NOT extend
-//     to a competing flood from the same address — see limit 2 below;
+//   - per IDENTIFIED source: one source cannot spend the budget that another identified
+//     source would use. Requesters that share a peer address — including every request
+//     that arrives without a peer, which shares the "unknown" key — share one budget, so
+//     a failure from one of them can prevent another's attempt from being compared;
+//   - no shared denial BETWEEN IDENTIFIED SOURCES: a source over budget waits, and it
+//     does not stop another identified source from being served. This is only as strong
+//     as the identity behind it — see the limits below;
+//   - no lockout from a source's OWN fumbling: a successful authentication clears that
+//     source's record, so its earlier failures are not held against a later success. This
+//     does NOT extend to a competing flood from the same address — see limit 2;
 //   - bounded memory: the map is capped and idle sources are dropped, the key is
 //     length-capped, and no per-source state can grow without both;
 //   - no new information: an over-budget refusal is identical whether or not a
@@ -25,9 +28,10 @@
 // once per refill interval. An opportunity, not a reservation, and not a guarantee: it
 // goes to whoever asks first, so under a continuing flood from the same address the
 // flooder normally takes it (limit 2). That refill is what keeps the refusal from being
-// a permanent ban, and it is what caps an attacker to one guess per interval per source.
+// a permanent ban, and it is what limits an attacker to one guess per interval per source
+// while that source's entry stays resident (limit 3).
 //
-// Two limits are stated rather than hidden.
+// Three limits are stated rather than hidden.
 //
 // 1. A source key is only as good as its trust anchor. The key is the socket peer
 //    and nothing else — never a request header, which the client chooses. So a
@@ -50,6 +54,15 @@
 //    channel can be added if a hard guarantee is ever needed. Recovery after a flood stops
 //    is verified. There is NO guaranteed progress while a flood from the same address is
 //    active — that is not claimed here, in the tests, or in the operator documentation.
+//
+// 3. Eviction can hand a spent source a fresh budget early. The map is capped and evicts
+//    the least-recently-updated entry, so once enough OTHER sources have appeared, a spent
+//    entry can be evicted and the same address starts over with a full budget before the
+//    refill would have granted one. This only ever resets a source's own failure state, so
+//    it denies nobody, but it means the per-interval bound above holds only while the
+//    entry stays resident, and it is why the cap is a memory bound rather than a security
+//    bound. An attacker who can appear as many real addresses is bounded by nothing beyond
+//    limit 1.
 
 export const AUTH_THROTTLE_MAX_FAILURES = 10;
 export const AUTH_THROTTLE_REFILL_MS = 10_000;
@@ -75,8 +88,8 @@ type Bucket = { tokens: number; updatedAt: number };
  * verified LOCALLY only (Deno 2.9.7 supplies the socket peer); for the deployment it is
  * Deno's documented behaviour but is NOT verified here, and the empirical check is
  * separate tracked work. When no peer is available, every such request shares one bucket:
- * visible, and never bypassable — but shared, so one client can delay every other client
- * in it.
+ * visible, and not bypassable by rotating request headers — but shared, so one client can
+ * delay every other client in it.
  */
 export function sourceKeyFrom(remoteAddr?: string | null): string {
   const peer = (remoteAddr ?? "").trim();
@@ -151,8 +164,10 @@ export function createAuthThrottle(options: AuthThrottleOptions = {}) {
       bucket.tokens = Math.max(0, bucket.tokens - 1);
     },
     /**
-     * Forget everything about a source that authenticated successfully. A valid
-     * credential must never be punished for earlier failures from the same address.
+     * Forget everything about a source that authenticated successfully, so its earlier
+     * failures are not held against it. Note this is per SOURCE, not per client: two
+     * clients behind one address share a budget, so another client's failures can still
+     * prevent this one's attempt from being compared at all.
      */
     recordSuccess(key: string): void {
       buckets.delete(key);

@@ -301,8 +301,11 @@ await asyncSection(
     );
     assert(
       afterRecovery?.status === 200,
-      `the credential itself must still be accepted once the wait is over, got ${afterRecovery?.status}`,
+      `the credential itself must still be accepted once the refusal is cleared, got ${afterRecovery?.status}`,
     );
+    // Note: this section clears the state with reset() rather than waiting out the interval, so it
+    // proves acceptance after clearing. Waiting is covered by the decision-level section and by the
+    // real-HTTP verification, which sleeps the advertised seconds.
   },
 );
 
@@ -518,13 +521,20 @@ await asyncSection(
     // number (say a hardcoded 1 while ten seconds are actually required) cannot pass. The
     // end-to-end proof that waiting the advertised time is enough lives in the real-HTTP
     // verification script, which sleeps the advertised seconds and expects a 200.
+    // The end-to-end proof that waiting the advertised time is enough lives in the real-HTTP
+    // verification script, which sleeps the advertised seconds and expects a 200. Here the
+    // comparison allows one second of drift in the correct direction, because the header was
+    // produced a moment before this decision is recomputed on the real clock: the wait can only
+    // have decreased, and a formatter that invents its own number (say 1 while 10 is required)
+    // still fails, which is the defect this section exists to catch.
     const decision = telemetryAuthThrottle.check(peer);
     assert(!decision.allowed, "the source is still spent, so a wait is what is advertised");
+    const advertised = Number(header);
     assert(
-      header === String(decision.retryAfterSeconds),
+      advertised === decision.retryAfterSeconds || advertised === decision.retryAfterSeconds + 1,
       `the header must be the decision's own value (${decision.retryAfterSeconds}), got ${header}`,
     );
-    assert(Number(header) >= 1, `the advertised wait must never be zero, got ${header}`);
+    assert(advertised >= 1, `the advertised wait must never be zero, got ${header}`);
   },
 );
 

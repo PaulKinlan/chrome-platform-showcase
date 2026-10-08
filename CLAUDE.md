@@ -143,22 +143,24 @@ telemetry. Its job is the depth work the daily build routine is too busy to do:
 - `GET /telemetry/demo/admin` — HTML dashboard, now including the top-failing-demos triage panel.
 - KV events self-expire after 90 days (`TELEMETRY_TTL_MS`) so the store no longer grows unbounded.
 - **Failed authentication is throttled per source** (`lib/auth-throttle.ts`): 10 failures, then one
-  further attempt per 10 seconds, refused with `429` + `Retry-After`. The source is the connection's
-  peer address, never a request header, so it cannot be rotated to buy a fresh budget. A 429 means
-  "wait", never "wrong password". A successful authentication clears the counter, so a correct
-  password is not punished for earlier failures, and a source is delayed rather than banned. Two
-  things to know if you are ever throttled. (1) One address shares one budget, so anyone behind the
-  same proxy, NAT or corporate egress shares yours. (2) While another client on that address is
-  flooding the endpoint it takes each refilled attempt before yours can arrive, so there is NO
-  guaranteed progress during such a flood — recovery is only guaranteed once the flood stops, and no
-  attempt is reserved for you. Restarting the service clears the in-memory counters, but that is a
-  production change requiring the owner's approval (never something an agent should do on its own),
-  and it is not a lasting guarantee while a flood continues, because the new budget gets spent the
-  same way. This per-source behaviour depends on the deployment supplying a distinct peer address.
-  That is verified locally only (Deno 2.9.7 does supply the socket peer); for Deno Deploy it is
-  documented behaviour but unverified from here, and the empirical check is tracked as separate
-  owned work. Were no peer supplied, every request would share one bucket, so one client could delay
-  all others — fail-safe against bypass, but shared.
+  further attempt per 10 seconds (while that address's entry stays resident - churn from other
+  addresses can evict it and reset the count early), refused with `429` + `Retry-After`. The source
+  is the connection's peer address, never a request header, so it cannot be rotated to buy a fresh
+  budget. A 429 means "wait", never "wrong password". A successful authentication clears the
+  counter, so that source's earlier failures are not held against a later success. Three things to
+  know if you are ever throttled. (1) One address shares one budget, so anyone behind the same
+  proxy, NAT or corporate egress shares yours - and their failures can stop your correct password
+  from being checked at all. (2) While another client on that address is flooding the endpoint it
+  takes each refilled attempt before yours can arrive, so there is NO guaranteed progress during
+  such a flood: recovery is only guaranteed once the flood stops, and no attempt is reserved for
+  you. (3) Restarting the service clears the in-memory counters and restores a fresh budget, but
+  that is a production change requiring the owner's approval (never something an agent should do on
+  its own), and it is not a guaranteed way in while a flood continues, because the flood can spend
+  the new budget before you arrive. This per-source behaviour depends on the deployment supplying a
+  distinct peer address. That is verified locally only (Deno 2.9.7 does supply the socket peer); for
+  Deno Deploy it is documented behaviour but unverified from here, and the empirical check is
+  tracked as separate owned work. Were no peer supplied, every request would share one bucket, so
+  one client could delay all others - fail-safe against bypass by rotating headers, but shared.
 
 ## Durable demo compatibility contract — stable URLs · additive evolution · non-destructive
 
