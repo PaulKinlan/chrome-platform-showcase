@@ -157,10 +157,12 @@ telemetry. Its job is the depth work the daily build routine is too busy to do:
   that is a production change requiring the owner's approval (never something an agent should do on
   its own), and it is not a guaranteed way in while a flood continues, because the flood can spend
   the new budget before you arrive. This per-source behaviour depends on the deployment supplying a
-  distinct peer address. That is verified locally only (Deno 2.9.7 does supply the socket peer); for
-  Deno Deploy it is documented behaviour but unverified from here, and the empirical check is
-  tracked as separate owned work. Were no peer supplied, every request would share one bucket, so
-  one client could delay all others - fail-safe against bypass by rotating headers, but shared.
+  distinct, client-representative peer address - a shared ingress proxy address would not satisfy
+  it, since all of that traffic would share one budget. That is verified locally only (Deno 2.9.7
+  does supply the socket peer); for Deno Deploy it is documented behaviour but unverified from here,
+  and the empirical check is tracked as separate owned work. Were no peer supplied, every request
+  would share one bucket, so one client could delay all others - fail-safe against bypass by
+  rotating headers, but shared.
 
 ## Durable demo compatibility contract — stable URLs · additive evolution · non-destructive
 

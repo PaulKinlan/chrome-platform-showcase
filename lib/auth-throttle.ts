@@ -84,12 +84,14 @@ type Bucket = { tokens: number; updatedAt: number };
  * `x-forwarded-for` is client-supplied, so keying on it would let one client rotate
  * its own key and spend a fresh budget per request — a throttle bypassable by the
  * very attacker it exists to stop, which is worse than no throttle because it looks
- * like protection. The deployment is therefore required to expose a peer address. That is
- * verified LOCALLY only (Deno 2.9.7 supplies the socket peer); for the deployment it is
- * Deno's documented behaviour but is NOT verified here, and the empirical check is
- * separate tracked work. When no peer is available, every such request shares one bucket:
- * visible, and not bypassable by rotating request headers — but shared, so one client can
- * delay every other client in it.
+ * like protection. The deployment is therefore required to expose a DISTINCT,
+ * CLIENT-REPRESENTATIVE peer identity per client. A peer that is merely a common ingress proxy
+ * shared by everybody would not suffice: all of that traffic would land in one bucket, which is
+ * the shared-lockout case described below. That requirement is verified LOCALLY only (Deno 2.9.7
+ * supplies the socket peer); for the deployment it is Deno's documented behaviour but is NOT
+ * verified here, and the empirical check is separate tracked work. When no peer is available,
+ * every such request shares one bucket: visible, and not bypassable by rotating request headers
+ * — but shared, so one client can delay every other client in it.
  */
 export function sourceKeyFrom(remoteAddr?: string | null): string {
   const peer = (remoteAddr ?? "").trim();

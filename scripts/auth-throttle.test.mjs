@@ -522,8 +522,6 @@ await asyncSection(
     // Tie the emitted header to the decision, so a response formatter that invents its own
     // number (say a hardcoded 1 while ten seconds are actually required) cannot pass. The
     // end-to-end proof that waiting the advertised time is enough lives in the real-HTTP
-    // verification script, which sleeps the advertised seconds and expects a 200.
-    // The end-to-end proof that waiting the advertised time is enough lives in the real-HTTP
     // verification script, which sleeps the advertised seconds and expects a 200. Here the
     // comparison allows one second of drift in the correct direction, because the header was
     // produced a moment before this decision is recomputed on the real clock: the wait can only
