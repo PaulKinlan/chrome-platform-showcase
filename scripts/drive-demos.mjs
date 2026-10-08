@@ -17,6 +17,14 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
+import {
+  classifyDriveEffect,
+  describeActions,
+  DRIVE_STATUS,
+  EFFECT_KIND,
+  gradeEffectOutcome,
+  NOT_DEMONSTRATED_STATUSES,
+} from "./lib/drive-effect.mjs";
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
 
 const args = [...Deno.args];
@@ -167,6 +175,7 @@ const IN_PAGE_DRIVER = `(async () => {
     controlsFound: 0,
     controlsExercised: 0,
     actions: [],
+    interactions: [],
     readoutsBefore: [],
     readoutsAfter: [],
     mutations: 0,
@@ -178,7 +187,8 @@ const IN_PAGE_DRIVER = `(async () => {
   const readouts = Array.from(document.querySelectorAll(
     '.readout, .output, #output, #result, #readout, pre, code, .status-val, .contrast-val, .runtime-probe-value, .badge, [role="status"], [aria-live]'
   ));
-  result.readoutsBefore = readouts.slice(0, 10).map(el => (el.innerText || el.textContent || '').trim().slice(0, 120));
+  const snapshotReadouts = () => readouts.slice(0, 10).map(el => (el.innerText || el.textContent || '').trim().slice(0, 120));
+  result.readoutsBefore = snapshotReadouts();
 
   // 2. Set up mutation observer
   let mutationCount = 0;
@@ -209,10 +219,18 @@ const IN_PAGE_DRIVER = `(async () => {
     const label = (btn.innerText || btn.getAttribute('aria-label') || btn.id || btn.className || 'button').trim().replace(/\\s+/g, ' ').slice(0, 40);
     try {
       btn.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      const mutationsBeforeAction = mutationCount;
       btn.click();
       result.controlsExercised++;
       result.actions.push('click: ' + label);
       await new Promise(r => setTimeout(r, 200));
+      // Record what THIS action did, so a later reset cannot be mistaken for the
+      // whole run having done nothing, and so an effect can be attributed.
+      result.interactions.push({
+        action: 'click: ' + label,
+        mutations: mutationCount - mutationsBeforeAction,
+        readoutsAfter: snapshotReadouts(),
+      });
     } catch (e) {
       result.actions.push('click error: ' + e.message);
     }
@@ -221,6 +239,7 @@ const IN_PAGE_DRIVER = `(async () => {
   // 5. Exercise inputs (sliders, checkboxes, color, select)
   for (const input of inputs.slice(0, 3)) {
     const id = input.id || input.name || input.type || input.tagName.toLowerCase();
+    const mutationsBeforeAction = mutationCount;
     try {
       if (input.type === 'checkbox' || input.type === 'radio') {
         input.click();
@@ -254,6 +273,11 @@ const IN_PAGE_DRIVER = `(async () => {
         }
       }
       await new Promise(r => setTimeout(r, 200));
+      result.interactions.push({
+        action: result.actions[result.actions.length - 1] || 'input',
+        mutations: mutationCount - mutationsBeforeAction,
+        readoutsAfter: snapshotReadouts(),
+      });
     } catch (e) {
       result.actions.push('input error: ' + e.message);
     }
@@ -265,7 +289,7 @@ const IN_PAGE_DRIVER = `(async () => {
 
   result.mutations = mutationCount;
   result.domMutated = mutationCount > 0;
-  result.readoutsAfter = readouts.slice(0, 10).map(el => (el.innerText || el.textContent || '').trim().slice(0, 120));
+  result.readoutsAfter = snapshotReadouts();
   result.stateChanged = result.domMutated || JSON.stringify(result.readoutsBefore) !== JSON.stringify(result.readoutsAfter);
 
   return result;
@@ -286,7 +310,15 @@ const IN_PAGE_DRIVER = `(async () => {
 // Only FAIL means "something is broken". The not-demonstrated statuses mean
 // "this run is not evidence that the demo works" — a different claim, which must
 // not be reported as a pass.
-function gradeRun({ isSpecCase, driveData, driveError, errors }) {
+function gradeRun({
+  isSpecCase,
+  driveData,
+  driveError,
+  errors,
+  visualDelta = null,
+  beforeHash = null,
+  afterHash = null,
+}) {
   if (driveError) return { status: "FAIL", reason: driveError };
   if (errors.length) return { status: "FAIL", reason: errors.join("; ") };
 
@@ -314,6 +346,11 @@ function gradeRun({ isSpecCase, driveData, driveError, errors }) {
   // Generic driver: grade the interaction evidence it already collects.
   const found = driveData?.controlsFound ?? 0;
   const exercised = driveData?.controlsExercised ?? 0;
+  const effect = classifyDriveEffect({
+    interactions: driveData?.interactions ?? [],
+    readoutsBefore: driveData?.readoutsBefore ?? [],
+    visualDelta,
+  });
   if (found === 0) {
     return {
       status: "NO-CONTROLS",
@@ -327,19 +364,21 @@ function gradeRun({ isSpecCase, driveData, driveError, errors }) {
         `${found} control(s) found, none exercisable by the driver (gesture- or selection-dependent?)`,
     };
   }
-  if (!driveData?.stateChanged) {
-    return {
-      status: "NO-EFFECT",
-      reason: `${exercised} control(s) exercised, no DOM mutation or readout change observed`,
-    };
-  }
-  return { status: "PASS" };
+  // "No DOM mutation or readout change" is NOT "nothing happened": a control can
+  // only paint (canvas, WebGL), and the before/after screenshots are then the only
+  // evidence there is. Discarding a differing pair because the DOM was quiet
+  // reported NO-EFFECT for demos that plainly responded (bead c3p).
+  //
+  // But a differing pair is NON-CAUSAL — an animation, clock or autoplay produces
+  // one identically — so it is NOT an ordinary pass either. It is reported as
+  // VISUAL-ONLY, a not-demonstrated status carrying both hashes and that limit.
+  const outcome = gradeEffectOutcome({ effect, exercised, beforeHash, afterHash });
+  return outcome.status === DRIVE_STATUS.PASS ? { status: DRIVE_STATUS.PASS, effect } : outcome;
 }
 
-// Indexed but not demonstrated. Kept out of the pass tally and listed separately,
-// as the showcase-auto-research SKILL requires for zero-control reference pages.
-// `UNVERIFIED` (disk-recovered, bead cix) keeps its own separate tally.
-const NOT_DEMONSTRATED_STATUSES = ["NO-CONTROLS", "NOT-DRIVEABLE", "NO-EFFECT", "NOT-ASSERTED"];
+// The not-demonstrated status list (including VISUAL-ONLY) lives in
+// ./lib/drive-effect.mjs, where the test can assert that a visual-only effect is
+// not counted as a pass.
 
 // ── Main Execution ──────────────────────────────────────────────────────────
 await bootServer();
@@ -352,6 +391,7 @@ let passedCount = 0;
 let failedCount = 0;
 let notDemonstratedCount = 0;
 let noVisualDeltaCount = 0;
+let visualOnlyCount = 0;
 
 try {
   chrome = await launchChrome();
@@ -504,6 +544,14 @@ try {
       driveData,
       driveError,
       errors,
+      visualDelta,
+      beforeHash,
+      afterHash,
+    });
+    const effect = verdict.effect ?? classifyDriveEffect({
+      interactions: driveData?.interactions ?? [],
+      readoutsBefore: driveData?.readoutsBefore ?? [],
+      visualDelta,
     });
 
     const record = {
@@ -517,9 +565,18 @@ try {
       controlsFound: driveData?.controlsFound ?? 0,
       controlsExercised: driveData?.controlsExercised ?? 0,
       actions: driveData?.actions ?? [],
+      interactions: (driveData?.interactions ?? []).map((step) => ({
+        action: step?.action ?? null,
+        mutations: step?.mutations ?? 0,
+      })),
       domMutated: driveData?.domMutated ?? false,
       mutations: driveData?.mutations ?? 0,
       stateChanged: driveData?.stateChanged ?? false,
+      effectKind: effect.kind,
+      effectiveActions: effect.effectiveActions.map((step) => step.action),
+      resetBy: effect.resetBy,
+      resetTarget: effect.resetTarget,
+      effectNote: effect.note,
       consoleErrors: errors,
       driveError,
       screenshots: {
@@ -530,7 +587,8 @@ try {
       },
       visualDelta,
       visualDeltaNote: visualDelta === false
-        ? "NO-VISUAL-DELTA — before/after screenshots are byte-identical, so the pair is not proof of the interaction"
+        ? (effect.note ??
+          "NO-VISUAL-DELTA — before/after screenshots are byte-identical, so the pair is not proof of the interaction")
         : null,
     };
 
@@ -544,17 +602,38 @@ try {
     if (record.visualDelta === false && wasDriven) {
       noVisualDeltaCount++;
       console.warn(
-        `  NO-VISUAL-DELTA  ${item.url} — before/after screenshots are byte-identical (${record.screenshots.beforeHash}) after ${record.controlsExercised} control(s) and ${record.mutations} mutation(s); the pair is not proof of the interaction`,
+        `  NO-VISUAL-DELTA  ${item.url} — ${
+          effect.resetBy
+            ? `the pair is byte-identical because the effect observed on ${
+              effect.resetTarget ?? "a control"
+            } was returned to its initial state by ${effect.resetBy}; the earlier effect was real, but the pair is not proof of it`
+            : `before/after screenshots are byte-identical (${record.screenshots.beforeHash}) after ${record.controlsExercised} control(s) and ${record.mutations} mutation(s); the pair is not proof of the interaction`
+        }`,
       );
     }
 
     if (verdict.status === "PASS") {
       passedCount++;
       const actionSummary = record.actions.length
-        ? record.actions.slice(0, 3).join(", ")
+        ? describeActions(
+          record.interactions,
+          record.actions.slice(0, 3).join(", "),
+        )
         : `${Object.keys(record.assertions ?? {}).length} assertion(s) held`;
+      const caveat = "";
       console.log(
-        `PASS  ${item.url} — ${actionSummary} (${record.mutations} mutations)`,
+        `PASS  ${item.url} — ${actionSummary} (run total: ${record.mutations} mutations)${caveat}`,
+      );
+    } else if (verdict.status === DRIVE_STATUS.VISUAL_ONLY) {
+      // Not a pass and not a failure: the pair differs but cannot be attributed, so
+      // the row is counted apart and flagged for review. It must ALSO be counted as
+      // not demonstrated — the per-run line said "0 not demonstrated" while listing
+      // a VISUAL-ONLY row, which is the same kind of dishonest tally the status was
+      // introduced to avoid.
+      visualOnlyCount++;
+      notDemonstratedCount++;
+      console.warn(
+        `  VISUAL-ONLY  ${item.url} — screenshots differ (${record.screenshots.beforeHash} -> ${record.screenshots.afterHash}) with no DOM mutation or readout change; a differing pair is non-causal, so this needs review rather than a pass`,
       );
     } else if (verdict.status === "FAIL") {
       failedCount++;
@@ -667,6 +746,7 @@ const summaryJson = {
   lastRunPassed: passedCount,
   lastRunNotDemonstrated: notDemonstratedCount,
   lastRunNoVisualDelta: noVisualDeltaCount,
+  lastRunVisualOnly: visualOnlyCount,
   lastRunFailed: failedCount,
   results: allResults,
 };
@@ -687,20 +767,29 @@ md +=
 md +=
   `- **Latest Run:** ${results.length} tested (${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed)\n\n`;
 md +=
-  `Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT** and **NOT-ASSERTED** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.\n\n`;
+  `Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT**, **NOT-ASSERTED** and **VISUAL-ONLY** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.\n\n`;
 md +=
-  `**NO-VISUAL-DELTA** is a caveat on a row, not a status: the before/after screenshots hash the same, so the pair is not proof of the interaction. It can mean the paint had not landed, or that the interaction legitimately returned the page to its starting state (for example a click that toggles a state and a second that toggles it back). The two are indistinguishable from the images, so neither is claimed.\n\n`;
+  `**NO-VISUAL-DELTA** is a caveat on a row, not a status: the before/after screenshots hash the same, so the pair is not proof of the interaction. When the run's per-action evidence identifies the cause it is named — a control whose effect was returned to its initial state by a later reset control — otherwise the pair is simply not claimed: the paint may not have landed.\n\n`;
+md +=
+  `**Per-action evidence.** The driver records what each control did, so a mutation total is never presented without attribution, and a later reset cannot be mistaken for the whole run having done nothing.\n\n`;
+md +=
+  `**VISUAL-ONLY** covers the case where the only signal is that the screenshots differ — a control that paints without touching the DOM, or ambient motion. A differing pair is **non-causal**: an animation, a clock or an autoplay produces one identically, so it is not evidence that the control did anything, and the row is reported for review with both hashes rather than counted as a pass.\n\n`;
 // Heading says what the table actually contains: driven passes, failures,
 // not-demonstrated rows and recovered artifacts all appear here.
 md += `## Indexed Demos\n\n`;
-md += `| Demo URL | Controls Found / Tested | Mutations | Status | Screenshot Proof |\n`;
+md +=
+  `| Demo URL | Controls Found / Tested | Mutations (run total) | Status | Screenshot Proof |\n`;
 md += `| :--- | :---: | :---: | :---: | :--- |\n`;
 
 for (const r of allResults) {
   const proofLinks = [
     r.screenshots?.initial ? `[Initial](${r.screenshots.initial})` : "",
-    r.visualDelta === false
-      ? "NO-VISUAL-DELTA (pair byte-identical)"
+    r.status === DRIVE_STATUS.VISUAL_ONLY
+      ? `pair differs (${r.screenshots?.beforeHash} -> ${r.screenshots?.afterHash}) — non-causal, needs review`
+      : r.visualDelta === false
+      ? (r.resetBy
+        ? `NO-VISUAL-DELTA (effect on ${r.resetTarget ?? "a control"} reset by ${r.resetBy})`
+        : "NO-VISUAL-DELTA (pair byte-identical)")
       : r.screenshots?.interactive
       ? `[Interactive](${r.screenshots.interactive})`
       : "",
@@ -741,6 +830,11 @@ console.log(
   ...(noVisualDeltaCount
     ? [
       `\nNO-VISUAL-DELTA: ${noVisualDeltaCount} driven row(s) produced byte-identical before/after screenshots — not proof of the interaction; see the table.`,
+    ]
+    : []),
+  ...(visualOnlyCount
+    ? [
+      `\nVISUAL-ONLY: ${visualOnlyCount} row(s) produced a differing screenshot pair with no DOM mutation or readout change — a differing pair is NON-CAUSAL, so these are NOT passes and need review; see the row notes.`,
     ]
     : []),
 );
