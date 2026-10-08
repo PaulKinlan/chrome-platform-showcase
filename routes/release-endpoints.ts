@@ -2743,7 +2743,12 @@ async function renderDbscRoute(req: Request, sub: string): Promise<Response | nu
       return jsonResponse({ error: verified.error }, { status: 400 });
     }
 
-    session.publicKeyJwk = verified.publicKeyJwk ?? null;
+    // The proof's header JWK is caller-supplied, and importKey ignores the
+    // properties it does not need, so store only what verification consumes:
+    // otherwise padding rides along for the session's whole 30-day lifetime.
+    session.publicKeyJwk = verified.publicKeyJwk
+      ? p256PublicJwkForStorage(verified.publicKeyJwk)
+      : null;
     session.registeredAt = new Date().toISOString();
     session.loginChallenge = null;
     session.shortCookieValue = randomBase64Url(18);
