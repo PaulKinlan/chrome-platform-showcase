@@ -134,7 +134,9 @@ export function renderConformancePage(s: ConformanceSuite): string {
       }</a></span>`
       : ""
   }
-      <span>chromestatus: <a href="https://chromestatus.com/feature/${s.chromestatusId}" target="_blank" rel="noopener">#${s.chromestatusId}</a></span>
+      <span>chromestatus: <a href="${
+    escapeHTML(`https://chromestatus.com/feature/${s.chromestatusId}`)
+  }" target="_blank" rel="noopener">#${escapeHTML(String(s.chromestatusId))}</a></span>
       <span>generated ${escapeHTML(s.generatedAt)} by ${escapeHTML(s.author)}</span>
     </div>
   </header>
