@@ -23,19 +23,178 @@ export function loadSidecar(root = REPO_ROOT) {
   }
 }
 
-export function loadSidecarFromRef(ref, root = REPO_ROOT) {
+// The git-tracked support map was introduced here (the commit that added it).
+// A baseline ref that predates this commit legitimately has no records, so the
+// parity monotonicity check has nothing to compare; every other reason for a
+// missing or unreadable snapshot must fail the gate instead of silently
+// skipping the invariant (bead chrome_platform_showcase-6tg).
+export const SUPPORT_MAP_INTRODUCED_IN = "19255c927233b15d44e8c7cbdef5c8adc9249365";
+
+// Raised when a baseline support snapshot cannot be used and must NOT be
+// treated as empty: an empty map makes `check-routes`' monotonicity loop
+// vacuous, so the gate would pass while a resolved class was quietly
+// downgraded.
+export class SupportSnapshotError extends Error {
+  constructor(ref, reason) {
+    super(`baseline responsive-support snapshot at ${ref}: ${reason}`);
+    this.name = "SupportSnapshotError";
+    this.ref = ref;
+    this.reason = reason;
+  }
+}
+
+function gitIn(root, args) {
+  if (typeof Deno !== "undefined" && typeof Deno.Command === "function") {
+    // Deno.Command rather than node's execFileSync: the latter needs --allow-env
+    // merely to spawn, so a caller that did not grant it got a permission error
+    // that looked like a missing git object. A read-only git query should need
+    // only --allow-run.
+    const out = new Deno.Command("git", {
+      args,
+      cwd: root,
+      stdout: "piped",
+      stderr: "piped",
+    }).outputSync();
+    if (out.code !== 0) {
+      const cause = new TextDecoder().decode(out.stderr).trim().split("\n")[0] ?? "";
+      const err = new Error(
+        `git ${args.join(" ")} exited ${out.code}${cause ? `: ${cause}` : ""}`,
+      );
+      err.status = out.code;
+      throw err;
+    }
+    return new TextDecoder().decode(out.stdout);
+  }
+
+  // Node runtime branch: use node:child_process execFileSync.
+  // Guarded so Deno does not run this path (Deno's node:child_process polyfill
+  // requires --allow-env merely to spawn).
   try {
-    const raw = execFileSync("git", ["show", `${ref}:responsive-support.json`], {
+    return execFileSync("git", args, {
       cwd: root,
       encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 64 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"],
     });
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
+  } catch (err) {
+    if (typeof err?.status === "number") {
+      const stderr = typeof err.stderr === "string"
+        ? err.stderr
+        : err.stderr
+        ? String(err.stderr)
+        : "";
+      const cause = stderr.trim().split("\n")[0] ?? "";
+      const customErr = new Error(
+        `git ${args.join(" ")} exited ${err.status}${cause ? `: ${cause}` : ""}`,
+      );
+      customErr.status = err.status;
+      throw customErr;
+    }
+    throw err;
   }
+}
+
+// Returns the support map at `ref`, `null` when the ref provably predates the
+// map (documented, visible policy), and throws SupportSnapshotError for every
+// other failure — a missing ref, a map deleted after it was introduced, an
+// unreadable or unparseable map, or a clone that cannot adjudicate because the
+// introduction commit is not present locally. Every diagnostic carries what git
+// actually said, so a permission or transport problem can never be reported as
+// an absent object.
+export function loadSidecarFromRef(ref, root = REPO_ROOT, opts = {}) {
+  const introducedIn = opts.introducedIn ?? SUPPORT_MAP_INTRODUCED_IN;
+  const cause = (err) => (err?.message ? ` (${err.message})` : "");
+  try {
+    gitIn(root, ["cat-file", "-e", `${ref}^{commit}`]);
+  } catch (err) {
+    throw new SupportSnapshotError(
+      ref,
+      `the ref could not be resolved as a commit in this clone${cause(err)}`,
+    );
+  }
+  let present = true;
+  try {
+    gitIn(root, ["cat-file", "-e", `${ref}:responsive-support.json`]);
+  } catch {
+    present = false;
+  }
+  if (!present) {
+    // Ancestry decides the policy, and it must be asked in BOTH directions:
+    // `--is-ancestor intro ref` exiting 1 means "not an ancestor", which covers
+    // both "ref predates the map" and "unrelated histories" — only the former is
+    // a legitimate skip (bead chrome_platform_showcase-7kr).
+    const isAncestor = (a, b) => {
+      try {
+        gitIn(root, ["merge-base", "--is-ancestor", a, b]);
+        return true;
+      } catch (err) {
+        if (err?.status === 1) return false;
+        throw err;
+      }
+    };
+    let introIsAncestorOfRef, refIsAncestorOfIntro;
+    try {
+      introIsAncestorOfRef = isAncestor(introducedIn, ref);
+      refIsAncestorOfIntro = introIsAncestorOfRef ? false : isAncestor(ref, introducedIn);
+    } catch (err) {
+      throw new SupportSnapshotError(
+        ref,
+        `the map is absent and this clone cannot determine the ancestry of ${ref} against the ` +
+          `introduction (${
+            introducedIn.slice(0, 12)
+          } did not resolve — fetch more history, e.g. git fetch --unshallow)${cause(err)}`,
+      );
+    }
+    if (introIsAncestorOfRef) {
+      throw new SupportSnapshotError(
+        ref,
+        `responsive-support.json is absent although ${ref} contains its introduction ` +
+          `(${introducedIn.slice(0, 12)}) — the monotonicity check cannot run vacuously`,
+      );
+    }
+    if (refIsAncestorOfIntro) return null; // provably predates the map: nothing to compare
+    throw new SupportSnapshotError(
+      ref,
+      `the map is absent and ${ref} shares no ancestry with the introduction ` +
+        `(${introducedIn.slice(0, 12)}) — unrelated histories fail closed rather than ` +
+        `skipping the monotonicity check`,
+    );
+  }
+  let raw;
+  try {
+    raw = gitIn(root, ["show", `${ref}:responsive-support.json`]);
+  } catch (err) {
+    throw new SupportSnapshotError(
+      ref,
+      `the map exists at that ref but could not be read${cause(err)}`,
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new SupportSnapshotError(
+      ref,
+      `the map exists at that ref but is not valid JSON — a malformed baseline must not read as empty${
+        cause(err)
+      }`,
+    );
+  }
+  // A map is a plain JSON object. `{}` is a legitimate empty map; null, an
+  // array, a string or a number is not a map at all, and reading any of them as
+  // empty made the monotonicity loop vacuous (bead chrome_platform_showcase-e8x).
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    const kind = parsed === null
+      ? "null"
+      : Array.isArray(parsed)
+      ? "an array"
+      : `a ${typeof parsed}`;
+    throw new SupportSnapshotError(
+      ref,
+      `the map at that ref is ${kind}, not a JSON object — a non-map baseline must not read as an empty map`,
+    );
+  }
+  return parsed;
 }
 
 // A class is acceptable for a TOUCHED demo only when it is ok, or unsupported

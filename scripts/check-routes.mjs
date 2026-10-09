@@ -59,6 +59,7 @@ import {
   loadSidecar,
   loadSidecarFromRef,
   SUPPORT_CLASSES,
+  SUPPORT_MAP_INTRODUCED_IN,
 } from "./lib/support.mjs";
 
 // A frontend-touching critique with a present-but-EMPTY `guidanceConsulted`
@@ -254,13 +255,26 @@ function main() {
   // ADDITIVE checks. They never touch the immutable conformance suites; they
   // read the `responsive-support.json` sidecar and the critique guidance field.
   const curSupport = loadSidecar();
-  const baseSupport = (() => {
-    try {
-      return loadSidecarFromRef(base.ref);
-    } catch {
-      return {};
-    }
-  })();
+  // A baseline snapshot that cannot be read must FAIL the gate rather than read
+  // as empty: an empty map makes the monotonicity loop below vacuous, so a
+  // resolved class could be downgraded and the gate would still pass (bead
+  // chrome_platform_showcase-6tg). Only a ref that provably predates the map is
+  // legitimately empty, and that skip is announced instead of being silent.
+  let baseSupport = null;
+  let baseSnapshotAbsent = false;
+  try {
+    baseSupport = loadSidecarFromRef(base.ref);
+    baseSnapshotAbsent = baseSupport === null;
+  } catch (err) {
+    failures.push(`support baseline: ${err.message}`);
+  }
+  if (baseSnapshotAbsent) {
+    console.log(
+      `note: no responsive-support baseline at ${base.ref} (predates ${
+        SUPPORT_MAP_INTRODUCED_IN.slice(0, 12)
+      }) — monotonicity comparison skipped, nothing to compare`,
+    );
+  }
   const cov = coverage(curSupport);
   const touched = changedFeatureIds(base.ref);
 
@@ -279,7 +293,7 @@ function main() {
   // (B) MONOTONIC: a class that was resolved (ok/unsupported) in the baseline
   // must not silently drop back to untested/needs-review/broken without a
   // migration record covering the id.
-  for (const [id, base] of Object.entries(baseSupport)) {
+  for (const [id, base] of Object.entries(baseSupport ?? {})) {
     const cur = curSupport[id];
     if (!cur) continue;
     for (const cls of SUPPORT_CLASSES) {
