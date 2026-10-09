@@ -1433,7 +1433,9 @@ window.addEventListener('load', () => {
 `;
         const html = rawHtml.replace("</body>", probe + "</body>");
         if (html === rawHtml) {
-          throw new Error(`${label}: probe injection failed - no </body> in ${pagePath}`);
+          throw new Error(
+            `${label}: probe injection failed - no </body> in the rendered /critiques page`,
+          );
         }
         pageServed++;
         return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });

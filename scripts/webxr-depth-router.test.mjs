@@ -104,8 +104,12 @@ function renderRouter({ caseId, device }) {
 }
 
 // Recipes the page must render, spelled out here so a change to the table is a
-// failure rather than a silently different demo. Bandwidth is device
-// resolution × bytes per depth format, in KB.
+// failure rather than a silently different demo. Snippet fragments and table
+// cells are asserted SEPARATELY (bead kz8 review, P1): an earlier version of this
+// suite accepted a value appearing in "the snippet or any row", which a renderer
+// emitting only `<td>${why}</td>` per row satisfied while the table columns and
+// the recommended-value cells were gone. Bandwidth is device resolution x bytes
+// per depth format, in KB.
 const CASES = [
   {
     caseId: "ar-occlusion",
@@ -115,27 +119,55 @@ const CASES = [
       "dataFormatPreference: ['luminance-alpha']",
       "depthType: 'raw'",
     ],
-    rows: ["gpu-optimized", "luminance-alpha", "raw", "least latency, noisy edges"],
+    rows: [
+      ["usagePreference", "gpu-optimized", "sampled inside the shader"],
+      ["dataFormatPreference", "luminance-alpha", "compact byte layout"],
+      ["depthType (v139)", "raw", "least latency, noisy edges"],
+      ["polling rate", "every-frame", "render-loop synced"],
+    ],
     bandwidth: "38 KB",
     latency: "real-time",
   },
   {
     caseId: "virtual-shadows",
     device: "quest",
-    snippet: ["depthType: 'smooth'", "dataFormatPreference: ['float32']"],
-    rows: ["smooth", "denoised, frame-coherent"],
+    snippet: [
+      "usagePreference: ['gpu-optimized']",
+      "dataFormatPreference: ['float32']",
+      "depthType: 'smooth'",
+    ],
+    rows: [
+      ["usagePreference", "gpu-optimized", "sampled inside the shader"],
+      ["dataFormatPreference", "float32", "precise distance maths"],
+      ["depthType (v139)", "smooth", "denoised, frame-coherent"],
+      ["polling rate", "every-frame", "render-loop synced"],
+    ],
     bandwidth: "300 KB",
     latency: "soft-real-time",
   },
   {
     caseId: "hit-test",
     device: "vision",
-    snippet: ["usagePreference: ['cpu-optimized']", "depthType: 'smooth'"],
-    rows: ["cpu-optimized"],
+    snippet: [
+      "usagePreference: ['cpu-optimized']",
+      "dataFormatPreference: ['luminance-alpha']",
+      "depthType: 'smooth'",
+    ],
+    rows: [
+      ["usagePreference", "cpu-optimized", "cpu reads pixels"],
+      ["dataFormatPreference", "luminance-alpha", "compact byte layout"],
+      ["depthType (v139)", "smooth", "denoised, frame-coherent"],
+      ["polling rate", "on-input", "event-driven"],
+    ],
     bandwidth: "600 KB",
     latency: "lazy",
   },
 ];
+
+function cellsOf(row) {
+  return [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)]
+    .map((m) => m[1].replace(/<[^>]*>/g, "").trim());
+}
 
 for (const expected of CASES) {
   const label = `${expected.caseId}/${expected.device}`;
@@ -146,24 +178,47 @@ for (const expected of CASES) {
     check(`${label} renders`, false, `render threw: ${error?.message ?? error}`);
     continue;
   }
-  const rendered = [...expected.snippet, ...expected.rows].map((needle) => [needle, state]);
-  const missing = rendered
-    .filter(([needle, s]) => !s.snippet.includes(needle) && !s.rows.join("\n").includes(needle))
-    .map(([needle]) => needle);
+
+  const missingFromSnippet = expected.snippet.filter((needle) => !state.snippet.includes(needle));
   check(
-    `${label} renders the expected recommendations`,
-    missing.length === 0,
-    `missing from snippet/rows: ${missing.join(", ")}`,
+    `${label} writes the expected request snippet`,
+    missingFromSnippet.length === 0,
+    `missing from the snippet: ${missingFromSnippet.join(", ")}`,
   );
+
+  check(
+    `${label} renders one recommendation row per knob`,
+    state.rows.length === expected.rows.length,
+    `got ${state.rows.length} rows: ${JSON.stringify(state.rows)}`,
+  );
+
+  // Cell structure, then per-cell content. "Somewhere in the rows" is not enough.
+  const malformed = state.rows
+    .map((row, index) => ({ index, cells: cellsOf(row) }))
+    .filter(({ cells }) => cells.length !== 3)
+    .map(({ index, cells }) => `row ${index} has ${cells.length} cells`);
+  check(`${label} renders three cells per row`, malformed.length === 0, malformed.join("; "));
+
+  const mismatched = expected.rows
+    .map((wanted, index) => ({
+      index,
+      wanted,
+      got: state.rows[index] === undefined ? [] : cellsOf(state.rows[index]),
+    }))
+    .filter(({ wanted, got }) => got.join("\u0000") !== wanted.join("\u0000"))
+    .map(({ index, wanted, got }) =>
+      `row ${index}: wanted ${JSON.stringify(wanted)} got ${JSON.stringify(got)}`
+    );
+  check(
+    `${label} renders the expected (knob, value, rationale) cells in order`,
+    mismatched.length === 0,
+    mismatched.join("; "),
+  );
+
   check(
     `${label} reports ${expected.bandwidth} and latency ${expected.latency}`,
     state.bandwidth === expected.bandwidth && state.latency === expected.latency,
     `got ${JSON.stringify(state.bandwidth)} / ${JSON.stringify(state.latency)}`,
-  );
-  check(
-    `${label} renders one recommendation row per knob`,
-    state.rows.length === 4,
-    `got ${state.rows.length} rows: ${JSON.stringify(state.rows)}`,
   );
 }
 

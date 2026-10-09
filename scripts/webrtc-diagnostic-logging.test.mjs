@@ -108,29 +108,50 @@ check(
 // non-empty non-thenable session id from start, InvalidStateError when the
 // lifecycle is wrong, TypeError for the metadata limits. This is the contract a
 // real Chrome 150 exposing the rewritten API presents.
-function modernSurface() {
+//
+// `broken` (bead kz8 review, P1) punches exactly ONE hole in that contract so a
+// payload can be shown to be sensitive to the contract it claims to test. A
+// payload that only has to pass here and fail against a surface with no statics
+// at all is satisfied by `typeof RTCPeerConnection.startDiagnosticLogging ===
+// 'function'`, which tests nothing.
+function modernSurface(broken = null) {
   let active = false;
-  return class RTCPeerConnection {
+  const enforceLimits = broken !== "metadata-limits";
+  const throwWhenActive = broken !== "start-while-active";
+  const throwStopWhenIdle = broken !== "stop-while-idle";
+  const throwCancelWhenIdle = broken !== "cancel-while-idle";
+  const synchronous = broken !== "start-synchronous";
+  // The lifecycle errors must be InvalidStateError by NAME, not just "throws".
+  const lifecycleError = broken === "lifecycle-error-name"
+    ? () => new TypeError("wrong error type")
+    : (message) => new DOMException(message, "InvalidStateError");
+  const cls = class RTCPeerConnection {
     static startDiagnosticLogging(options = {}) {
-      if (active) throw new DOMException("already logging", "InvalidStateError");
+      if (active && throwWhenActive) throw lifecycleError("already logging");
       const metadata = options.metadata ?? {};
       const keys = Object.keys(metadata);
-      if (keys.length > 5) throw new TypeError("too many metadata keys");
-      for (const key of keys) {
-        if (String(metadata[key]).length > 100) throw new TypeError("metadata value too long");
+      if (enforceLimits) {
+        if (keys.length > 5) throw new TypeError("too many metadata keys");
+        for (const key of keys) {
+          if (String(metadata[key]).length > 100) throw new TypeError("metadata value too long");
+        }
       }
       active = true;
-      return "session-1";
+      return synchronous ? "session-1" : Promise.resolve("session-1");
     }
     static stopDiagnosticLogging() {
-      if (!active) throw new DOMException("not logging", "InvalidStateError");
+      if (!active && throwStopWhenIdle) throw lifecycleError("not logging");
       active = false;
     }
     static cancelDiagnosticLogging() {
-      if (!active) throw new DOMException("not logging", "InvalidStateError");
+      if (!active && throwCancelWhenIdle) throw lifecycleError("not logging");
       active = false;
     }
   };
+  if (broken === "no-start-static") delete cls.startDiagnosticLogging;
+  if (broken === "no-stop-static") delete cls.stopDiagnosticLogging;
+  if (broken === "no-cancel-static") delete cls.cancelDiagnosticLogging;
+  return cls;
 }
 
 // Pre-rewrite surface: the removed Navigator binding, a promise-returning
@@ -149,7 +170,7 @@ const LEGACY_NAVIGATOR = {
 async function runPayloads(surface, navigatorValue) {
   const results = [];
   for (const assertion of conformance.assertions) {
-    const result = await withGlobal("RTCPeerConnection", surface(), async () => {
+    const result = await withGlobal("RTCPeerConnection", surface, async () => {
       const run = () => runConformanceAssertion(assertion.kind, assertion.test, assertion.expect);
       return navigatorValue === undefined ? await run() : await withNavigator(navigatorValue, run);
     });
@@ -158,7 +179,7 @@ async function runPayloads(surface, navigatorValue) {
   return results;
 }
 
-const modern = await runPayloads(modernSurface, undefined);
+const modern = await runPayloads(modernSurface(), undefined);
 for (const result of modern) {
   check(
     `conformance payload ${result.id} passes on the rewritten static surface`,
@@ -170,7 +191,7 @@ for (const result of modern) {
 // The discrimination half: every payload must REJECT the surface the rewrite
 // removed. A payload that cannot tell the two apart is a tautology, and this is
 // the assertion that fails when one is introduced.
-const legacy = await runPayloads(legacySurface, LEGACY_NAVIGATOR);
+const legacy = await runPayloads(legacySurface(), LEGACY_NAVIGATOR);
 for (const result of legacy) {
   check(
     `conformance payload ${result.id} rejects the pre-rewrite surface`,
@@ -180,7 +201,69 @@ for (const result of legacy) {
   );
 }
 
-// ── 3. STATIC: the payloads never name the removed surface ───────────────────
+// ── 3. Each payload is SENSITIVE TO ITS OWN contract (bead kz8 review, P1) ───
+// The legacy run above only proves a payload can distinguish "the whole surface"
+// from "no statics at all". A payload such as
+// `typeof RTCPeerConnection.startDiagnosticLogging === 'function'` satisfies both,
+// so it would pass while testing nothing. Here the rewritten surface is broken in
+// exactly one place per payload, and that payload must fail. This is the
+// assertion that fails when someone replaces a contract test with a smoke test.
+const PAYLOAD_BREAKS = {
+  "pco-start-static-method": "no-start-static",
+  "pco-stop-static-method": "no-stop-static",
+  "pco-cancel-static-method": "no-cancel-static",
+  "legacy-navigator-rtc-removed": "legacy-navigator",
+  "start-returns-session-id-synchronously": "start-synchronous",
+  "start-while-active-throws-invalid-state": "start-while-active",
+  "stop-while-idle-throws-invalid-state": "stop-while-idle",
+  "cancel-while-idle-throws-invalid-state": "cancel-while-idle",
+  "metadata-over-limit-throws-type-error": "metadata-limits",
+};
+
+for (const [id, broken] of Object.entries(PAYLOAD_BREAKS)) {
+  const assertion = conformance.assertions.find((a) => a.id === id);
+  if (!assertion) {
+    check(
+      `conformance payload ${id} exists so its contract can be broken`,
+      false,
+      `conformance.json no longer carries an assertion with id ${id}; PAYLOAD_BREAKS is stale`,
+    );
+    continue;
+  }
+  // The navigator case keeps the rewritten statics intact and reintroduces only
+  // the removed binding, so the payload cannot fail for an unrelated reason.
+  const navigatorValue = broken === "legacy-navigator" ? LEGACY_NAVIGATOR : undefined;
+  const surface = modernSurface(broken === "legacy-navigator" ? null : broken);
+  const [result] = (await runPayloads(surface, navigatorValue)).filter((r) => r.id === id);
+  check(
+    `conformance payload ${id} fails when its own contract is broken (${broken})`,
+    result.ok === false,
+    `ok=${result.ok} — this payload still passes on a surface where its own contract is ` +
+      `violated, so it does not test that contract (detail=${JSON.stringify(result.detail)})`,
+  );
+}
+
+// The lifecycle payloads must also pin the error NAME, not merely that something
+// throws: swapping InvalidStateError for a TypeError has to be visible.
+for (
+  const id of [
+    "start-while-active-throws-invalid-state",
+    "stop-while-idle-throws-invalid-state",
+    "cancel-while-idle-throws-invalid-state",
+  ]
+) {
+  const [result] = (await runPayloads(modernSurface("lifecycle-error-name"), undefined))
+    .filter((r) => r.id === id);
+  check(
+    `conformance payload ${id} fails when the lifecycle error is not an InvalidStateError`,
+    result.ok === false,
+    `ok=${result.ok} — the payload accepts the wrong error type (detail=${
+      JSON.stringify(result.detail)
+    })`,
+  );
+}
+
+// ── 4. STATIC: the payloads never name the removed surface ───────────────────
 // Kept as a cheap contract statement next to the execution above: prose may name
 // what was removed, an executable payload may not.
 const assertionTests = conformance.assertions.map((a) => String(a.test)).join("\n");
@@ -200,7 +283,7 @@ check(
   !/allowUpload/.test(assertionTests),
 );
 
-// ── 4. STATIC: the demos call only the current surface ───────────────────────
+// ── 5. STATIC: the demos call only the current surface ───────────────────────
 // Prose and the honest legacy-surface detection (a `typeof ... === "function"`
 // check) are allowed; *calling* a removed method, or passing the removed
 // allowUpload option, is not.
