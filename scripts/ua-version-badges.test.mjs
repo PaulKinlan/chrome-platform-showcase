@@ -1,12 +1,25 @@
-// Static checks for the UA-parsing → UA-Client-Hints badge conversion
-// (bead chrome_platform_showcase-6qi).
+// UA-parsing → UA-Client-Hints badge conversion (bead chrome_platform_showcase-6qi).
 //
-// Contract: the 11 v150 demo pages that used to regex-parse
-// navigator.userAgent for a Chrome-version badge must now get the version
-// from User-Agent Client Hints via the shared helper
-// (public/chrome-compat.js) — or, where the badge states a capability with
-// a spec-level surface, use capability detection instead — and must render
-// an honest "version unknown" state when the browser reports no version.
+// Contract: the demo pages that used to regex-parse navigator.userAgent for a
+// Chrome-version badge now get the version from User-Agent Client Hints via the
+// shared helper (public/chrome-compat.js) — or, where the badge states a
+// capability with a spec-level surface, use capability detection instead — and
+// must render an honest "version unknown" state when the browser reports no
+// version.
+//
+// Two layers, because they can fail in different ways (bead kz8):
+//
+//   1. BEHAVIOUR — the helper is loaded and chromiumMajorVersion() is called
+//      for each browser the badge has to get right (no UA-CH, reduced/spoofed
+//      brand lists, GREASE decoys, non-Chromium, unparseable and absent
+//      versions). This is the load-bearing part: it asserts what the function
+//      returns, not what the source looks like.
+//   2. STATIC GUARDS — labelled as static. They pin wiring (page loads the
+//      helper, calls it, never parses navigator.userAgent) and the rendered
+//      honest-unknown copy. Copy is not behaviour, so the guard is only as good
+//      as how tightly it is scoped: the page list below is checked for
+//      COMPLETENESS against the tree, so a page wired to the helper but missing
+//      from the list fails rather than silently losing its assertion.
 //
 // Run: deno task test-ua-badges
 
@@ -17,14 +30,16 @@ function read(path) {
 }
 
 let failures = 0;
-function check(label, ok) {
+function check(label, ok, detail = "") {
   if (ok) {
     console.log(`ok — ${label}`);
   } else {
     failures++;
-    console.error(`FAIL — ${label}`);
+    console.error(`FAIL — ${label}${detail ? `\n      ${detail}` : ""}`);
   }
 }
+
+const HELPER_TAG = '<script src="/public/chrome-compat.js"></script>';
 
 // Pages converted to the UA-CH helper. prototype-inspector is deliberately
 // absent: its badge states a capability ('FontFaceSet' in window), not a
@@ -50,6 +65,33 @@ const ALL_PAGES = [
   "v150/remove-legacynointerfaceobject-from-fontfaceset-idl/prototype-inspector/index.html",
 ];
 
+// Every published page that loads the helper, discovered from the tree rather
+// than listed here, so the two can be compared in both directions.
+function pagesLoadingHelper(dir = "v150") {
+  const found = [];
+  for (const entry of Deno.readDirSync(`${REPO}${dir}`)) {
+    const path = `${dir}/${entry.name}`;
+    if (entry.isDirectory) found.push(...pagesLoadingHelper(path));
+    else if (entry.name === "index.html" && read(path).includes(HELPER_TAG)) found.push(path);
+  }
+  return found.sort();
+}
+
+// ── Static guard: the page list is exactly the pages wired to the helper ────
+{
+  const discovered = pagesLoadingHelper();
+  const listed = [...UA_CH_PAGES].sort();
+  const missing = discovered.filter((page) => !listed.includes(page));
+  const dead = listed.filter((page) => !discovered.includes(page));
+  check(
+    "UA_CH_PAGES lists every page that loads the helper, and no others",
+    missing.length === 0 && dead.length === 0,
+    `pages loading the helper but not listed: ${missing.join(", ") || "(none)"}; ` +
+      `listed but not loading it: ${dead.join(", ") || "(none)"}`,
+  );
+}
+
+// ── Static guards: wiring and the absence of UA-string parsing ──────────────
 for (const page of ALL_PAGES) {
   const html = read(page);
   check(
@@ -62,7 +104,7 @@ for (const page of UA_CH_PAGES) {
   const html = read(page);
   check(
     `${page} loads the UA-CH helper`,
-    html.includes('<script src="/public/chrome-compat.js"></script>'),
+    html.includes(HELPER_TAG),
   );
   check(
     `${page} reads the version via chromiumMajorVersion()`,
@@ -76,6 +118,11 @@ for (const page of UA_CH_PAGES) {
 // fails the check. (Bead chrome_platform_showcase-gdn: the previous loose
 // /unknown/ alternation was satisfied by an unrelated "unknown error"
 // string in migration-patterns and pinned nothing.)
+//
+// This is a STATIC copy guard, deliberately: the string it wants is produced by
+// per-page inline script against a real browser's UA-CH, and that is what the
+// behaviour layer above covers for the shared half. Keep it — it is the only
+// thing pinning the wording a user is shown — but treat it as copy, not proof.
 const HONEST_UNKNOWN_STRINGS = {
   "v150/deprecate-and-remove-attribution-reporting-api/removal-timeline/index.html":
     "(version unknown — no UA Client Hints)",
@@ -107,13 +154,21 @@ const HONEST_UNKNOWN_STRINGS = {
 for (const page of UA_CH_PAGES) {
   const html = read(page);
   const expected = HONEST_UNKNOWN_STRINGS[page];
-  if (!expected) {
-    check(`${page} has an entry in HONEST_UNKNOWN_STRINGS`, false);
-    continue;
-  }
+  check(`${page} has an entry in HONEST_UNKNOWN_STRINGS`, Boolean(expected));
+  if (!expected) continue;
   check(
     `${page} renders its exact honest version-unknown string`,
     html.includes(expected),
+    `expected the rendered copy to contain: ${JSON.stringify(expected)}`,
+  );
+}
+
+{
+  const stray = Object.keys(HONEST_UNKNOWN_STRINGS).filter((page) => !UA_CH_PAGES.includes(page));
+  check(
+    "HONEST_UNKNOWN_STRINGS has no entry for a page that is not listed",
+    stray.length === 0,
+    `entries with no page in UA_CH_PAGES: ${stray.join(", ")}`,
   );
 }
 
@@ -145,54 +200,105 @@ for (const page of UA_CH_PAGES) {
   );
 }
 
-// ── Runtime behaviour of chromiumMajorVersion() ─────────────────────────────
+// ── Behaviour: what chromiumMajorVersion() actually returns ─────────────────
 // The honest-unknown path is the load-bearing claim of this fix: when the
-// browser reports no Chromium version (no UA-CH, empty brands, or only
-// GREASE entries), the helper must return null — never a guess. These stubs
-// pin that contract so a regression fails here, not just in an ad-hoc
-// browser run.
+// browser reports no Chromium version (no UA-CH, empty or unparseable brands,
+// or only GREASE entries), the helper must return null — never a guess. This
+// drives the real helper with a stubbed navigator; each case names the
+// regression it catches, so the suite fails on behaviour rather than on a
+// string in the source.
 {
   await import("../public/chrome-compat.js");
-  const stub = (value) =>
-    Object.defineProperty(globalThis.navigator, "userAgentData", {
-      value,
-      configurable: true,
-    });
 
+  // Deno's own navigator has no userAgentData, so this is the real "browser
+  // without UA-CH" case before anything is stubbed.
   check(
-    "chromiumMajorVersion() returns null with no UA-CH support",
+    "chromiumMajorVersion() returns null for a browser with no UA-CH support",
     globalThis.chromiumMajorVersion() === null,
+    `got ${JSON.stringify(globalThis.chromiumMajorVersion())}`,
   );
-  stub({ brands: [] });
-  check(
-    "chromiumMajorVersion() returns null for empty brands (spoofed/reduced UA)",
-    globalThis.chromiumMajorVersion() === null,
-  );
-  stub({ brands: [{ brand: "Not_A Brand", version: "99" }] });
-  check(
-    "chromiumMajorVersion() ignores GREASE-only brand lists",
-    globalThis.chromiumMajorVersion() === null,
-  );
-  stub({ brands: [{ brand: "Firefox", version: "144" }] });
-  check(
-    "chromiumMajorVersion() returns null for non-Chromium brands",
-    globalThis.chromiumMajorVersion() === null,
-  );
-  stub({
-    brands: [
-      { brand: "Not_A Brand", version: "99" },
-      { brand: "Google Chrome", version: "154" },
+
+  // Replace the whole navigator for a case and restore the real one after: the
+  // real Navigator instance exposes userAgentData as a getter-only property, so
+  // a stub has to be a different object, and leaving one installed would leak
+  // into every later case.
+  const REAL_NAVIGATOR = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  function withNavigator(navigatorValue, fn) {
+    Object.defineProperty(globalThis, "navigator", {
+      value: navigatorValue,
+      configurable: true,
+      writable: true,
+    });
+    try {
+      return fn();
+    } finally {
+      Object.defineProperty(globalThis, "navigator", REAL_NAVIGATOR);
+    }
+  }
+
+  const cases = [
+    ["no userAgentData at all", {}, null],
+    ["userAgentData present but brands absent", { userAgentData: {} }, null],
+    ["brands is not an array", { userAgentData: { brands: "Google Chrome" } }, null],
+    ["empty brands (reduced UA)", { userAgentData: { brands: [] } }, null],
+    [
+      "GREASE-only brand list",
+      { userAgentData: { brands: [{ brand: "Not_A Brand", version: "99" }] } },
+      null,
     ],
-  });
-  check(
-    "chromiumMajorVersion() reads the real Chromium version past GREASE",
-    globalThis.chromiumMajorVersion() === 154,
-  );
-  stub({ brands: [{ brand: "Chromium", version: "garbage" }] });
-  check(
-    "chromiumMajorVersion() returns null for an unparseable version",
-    globalThis.chromiumMajorVersion() === null,
-  );
+    [
+      "non-Chromium brands",
+      { userAgentData: { brands: [{ brand: "Firefox", version: "144" }] } },
+      null,
+    ],
+    [
+      "Google Chrome",
+      { userAgentData: { brands: [{ brand: "Google Chrome", version: "154" }] } },
+      154,
+    ],
+    ["Chromium", { userAgentData: { brands: [{ brand: "Chromium", version: "120" }] } }, 120],
+    [
+      "Microsoft Edge",
+      { userAgentData: { brands: [{ brand: "Microsoft Edge", version: "121" }] } },
+      121,
+    ],
+    [
+      "real version sitting behind a GREASE decoy",
+      {
+        userAgentData: {
+          brands: [
+            { brand: "Not_A Brand", version: "99" },
+            { brand: "Google Chrome", version: "154" },
+          ],
+        },
+      },
+      154,
+    ],
+    [
+      "unparseable version string",
+      { userAgentData: { brands: [{ brand: "Chromium", version: "garbage" }] } },
+      null,
+    ],
+    [
+      "major version 0 (a falsy version is not a version)",
+      { userAgentData: { brands: [{ brand: "Google Chrome", version: "0" }] } },
+      null,
+    ],
+    [
+      "brand entry with no version at all",
+      { userAgentData: { brands: [{ brand: "Google Chrome" }] } },
+      null,
+    ],
+  ];
+
+  for (const [name, navigatorValue, expected] of cases) {
+    const got = withNavigator(navigatorValue, () => globalThis.chromiumMajorVersion());
+    check(
+      `chromiumMajorVersion() with ${name} returns ${JSON.stringify(expected)}`,
+      got === expected,
+      `got ${JSON.stringify(got)}, expected ${JSON.stringify(expected)}`,
+    );
+  }
 }
 
 if (failures > 0) {

@@ -9,7 +9,7 @@ import { readBoundedBody } from "../lib/request-body.ts";
 import { buildAliasLocation, handleAliasRoute } from "../routes/aliases.ts";
 import { renderCategoryCard, renderDemoCard, renderFeatureCatalogueRows } from "../routes/pages.ts";
 import { renderConformancePage } from "../routes/conformance-renderers.ts";
-import { renderCritiqueDetail } from "../routes/critique-renderers.ts";
+import { renderCritiqueDetail, renderCritiquesIndex } from "../routes/critique-renderers.ts";
 import { renderConformanceRunAllPage } from "../routes/conformance-renderers.ts";
 import { handlePublicRoute } from "../routes/public.ts";
 import {
@@ -1102,6 +1102,416 @@ section("critique detail escapes the severity chip and the ChromeStatus link", a
     textHtml.includes("&lt;script&gt;alert(1)&lt;/script&gt;"),
     `${label}: link text was not encoded`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Focus cascade and roving tabindex: real browser measurement on the
+// use-case-sampler demo page.
+//
+// Asserts that:
+// 1. The .uc-card radio control is programmatically focusable;
+// 2. The focus ring is visible (computed outlineStyle !== 'none' or non-zero
+//    box-shadow) — pins that later/higher-specificity rules do not strip it;
+// 3. The roving tabindex contract: dispatching ArrowRight keydown moves focus
+//    and selection to the next card, updating activeElement, aria-checked,
+//    and tabindex attributes according to the WAI-ARIA Radio Group pattern.
+// ---------------------------------------------------------------------------
+section("focus cascade and roving tabindex on use-case sampler", async () => {
+  const label = "focus cascade and roving tabindex on use-case sampler";
+  const chromeCandidates = [
+    Deno.env.get("CHROME_BIN"),
+    `${
+      Deno.env.get("HOME") ?? ""
+    }/.cache/browsers/chrome/linux-154.0.8037.92/chrome-linux64/chrome`,
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+  ].filter(Boolean);
+  let chromeBin = null;
+  for (const c of chromeCandidates) {
+    try {
+      await Deno.stat(c);
+      chromeBin = c;
+      break;
+    } catch { /* next candidate */ }
+  }
+  if (!chromeBin) {
+    console.log(`skip ${label}: no Chrome binary (set CHROME_BIN)`);
+    return;
+  }
+
+  const pagePath = new URL(
+    "../v150/web-speech-api-on-device-recognition-quality/use-case-sampler/index.html",
+    import.meta.url,
+  ).pathname;
+  const rawHtml = await Deno.readTextFile(pagePath);
+
+  let reportedVerdict = null;
+  let reportWaiter = null;
+  let pageServed = 0;
+  const waitForVerdict = (ms) =>
+    new Promise((resolve) => {
+      if (reportedVerdict) return resolve(reportedVerdict);
+      const timer = setTimeout(() => resolve(null), ms);
+      reportWaiter = () => {
+        clearTimeout(timer);
+        resolve(reportedVerdict);
+      };
+    });
+
+  let serverPort = 0;
+  const server = Deno.serve(
+    { hostname: "127.0.0.1", port: 0, onListen: ({ port }) => (serverPort = port) },
+    async (req) => {
+      const u = new URL(req.url);
+      if (u.pathname === "/report") {
+        const raw = u.searchParams.get("result");
+        const err = u.searchParams.get("error");
+        if (err) {
+          reportedVerdict = { error: err };
+        } else if (raw) {
+          try {
+            reportedVerdict = JSON.parse(raw);
+          } catch {
+            reportedVerdict = { raw };
+          }
+        }
+        reportWaiter?.();
+        return new Response("ok", { headers: { "content-type": "text/plain" } });
+      }
+      if (u.pathname.startsWith("/public/")) {
+        const res = await handlePublicRoute(req);
+        if (res) return res;
+      }
+      if (u.pathname === "/" || u.pathname === "/index.html") {
+        const probe = `
+<script>
+window.addEventListener('load', () => {
+  try {
+    const cards = document.querySelectorAll('.uc-card');
+    if (!cards || cards.length < 2) throw new Error('expected at least 2 .uc-card controls, found ' + (cards ? cards.length : 0));
+    const first = cards[0];
+    const second = cards[1];
+
+    first.focus();
+    const isFocusable = document.activeElement === first;
+    const activeBefore = document.activeElement ? (document.activeElement.id || document.activeElement.className) : null;
+
+    const cs = window.getComputedStyle(first);
+    const outlineStyle = cs.outlineStyle;
+    const outlineWidth = cs.outlineWidth;
+    const outlineColor = cs.outlineColor;
+    const boxShadow = cs.boxShadow;
+    // A non-'none' outline style is not enough on its own: an outline of
+    // '0px solid' computes to outlineStyle=solid and draws nothing. Require
+    // real pixels.
+    const outlinePx = parseFloat(outlineWidth) || 0;
+    const focusRingVisible = (outlineStyle !== 'none' && outlinePx > 0) ||
+      (boxShadow && boxShadow !== 'none');
+
+    first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+
+    const isNextFocused = document.activeElement === second;
+    const activeAfter = document.activeElement ? (document.activeElement.id || document.activeElement.className) : null;
+    const firstAriaChecked = first.getAttribute('aria-checked');
+    const firstTabindex = first.getAttribute('tabindex');
+    const secondAriaChecked = second.getAttribute('aria-checked');
+    const secondTabindex = second.getAttribute('tabindex');
+
+    const data = {
+      isFocusable,
+      activeBefore,
+      outlineStyle,
+      outlineWidth,
+      outlineColor,
+      boxShadow,
+      outlinePx,
+      focusRingVisible,
+      isNextFocused,
+      activeAfter,
+      firstAriaChecked,
+      firstTabindex,
+      secondAriaChecked,
+      secondTabindex
+    };
+    location.href = '/report?result=' + encodeURIComponent(JSON.stringify(data));
+  } catch (e) {
+    location.href = '/report?error=' + encodeURIComponent(e && e.message ? e.message : String(e));
+  }
+});
+</script>
+`;
+        const html = rawHtml.replace("</body>", probe + "</body>");
+        if (html === rawHtml) {
+          throw new Error(`${label}: probe injection failed - no </body> in ${pagePath}`);
+        }
+        pageServed++;
+        return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  );
+
+  const profile = await Deno.makeTempDir({ prefix: "focus-probe-" });
+  let child = null;
+  try {
+    const pageUrl = `http://127.0.0.1:${serverPort}/`;
+    child = new Deno.Command(chromeBin, {
+      args: [
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--no-default-browser-check",
+        `--user-data-dir=${profile}`,
+        pageUrl,
+      ],
+      stdin: "null",
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+
+    const verdict = await waitForVerdict(120000);
+    if (!verdict) {
+      // Not a skip: the harness only reaches here with a Chrome binary present, so a
+      // missing verdict means the injected probe never ran - the page did not load, or
+      // its script threw. Nothing else in the repo measures this claim, so a silent
+      // skip would retire the only coverage there is.
+      throw new Error(
+        `${label}: Chrome produced no verdict in 120s (page requests: ${pageServed}). ` +
+          `With a Chrome binary present this is a failure, not a skip: the injected probe never ran.`,
+      );
+    }
+    if (verdict.error) {
+      throw new Error(`${label}: probe error: ${verdict.error}`);
+    }
+
+    assert(
+      verdict.isFocusable,
+      `${label}: activeElement after first.focus() was ${verdict.activeBefore}, expected uc-command`,
+    );
+    assert(
+      verdict.focusRingVisible,
+      `${label}: focus must be visible; got outlineStyle=${verdict.outlineStyle}, outlineWidth=${verdict.outlineWidth}, boxShadow=${verdict.boxShadow}`,
+    );
+    assert(
+      verdict.isNextFocused,
+      `${label}: activeElement after ArrowRight was ${verdict.activeAfter}, expected uc-dictation`,
+    );
+    assert(
+      verdict.secondAriaChecked === "true" && verdict.secondTabindex === "0",
+      `${label}: next card state invalid: aria-checked=${verdict.secondAriaChecked}, tabindex=${verdict.secondTabindex}`,
+    );
+    assert(
+      verdict.firstAriaChecked === "false" && verdict.firstTabindex === "-1",
+      `${label}: previous card state invalid: aria-checked=${verdict.firstAriaChecked}, tabindex=${verdict.firstTabindex}`,
+    );
+    console.log(
+      `     ${label}: selector=.uc-card#uc-command computed outline="${verdict.outlineStyle} ${verdict.outlineWidth} ${verdict.outlineColor}" roving->#${verdict.activeAfter} aria-checked=${verdict.secondAriaChecked}`,
+    );
+  } finally {
+    try {
+      child?.kill("SIGKILL");
+    } catch { /* already gone */ }
+    await child?.status?.catch?.(() => {});
+    for (let i = 0; i < 20; i++) {
+      try {
+        await Deno.remove(profile, { recursive: true });
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    await server.shutdown();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Rendered overflow of the /critiques table at 390px viewport width.
+//
+// Asserts that at a mobile viewport (390x740):
+// 1. The scroll region genuinely scrolls: .table-scroll has clientWidth > 0,
+//    scrollWidth > clientWidth, and horizontal scroll capability;
+// 2. The DOCUMENT does not overflow: documentElement.scrollWidth <= clientWidth + 1;
+// 3. The region is keyboard reachable in the rendered DOM (tabindex attribute present).
+// ---------------------------------------------------------------------------
+section("critiques table rendered overflow at 390px", async () => {
+  const label = "critiques table rendered overflow at 390px";
+  const chromeCandidates = [
+    Deno.env.get("CHROME_BIN"),
+    `${
+      Deno.env.get("HOME") ?? ""
+    }/.cache/browsers/chrome/linux-154.0.8037.92/chrome-linux64/chrome`,
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+  ].filter(Boolean);
+  let chromeBin = null;
+  for (const c of chromeCandidates) {
+    try {
+      await Deno.stat(c);
+      chromeBin = c;
+      break;
+    } catch { /* next candidate */ }
+  }
+  if (!chromeBin) {
+    console.log(`skip ${label}: no Chrome binary (set CHROME_BIN)`);
+    return;
+  }
+
+  const rawHtml = await renderCritiquesIndex();
+
+  let reportedVerdict = null;
+  let reportWaiter = null;
+  let pageServed = 0;
+  const waitForVerdict = (ms) =>
+    new Promise((resolve) => {
+      if (reportedVerdict) return resolve(reportedVerdict);
+      const timer = setTimeout(() => resolve(null), ms);
+      reportWaiter = () => {
+        clearTimeout(timer);
+        resolve(reportedVerdict);
+      };
+    });
+
+  let serverPort = 0;
+  const server = Deno.serve(
+    { hostname: "127.0.0.1", port: 0, onListen: ({ port }) => (serverPort = port) },
+    async (req) => {
+      const u = new URL(req.url);
+      if (u.pathname === "/report") {
+        const raw = u.searchParams.get("result");
+        const err = u.searchParams.get("error");
+        if (err) {
+          reportedVerdict = { error: err };
+        } else if (raw) {
+          try {
+            reportedVerdict = JSON.parse(raw);
+          } catch {
+            reportedVerdict = { raw };
+          }
+        }
+        reportWaiter?.();
+        return new Response("ok", { headers: { "content-type": "text/plain" } });
+      }
+      if (u.pathname.startsWith("/public/")) {
+        const res = await handlePublicRoute(req);
+        if (res) return res;
+      }
+      if (u.pathname === "/critiques") {
+        const probe = `
+<script>
+window.addEventListener('load', () => {
+  try {
+    const scrollRegion = document.querySelector('.table-scroll');
+    if (!scrollRegion) throw new Error('.table-scroll element not found');
+    const doc = document.documentElement;
+
+    const initialLeft = scrollRegion.scrollLeft;
+    scrollRegion.scrollLeft = 20;
+    const canScroll = scrollRegion.scrollLeft > 0;
+    scrollRegion.scrollLeft = initialLeft;
+
+    const cs = window.getComputedStyle(scrollRegion);
+    const overflowX = cs.overflowX;
+
+    const data = {
+      tableScrollWidth: scrollRegion.scrollWidth,
+      tableClientWidth: scrollRegion.clientWidth,
+      tableTabIndex: scrollRegion.getAttribute('tabindex'),
+      tableOverflowX: overflowX,
+      canScroll,
+      docScrollWidth: doc.scrollWidth,
+      docClientWidth: doc.clientWidth,
+      windowInnerWidth: window.innerWidth,
+    };
+    location.href = '/report?result=' + encodeURIComponent(JSON.stringify(data));
+  } catch (e) {
+    location.href = '/report?error=' + encodeURIComponent(e && e.message ? e.message : String(e));
+  }
+});
+</script>
+`;
+        const html = rawHtml.replace("</body>", probe + "</body>");
+        if (html === rawHtml) {
+          throw new Error(
+            `${label}: probe injection failed - no </body> in the rendered /critiques page`,
+          );
+        }
+        pageServed++;
+        return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  );
+
+  const profile = await Deno.makeTempDir({ prefix: "critiques-overflow-" });
+  let child = null;
+  try {
+    const pageUrl = `http://127.0.0.1:${serverPort}/critiques`;
+    child = new Deno.Command(chromeBin, {
+      args: [
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=390,740",
+        "--hide-scrollbars",
+        `--app=${pageUrl}`,
+        `--user-data-dir=${profile}`,
+      ],
+      stdin: "null",
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+
+    const verdict = await waitForVerdict(120000);
+    if (!verdict) {
+      // Not a skip: the harness only reaches here with a Chrome binary present, so a
+      // missing verdict means the injected probe never ran - the page did not load, or
+      // its script threw. Nothing else in the repo measures this claim, so a silent
+      // skip would retire the only coverage there is.
+      throw new Error(
+        `${label}: Chrome produced no verdict in 120s (page requests: ${pageServed}). ` +
+          `With a Chrome binary present this is a failure, not a skip: the injected probe never ran.`,
+      );
+    }
+    if (verdict.error) {
+      throw new Error(`${label}: probe error: ${verdict.error}`);
+    }
+
+    assert(
+      verdict.tableClientWidth > 0 && verdict.tableScrollWidth > verdict.tableClientWidth &&
+        verdict.canScroll,
+      `${label}: scroll region does not genuinely scroll (scrollWidth=${verdict.tableScrollWidth}, clientWidth=${verdict.tableClientWidth}, canScroll=${verdict.canScroll}, overflowX=${verdict.tableOverflowX})`,
+    );
+    assert(
+      verdict.docScrollWidth <= verdict.docClientWidth + 1,
+      `${label}: document overflows (scrollWidth=${verdict.docScrollWidth}, clientWidth=${verdict.docClientWidth})`,
+    );
+    assert(
+      verdict.tableTabIndex !== null,
+      `${label}: tabindex attribute missing on .table-scroll (got ${verdict.tableTabIndex})`,
+    );
+    console.log(
+      `     ${label}: .table-scroll clientWidth=${verdict.tableClientWidth} scrollWidth=${verdict.tableScrollWidth} doc clientWidth=${verdict.docClientWidth} scrollWidth=${verdict.docScrollWidth}`,
+    );
+  } finally {
+    try {
+      child?.kill("SIGKILL");
+    } catch { /* already gone */ }
+    await child?.status?.catch?.(() => {});
+    for (let i = 0; i < 20; i++) {
+      try {
+        await Deno.remove(profile, { recursive: true });
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    await server.shutdown();
+  }
 });
 
 // ---- end of sections ----

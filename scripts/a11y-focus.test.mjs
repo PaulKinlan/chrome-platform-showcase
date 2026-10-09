@@ -1,4 +1,4 @@
-// Static keyboard-accessibility checks for the v150 focus/roles fixes
+// STATIC keyboard-accessibility checks for the v150 focus/roles fixes
 // (bead chrome_platform_showcase-dm5).
 //
 // These assertions encode the accessibility contract the demos must meet:
@@ -9,6 +9,24 @@
 //   - visually-hidden radio inputs reveal focus through :focus-within;
 //   - inert preview swatches are not in the tab order.
 //
+// WHAT THIS SUITE IS, after bead kz8: a STATIC guard. Every assertion reads CSS
+// or HTML text, because the task runs with --allow-read only and Deno has no DOM
+// and no cascade engine. It therefore cannot see a later or higher-specificity
+// rule that wins the cascade, a rule reachable only through @media/@supports
+// (see the note on ruleBlock below), whether an element is ever rendered, or
+// whether a shadow root is reachable from the document-level ring. Those are
+// real properties of the contract, so the static half is not the whole claim.
+//
+// WHERE THE BEHAVIOUR LIVES: scripts/server-hardening.test.mjs (task
+// test-hardening, already permitted to launch Chrome) measures the rendered
+// article — computed outline on a really focused control, and the roving
+// keydown contract on the use-case-sampler cards — and loud-skips when no Chrome
+// binary is present. The role/tabindex half below is also covered in the gate by
+// `python3 .claude/audit-demos.py --strict`. What is unique to this file is the
+// shared design-system ring and the per-page "did you delete the outline"
+// inventory, which stay as static guards on purpose: they are cheap, they name
+// the page, and the browser run is the expensive backstop.
+//
 // Run: deno task test-a11y-focus
 
 const REPO = new URL("..", import.meta.url).pathname;
@@ -18,12 +36,12 @@ function read(path) {
 }
 
 let failures = 0;
-function check(label, ok) {
+function check(label, ok, detail = "") {
   if (ok) {
     console.log(`ok — ${label}`);
   } else {
     failures++;
-    console.error(`FAIL — ${label}`);
+    console.error(`FAIL — ${label}${detail ? `\n      ${detail}` : ""}`);
   }
 }
 
@@ -47,11 +65,13 @@ function ruleBlock(css, selectorFragment) {
   check(
     "public/styles.css defines a global :focus-visible rule",
     block !== null,
+    "no :focus-visible declaration block found in public/styles.css",
   );
   check(
     "global :focus-visible rule draws a visible outline",
     block !== null && /outline\s*:\s*[^;]*solid/.test(block) &&
       !/outline\s*:\s*none/.test(block),
+    block === null ? "rule absent" : `declarations: ${block.trim()}`,
   );
 }
 
@@ -64,6 +84,7 @@ function ruleBlock(css, selectorFragment) {
   check(
     ".filter-btn base rule exists and does not strip the outline",
     base !== null && !/outline\s*:\s*none/.test(base),
+    base === null ? "no .filter-btn base rule" : `declarations: ${base.trim()}`,
   );
 }
 
@@ -180,10 +201,12 @@ function ruleBlock(css, selectorFragment) {
   check(
     ".quality-card:focus-within rule exists for the visually-hidden radios",
     block !== null,
+    "no .quality-card:focus-within rule found in the demo",
   );
   check(
     ".quality-card:focus-within draws a visible indicator",
     block !== null && /outline|box-shadow|border/.test(block),
+    block === null ? "rule absent" : `declarations: ${block.trim()}`,
   );
 }
 
@@ -195,6 +218,9 @@ function ruleBlock(css, selectorFragment) {
     "language select does not strip the outline without a replacement",
     base === null || !/outline\s*:\s*none/.test(base) ||
       ruleBlock(html, ".lang-select-wrap select:focus-visible") !== null,
+    base === null
+      ? "no .lang-select-wrap select base rule"
+      : `declarations: ${base.trim()} (no :focus-visible replacement)`,
   );
 }
 
@@ -217,6 +243,7 @@ function ruleBlock(css, selectorFragment) {
   check(
     ".toolbar-btn shows its ring on :focus-visible (not plain :focus)",
     ruleBlock(html, ".toolbar-btn:focus-visible") !== null,
+    "no .toolbar-btn:focus-visible rule in v150/focusgroup/toolbar-demo/index.html",
   );
 }
 
@@ -293,6 +320,7 @@ for (
   check(
     "shadow-dom-scope .demo-input:focus does not cancel the global ring",
     lightFocus !== null && !/outline\s*:\s*none/.test(lightFocus),
+    lightFocus === null ? "no .demo-input:focus rule" : `declarations: ${lightFocus.trim()}`,
   );
   // The in-shadow control is unreachable by the document-level global rule,
   // so its focus style must carry a visible outline of its own.
@@ -300,6 +328,7 @@ for (
   check(
     "shadow-dom-scope .shadow-input:focus has its own visible outline (shadow root)",
     shadowFocus !== null && /outline\s*:\s*\d+px\s+solid/.test(shadowFocus),
+    shadowFocus === null ? "no .shadow-input:focus rule" : `declarations: ${shadowFocus.trim()}`,
   );
 }
 
