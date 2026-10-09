@@ -304,7 +304,6 @@ const IN_PAGE_DRIVER = `(async () => {
   result.controlsFound = buttons.length + inputs.length;
 
   // 4. Exercise buttons (up to 4 distinct interactive controls)
-  const mutationsBeforeFirstAction = mutationCount;
   for (const btn of buttons.slice(0, 4)) {
     const label = (btn.innerText || btn.getAttribute('aria-label') || btn.id || btn.className || 'button').trim().replace(/\\s+/g, ' ').slice(0, 40);
     try {
@@ -383,20 +382,7 @@ const IN_PAGE_DRIVER = `(async () => {
   result.settleMutations = settleMutations;
   result.domMutated = mutationCount > 0;
   result.readoutsAfter = snapshotReadouts();
-  result.stateChanged = (result.controlsExercised > 0 ? (mutationCount - mutationsBeforeFirstAction > 0) : result.domMutated) || JSON.stringify(result.readoutsBefore) !== JSON.stringify(result.readoutsAfter);
-
-  // If delayed mutations or readout moves occurred during settle and the last action
-  // observed 0 mutations in its immediate window, attribute the settle effect to that action.
-  if (result.interactions.length > 0) {
-    const last = result.interactions[result.interactions.length - 1];
-    if (last.mutations === 0 && settleMutations > 0) {
-      last.mutations = settleMutations;
-    }
-    const readoutsChanged = JSON.stringify(result.readoutsBefore) !== JSON.stringify(result.readoutsAfter);
-    if (readoutsChanged && JSON.stringify(result.readoutsBefore) === JSON.stringify(last.readoutsAfter)) {
-      last.readoutsAfter = result.readoutsAfter;
-    }
-  }
+  result.stateChanged = result.domMutated || JSON.stringify(result.readoutsBefore) !== JSON.stringify(result.readoutsAfter);
 
   return result;
 })()`;
@@ -429,6 +415,7 @@ let failedCount = 0;
 let notDemonstratedCount = 0;
 let noVisualDeltaCount = 0;
 let visualOnlyCount = 0;
+let delayedChangeCount = 0;
 
 try {
   chrome = await launchChrome();
@@ -613,6 +600,7 @@ try {
       })),
       domMutated: driveData?.domMutated ?? false,
       mutations: driveData?.mutations ?? 0,
+      settleMutations: driveData?.settleMutations ?? 0,
       stateChanged: driveData?.stateChanged ?? false,
       effectKind: effect.kind,
       effectiveActions: effect.effectiveActions.map((step) => step.action),
@@ -676,6 +664,12 @@ try {
       notDemonstratedCount++;
       console.warn(
         `  VISUAL-ONLY  ${item.url} — screenshots differ (${record.screenshots.beforeHash} -> ${record.screenshots.afterHash}) with no DOM mutation or readout change; a differing pair is non-causal, so this needs review rather than a pass`,
+      );
+    } else if (verdict.status === DRIVE_STATUS.DELAYED_CHANGE) {
+      delayedChangeCount++;
+      notDemonstratedCount++;
+      console.warn(
+        `  DELAYED-CHANGE  ${item.url} — ${verdict.reason}`,
       );
     } else if (verdict.status === "FAIL") {
       failedCount++;
@@ -789,6 +783,7 @@ const summaryJson = {
   lastRunNotDemonstrated: notDemonstratedCount,
   lastRunNoVisualDelta: noVisualDeltaCount,
   lastRunVisualOnly: visualOnlyCount,
+  lastRunDelayedChange: delayedChangeCount,
   lastRunFailed: failedCount,
   results: allResults,
 };
@@ -809,13 +804,15 @@ md +=
 md +=
   `- **Latest Run:** ${results.length} tested (${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed)\n\n`;
 md +=
-  `Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT**, **NOT-ASSERTED** and **VISUAL-ONLY** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.\n\n`;
+  `Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT**, **NOT-ASSERTED**, **VISUAL-ONLY** and **DELAYED-CHANGE** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.\n\n`;
 md +=
   `**NO-VISUAL-DELTA** is a caveat on a row, not a status: the before/after screenshots hash the same, so the pair is not proof of the interaction. When the run's per-action evidence identifies the cause it is named — a control whose effect was returned to its initial state by a later reset control — otherwise the pair is simply not claimed: the paint may not have landed.\n\n`;
 md +=
   `**Per-action evidence.** The driver records what each control did, so a mutation total is never presented without attribution, and a later reset cannot be mistaken for the whole run having done nothing.\n\n`;
 md +=
   `**VISUAL-ONLY** covers the case where the only signal is that the screenshots differ — a control that paints without touching the DOM, or ambient motion. A differing pair is **non-causal**: an animation, a clock or an autoplay produces one identically, so it is not evidence that the control did anything, and the row is reported for review with both hashes rather than counted as a pass.\n\n`;
+md +=
+  `**DELAYED-CHANGE** covers runs where DOM mutations or readout moves occurred during post-action settle, but could not be attributed to an immediate action window. Aggregate settle change is **non-causal**: an animation, a clock, an autoplay or ambient page churn produces one identically, so it is not evidence that the control caused the change without a demo-specific assertion, and the row is reported for review rather than counted as a pass.\n\n`;
 // Heading says what the table actually contains: driven passes, failures,
 // not-demonstrated rows and recovered artifacts all appear here.
 md += `## Indexed Demos\n\n`;
@@ -828,6 +825,10 @@ for (const r of allResults) {
     r.screenshots?.initial ? `[Initial](${r.screenshots.initial})` : "",
     r.status === DRIVE_STATUS.VISUAL_ONLY
       ? `pair differs (${r.screenshots?.beforeHash} -> ${r.screenshots?.afterHash}) — non-causal, needs review`
+      : r.status === DRIVE_STATUS.DELAYED_CHANGE
+      ? `delayed change (${
+        r.settleMutations ?? r.mutations
+      } settle mutation(s)) — non-causal, needs review`
       : r.visualDelta === false
       ? (r.resetBy
         ? `NO-VISUAL-DELTA (effect on ${r.resetTarget ?? "a control"} reset by ${r.resetBy})`
