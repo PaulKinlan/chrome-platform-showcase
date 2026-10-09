@@ -16,6 +16,19 @@
 //
 // Exit code is the failing step's exit code (so 124/137/143 still mean "killed
 // by a bound", exactly as the fleet wrappers expect). 0 means every step passed.
+//
+// Fail closed on an unknown change set — three ways it can happen, none of which
+// may read as "nothing changed" (reviewer finding ysp on 1701cee9):
+//
+//   1. a required `git diff`/`ls-files` exits non-zero (corrupt index, bad tree)
+//      → ChangeSetError → the FULL gate runs;
+//   2. no base ref can be established at all → ChangeSetError → the FULL gate;
+//   3. an explicit `--base` does not resolve → an error, never a silent fall
+//      back to a different ref (a fallback could diff to empty and pass).
+//
+// `--paths a,b,c` overrides the git-derived change set with an explicit list and
+// exists only so a lane can prove which tier a path selects (`deno task
+// check:affected` never passes it); the reason lines always print that path list.
 
 import { ALL_STEP_IDS, GATE_STEPS, STATIC_STEP_IDS } from "./gate-steps.mjs";
 import { changedPaths, selectSteps } from "./affected-tests.mjs";
@@ -85,13 +98,28 @@ if (args.affected) {
     selection = selectSteps(args.paths);
     source = `--paths (${args.paths.length} path(s))`;
   } else {
-    const changes = changedPaths({ base: args.base });
-    selection = selectSteps(changes.paths);
-    source = changes.paths == null
-      ? changes.error
-      : `${changes.paths.length} changed file(s) vs ${changes.base} (merge-base ${
+    let changes = null;
+    let unknown = null;
+    try {
+      changes = changedPaths({ base: args.base });
+    } catch (err) {
+      // Fail closed: an unknown change set selects the FULL gate. It must never
+      // read as "nothing changed" — that was reviewer finding ysp on 1701cee9,
+      // where a failing `git diff` decoded to an empty list and the static tier
+      // PASSED on a changed tree.
+      unknown = err.message;
+    }
+    selection = selectSteps(changes?.paths ?? null);
+    source = unknown == null
+      ? `${changes.paths.length} changed file(s) vs ${changes.base} (merge-base ${
         changes.mergeBase.slice(0, 12)
-      })`;
+      })`
+      : `UNKNOWN change set (${unknown})`;
+    if (unknown != null) {
+      console.log(
+        `gate: FAIL-CLOSED — the change set could not be determined, so the full gate runs: ${unknown}`,
+      );
+    }
   }
 } else {
   selection = {

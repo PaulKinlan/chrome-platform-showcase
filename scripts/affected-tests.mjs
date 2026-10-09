@@ -351,48 +351,91 @@ export function unknownRuleSteps(steps = GATE_STEPS, rules = RULES) {
 
 function git(args, cwd = REPO) {
   try {
-    const { code, stdout } = new Deno.Command("git", {
+    const { code, stdout, stderr } = new Deno.Command("git", {
       args,
       cwd,
       stdout: "piped",
       stderr: "piped",
     }).outputSync();
-    if (code !== 0) return null;
-    return new TextDecoder().decode(stdout);
-  } catch {
-    return null;
+    return {
+      code,
+      out: new TextDecoder().decode(stdout),
+      err: new TextDecoder().decode(stderr).trim(),
+    };
+  } catch (err) {
+    return { code: -1, out: "", err: String(err?.message ?? err) };
   }
 }
+
+/**
+ * The change set could not be determined, so no tier may be guessed.
+ * Thrown by changedPaths for ANY required git query that fails, and for a base
+ * ref that cannot be established (including an explicit --base). Callers must
+ * fail closed: the runner runs the FULL gate, the CLI exits non-zero. Before
+ * this existed, `git diff` failing decoded to an empty path list, which read as
+ * "nothing changed" and produced a silent static PASS (reviewer finding ysp on
+ * 1701cee9).
+ */
+export class ChangeSetError extends Error {}
 
 const lines = (text) => (text ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
 
 /**
  * The change set for the current tree.
  *
- * Base selection: --base, then origin/main, main, HEAD (the first that resolves
- * and has a merge-base with HEAD). The merge-base is the branch's fork point,
- * which is what makes the diff describe the change rather than everything main
- * has landed since. No network access: a lane fetches before it asks.
+ * Base selection: an explicit --base is the ONLY candidate (a base that does
+ * not resolve is an error, never a silent fall back to a different ref); with
+ * no --base, origin/main, main and HEAD are tried in order. The merge-base is
+ * the branch's fork point, which is what makes the diff describe the change
+ * rather than everything main has landed since. No network access: a lane
+ * fetches before it asks.
+ *
+ * `run` is injectable so the fail-closed behaviour can be tested with a git
+ * wrapper that fails a chosen subcommand (affected-tests.test.mjs).
  */
-export function changedPaths({ base = null, cwd = REPO } = {}) {
-  const candidates = [base, "origin/main", "main", "HEAD"].filter(Boolean);
+export function changedPaths({ base = null, cwd = REPO, run = git } = {}) {
+  const candidates = base ? [base] : ["origin/main", "main", "HEAD"];
+  const problems = [];
   for (const ref of candidates) {
-    if (git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd) == null) continue;
-    const mergeBase = lines(git(["merge-base", ref, "HEAD"], cwd))[0];
-    if (!mergeBase) continue;
-    const paths = unique([
-      ...lines(git(["diff", "--name-only", mergeBase, "HEAD"], cwd)),
-      ...lines(git(["diff", "--name-only", "HEAD"], cwd)),
-      ...lines(git(["ls-files", "--others", "--exclude-standard"], cwd)),
-    ]).sort();
-    return { base: ref, mergeBase, paths };
+    const probe = run(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd);
+    if (probe.code !== 0) {
+      problems.push(`${ref}: ${probe.err || "does not resolve to a commit"}`);
+      continue;
+    }
+    const mb = run(["merge-base", ref, "HEAD"], cwd);
+    if (mb.code !== 0) {
+      problems.push(`${ref}: merge-base failed${mb.err ? ` (${mb.err})` : ""}`);
+      continue;
+    }
+    const mergeBase = lines(mb.out)[0];
+    if (!mergeBase) {
+      problems.push(`${ref}: merge-base produced no commit`);
+      continue;
+    }
+    // Every one of these is REQUIRED. A non-zero exit means the change set is
+    // unknown, not empty — see ChangeSetError above.
+    const queries = [
+      ["diff", "--name-only", mergeBase, "HEAD"],
+      ["diff", "--name-only", "HEAD"],
+      ["ls-files", "--others", "--exclude-standard"],
+    ];
+    const paths = [];
+    for (const args of queries) {
+      const r = run(args, cwd);
+      if (r.code !== 0) {
+        throw new ChangeSetError(
+          `git ${args.join(" ")} exited ${r.code}${
+            r.err ? ` (${r.err})` : ""
+          } — the change set cannot be determined`,
+        );
+      }
+      paths.push(...lines(r.out));
+    }
+    return { base: ref, mergeBase, paths: unique(paths).sort() };
   }
-  return {
-    base: null,
-    mergeBase: null,
-    paths: null,
-    error: `could not resolve a base ref (tried ${candidates.join(", ")})`,
-  };
+  throw new ChangeSetError(
+    `no base ref could be established (tried ${candidates.join(", ")}): ${problems.join("; ")}`,
+  );
 }
 
 function main() {
@@ -414,13 +457,20 @@ function main() {
     paths = (flag("--paths") ?? "").split(",").map((p) => p.trim()).filter(Boolean);
     source = "--paths";
   } else {
-    const changes = changedPaths({ base: flag("--base") });
+    let changes;
+    try {
+      changes = changedPaths({ base: flag("--base") });
+    } catch (err) {
+      // Fail closed, loudly: an unknown change set must never be reported as a
+      // small one (reviewer finding ysp on 1701cee9).
+      console.error(`affected: ${err.message}`);
+      console.error("affected: FAIL-CLOSED — no tier can be chosen from an unknown change set");
+      Deno.exit(2);
+    }
     paths = changes.paths;
-    source = changes.paths == null
-      ? changes.error
-      : `${paths.length} changed file(s) vs ${changes.base} (merge-base ${
-        changes.mergeBase.slice(0, 12)
-      })`;
+    source = `${paths.length} changed file(s) vs ${changes.base} (merge-base ${
+      changes.mergeBase.slice(0, 12)
+    })`;
   }
 
   const selection = selectSteps(paths);

@@ -19,6 +19,7 @@
 import { ALL_STEP_IDS, GATE_STEPS, STATIC_STEP_IDS } from "./gate-steps.mjs";
 import {
   changedPaths,
+  ChangeSetError,
   matchPath,
   orphanedSteps,
   RULES,
@@ -333,6 +334,110 @@ check(
   "changedPaths returns non-empty relative paths only",
   (changes.paths ?? []).every((p) => typeof p === "string" && p.length > 0 && !p.startsWith("/")),
 );
+
+// ------------------------------------------------- fail-closed git plumbing (ysp)
+// Reviewer finding ysp on 1701cee9: a failing `git diff`/`ls-files` decoded to an
+// empty path list, which read as "nothing changed" and produced a silent STATIC
+// pass on a tree with 8 changed paths. Every required git query now throws
+// ChangeSetError, and the runner turns that into the FULL gate.
+const realGit = (args, cwd) => {
+  const p = new Deno.Command("git", { args, cwd, stdout: "piped", stderr: "piped" }).outputSync();
+  return {
+    code: p.code,
+    out: new TextDecoder().decode(p.stdout),
+    err: new TextDecoder().decode(p.stderr).trim(),
+  };
+};
+const wrapper = (...failingPrefixes) => (args, cwd) => {
+  const key = args.join(" ");
+  if (failingPrefixes.some((p) => key.startsWith(p))) {
+    return { code: 128, out: "", err: `fatal: ${key} unavailable (fixture)` };
+  }
+  return realGit(args, cwd);
+};
+const mustThrow = (label, run) => {
+  let threw = null;
+  try {
+    changedPaths({ base: "HEAD", run });
+  } catch (err) {
+    threw = err;
+  }
+  check(
+    label,
+    threw instanceof ChangeSetError,
+    threw ? `threw ${threw.constructor.name}` : "returned a change set instead of failing closed",
+  );
+  return threw;
+};
+
+mustThrow(
+  "a failing `git diff <base>..HEAD` fails closed (head-to-head)",
+  wrapper("diff --name-only"),
+);
+mustThrow(
+  "a failing working-tree `git diff --name-only HEAD` fails closed",
+  wrapper("diff --name-only"),
+);
+mustThrow("a failing `git ls-files --others` fails closed", wrapper("ls-files"));
+const unknownBase = (() => {
+  try {
+    // No fallback: an explicit base that does not resolve must not become a
+    // different ref's (possibly empty) diff.
+    changedPaths({ base: "definitely-not-a-ref-ysp", run: realGit });
+    return null;
+  } catch (err) {
+    return err;
+  }
+})();
+check(
+  "an explicit --base that does not resolve fails closed",
+  unknownBase instanceof ChangeSetError,
+);
+check(
+  "the explicit-base error names the requested ref (no silent fallback)",
+  String(unknownBase?.message ?? "").includes("definitely-not-a-ref-ysp"),
+  String(unknownBase?.message ?? ""),
+);
+check(
+  "an unavailable git binary fails closed",
+  (() => {
+    try {
+      changedPaths({ base: "HEAD", run: () => ({ code: -1, out: "", err: "spawn failed" }) });
+      return false;
+    } catch (err) {
+      return err instanceof ChangeSetError;
+    }
+  })(),
+);
+check(
+  "an unknown change set selects the full gate (never a silent static pass)",
+  selectSteps(null).tier === "full" && selectSteps(null).steps.length === ALL_STEP_IDS.length,
+);
+
+// A genuinely unchanged tree is legitimately static: real temp repo, one commit,
+// nothing staged/unstaged/untracked.
+const fixture = await Deno.makeTempDir({ prefix: "tier-unchanged-" });
+try {
+  const gitIn = (args) => {
+    const p = new Deno.Command("git", { args, cwd: fixture, stdout: "piped", stderr: "piped" })
+      .outputSync();
+    if (p.code !== 0) {
+      throw new Error(`git ${args.join(" ")}: ${new TextDecoder().decode(p.stderr)}`);
+    }
+  };
+  gitIn(["init", "-q"]);
+  Deno.writeTextFileSync(`${fixture}/readme.txt`, "unchanged\n");
+  gitIn(["add", "readme.txt"]);
+  gitIn(["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "init"]);
+  const unchanged = changedPaths({ base: "HEAD", cwd: fixture });
+  check(
+    "an unchanged tree legitimately selects the static tier",
+    unchanged.paths.length === 0 && selectSteps(unchanged.paths).tier === "static",
+    `paths=${JSON.stringify(unchanged.paths)}`,
+  );
+} finally {
+  await Deno.remove(fixture, { recursive: true });
+}
 
 if (failures) {
   console.error(`\n${failures} affected-tests guard(s) failed`);
