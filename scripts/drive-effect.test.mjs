@@ -33,8 +33,11 @@ import {
   DRIVE_STATUS,
   EFFECT_KIND,
   gradeEffectOutcome,
+  gradeRun,
   NOT_DEMONSTRATED_STATUSES,
 } from "./lib/drive-effect.mjs";
+
+const driveDemosSource = Deno.readTextFileSync("scripts/drive-demos.mjs");
 
 let failures = 0;
 function section(name, fn) {
@@ -281,6 +284,10 @@ section("a visual-only effect is graded VISUAL-ONLY, never PASS", () => {
     "VISUAL-ONLY must be a not-demonstrated status so it stays out of the pass tally",
   );
   assert(
+    NOT_DEMONSTRATED_STATUSES.includes(DRIVE_STATUS.DELAYED_CHANGE),
+    "DELAYED-CHANGE must be a not-demonstrated status so it stays out of the pass tally",
+  );
+  assert(
     !NOT_DEMONSTRATED_STATUSES.includes(DRIVE_STATUS.PASS),
     "PASS must never be listed as not-demonstrated",
   );
@@ -376,6 +383,256 @@ section("the run summary attributes mutations to actions", () => {
   assertEqual(describeActions([{ action: "click: Run", mutations: 1 }]), "click: Run (1 mutation)");
   assertEqual(describeActions([]), "", "no interactions renders nothing");
   assertEqual(describeActions([], "fallback text"), "fallback text");
+});
+
+// ── Delayed DOM Mutations & Unrelated DOM Churn Guard (beads 1je and 1vl) ───
+
+section("in-page driver retains per-action evidence without rewrite promotion", () => {
+  // In-page driver must not rewrite last interaction's mutations or readouts
+  // from aggregate settle evidence. Per-action windows must stay pure.
+  assert(
+    !driveDemosSource.includes("last.mutations = settleMutations"),
+    "in-page driver must not rewrite last action mutations from settle evidence",
+  );
+  assert(
+    !driveDemosSource.includes("last.readoutsAfter = result.readoutsAfter"),
+    "in-page driver must not rewrite last action readoutsAfter from settle evidence",
+  );
+  assert(
+    driveDemosSource.includes("result.settleMutations = settleMutations"),
+    "in-page driver records settleMutations as an observable",
+  );
+  assert(
+    driveDemosSource.includes("result.mutations = mutationCount"),
+    "in-page driver records run total mutations as an observable",
+  );
+});
+
+section(
+  "no-op click with ambient settle mutations is classified DELAYED-CHANGE and NOT PASS",
+  () => {
+    // Reviewer counter-case (bead 1vl): a no-op click produces 0 mutations in its
+    // 200 ms window, followed by an unrelated ambient timer producing 7 mutations
+    // during settle. Generic aggregate timing cannot prove causality, so this must
+    // NOT be graded PASS and must NOT attribute mutations to the no-op click.
+    const effect = classifyDriveEffect({
+      interactions: [{ action: "click: No-op", mutations: 0, readoutsAfter: IDLE }],
+      readoutsBefore: IDLE,
+      readoutsAfter: IDLE,
+      visualDelta: false,
+      cumulativeMutations: 7,
+      settleMutations: 7,
+      stateChanged: true,
+    });
+    assertEqual(effect.kind, EFFECT_KIND.DELAYED, "kind must be delayed, not dom");
+    assert(effect.hasEffect, "delayed change is observable");
+    assertEqual(effect.effectiveActions, [], "no causal attribution to click: No-op");
+    assertEqual(effect.settleMutations, 7, "observable settle mutations preserved");
+    const outcome = gradeEffectOutcome({ effect, exercised: 1 });
+    assert(outcome.status !== DRIVE_STATUS.PASS, "must not be PASS");
+    assert(outcome.status !== DRIVE_STATUS.NO_EFFECT, "must not be NO-EFFECT");
+    assertEqual(outcome.status, DRIVE_STATUS.DELAYED_CHANGE, "status must be DELAYED-CHANGE");
+    assert(
+      outcome.reason.includes("NON-CAUSAL"),
+      "reason must identify aggregate settle change as non-causal",
+    );
+
+    // gradeRun must also report DELAYED-CHANGE, NOT PASS
+    const verdict = gradeRun({
+      driveData: {
+        controlsFound: 1,
+        controlsExercised: 1,
+        interactions: [{ action: "click: No-op", mutations: 0, readoutsAfter: IDLE }],
+        readoutsBefore: IDLE,
+        readoutsAfter: IDLE,
+        mutations: 7,
+        settleMutations: 7,
+        stateChanged: true,
+      },
+    });
+    assert(verdict.status !== DRIVE_STATUS.PASS, "gradeRun must not grade ambient settle as PASS");
+    assertEqual(verdict.status, DRIVE_STATUS.DELAYED_CHANGE, "gradeRun returns DELAYED-CHANGE");
+  },
+);
+
+section(
+  "genuine delayed click is OBSERVED as DELAYED-CHANGE, but NOT PASS without demo-specific assertion",
+  () => {
+    // Slower-landing DOM effect (250-550ms) has 0 mutations in immediate 200ms window.
+    // Without a demo-specific assertion, generic aggregate settle cannot prove causality,
+    // so it is reported observed as DELAYED-CHANGE (not NO-EFFECT, and not PASS).
+    const unasserted = gradeRun({
+      driveData: {
+        controlsFound: 1,
+        controlsExercised: 1,
+        actions: ["click: Run Delayed"],
+        interactions: [{ action: "click: Run Delayed", mutations: 0, readoutsAfter: IDLE }],
+        readoutsBefore: IDLE,
+        readoutsAfter: IDLE,
+        mutations: 6,
+        settleMutations: 6,
+        stateChanged: true,
+      },
+    });
+    assert(
+      unasserted.status !== DRIVE_STATUS.PASS,
+      "generic driver without assertion must not PASS",
+    );
+    assert(unasserted.status !== DRIVE_STATUS.NO_EFFECT, "must not report misleading NO-EFFECT");
+    assertEqual(unasserted.status, DRIVE_STATUS.DELAYED_CHANGE, "reports DELAYED-CHANGE");
+    assertEqual(unasserted.effect?.settleMutations, 6, "settle mutations observable");
+    assertEqual(unasserted.effect?.effectiveActions, [], "no unproven causal attribution");
+
+    // With a demo-specific assertion holding, gradeRun grades PASS
+    const asserted = gradeRun({
+      driveData: {
+        controlsFound: 1,
+        controlsExercised: 1,
+        actions: ["click: Run Delayed"],
+        interactions: [{ action: "click: Run Delayed", mutations: 0, readoutsAfter: IDLE }],
+        readoutsBefore: IDLE,
+        readoutsAfter: IDLE,
+        mutations: 6,
+        settleMutations: 6,
+        stateChanged: true,
+        assert: { "delayed-dom-rendered": true },
+      },
+    });
+    assertEqual(asserted.status, DRIVE_STATUS.PASS, "demo-specific assertion holding grades PASS");
+  },
+);
+
+section("stateChanged alone with zero settle mutations does NOT cause PASS", () => {
+  // A run where stateChanged is true (e.g. from pre-action churn or stale state)
+  // but settleMutations is 0 and readouts did not move must NOT grade PASS.
+  const effect = classifyDriveEffect({
+    interactions: [{ action: "click: No-op", mutations: 0, readoutsAfter: IDLE }],
+    readoutsBefore: IDLE,
+    readoutsAfter: IDLE,
+    visualDelta: false,
+    cumulativeMutations: 5,
+    settleMutations: 0,
+    stateChanged: true,
+  });
+  assertEqual(effect.kind, EFFECT_KIND.NONE, "stateChanged alone yields kind none");
+  assert(!effect.hasEffect, "stateChanged alone does not count as effect");
+  const outcome = gradeEffectOutcome({ effect, exercised: 1 });
+  assert(outcome.status !== DRIVE_STATUS.PASS, "must not be PASS");
+  assertEqual(outcome.status, DRIVE_STATUS.NO_EFFECT, "must remain NO-EFFECT");
+
+  const verdict = gradeRun({
+    driveData: {
+      controlsFound: 1,
+      controlsExercised: 1,
+      interactions: [{ action: "click: No-op", mutations: 0, readoutsAfter: IDLE }],
+      readoutsBefore: IDLE,
+      readoutsAfter: IDLE,
+      mutations: 5,
+      settleMutations: 0,
+      stateChanged: true,
+    },
+  });
+  assert(verdict.status !== DRIVE_STATUS.PASS, "gradeRun with stateChanged alone must not PASS");
+  assertEqual(
+    verdict.status,
+    DRIVE_STATUS.NO_EFFECT,
+    "gradeRun with stateChanged alone yields NO-EFFECT",
+  );
+});
+
+section(
+  "delayed readout move landing during settle is classified DELAYED-CHANGE and NOT PASS",
+  () => {
+    const effect = classifyDriveEffect({
+      interactions: [{ action: "click: Fetch Data", mutations: 0, readoutsAfter: IDLE }],
+      readoutsBefore: IDLE,
+      readoutsAfter: ["loaded: 42 records"],
+      visualDelta: false,
+      cumulativeMutations: 0,
+      settleMutations: 0,
+      stateChanged: true,
+    });
+    assert(effect.hasEffect, "delayed readout change is observable");
+    assertEqual(effect.kind, EFFECT_KIND.DELAYED, "kind is delayed, not dom");
+    assertEqual(effect.delayedReadoutMoved, true, "flagged as delayed readout move");
+    assertEqual(effect.effectiveActions, [], "no causal action attribution without assertion");
+    const outcome = gradeEffectOutcome({ effect, exercised: 1 });
+    assert(outcome.status !== DRIVE_STATUS.PASS, "must not grade PASS");
+    assertEqual(outcome.status, DRIVE_STATUS.DELAYED_CHANGE, "grades DELAYED-CHANGE");
+  },
+);
+
+section(
+  "delayed change takes precedence over visual delta and remains DELAYED-CHANGE (NOT PASS)",
+  () => {
+    // If the screenshot pair differs AND delayed DOM mutations landed during settle,
+    // the run must be classified DELAYED-CHANGE, NOT PASS and NOT VISUAL-ONLY.
+    const effect = classifyDriveEffect({
+      interactions: [{ action: "click: Run Async", mutations: 0, readoutsAfter: IDLE }],
+      readoutsBefore: IDLE,
+      readoutsAfter: IDLE,
+      visualDelta: true,
+      cumulativeMutations: 5,
+      settleMutations: 5,
+      stateChanged: true,
+    });
+    assertEqual(
+      effect.kind,
+      EFFECT_KIND.DELAYED,
+      "delayed DOM change takes precedence over visual-only",
+    );
+    const outcome = gradeEffectOutcome({
+      effect,
+      exercised: 1,
+      beforeHash: "711590282133ce74",
+      afterHash: "9e8b1d60f4c2f37e",
+    });
+    assert(outcome.status !== DRIVE_STATUS.PASS, "must not grade PASS");
+    assertEqual(
+      outcome.status,
+      DRIVE_STATUS.DELAYED_CHANGE,
+      "must grade DELAYED-CHANGE rather than VISUAL-ONLY",
+    );
+  },
+);
+
+section("unrelated pre-action DOM churn with a no-op action does NOT count as demo effect", () => {
+  // Page had 5 mutations before any control was exercised, but 0 during action
+  // and 0 during settle. This is pre-action churn, not an interaction effect.
+  const effect = classifyDriveEffect({
+    interactions: [{ action: "click: No-op", mutations: 0, readoutsAfter: IDLE }],
+    readoutsBefore: IDLE,
+    readoutsAfter: IDLE,
+    visualDelta: false,
+    cumulativeMutations: 5,
+    settleMutations: 0,
+    stateChanged: false,
+  });
+  assert(!effect.hasEffect, "pre-action churn must not count as an effect");
+  assertEqual(effect.kind, EFFECT_KIND.NONE, "kind none");
+  const outcome = gradeEffectOutcome({ effect, exercised: 1 });
+  assertEqual(
+    outcome.status,
+    DRIVE_STATUS.NO_EFFECT,
+    "no-op with pre-action churn stays NO-EFFECT",
+  );
+});
+
+section("unrelated DOM churn on an un-exercised page does NOT count as demo effect", () => {
+  // No controls were exercised (interactions empty). Cumulative mutations cannot
+  // be attributed to any action.
+  const effect = classifyDriveEffect({
+    interactions: [],
+    readoutsBefore: IDLE,
+    readoutsAfter: IDLE,
+    visualDelta: false,
+    cumulativeMutations: 10,
+    settleMutations: 10,
+    stateChanged: true,
+  });
+  assert(!effect.hasEffect, "un-exercised churn must not count as an effect");
+  assertEqual(effect.kind, EFFECT_KIND.NONE, "kind none");
+  assertEqual(effect.effectiveActions, [], "no actions to attribute");
 });
 
 if (failures > 0) {
