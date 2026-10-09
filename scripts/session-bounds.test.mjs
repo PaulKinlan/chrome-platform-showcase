@@ -16,7 +16,12 @@
 //
 // Run: deno task test-session-bounds
 
-import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
+import {
+  handleLegacyReleaseEndpoints,
+  WEBAUTHN_SIGNAL_CREDENTIAL_ID_MAX_LENGTH,
+  WEBAUTHN_SIGNAL_CREDENTIAL_ID_MAX_RAW_BYTES,
+  WEBAUTHN_SIGNAL_MAX_CREDENTIALS,
+} from "../routes/release-endpoints.ts";
 import { BoundedSessionStore } from "../lib/session-store.ts";
 
 // Well above any sane per-store cap, so the assertions do not depend on the
@@ -58,6 +63,75 @@ async function callWebAuthnSession(cookie) {
   });
   const res = await handleLegacyReleaseEndpoints(req, "v130", sub, noAsset);
   assert(res, "webauthn session-state route should be handled");
+  return res;
+}
+
+function base64UrlEncode(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function registerWebAuthnCredential(cookie, id, expectedStatus = 200) {
+  const origin = "http://localhost:3000";
+  const optRes = await handleLegacyReleaseEndpoints(
+    new Request(`${origin}/v130/webauthn-signal-api/register-options`, {
+      headers: cookie ? { cookie } : {},
+    }),
+    "v130",
+    "/webauthn-signal-api/register-options",
+    noAsset,
+  );
+  const setCookie = optRes.headers.get("set-cookie")?.split(";")[0] ?? cookie;
+  const opt = await optRes.json();
+  const challenge = opt.publicKey.challenge;
+
+  const clientData = JSON.stringify({
+    type: "webauthn.create",
+    challenge,
+    origin,
+  });
+  const clientDataJSON = base64UrlEncode(new TextEncoder().encode(clientData));
+
+  const regRes = await handleLegacyReleaseEndpoints(
+    new Request(`${origin}/v130/webauthn-signal-api/register`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: setCookie,
+      },
+      body: JSON.stringify({
+        id,
+        response: { clientDataJSON },
+      }),
+    }),
+    "v130",
+    "/webauthn-signal-api/register",
+    noAsset,
+  );
+  assert(
+    regRes.status === expectedStatus,
+    `webauthn register expected status ${expectedStatus}, got ${regRes.status}`,
+  );
+  const payload = await regRes.json();
+  return { cookie: setCookie, payload, status: regRes.status, res: regRes };
+}
+
+async function revokeWebAuthnCredential(cookie, id) {
+  const origin = "http://localhost:3000";
+  const res = await handleLegacyReleaseEndpoints(
+    new Request(`${origin}/v130/webauthn-signal-api/revoke`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie,
+      },
+      body: JSON.stringify({ id }),
+    }),
+    "v130",
+    "/webauthn-signal-api/revoke",
+    noAsset,
+  );
   return res;
 }
 
@@ -116,6 +190,222 @@ section("webauthn cookie sessions are bounded (oldest cookies are re-minted)", a
     `webauthn sessions are unbounded: the session minted ${MANY} sessions ago was still retained`,
   );
 });
+
+section(
+  "webauthn signal credential count is bounded per session (oldest credentials evicted past cap)",
+  async () => {
+    let cookie = "";
+    const total = WEBAUTHN_SIGNAL_MAX_CREDENTIALS + 5;
+    for (let i = 0; i < total; i++) {
+      const res = await registerWebAuthnCredential(cookie, `cred-${i}`);
+      cookie = res.cookie;
+    }
+
+    const res = await callWebAuthnSession(cookie);
+    const state = await res.json();
+    assert(
+      state.credentials.length === WEBAUTHN_SIGNAL_MAX_CREDENTIALS,
+      `expected credentials count to be capped at ${WEBAUTHN_SIGNAL_MAX_CREDENTIALS}, but got ${state.credentials.length}`,
+    );
+    const hasFirst = state.credentials.some((c) => c.id === "cred-0");
+    assert(!hasFirst, "oldest credential (cred-0) should have been evicted past the cap");
+    assert(
+      state.credentials[0].id === `cred-${total - 1}`,
+      `newest credential should be at the front, got ${state.credentials[0]?.id}`,
+    );
+  },
+);
+
+section(
+  "webauthn signal preserves 300-byte credential ID on register and revoke round-trip",
+  async () => {
+    // 300 raw bytes produces 400 base64url characters.
+    const rawBytes = new Uint8Array(300);
+    for (let i = 0; i < 300; i++) rawBytes[i] = (i * 7 + 13) % 256;
+    const id300 = base64UrlEncode(rawBytes);
+    assert(id300.length === 400, "300 raw bytes must encode to 400 base64url characters");
+
+    // 1. Register with the 300-byte raw (400 base64url char) ID.
+    const { cookie, payload } = await registerWebAuthnCredential("", id300);
+    assert(payload.credentials.length === 1, "expected 1 registered credential");
+    assert(
+      payload.credentials[0].id === id300,
+      "registered credential ID must preserve full 400-char ID without truncation",
+    );
+    assert(payload.credentials[0].revokedAt === null, "new credential should not be revoked");
+
+    // Verify server session state preserves the exact ID
+    const stateRes = await callWebAuthnSession(cookie);
+    const state = await stateRes.json();
+    assert(state.credentials[0].id === id300, "session state must retain full 400-char ID");
+
+    // 2. Revoke using the authentic full ID
+    const revokeRes = await revokeWebAuthnCredential(cookie, id300);
+    assert(
+      revokeRes.status === 200,
+      `revoke with authentic ID should return 200, got ${revokeRes.status}`,
+    );
+    const revokedState = await revokeRes.json();
+    const revokedCred = revokedState.credentials.find((c) => c.id === id300);
+    assert(revokedCred && revokedCred.revokedAt !== null, "credential should be marked revoked");
+
+    // 3. Attempting to revoke with a sliced ID (e.g. 256 chars) returns 404
+    const slicedRes = await revokeWebAuthnCredential(cookie, id300.slice(0, 256));
+    assert(slicedRes.status === 404, "revoke with truncated ID should return 404");
+  },
+);
+
+section(
+  "webauthn signal allows max spec-compliant 1023-byte credential ID exact",
+  async () => {
+    // W3C WebAuthn L3 (§5.1): credential IDs MUST NOT be longer than 1023 bytes.
+    // 1023 raw bytes encodes to exactly 1364 base64url characters (1023 / 3 * 4 = 1364).
+    const rawBytes = new Uint8Array(1023);
+    for (let i = 0; i < 1023; i++) rawBytes[i] = (i * 11 + 3) % 256;
+    const id1023 = base64UrlEncode(rawBytes);
+    assert(id1023.length === 1364, "1023 raw bytes must encode to 1364 base64url characters");
+
+    const { cookie, payload } = await registerWebAuthnCredential("", id1023);
+    assert(payload.credentials.length === 1, "expected 1 registered credential");
+    assert(payload.credentials[0].id === id1023, "retained ID must match exact 1364-char ID");
+
+    const stateRes = await callWebAuthnSession(cookie);
+    const state = await stateRes.json();
+    assert(
+      state.credentials[0].id === id1023,
+      "server state must retain exact 1023-byte (1364-char) credential ID",
+    );
+  },
+);
+
+section(
+  "webauthn signal rejects >1023 byte and over-long credential IDs without retaining",
+  async () => {
+    // 1024 raw bytes encodes to 1366 base64url characters, exceeding the 1023-byte / 1364-char bound.
+    const rawBytes1024 = new Uint8Array(1024);
+    for (let i = 0; i < 1024; i++) rawBytes1024[i] = i % 256;
+    const id1024 = base64UrlEncode(rawBytes1024);
+    assert(id1024.length === 1366, "1024 raw bytes must encode to 1366 base64url characters");
+
+    // Start with a valid session holding 1 credential
+    const validRes = await registerWebAuthnCredential("", "initial-valid-cred");
+    const cookie = validRes.cookie;
+
+    // Attempt to register 1024 raw bytes (>1023 bound)
+    const rej1024 = await registerWebAuthnCredential(cookie, id1024, 400);
+    assert(
+      rej1024.status === 400,
+      `expected 400 for 1024-byte credential ID, got ${rej1024.status}`,
+    );
+
+    // Attempt to register over-long string (e.g. 200,000 characters)
+    const overlongId = "x".repeat(200_000);
+    const rejOverlong = await registerWebAuthnCredential(cookie, overlongId, 400);
+    assert(
+      rejOverlong.status === 400,
+      `expected 400 for 200,000-char credential ID, got ${rejOverlong.status}`,
+    );
+
+    // Assert neither rejected ID was retained in the session
+    const stateRes = await callWebAuthnSession(cookie);
+    const state = await stateRes.json();
+    assert(
+      state.credentials.length === 1,
+      "session should still have only the 1 initial credential",
+    );
+    assert(
+      state.credentials[0].id === "initial-valid-cred",
+      "only the valid credential should be retained",
+    );
+    assert(
+      !state.credentials.some((c) => c.id === id1024),
+      "1024-byte credential must not be retained",
+    );
+    assert(
+      !state.credentials.some((c) => c.id === overlongId),
+      "overlong credential must not be retained",
+    );
+  },
+);
+
+section(
+  "webauthn signal preserves distinct credentials sharing 256-char prefix without collision",
+  async () => {
+    // Two distinct 301-byte raw credentials sharing the first 300 bytes (each 402 base64url chars).
+    // Under the old 256-char slice, these collided and the second was silently dropped.
+    const baseBytes = new Uint8Array(300);
+    for (let i = 0; i < 300; i++) baseBytes[i] = 0x78; // 'x'
+    const rawA = new Uint8Array(301);
+    rawA.set(baseBytes);
+    rawA[300] = 0x41; // 'A'
+    const rawB = new Uint8Array(301);
+    rawB.set(baseBytes);
+    rawB[300] = 0x42; // 'B'
+
+    const idA = base64UrlEncode(rawA);
+    const idB = base64UrlEncode(rawB);
+    assert(
+      idA.length === 402 && idB.length === 402,
+      "301 raw bytes must encode to 402 base64url chars",
+    );
+    assert(
+      idA.slice(0, 256) === idB.slice(0, 256),
+      "both IDs share their first 256 characters",
+    );
+    assert(idA !== idB, "the full IDs must be distinct");
+
+    const regA = await registerWebAuthnCredential("", idA);
+    const cookie = regA.cookie;
+    const regB = await registerWebAuthnCredential(cookie, idB);
+
+    const stateRes = await callWebAuthnSession(cookie);
+    const state = await stateRes.json();
+    assert(
+      state.credentials.length === 2,
+      `expected 2 distinct credentials, got ${state.credentials.length}`,
+    );
+    const hasA = state.credentials.some((c) => c.id === idA);
+    const hasB = state.credentials.some((c) => c.id === idB);
+    assert(hasA && hasB, "both distinct credentials must be retained in session");
+  },
+);
+
+section(
+  "webauthn signal partitions active vs revoked credentials for signal API consumption",
+  async () => {
+    // Workbench passes active IDs to PublicKeyCredential.signalAllAcceptedCredentials
+    // and revoked IDs to PublicKeyCredential.signalUnknownCredential.
+    const rawBytesA = new Uint8Array(300);
+    for (let i = 0; i < 300; i++) rawBytesA[i] = (i + 1) % 256;
+    const idActive = base64UrlEncode(rawBytesA);
+
+    const rawBytesB = new Uint8Array(300);
+    for (let i = 0; i < 300; i++) rawBytesB[i] = (i + 50) % 256;
+    const idRevoked = base64UrlEncode(rawBytesB);
+
+    let { cookie } = await registerWebAuthnCredential("", idActive);
+    const reg2 = await registerWebAuthnCredential(cookie, idRevoked);
+    cookie = reg2.cookie;
+
+    // Revoke the second credential
+    await revokeWebAuthnCredential(cookie, idRevoked);
+
+    const stateRes = await callWebAuthnSession(cookie);
+    const state = await stateRes.json();
+
+    const activeIds = state.credentials.filter((c) => !c.revokedAt).map((c) => c.id);
+    const revokedIds = state.credentials.filter((c) => c.revokedAt).map((c) => c.id);
+
+    assert(
+      activeIds.length === 1 && activeIds[0] === idActive,
+      "signalAllAcceptedCredentials target ID must match exactly",
+    );
+    assert(
+      revokedIds.length === 1 && revokedIds[0] === idRevoked,
+      "signalUnknownCredential target ID must match exactly",
+    );
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Contract of the shared store itself: the route-level sections above prove the
