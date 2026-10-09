@@ -5,6 +5,7 @@
 // attribute escaping on generated pages.
 
 import { handleDemoTelemetryRoute } from "../routes/demo-telemetry.ts";
+import { readBoundedBody } from "../lib/request-body.ts";
 import { buildAliasLocation, handleAliasRoute } from "../routes/aliases.ts";
 import { renderCategoryCard, renderDemoCard, renderFeatureCatalogueRows } from "../routes/pages.ts";
 import { renderConformancePage } from "../routes/conformance-renderers.ts";
@@ -241,6 +242,95 @@ section("fedcm assertion body cap", async () => {
     noAsset,
   );
   assertStatus(res.status, 413, label);
+});
+
+// A body with caller-chosen chunk sizes plus a record of what the consumer did
+// with it. `countingBody` above cannot express these cases: it caps every chunk
+// at 64 KiB, so it can never hand over a chunk larger than the cap under test.
+function sizedChunks(sizes) {
+  const queue = [...sizes];
+  const state = { pulled: 0, chunks: 0, cancelled: false };
+  const stream = new ReadableStream({
+    pull(controller) {
+      const size = queue.shift();
+      if (size === undefined) {
+        controller.close();
+        return;
+      }
+      state.chunks += 1;
+      state.pulled += size;
+      controller.enqueue(new Uint8Array(size));
+    },
+    cancel() {
+      state.cancelled = true;
+    },
+  });
+  return { stream, state };
+}
+
+section("an over-limit stream chunk is dropped, not retained", async () => {
+  const label = "over-limit chunk";
+  const cap = 128 * KIB;
+
+  // One chunk, larger than the whole cap: the read cannot know to reject it
+  // until it has the chunk, so one chunk past the cap is the bound the file
+  // header states - and the chunk must be dropped on the way to the 413 rather
+  // than appended to the retained buffer (21cf7695 appended it first).
+  const one = sizedChunks([MIB]);
+  const over = await readBoundedBody(
+    post("/telemetry/demo", one.stream, { "content-type": "application/json" }),
+    cap,
+    "Over the cap.",
+  );
+  assert(over.ok === false, `${label}: an over-limit chunk must reject the body`);
+  assertStatus(over.response.status, 413, label);
+  assert(
+    (await over.response.json()).error === "Over the cap.",
+    `${label}: the 413 must carry the caller's message`,
+  );
+  assert(
+    one.state.pulled === MIB,
+    `${label}: the stream handed over ${one.state.pulled} bytes, expected the one chunk`,
+  );
+  assert(
+    one.state.cancelled,
+    `${label}: the reader must be cancelled once the cap is exceeded`,
+  );
+
+  // Both sides of the boundary: a body that lands exactly on the cap is
+  // accepted, and the chunk that would take the running total past it is
+  // refused without anything after it being pulled.
+  const exact = sizedChunks([cap / 2, cap / 2]);
+  const exactResult = await readBoundedBody(
+    post("/telemetry/demo", exact.stream, { "content-type": "application/json" }),
+    cap,
+  );
+  assert(
+    exactResult.ok === true && exactResult.bytes.byteLength === cap,
+    `${label}: a body of exactly the cap must be accepted, got ${
+      exactResult.ok ? exactResult.bytes.byteLength : `status ${exactResult.response.status}`
+    }`,
+  );
+
+  const past = sizedChunks([cap / 2, cap / 2, 8 * KIB, 8 * KIB]);
+  const pastResult = await readBoundedBody(
+    post("/telemetry/demo", past.stream, { "content-type": "application/json" }),
+    cap,
+  );
+  assert(pastResult.ok === false, `${label}: the chunk past the cap must reject the body`);
+  assertStatus(pastResult.response.status, 413, label);
+  assert(
+    past.state.pulled === cap + 8 * KIB,
+    `${label}: pulled ${past.state.pulled} bytes, expected the cap plus the one over-limit chunk`,
+  );
+  assert(
+    past.state.chunks === 3,
+    `${label}: the consumer took ${past.state.chunks} chunks, expected the two that fit plus the one that did not`,
+  );
+  assert(
+    past.state.cancelled,
+    `${label}: the reader must be cancelled before the rest of the stream is read`,
+  );
 });
 
 // ---------------------------------------------------------------------------

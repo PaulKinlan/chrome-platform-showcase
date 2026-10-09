@@ -2,9 +2,12 @@
 //
 // Public endpoints read request bodies with an explicit byte cap. A declared
 // content-length larger than the cap is rejected before a single body byte is
-// read, and a streamed body is cancelled as soon as the cap is exceeded, so a
-// request can never make the server buffer more than the cap's worth of body
-// bytes. Over-limit requests get a 413 whose message names the byte limit.
+// read, and a streamed body is cancelled as soon as a chunk would take the
+// running total over the cap, without that chunk being retained, so the bytes
+// buffered for one request never exceed the cap. A single chunk the stream has
+// already delivered can itself be larger than the cap; it is dropped here
+// rather than appended. Over-limit requests get a 413 whose message names the
+// byte limit.
 
 export interface BoundedBodyOk {
   ok: true;
@@ -67,9 +70,14 @@ export async function readBoundedBody(
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    chunks.push(value);
-    total += value.byteLength;
-    if (total > limitBytes) {
+    // Test the running total BEFORE retaining the chunk. Appending first (the
+    // 21cf7695 order) put one over-limit chunk in the buffer on the way to
+    // rejecting the request; the claim above is only literally true when the
+    // chunk is dropped instead. A chunk the stream has already handed over can
+    // itself exceed the cap - that is the one chunk the header comment allows -
+    // and it is never appended here.
+    const nextTotal = total + value.byteLength;
+    if (nextTotal > limitBytes) {
       try {
         await reader.cancel();
       } catch {
@@ -77,6 +85,8 @@ export async function readBoundedBody(
       }
       return { ok: false, response: payloadTooLargeResponse(limitBytes, message) };
     }
+    chunks.push(value);
+    total = nextTotal;
   }
 
   const bytes = new Uint8Array(total);
