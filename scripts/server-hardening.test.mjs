@@ -1147,6 +1147,7 @@ section("focus cascade and roving tabindex on use-case sampler", async () => {
 
   let reportedVerdict = null;
   let reportWaiter = null;
+  let pageServed = 0;
   const waitForVerdict = (ms) =>
     new Promise((resolve) => {
       if (reportedVerdict) return resolve(reportedVerdict);
@@ -1240,6 +1241,10 @@ window.addEventListener('load', () => {
 </script>
 `;
         const html = rawHtml.replace("</body>", probe + "</body>");
+        if (html === rawHtml) {
+          throw new Error(`${label}: probe injection failed - no </body> in ${pagePath}`);
+        }
+        pageServed++;
         return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
       }
       return new Response("not found", { status: 404 });
@@ -1268,8 +1273,14 @@ window.addEventListener('load', () => {
 
     const verdict = await waitForVerdict(120000);
     if (!verdict) {
-      console.log(`skip ${label}: Chrome produced no verdict on this run`);
-      return;
+      // Not a skip: the harness only reaches here with a Chrome binary present, so a
+      // missing verdict means the injected probe never ran - the page did not load, or
+      // its script threw. Nothing else in the repo measures this claim, so a silent
+      // skip would retire the only coverage there is.
+      throw new Error(
+        `${label}: Chrome produced no verdict in 120s (page requests: ${pageServed}). ` +
+          `With a Chrome binary present this is a failure, not a skip: the injected probe never ran.`,
+      );
     }
     if (verdict.error) {
       throw new Error(`${label}: probe error: ${verdict.error}`);
@@ -1351,6 +1362,7 @@ section("critiques table rendered overflow at 390px", async () => {
 
   let reportedVerdict = null;
   let reportWaiter = null;
+  let pageServed = 0;
   const waitForVerdict = (ms) =>
     new Promise((resolve) => {
       if (reportedVerdict) return resolve(reportedVerdict);
@@ -1420,6 +1432,10 @@ window.addEventListener('load', () => {
 </script>
 `;
         const html = rawHtml.replace("</body>", probe + "</body>");
+        if (html === rawHtml) {
+          throw new Error(`${label}: probe injection failed - no </body> in ${pagePath}`);
+        }
+        pageServed++;
         return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
       }
       return new Response("not found", { status: 404 });
@@ -1450,8 +1466,14 @@ window.addEventListener('load', () => {
 
     const verdict = await waitForVerdict(120000);
     if (!verdict) {
-      console.log(`skip ${label}: Chrome produced no verdict on this run`);
-      return;
+      // Not a skip: the harness only reaches here with a Chrome binary present, so a
+      // missing verdict means the injected probe never ran - the page did not load, or
+      // its script threw. Nothing else in the repo measures this claim, so a silent
+      // skip would retire the only coverage there is.
+      throw new Error(
+        `${label}: Chrome produced no verdict in 120s (page requests: ${pageServed}). ` +
+          `With a Chrome binary present this is a failure, not a skip: the injected probe never ran.`,
+      );
     }
     if (verdict.error) {
       throw new Error(`${label}: probe error: ${verdict.error}`);
