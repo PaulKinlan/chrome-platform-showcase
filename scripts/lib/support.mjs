@@ -43,6 +43,19 @@ export class SupportSnapshotError extends Error {
   }
 }
 
+// Raised when the touched-demo set cannot be determined. It is deliberately
+// fatal rather than empty: `check-routes` rule (C) iterates this set, so
+// treating a git failure as "nothing was touched" silently skips every touched
+// demo (bead chrome_platform_showcase-3rg).
+export class TouchedSetError extends Error {
+  constructor(ref, reason) {
+    super(`touched demo set at ${ref}: ${reason}`);
+    this.name = "TouchedSetError";
+    this.ref = ref;
+    this.reason = reason;
+  }
+}
+
 function gitIn(root, args) {
   if (typeof Deno !== "undefined" && typeof Deno.Command === "function") {
     // Deno.Command rather than node's execFileSync: the latter needs --allow-env
@@ -238,26 +251,33 @@ export function coverage(data) {
 // committed + staged + unstaged + untracked. Used to enforce the "touched demo
 // must be tested on every supported class" rule without failing the whole
 // backlog of untested demos.
+//
+// Fail closed: a git failure is reported as a TouchedSetError, never as an empty
+// set. An empty set is a legitimate answer (nothing changed, including a truly
+// clean tree) and is the only other way to get one, so a caller can never
+// mistake "git could not answer" for "nothing was touched" (bead
+// chrome_platform_showcase-3rg).
 export function changedFeatureIds(ref, root = REPO_ROOT) {
   const ids = new Set();
   const add = (path) => {
     const m = String(path).match(/^(v\d+)\/([^/]+)\//);
     if (m) ids.add(`${m[1]}/${m[2]}`);
   };
-  const run = (args) => {
-    try {
-      return execFileSync("git", args, {
-        cwd: root,
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-      });
-    } catch {
-      return "";
-    }
-  };
-  for (const line of run(["diff", "--name-only", ref]).split("\n")) if (line) add(line);
-  for (const line of run(["ls-files", "--others", "--exclude-standard"]).split("\n")) {
-    if (line) add(line);
+  let changed;
+  let untracked;
+  try {
+    // gitIn is the shared dual-runtime transport (Deno.Command under Deno,
+    // execFileSync under Node), so this path stays portable across both.
+    changed = gitIn(root, ["diff", "--name-only", ref]);
+    untracked = gitIn(root, ["ls-files", "--others", "--exclude-standard"]);
+  } catch (err) {
+    throw new TouchedSetError(
+      ref,
+      `${err?.message ?? err} — the touched-demo set could not be determined, ` +
+        `so it must not read as "no demos were touched"`,
+    );
   }
+  for (const line of changed.split("\n")) if (line) add(line);
+  for (const line of untracked.split("\n")) if (line) add(line);
   return ids;
 }
