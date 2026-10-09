@@ -107,6 +107,22 @@ Deno.removeSync(join(root, MAP));
 const D = commit("map deleted after introduction");
 Deno.writeTextFileSync(join(root, MAP), "{}\n");
 const E = commit("empty but existing map");
+Deno.writeTextFileSync(join(root, MAP), "null\n");
+const F = commit("JSON null");
+Deno.writeTextFileSync(join(root, MAP), '["v1/demo"]\n');
+const G = commit("JSON array");
+Deno.writeTextFileSync(join(root, MAP), '"a string"\n');
+const H = commit("JSON string");
+Deno.writeTextFileSync(join(root, MAP), "42\n");
+const I = commit("JSON number");
+// An unrelated history: orphan branch, no map, no common ancestor with B.
+git(["checkout", "--orphan", "unrelated"]);
+git(["rm", "-rf", "--cached", "."]);
+Deno.removeSync(join(root, MAP));
+Deno.writeTextFileSync(join(root, "README.md"), "unrelated\n");
+git(["add", "-A"]);
+const UNRELATED = commit("unrelated orphan");
+git(["checkout", "-q", "master"]);
 
 const opts = { introducedIn: B };
 
@@ -153,6 +169,32 @@ check("OPEN: a clone that cannot adjudicate throws and says how to fix it", () =
     () => loadSidecarFromRef(A, root, { introducedIn: "0".repeat(40) }),
     /unshallow/,
   );
+});
+
+check("OPEN (e8x): a present JSON null fails closed, not an empty map", () => {
+  assertThrows(() => loadSidecarFromRef(F, root, opts), /is null, not a JSON object/);
+});
+
+check("OPEN (e8x): a present JSON array fails closed", () => {
+  assertThrows(() => loadSidecarFromRef(G, root, opts), /is an array, not a JSON object/);
+});
+
+check("OPEN (e8x): a present JSON string fails closed", () => {
+  assertThrows(() => loadSidecarFromRef(H, root, opts), /is a string, not a JSON object/);
+});
+
+check("OPEN (e8x): a present JSON number fails closed", () => {
+  assertThrows(() => loadSidecarFromRef(I, root, opts), /is a number, not a JSON object/);
+});
+
+check("OPEN (7kr): an unrelated history fails closed, not 'predates the map'", () => {
+  assertThrows(() => loadSidecarFromRef(UNRELATED, root, opts), /shares no ancestry/);
+});
+
+check("pre-support means the REF is an ancestor of the introduction", () => {
+  // A is the parent of B (which introduced the map), so this is the genuine
+  // pre-support case; an unrelated history must not reach the same branch.
+  assert(loadSidecarFromRef(A, root, opts) === null, "A must be classified pre-support");
 });
 
 check("the diagnostics name the ref they are about", () => {

@@ -90,29 +90,45 @@ export function loadSidecarFromRef(ref, root = REPO_ROOT, opts = {}) {
     present = false;
   }
   if (!present) {
-    let ancestor;
-    try {
-      // exit 0 = the ref contains the introduction, so the map should exist
-      gitIn(root, ["merge-base", "--is-ancestor", introducedIn, ref]);
-      ancestor = true;
-    } catch (err) {
-      if (err?.status === 1) {
-        ancestor = false; // exit 1 = the ref predates the map
-      } else {
-        throw new SupportSnapshotError(
-          ref,
-          `the map is absent and this clone cannot tell whether ${ref} predates its introduction ` +
-            `(${
-              introducedIn.slice(0, 12)
-            } did not resolve — fetch more history, e.g. git fetch --unshallow)${cause(err)}`,
-        );
+    // Ancestry decides the policy, and it must be asked in BOTH directions:
+    // `--is-ancestor intro ref` exiting 1 means "not an ancestor", which covers
+    // both "ref predates the map" and "unrelated histories" — only the former is
+    // a legitimate skip (bead chrome_platform_showcase-7kr).
+    const isAncestor = (a, b) => {
+      try {
+        gitIn(root, ["merge-base", "--is-ancestor", a, b]);
+        return true;
+      } catch (err) {
+        if (err?.status === 1) return false;
+        throw err;
       }
+    };
+    let introIsAncestorOfRef, refIsAncestorOfIntro;
+    try {
+      introIsAncestorOfRef = isAncestor(introducedIn, ref);
+      refIsAncestorOfIntro = introIsAncestorOfRef ? false : isAncestor(ref, introducedIn);
+    } catch (err) {
+      throw new SupportSnapshotError(
+        ref,
+        `the map is absent and this clone cannot determine the ancestry of ${ref} against the ` +
+          `introduction (${
+            introducedIn.slice(0, 12)
+          } did not resolve — fetch more history, e.g. git fetch --unshallow)${cause(err)}`,
+      );
     }
-    if (!ancestor) return null;
+    if (introIsAncestorOfRef) {
+      throw new SupportSnapshotError(
+        ref,
+        `responsive-support.json is absent although ${ref} contains its introduction ` +
+          `(${introducedIn.slice(0, 12)}) — the monotonicity check cannot run vacuously`,
+      );
+    }
+    if (refIsAncestorOfIntro) return null; // provably predates the map: nothing to compare
     throw new SupportSnapshotError(
       ref,
-      `responsive-support.json is absent although ${ref} contains its introduction ` +
-        `(${introducedIn.slice(0, 12)}) — the monotonicity check cannot run vacuously`,
+      `the map is absent and ${ref} shares no ancestry with the introduction ` +
+        `(${introducedIn.slice(0, 12)}) — unrelated histories fail closed rather than ` +
+        `skipping the monotonicity check`,
     );
   }
   let raw;
@@ -124,9 +140,9 @@ export function loadSidecarFromRef(ref, root = REPO_ROOT, opts = {}) {
       `the map exists at that ref but could not be read${cause(err)}`,
     );
   }
+  let parsed;
   try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
+    parsed = JSON.parse(raw);
   } catch (err) {
     throw new SupportSnapshotError(
       ref,
@@ -135,6 +151,21 @@ export function loadSidecarFromRef(ref, root = REPO_ROOT, opts = {}) {
       }`,
     );
   }
+  // A map is a plain JSON object. `{}` is a legitimate empty map; null, an
+  // array, a string or a number is not a map at all, and reading any of them as
+  // empty made the monotonicity loop vacuous (bead chrome_platform_showcase-e8x).
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    const kind = parsed === null
+      ? "null"
+      : Array.isArray(parsed)
+      ? "an array"
+      : `a ${typeof parsed}`;
+    throw new SupportSnapshotError(
+      ref,
+      `the map at that ref is ${kind}, not a JSON object — a non-map baseline must not read as an empty map`,
+    );
+  }
+  return parsed;
 }
 
 // A class is acceptable for a TOUCHED demo only when it is ok, or unsupported
