@@ -40,10 +40,17 @@ deno task auto-research   # Starts the local server and displays the quality/con
 `deno fmt` intentionally excludes HTML, CSS, and generated demo JSON/JS. Do not mass-format demo
 HTML or CSS unless the task specifically requires it.
 
-`deno task check` is the local full gate (and the task the VM fleet's `fleet-check` runs). It now
-includes `deno fmt --check`, so a tree that is green locally cannot fail CI on formatting. The
-parity is enforced by `scripts/gate-parity.test.mjs`, which reads `.github/workflows/ci.yml` and
-fails if CI enforces a formatter or type-check step that the full gate omits.
+`deno task check` is the local full gate (and the task the VM fleet's `fleet-check` runs). It runs
+`deno fmt --check`, `deno check server.ts`, the durable-demo route gate (`deno task check-routes`)
+and the responsive-coverage report (`deno task responsive-support report`) as fatal `&&`-chained
+steps, so a route or coverage regression fails the documented gate rather than only CI.
+`scripts/gate-parity.test.mjs` additionally reads `.github/workflows/ci.yml` and fails if CI
+enforces a formatter or type-check step that the full gate omits.
+
+That guard covers that one direction only, so this is **not** a general CI-parity guarantee: a
+future CI step is not automatically mirrored in `deno task check`, and nothing fails if it is
+missing. Wire it into the gate (and, if it can run locally, into the guard's expectation) in the
+change that adds it.
 
 ### Slashcommands (Trigger via chat)
 
