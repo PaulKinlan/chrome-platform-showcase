@@ -26,7 +26,8 @@ Run from the repo root:
 ```bash
 deno fmt --check
 deno check server.ts
-deno task check
+deno task check            # full gate: every step in scripts/gate-steps.mjs, with per-step timings
+deno task check:affected   # fast gate: static steps + the suites the changed files select
 deno task audit
 deno task check-routes    # Route regression gate — run before EVERY push (see contract below)
 deno task check-duplicates # One-folder-per-feature gate — run before EVERY push (see contract below)
@@ -41,11 +42,29 @@ deno task auto-research   # Starts the local server and displays the quality/con
 HTML or CSS unless the task specifically requires it.
 
 `deno task check` is the local full gate (and the task the VM fleet's `fleet-check` runs). It runs
-`deno fmt --check`, `deno check server.ts`, the durable-demo route gate (`deno task check-routes`)
-and the responsive-coverage report (`deno task responsive-support report`) as fatal `&&`-chained
-steps, so a route or coverage regression fails the documented gate rather than only CI.
-`scripts/gate-parity.test.mjs` additionally reads `.github/workflows/ci.yml` and fails if CI
-enforces a formatter or type-check step that the full gate omits.
+every step in `scripts/gate-steps.mjs` — `deno check server.ts`, `deno fmt --check`, the
+durable-demo route gate (`deno task check-routes`), the responsive-coverage report
+(`deno task responsive-support report`), the python demo audit and every behavioural, integration
+and GC-exposed suite — in order, failing fast on the first non-zero exit. `scripts/run-gate.mjs`
+executes that plan and prints each step's **measured** duration plus a slowest-steps summary, so a
+step that starts costing more is visible in the gate log instead of being guessed at.
+
+`deno task check:affected` is the fast tier for iterative work: the static steps of the same plan
+plus only the suites the change selects (`scripts/affected-tests.mjs`). The map is fail-closed — a
+path no rule matches, `deno.json`, `deno.lock`, `lib/**`, `scripts/lib/**`, a suite file itself,
+`.github/**` and the shared `public/styles.css` / `public/media/**` assets all select the **full**
+gate. Generated artefacts (`responsive-support.json`, `demo-index.json`, `feature-lineage.json`) and
+prose select the static tier only, so an automated fix pass does not pay the integration gate.
+`lib/**` is deliberately **not** narrowed: without proven per-file coverage a shared-backend edit
+selects the full gate. `scripts/affected-tests.test.mjs` is a static step, so an unselectable suite
+or a dead rule fails the gate rather than silently missing tests; `scripts/gate-parity.test.mjs`
+fails if a task that runs a `*.test.mjs` is not reachable from the plan, so a suite landing from
+another branch cannot be dropped by a merge. The full gate is still the merger's once-per-landing
+run; `check:affected` is a feedback loop, not a replacement for it.
+
+`scripts/gate-parity.test.mjs` reads the same plan (`scripts/gate-steps.mjs`), expands every step,
+reads `.github/workflows/ci.yml`, and fails if CI enforces a formatter or type-check step that the
+full gate omits, or if a plan step names a task `deno.json` does not define.
 
 That guard covers that one direction only, so this is **not** a general CI-parity guarantee: a
 future CI step is not automatically mirrored in `deno task check`, and nothing fails if it is

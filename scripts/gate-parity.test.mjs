@@ -11,10 +11,20 @@
 // CI is parsed rather than hard-coded, so adding a formatter step to CI
 // without adding it to the gate fails here instead of in CI.
 //
-// The second rule: every scripts/*.test.mjs is named by a task on that same
-// chain (bead 86v), so a suite that exists cannot be one nothing ever runs.
+// The second rule: every scripts/*.test.mjs is named by a task reachable from
+// that same gate (bead 86v), so a suite that exists cannot be one nothing ever
+// runs.
+//
+// The gate is no longer an inline `&&` chain string in deno.json: it is the
+// ordered plan in scripts/gate-steps.mjs, executed by scripts/run-gate.mjs and
+// reported with per-step timings (bead 6r8, ADR 15c). This guard reads that
+// plan and expands each step through `deno task`, so the two rules above still
+// hold against the commands the gate actually runs — and it fails if a plan
+// step names a task deno.json does not define.
 //
 // Run: deno task test-gate-parity
+
+import { GATE_STEPS } from "./gate-steps.mjs";
 
 const REPO = new URL("..", import.meta.url).pathname;
 
@@ -46,15 +56,44 @@ function expand(name, seen = new Set()) {
   if (raw == null || seen.has(name)) return raw ?? "";
   seen.add(name);
   return raw.replace(
-    /deno task ([a-z0-9-]+)/g,
+    /deno task ([a-z0-9:-]+)/g,
     (m, n) => (tasks[n] != null ? expand(n, seen) : m),
   );
 }
 
-const fullGate = squash(expand("check"));
+// The full gate: every plan step, in order, expanded to the commands it runs.
+const stepCommand = (step) => squash([expand(step.task), ...(step.args ?? [])].join(" "));
+const fullGate = squash(GATE_STEPS.map(stepCommand).join(" && "));
 
-// The full gate exists and is what the fleet wrapper invokes.
+// The gate exists, it is plan-driven, and the plan is wired to deno.json.
 check("deno.json defines the `check` full gate", typeof tasks.check === "string");
+check(
+  "deno.json defines the fast `check:affected` gate",
+  typeof tasks["check:affected"] === "string",
+);
+check(
+  "the full gate runs the plan through scripts/run-gate.mjs",
+  (tasks.check ?? "").includes("scripts/run-gate.mjs"),
+  `check = ${JSON.stringify(tasks.check)}`,
+);
+check(
+  "the fast gate runs the plan through scripts/run-gate.mjs with --affected",
+  (tasks["check:affected"] ?? "").includes("scripts/run-gate.mjs") &&
+    (tasks["check:affected"] ?? "").includes("--affected"),
+  `check:affected = ${JSON.stringify(tasks["check:affected"])}`,
+);
+check(
+  "the gate plan declares steps for both tiers",
+  GATE_STEPS.length > 0 && GATE_STEPS.some((s) => s.tier === "static") &&
+    GATE_STEPS.some((s) => s.tier === "affected"),
+);
+for (const step of GATE_STEPS.filter((s) => tasks[s.task] == null)) {
+  check(
+    `plan step \`${step.id}\` names an existing deno.json task`,
+    false,
+    `deno.json has no task \`${step.task}\`; the plan and deno.json have drifted`,
+  );
+}
 check("deno.json defines a formatter task", typeof tasks.fmt === "string");
 
 // Formatter parity: each formatter command CI enforces must run in the gate.
@@ -96,13 +135,14 @@ const scriptTests = [...Deno.readDirSync(`${REPO}scripts`)]
   .filter((entry) => entry.isFile && entry.name.endsWith(".test.mjs"))
   .map((entry) => entry.name)
   .sort();
-// Tasks reachable from `check`, following nested `deno task <name>` references.
+// Tasks reachable from the plan, following nested `deno task <name>` references.
 const gateTasks = new Set();
-(function walk(name) {
+function walk(name) {
   if (gateTasks.has(name) || tasks[name] == null) return;
   gateTasks.add(name);
-  for (const m of tasks[name].matchAll(/deno task ([a-z0-9-]+)/g)) walk(m[1]);
-})("check");
+  for (const m of tasks[name].matchAll(/deno task ([a-z0-9:-]+)/g)) walk(m[1]);
+}
+for (const step of GATE_STEPS) walk(step.task);
 const tasksRunning = (file) =>
   // Match the path, not the bare name: `cmd.includes(file)` would let a new
   // scripts/runner.test.mjs be "covered" by a task running
@@ -134,6 +174,25 @@ check(
   `suites whose tasks are off the check chain: ${
     unreachable.map((file) => `${file} (${tasksRunning(file).join(", ")})`).join("; ")
   }`,
+);
+
+// Task-level registration (bead 6r8 union guard). A suite can be registered as a
+// deno.json task before — or without — a file this scan sees, and two branches
+// can each add one: the union must not keep the task and lose the chain entry
+// (which is what replacing the flat `&&` chain with a plan could do). So every
+// task whose command runs a `*.test.mjs` must be reachable from the plan; a
+// newly registered suite that no plan step names fails the gate instead of
+// silently stopping running.
+const suiteTasks = Object.entries(tasks)
+  .filter(([, cmd]) => /\.test\.mjs\b/.test(cmd))
+  .map(([name]) => name)
+  .sort();
+const offPlanSuiteTasks = suiteTasks.filter((name) => !gateTasks.has(name));
+check(
+  "every task that runs a *.test.mjs suite is reachable from the gate plan",
+  offPlanSuiteTasks.length === 0,
+  `off-plan suite tasks: ${offPlanSuiteTasks.join(", ")} — add a step to scripts/gate-steps.mjs ` +
+    "(and a rule in scripts/affected-tests.mjs selects it), or the suite stops running",
 );
 
 if (failures) {
