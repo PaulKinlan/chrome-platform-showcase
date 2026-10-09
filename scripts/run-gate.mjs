@@ -27,6 +27,24 @@ function readTasks() {
   return config.tasks ?? {};
 }
 
+// Steps run as `deno task <task> [args]`, i.e. through Deno's own task shell,
+// exactly the way the old `&&` chain ran each of them. This is deliberate: a
+// `bash -c` wrapper would add a bash dependency and a different shell's
+// semantics, and the gate must behave identically on the VM, in CI and on a
+// developer's machine (Deno's task shell is cross-platform; bash is not).
+function displayCommand(step) {
+  return ["deno task", step.task, ...(step.args ?? [])].join(" ");
+}
+
+function assertTaskExists(step, tasks) {
+  if (typeof tasks[step.task] !== "string") {
+    throw new Error(
+      `gate plan names task "${step.task}" (step ${step.id}) but deno.json has no such task — ` +
+        `the plan and deno.json have drifted`,
+    );
+  }
+}
+
 function commandFor(step, tasks) {
   const raw = tasks[step.task];
   if (raw == null) {
@@ -133,15 +151,16 @@ const started = performance.now();
 for (const [i, step] of plan.entries()) {
   let cmd;
   try {
-    cmd = commandFor(step, tasks);
+    assertTaskExists(step, tasks);
+    cmd = displayCommand(step);
   } catch (err) {
     console.error(`gate: PLAN ERROR — ${err.message}`);
     Deno.exit(2);
   }
-  console.log(`gate: [${i + 1}/${plan.length}] ${step.id} — ${step.what}`);
+  console.log(`gate: [${i + 1}/${plan.length}] ${step.id} (${cmd}) — ${step.what}`);
   const t0 = performance.now();
-  const child = new Deno.Command("bash", {
-    args: ["-c", cmd],
+  const child = new Deno.Command("deno", {
+    args: ["task", step.task, ...(step.args ?? [])],
     cwd: REPO,
     stdin: "inherit",
     stdout: "inherit",

@@ -51,12 +51,15 @@ step that starts costing more is visible in the gate log instead of being guesse
 
 `deno task check:affected` is the fast tier for iterative work: the static steps of the same plan
 plus only the suites the change selects (`scripts/affected-tests.mjs`). The map is fail-closed — a
-path no rule matches, `deno.json`, `scripts/lib/**`, a suite file itself and the shared
-`public/styles.css` / `public/media/**` assets all select the **full** gate. Generated artefacts
-(`responsive-support.json`, `demo-index.json`, `feature-lineage.json`) and prose select the static
-tier only, so an automated fix pass does not pay the integration gate.
-`scripts/affected-tests.test.mjs` is a static step, so an unselectable suite or a dead rule fails
-the gate rather than silently missing tests. The full gate is still the merger's once-per-landing
+path no rule matches, `deno.json`, `deno.lock`, `lib/**`, `scripts/lib/**`, a suite file itself,
+`.github/**` and the shared `public/styles.css` / `public/media/**` assets all select the **full**
+gate. Generated artefacts (`responsive-support.json`, `demo-index.json`, `feature-lineage.json`) and
+prose select the static tier only, so an automated fix pass does not pay the integration gate.
+`lib/**` is deliberately **not** narrowed: without proven per-file coverage a shared-backend edit
+selects the full gate. `scripts/affected-tests.test.mjs` is a static step, so an unselectable suite
+or a dead rule fails the gate rather than silently missing tests; `scripts/gate-parity.test.mjs`
+fails if a task that runs a `*.test.mjs` is not reachable from the plan, so a suite landing from
+another branch cannot be dropped by a merge. The full gate is still the merger's once-per-landing
 run; `check:affected` is a feedback loop, not a replacement for it.
 
 `scripts/gate-parity.test.mjs` reads the same plan (`scripts/gate-steps.mjs`), expands every step,

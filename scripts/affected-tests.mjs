@@ -204,16 +204,14 @@ export const RULES = [
     note: "demo telemetry route",
   },
   { pattern: "routes/**", steps: SERVER_STEPS, note: "route surface" },
-  { pattern: "lib/**", steps: SERVER_STEPS, note: "shared server library" },
-  { pattern: "lib/jwk.ts", steps: ["test-spc-bbk-jwk-shape"], note: "JWK helper" },
+  // ALL of lib/** fails closed to the full gate (coord, 2026-10-09): the shared
+  // backend library has no proven per-file affected coverage, so a narrowed map
+  // here would be a guess about behaviour. Deliberately no per-file lib rules.
   {
-    pattern: "lib/probe-record-store.ts",
-    steps: ["test-speculation-probe-store", "test-speculation-probe-docs"],
-    note: "probe record store",
+    pattern: "lib/**",
+    all: true,
+    note: "shared backend library: unproven affected coverage → FULL gate",
   },
-  { pattern: "lib/auth-throttle.ts", steps: ["test-auth-throttle"], note: "auth throttle" },
-  { pattern: "lib/session-store.ts", steps: ["test-session-bounds"], note: "session store" },
-  { pattern: "lib/request-body.ts", steps: ["test-hardening"], note: "request body parsing" },
 
   // ---- gate-side scripts ----------------------------------------------
   { pattern: ".route-manifest.baseline.json", steps: ["check-routes"], note: "route baseline" },

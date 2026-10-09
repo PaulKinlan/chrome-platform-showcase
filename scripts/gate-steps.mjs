@@ -67,6 +67,16 @@ export const GATE_STEPS = [
     what: "responsive support coverage report + monotonicity",
   },
 
+  // PENDING UNION — fleet/evp-6tg (reviewed, may land before this branch): that
+  // branch appends `deno task test-support-ref-fail-closed` at chain position 7
+  // (here, right after responsive-support-report and before test-session-bounds)
+  // running scripts/support-ref-fail-closed.test.mjs. When it lands, add:
+  //   { id: "test-support-ref-fail-closed", task: "test-support-ref-fail-closed",
+  //     tier: "affected", what: "support snapshot read failures fail closed" },
+  // at this position. The existing rules already select it (scripts/*.test.mjs
+  // and scripts/lib/** both select the full gate), and test-gate-parity FAILS
+  // until the step is in the plan, so the union cannot silently drop it.
+
   {
     id: "test-session-bounds",
     task: "test-session-bounds",

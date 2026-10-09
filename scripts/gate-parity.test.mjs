@@ -176,6 +176,25 @@ check(
   }`,
 );
 
+// Task-level registration (bead 6r8 union guard). A suite can be registered as a
+// deno.json task before — or without — a file this scan sees, and two branches
+// can each add one: the union must not keep the task and lose the chain entry
+// (which is what replacing the flat `&&` chain with a plan could do). So every
+// task whose command runs a `*.test.mjs` must be reachable from the plan; a
+// newly registered suite that no plan step names fails the gate instead of
+// silently stopping running.
+const suiteTasks = Object.entries(tasks)
+  .filter(([, cmd]) => /\.test\.mjs\b/.test(cmd))
+  .map(([name]) => name)
+  .sort();
+const offPlanSuiteTasks = suiteTasks.filter((name) => !gateTasks.has(name));
+check(
+  "every task that runs a *.test.mjs suite is reachable from the gate plan",
+  offPlanSuiteTasks.length === 0,
+  `off-plan suite tasks: ${offPlanSuiteTasks.join(", ")} — add a step to scripts/gate-steps.mjs ` +
+    "(and a rule in scripts/affected-tests.mjs selects it), or the suite stops running",
+);
+
 if (failures) {
   console.error(`\n${failures} local-gate/CI parity check(s) failed`);
   Deno.exit(1);

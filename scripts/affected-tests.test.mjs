@@ -231,12 +231,24 @@ check(
   `steps=${gc.steps.join(", ")}`,
 );
 check(
-  "a JWK helper change selects the JWK shape suite",
-  selectSteps(["lib/jwk.ts"]).steps.includes("test-spc-bbk-jwk-shape"),
+  "a JWK helper change fails closed to the full gate (lib/** has unproven coverage)",
+  selectSteps(["lib/jwk.ts"]).tier === "full",
 );
 check(
-  "a request-body change selects the hardening suite",
-  selectSteps(["lib/request-body.ts"]).steps.includes("test-hardening"),
+  "a request-body change fails closed to the full gate",
+  selectSteps(["lib/request-body.ts"]).tier === "full",
+);
+check(
+  "every lib/** path fails closed",
+  [
+    "lib/jwk.ts",
+    "lib/chromestatus.ts",
+    "lib/request-body.ts",
+    "lib/probe-record-store.ts",
+    "lib/session-store.ts",
+    "lib/auth-throttle.ts",
+    "lib/sub/dir/helper.ts",
+  ].every((p) => selectSteps([p]).tier === "full"),
 );
 check(
   "a server.ts change selects the boot suite",
