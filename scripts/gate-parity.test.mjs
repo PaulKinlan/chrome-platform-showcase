@@ -86,6 +86,12 @@ for (const cmd of ciRuns.filter((c) => /(^|\s)deno check\b/.test(c))) {
 // deno.json task AND that task is reachable from the full gate — a task defined
 // but left off the `check` chain still never runs in the gate the fleet and the
 // pre-push routine execute.
+//
+// What this proves: the suite's path appears in a task command and that task is
+// on the chain. What it cannot prove: that the command actually executes the file
+// (a task that merely echoed the path would satisfy it), and it does not scan
+// subdirectories of scripts/. Running the gate is what proves execution; this is
+// the guard against a suite that nothing names at all.
 const scriptTests = [...Deno.readDirSync(`${REPO}scripts`)]
   .filter((entry) => entry.isFile && entry.name.endsWith(".test.mjs"))
   .map((entry) => entry.name)
@@ -98,7 +104,13 @@ const gateTasks = new Set();
   for (const m of tasks[name].matchAll(/deno task ([a-z0-9-]+)/g)) walk(m[1]);
 })("check");
 const tasksRunning = (file) =>
-  Object.entries(tasks).filter(([, cmd]) => cmd.includes(file)).map(([name]) => name);
+  // Match the path, not the bare name: `cmd.includes(file)` would let a new
+  // scripts/runner.test.mjs be "covered" by a task running
+  // scripts/conformance-runner.test.mjs, which is the same silent-suite hole
+  // this guard exists to close (review finding on 86v, driven by the reviewer).
+  Object.entries(tasks)
+    .filter(([, cmd]) => cmd.includes(`scripts/${file}`))
+    .map(([name]) => name);
 const unnamed = scriptTests.filter((file) => tasksRunning(file).length === 0);
 const unreachable = scriptTests.filter((file) =>
   tasksRunning(file).length > 0 &&
