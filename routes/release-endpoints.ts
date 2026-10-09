@@ -1612,6 +1612,20 @@ let evpKeyPairPromise: Promise<CryptoKeyPair> | null = null;
 // the lifetime the sample issuer mints, and the test suite asserts this TTL
 // exceeds it. With fingerprints the cache is bounded in time, in size (4096
 // entries of 64 hex characters) and in per-entry cost.
+//
+// The same reasoning applies to the entry cap, which is why this store is not
+// used the way the fixture session stores are. For those the cap is a memory
+// bound and evicting the oldest entry only costs a client its session; here the
+// cache is a deny-list, so an entry the cap evicted is a marker whose token is
+// still live and the next validation of that nonce is trusted as a replay. An
+// evicting cap therefore defeats replay rejection silently, and there is no
+// bound on how recently the evicted nonce was seen. So the cap is a security
+// bound too: `evpNonceReplayCacheIsFull` reports it and `verifyEvpJwt` fails
+// *closed* when it is reached - with all 4096 slots holding unexpired markers it
+// refuses the token rather than evicting a live marker to record it. Capacity
+// recovers on its own as entries age out, the memory bound is unchanged, and
+// scripts/evp-nonce-replay.test.mjs asserts that a nonce validated before the
+// cap is still rejected after more than EVP_NONCE_REPLAY_MAX_ENTRIES newer ones.
 export const EVP_SAMPLE_TOKEN_TTL_SECONDS = 300;
 export const EVP_NONCE_REPLAY_TTL_MS = 15 * 60 * 1000;
 export const EVP_NONCE_REPLAY_MAX_ENTRIES = 4096;
@@ -1619,6 +1633,13 @@ const evpUsedNonces = new BoundedSessionStore<true>({
   ttlMs: EVP_NONCE_REPLAY_TTL_MS,
   maxEntries: EVP_NONCE_REPLAY_MAX_ENTRIES,
 });
+
+// True when every slot holds a marker whose token may still be replayed, so one
+// more marker cannot be recorded without evicting a live one. `size` drops
+// expired entries before counting, so a full cache is one where nothing can go.
+export function evpNonceReplayCacheIsFull(): boolean {
+  return evpUsedNonces.size >= EVP_NONCE_REPLAY_MAX_ENTRIES;
+}
 
 async function evpNonceFingerprint(nonce: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(nonce));
@@ -1779,8 +1800,24 @@ async function verifyEvpJwt(
     },
   );
 
-  const valid = checks.every((check) => check.pass === true);
-  if (valid && nonceFingerprint) evpUsedNonces.set(nonceFingerprint, true);
+  let valid = checks.every((check) => check.pass === true);
+  if (valid && nonceFingerprint) {
+    // Recording the marker is what makes the check above reject the next
+    // presentation of this nonce. The cap never evicts a live marker to make
+    // room (see the cache comment), so at capacity the token is refused instead.
+    if (evpNonceReplayCacheIsFull()) {
+      checks.push({
+        title: "Replay cache can record this nonce",
+        detail:
+          "The replay cache is full of nonces whose tokens have not expired, and it does not evict a live marker - an evicted marker is a replay the validator would accept. The validator fails closed until entries expire, so this token is refused rather than trusted unrecorded.",
+        value: `live markers = ${evpUsedNonces.size}/${EVP_NONCE_REPLAY_MAX_ENTRIES}`,
+        pass: false,
+      });
+      valid = false;
+    } else {
+      evpUsedNonces.set(nonceFingerprint, true);
+    }
+  }
   return { valid, checks, header, payload };
 }
 

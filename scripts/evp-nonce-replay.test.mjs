@@ -11,8 +11,10 @@
 // a TTL that has to outlive the token it guards (a nonce may only become
 // replayable once its token is expired and therefore rejected on `exp`). This
 // suite keeps both halves honest: replay rejection still works, distinct nonces
-// stay distinct at any length, the retained memory is bounded, and the TTL
-// invariant holds.
+// stay distinct at any length, the retained memory is bounded, the TTL invariant
+// holds, and the entry cap refuses a new marker rather than evicting a live one
+// (chrome_platform_showcase-lri, where an evicting cap let a still-valid token
+// be replayed once 4096 newer nonces had filled the cache).
 //
 // Run: deno task test-evp-nonce-replay   (needs --v8-flags=--expose-gc)
 
@@ -20,6 +22,7 @@ import {
   EVP_NONCE_REPLAY_MAX_ENTRIES,
   EVP_NONCE_REPLAY_TTL_MS,
   EVP_SAMPLE_TOKEN_TTL_SECONDS,
+  evpNonceReplayCacheIsFull,
   handleLegacyReleaseEndpoints,
 } from "../routes/release-endpoints.ts";
 
@@ -191,6 +194,58 @@ section("retained nonce memory stays bounded", async () => {
     `     (offered ${offered.toFixed(1)} MiB of nonce text; retained ${
       retainedMiB.toFixed(2)
     } MiB)`,
+  );
+});
+
+section("a nonce validated before the entry cap is still rejected after it fills", async () => {
+  // Regression for chrome_platform_showcase-lri. The cache is a deny-list, so an
+  // evicting entry cap silently defeated replay rejection: once 4096 newer
+  // nonces had been validated the oldest marker was gone and a token still
+  // inside its 300s lifetime validated a second time. The cap now refuses new
+  // markers instead of evicting live ones, which has to be measured across a
+  // real crossing - the store's eviction only happens on a successful write.
+  //
+  // This section saturates the module-level cache, so it runs last.
+  const nonce = `cap-${crypto.randomUUID()}`;
+  const token = await sample(nonce);
+  assert(
+    (await validate(token, nonce)).valid === true,
+    "the pre-cap nonce should validate once",
+  );
+
+  let refused = 0;
+  const target = EVP_NONCE_REPLAY_MAX_ENTRIES + 64;
+  for (let i = 0; i < target; i++) {
+    const floodNonce = `cap-flood-${i}-${crypto.randomUUID()}`;
+    const result = await validate(await sample(floodNonce), floodNonce);
+    if (result.valid === true) continue;
+    refused += 1;
+    // A refusal has to be the capacity decision, not some other check quietly
+    // failing on a token the issuer just minted.
+    assert(
+      (result.checks ?? []).some((check) =>
+        check.title === "Replay cache can record this nonce" && check.pass === false
+      ),
+      `flood validation ${i} was refused without naming the replay cache as the reason`,
+    );
+  }
+  assert(
+    evpNonceReplayCacheIsFull(),
+    `${target} validations should have filled the ${EVP_NONCE_REPLAY_MAX_ENTRIES}-entry replay cache`,
+  );
+  assert(
+    refused > 0,
+    "reaching the cap must refuse new tokens rather than evicting a live marker",
+  );
+
+  const replay = await validate(token, nonce);
+  assert(
+    replay.valid === false,
+    `a nonce validated before the ${EVP_NONCE_REPLAY_MAX_ENTRIES}-entry cap must still be rejected after it fills`,
+  );
+  assert(
+    replayCheck(replay)?.pass === false,
+    "the post-cap rejection must be the replay check specifically",
   );
 });
 
