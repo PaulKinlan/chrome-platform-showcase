@@ -294,13 +294,13 @@ function contrastRatio(foreground, background) {
   if (background && text) {
     const ratio = contrastRatio(text, background);
     check(
-      "recommended values reach a 3:1 contrast ratio",
-      ratio >= 3,
+      "recommended values reach a 4.5:1 WCAG AA contrast ratio",
+      ratio >= 4.5,
       `computed ${ratio.toFixed(2)}:1 for ${text} on ${background}`,
     );
     console.log(
-      `     (best-cell contrast ${ratio.toFixed(2)}:1 — below the 4.5:1 AA threshold for ` +
-        `0.78rem text, recorded as an a11y residual, not as a regression)`,
+      `     (best-cell contrast ${ratio.toFixed(2)}:1 satisfies the 4.5:1 WCAG AA threshold for ` +
+        `0.78rem text)`,
     );
   }
 }
