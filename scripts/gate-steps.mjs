@@ -66,18 +66,6 @@ export const GATE_STEPS = [
     tier: "static",
     what: "responsive support coverage report + monotonicity",
   },
-  {
-    id: "check-duplicates",
-    task: "check-duplicates",
-    tier: "static",
-    what: "one demo folder per feature + lineage notes present",
-  },
-  {
-    id: "check-demo-index",
-    task: "check-demo-index",
-    tier: "static",
-    what: "demo-index.json matches the folders on disk",
-  },
 
   {
     id: "test-session-bounds",
@@ -228,6 +216,22 @@ export const GATE_STEPS = [
     task: "test-webxr-depth-router",
     tier: "affected",
     what: "WebXR depth router demo",
+  },
+
+  // The two repo-wide structural scans stay LAST in the plan, exactly where the
+  // old `&&` chain ran them: the plan's order is the chain's order (verified
+  // command-for-command), so a failure reports in the same place it always did.
+  {
+    id: "check-duplicates",
+    task: "check-duplicates",
+    tier: "static",
+    what: "one demo folder per feature + lineage notes present",
+  },
+  {
+    id: "check-demo-index",
+    task: "check-demo-index",
+    tier: "static",
+    what: "demo-index.json matches the folders on disk",
   },
 ];
 

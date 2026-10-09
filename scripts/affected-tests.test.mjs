@@ -41,6 +41,58 @@ const tasks = JSON.parse(read("deno.json")).tasks ?? {};
 
 // ---------------------------------------------------------------- plan shape
 const ids = GATE_STEPS.map((s) => s.id);
+
+// The order the gate ran in when it was the flat `&&` chain (bead 6r8, coord
+// constraint: preserve EXACT order). The plan may add steps, but these must not
+// be reordered: the order is where a failure reports, and reordering it silently
+// invalidates every cached gate log. `typecheck` and `audit-strict` are the two
+// steps that were inline commands in that chain and are now named tasks, at the
+// same positions. Verified command-for-command against 82fabde3:deno.json.
+const CHAIN_ORDER = [
+  "typecheck",
+  "fmt-check",
+  "test-gate-parity",
+  "check-routes",
+  "responsive-support-report",
+  "test-session-bounds",
+  "test-header-grammar",
+  "test-spc-bbk-device-name",
+  "test-spc-bbk-jwk-shape",
+  "test-dbsc-jwk-shape",
+  "test-evp-nonce-replay",
+  "test-speculation-probe-store",
+  "test-speculation-probe-docs",
+  "test-drive-effect",
+  "test-server-boot",
+  "test-auth-throttle",
+  "audit-strict",
+  "test-speech-transcripts",
+  "test-speech-transcript-dom",
+  "test-speech-transcript-highlight",
+  "test-critique-table-scroll",
+  "test-corner-shape-values",
+  "test-a11y-focus",
+  "test-ua-badges",
+  "test-conformance-runner",
+  "test-hardening",
+  "test-font-loading",
+  "test-webrtc-diagnostic-logging",
+  "test-entity-scripts",
+  "test-webxr-depth-router",
+  "check-duplicates",
+  "check-demo-index",
+];
+const planChainOrder = ids.filter((id) => CHAIN_ORDER.includes(id));
+check(
+  "the full gate keeps the historical chain order (new steps may be inserted, none reordered)",
+  JSON.stringify(planChainOrder) === JSON.stringify(CHAIN_ORDER),
+  `expected ${CHAIN_ORDER.join(", ")}\n      got      ${planChainOrder.join(", ")}`,
+);
+check(
+  "every historical gate step is still in the plan",
+  CHAIN_ORDER.every((id) => ids.includes(id)),
+  `missing: ${CHAIN_ORDER.filter((id) => !ids.includes(id))}`,
+);
 check("the plan is not empty", GATE_STEPS.length > 0);
 check(
   "every step id is unique",
