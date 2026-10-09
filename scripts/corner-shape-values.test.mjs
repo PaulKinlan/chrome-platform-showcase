@@ -107,11 +107,20 @@ function runGallery({ supported, radius = "12" }) {
   return {
     swatches,
     support: byId.support.innerHTML.replace(/<[^>]*>/g, "").trim(),
+    supportClass: byId.support.className,
     detail: byId.detail.textContent,
     radiusLabel: byId["radius-label"].textContent,
     probes,
     telemetry,
   };
+}
+
+// Parses count pairs from summary text (e.g. "7 of 7", "0 of 7", "7/7") without
+// coupling to the surrounding sentence wording.
+function parseSupportCounts(text) {
+  const match = text.match(/(\d+)\s*(?:of|\/)\s*(\d+)/i) ??
+    text.match(/\b(\d+)\b[^\d]+\b(\d+)\b/);
+  return match ? [Number(match[1]), Number(match[2])] : null;
 }
 
 // ── the rendered gallery ─────────────────────────────────────────────────────
@@ -167,20 +176,47 @@ assert.deepEqual(
   "every box must take the radius from the control",
 );
 
-// The count in the page's own summary must agree with what it rendered — the
-// rendered counterpart of the old `${built.length} example` source check. The
-// expected number is read from the DOM, so a hardcoded count fails.
+// The count and support state in the page's summary must agree with what it rendered.
+// Parsed counts ([supported, total]) are compared against the rendered DOM rather
+// than pinning exact prose, so harmless rewordings stay green while hardcoded or
+// inaccurate counts fail.
 const renderedCount = allSupported.swatches.length;
 assert.equal(renderedCount, 7, `expected 7 examples rendered, got ${renderedCount}`);
-assert.equal(
-  allSupported.support,
-  `${renderedCount} of ${renderedCount} example values are supported for corner-shape`,
-  `summary text does not agree with the ${renderedCount} rendered examples: ${allSupported.support}`,
+
+assert.ok(
+  /\byes\b/.test(allSupported.supportClass) && !/\bno\b/.test(allSupported.supportClass),
+  `summary element must indicate positive support class: ${allSupported.supportClass}`,
 );
+const [allSuppCount, allTotalCount] = parseSupportCounts(allSupported.support) ?? [];
+assert.deepEqual(
+  [allSuppCount, allTotalCount],
+  [renderedCount, renderedCount],
+  `summary count does not agree with the ${renderedCount} rendered examples: ${allSupported.support}`,
+);
+assert.match(
+  allSupported.support,
+  /\bcorner-shape\b/i,
+  `summary text must reference corner-shape: ${allSupported.support}`,
+);
+
+// Detail copy must reflect the control radius, the rendered count, and explain
+// fallback behavior without asserting verbatim prose.
+const detailRadiusMatch = allSupported.detail.match(/(\d+)\s*px/i) ??
+  allSupported.detail.match(/\bradius[^\d]*(\d+)\b/i);
 assert.equal(
+  detailRadiusMatch ? Number(detailRadiusMatch[1]) : null,
+  12,
+  `detail copy does not reflect the 12px control radius: ${allSupported.detail}`,
+);
+assert.match(
   allSupported.detail,
-  `Radius 12px across ${renderedCount} example values. Unsupported values use border-radius alone.`,
+  new RegExp(`\\b${renderedCount}\\b`),
   `detail copy does not agree with the ${renderedCount} rendered examples: ${allSupported.detail}`,
+);
+assert.match(
+  allSupported.detail,
+  /\bborder-radius\b/i,
+  `detail copy must explain border-radius fallback: ${allSupported.detail}`,
 );
 assert.equal(allSupported.radiusLabel, "12px", "the radius label must echo the control");
 
@@ -218,15 +254,47 @@ assert.deepEqual(
   noneSupported.swatches.map(() => "12px"),
   "the border-radius fallback must still be applied to every box",
 );
-assert.equal(
-  noneSupported.support,
-  `0 of ${renderedCount} example values are supported for corner-shape; all boxes use border-radius alone`,
-  `fallback summary disagrees with the render: ${noneSupported.support}`,
+// Fallback branch summary: class must indicate negative support, parsed counts
+// must be 0 of renderedCount, and it must describe corner-shape and border-radius.
+assert.ok(
+  /\bno\b/.test(noneSupported.supportClass) && !/\byes\b/.test(noneSupported.supportClass),
+  `fallback summary element must indicate no-support class: ${noneSupported.supportClass}`,
 );
+const [noneSuppCount, noneTotalCount] = parseSupportCounts(noneSupported.support) ?? [];
+assert.deepEqual(
+  [noneSuppCount, noneTotalCount],
+  [0, renderedCount],
+  `fallback summary count does not agree with the render (expected [0, ${renderedCount}]): ${noneSupported.support}`,
+);
+assert.match(
+  noneSupported.support,
+  /\bcorner-shape\b/i,
+  `fallback summary must reference corner-shape: ${noneSupported.support}`,
+);
+assert.match(
+  noneSupported.support,
+  /\bborder-radius\b/i,
+  `fallback summary must mention border-radius fallback: ${noneSupported.support}`,
+);
+
+// Fallback branch detail: must reflect control radius, rendered count, and explain
+// fallback behavior without pinning exact sentence wording.
+const fallbackDetailRadius = noneSupported.detail.match(/(\d+)\s*px/i) ??
+  noneSupported.detail.match(/\bradius[^\d]*(\d+)\b/i);
 assert.equal(
+  fallbackDetailRadius ? Number(fallbackDetailRadius[1]) : null,
+  12,
+  `fallback detail does not reflect the 12px control radius: ${noneSupported.detail}`,
+);
+assert.match(
   noneSupported.detail,
-  `Radius 12px applied to all ${renderedCount} examples. Without corner-shape, every box uses border-radius alone.`,
-  `fallback detail disagrees with the render: ${noneSupported.detail}`,
+  new RegExp(`\\b${renderedCount}\\b`),
+  `fallback detail does not agree with the ${renderedCount} rendered examples: ${noneSupported.detail}`,
+);
+assert.match(
+  noneSupported.detail,
+  /\bborder-radius\b/i,
+  `fallback detail must mention border-radius fallback: ${noneSupported.detail}`,
 );
 assert.deepEqual(
   noneSupported.telemetry,
@@ -236,10 +304,28 @@ assert.deepEqual(
 
 // ── the radius-zero branch ───────────────────────────────────────────────────
 const zeroRadius = runGallery({ supported: () => true, radius: "0" });
-assert.equal(
+
+// The radius-zero branch: must describe square corners at zero radius across
+// rendered examples without pinning the exact sentence.
+assert.match(
   zeroRadius.detail,
-  `At radius zero, all ${renderedCount} examples have square corners.`,
-  `radius-zero copy disagrees with the render: ${zeroRadius.detail}`,
+  /\b(?:zero|0(?:px)?)\b/i,
+  `radius-zero copy must mention zero radius: ${zeroRadius.detail}`,
+);
+assert.match(
+  zeroRadius.detail,
+  /\bsquare\b/i,
+  `radius-zero copy must describe square corners: ${zeroRadius.detail}`,
+);
+assert.match(
+  zeroRadius.detail,
+  new RegExp(`\\b${renderedCount}\\b`),
+  `radius-zero copy does not agree with the ${renderedCount} rendered examples: ${zeroRadius.detail}`,
+);
+assert.doesNotMatch(
+  zeroRadius.detail,
+  /\b12px\b/i,
+  `radius-zero copy must not retain the previous 12px radius: ${zeroRadius.detail}`,
 );
 assert.equal(zeroRadius.radiusLabel, "0px", "the radius label must follow the control to zero");
 
