@@ -169,6 +169,15 @@ function cellsOf(row) {
     .map((m) => m[1].replace(/<[^>]*>/g, "").trim());
 }
 
+// Attributes matter as much as text here: the demo's whole point is WHICH cell is
+// marked as the recommendation, and cellsOf() strips tags, so a highlight that
+// moved to the rationale cell (or vanished) would pass a text-only comparison.
+// Bead chrome_platform_showcase-q3p.
+function cellsWithAttrs(row) {
+  return [...row.matchAll(/<td([^>]*)>([\s\S]*?)<\/td>/g)]
+    .map((m) => ({ attrs: m[1], text: m[2].replace(/<[^>]*>/g, "").trim() }));
+}
+
 for (const expected of CASES) {
   const label = `${expected.caseId}/${expected.device}`;
   let state;
@@ -213,6 +222,23 @@ for (const expected of CASES) {
     `${label} renders the expected (knob, value, rationale) cells in order`,
     mismatched.length === 0,
     mismatched.join("; "),
+  );
+
+  // The recommended value is the cell the page paints with the emerald "best"
+  // style. Assert the highlight is on the VALUE cell and nowhere else, so a
+  // renderer that puts it on the rationale (or drops it) fails even though the
+  // text is unchanged.
+  const wrongHighlights = state.rows
+    .map((row, index) => ({
+      index,
+      best: cellsWithAttrs(row).map((cell) => /\bclass="[^"]*\bbest\b/.test(cell.attrs)),
+    }))
+    .filter(({ best }) => best.join(",") !== "false,true,false")
+    .map(({ index, best }) => `row ${index} best-flags ${JSON.stringify(best)}`);
+  check(
+    `${label} marks only the recommended value cell as best`,
+    wrongHighlights.length === 0,
+    wrongHighlights.join("; "),
   );
 
   check(
