@@ -541,9 +541,13 @@ routine.
 # from repo root
 deno fmt --check                      # format check
 deno check server.ts                  # type check
+deno task check                       # local full gate: the suites plus the route and responsive
+                                      # gates listed below
 deno task check-routes                # route + parity regression gate — run before EVERY push
+                                      # (already inside `deno task check`)
 deno task check-demo-coverage         # no listed feature without a demo — run before EVERY push
 deno task responsive-support report   # mobile/desktop parity coverage denominators
+                                      # (already inside `deno task check`)
 deno task responsive-check <id> --merge  # mobile+desktop matrix for a touched demo (headless Chrome)
 deno task start                       # boot at localhost:3000
 
@@ -552,6 +556,10 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/
 curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/features
 curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
 ```
+
+`deno task check` is not a general CI-parity guarantee: `scripts/gate-parity.test.mjs` only checks
+that CI's formatter and type-check steps are in the gate, so a new CI step must be wired into the
+gate by hand (see AGENTS.md).
 
 For demo changes and bug fixes, also verify with `chrome-devtools-mcp`:
 
