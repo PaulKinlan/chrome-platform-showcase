@@ -541,8 +541,10 @@ routine.
 # from repo root
 deno fmt --check                      # format check
 deno check server.ts                  # type check
-deno task check                       # local full gate: the suites plus the route and responsive
-                                      # gates listed below
+deno task check                       # local full gate: every step in scripts/gate-steps.mjs, run in
+                                      # order with per-step measured timings; fails fast
+deno task check:affected              # fast tier for iterative work: the static steps plus only the
+                                      # suites the changed files select (fail-closed path map)
 deno task check-routes                # route + parity regression gate — run before EVERY push
                                       # (already inside `deno task check`)
 deno task check-demo-coverage         # no listed feature without a demo — run before EVERY push
