@@ -11,6 +11,9 @@
 // CI is parsed rather than hard-coded, so adding a formatter step to CI
 // without adding it to the gate fails here instead of in CI.
 //
+// The second rule: every scripts/*.test.mjs is named by a task on that same
+// chain (bead 86v), so a suite that exists cannot be one nothing ever runs.
+//
 // Run: deno task test-gate-parity
 
 const REPO = new URL("..", import.meta.url).pathname;
@@ -74,6 +77,52 @@ for (const cmd of ciFmt) {
 for (const cmd of ciRuns.filter((c) => /(^|\s)deno check\b/.test(c))) {
   check(`full gate runs CI's type check (\`${cmd}\`)`, fullGate.includes(cmd));
 }
+
+// Test-registration parity (bead chrome_platform_showcase-86v).
+//
+// scripts/corner-shape-values.test.mjs sat in the tree named by no task and
+// reachable from no gate, so it could have rotted or started failing and nothing
+// would ever have reported it. The rule: every scripts/*.test.mjs is named by a
+// deno.json task AND that task is reachable from the full gate — a task defined
+// but left off the `check` chain still never runs in the gate the fleet and the
+// pre-push routine execute.
+const scriptTests = [...Deno.readDirSync(`${REPO}scripts`)]
+  .filter((entry) => entry.isFile && entry.name.endsWith(".test.mjs"))
+  .map((entry) => entry.name)
+  .sort();
+// Tasks reachable from `check`, following nested `deno task <name>` references.
+const gateTasks = new Set();
+(function walk(name) {
+  if (gateTasks.has(name) || tasks[name] == null) return;
+  gateTasks.add(name);
+  for (const m of tasks[name].matchAll(/deno task ([a-z0-9-]+)/g)) walk(m[1]);
+})("check");
+const tasksRunning = (file) =>
+  Object.entries(tasks).filter(([, cmd]) => cmd.includes(file)).map(([name]) => name);
+const unnamed = scriptTests.filter((file) => tasksRunning(file).length === 0);
+const unreachable = scriptTests.filter((file) =>
+  tasksRunning(file).length > 0 &&
+  !tasksRunning(file).some((name) => gateTasks.has(name))
+);
+
+check(
+  "the repo declares test suites to run",
+  scriptTests.length > 0,
+  "no scripts/*.test.mjs found — if the suites were moved, move this guard with them",
+);
+check(
+  "every scripts/*.test.mjs is named by a deno.json task",
+  unnamed.length === 0,
+  `unregistered suites: ${unnamed.join(", ")} — add a test-* task that runs each one, ` +
+    "or delete the file; a suite no task names cannot report a failure",
+);
+check(
+  "every test suite is reachable from the full gate (deno task check)",
+  unreachable.length === 0,
+  `suites whose tasks are off the check chain: ${
+    unreachable.map((file) => `${file} (${tasksRunning(file).join(", ")})`).join("; ")
+  }`,
+);
 
 if (failures) {
   console.error(`\n${failures} local-gate/CI parity check(s) failed`);
