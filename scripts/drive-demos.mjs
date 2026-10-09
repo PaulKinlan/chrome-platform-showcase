@@ -23,6 +23,7 @@ import {
   DRIVE_STATUS,
   EFFECT_KIND,
   gradeEffectOutcome,
+  gradeRun,
   NOT_DEMONSTRATED_STATUSES,
 } from "./lib/drive-effect.mjs";
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
@@ -303,6 +304,7 @@ const IN_PAGE_DRIVER = `(async () => {
   result.controlsFound = buttons.length + inputs.length;
 
   // 4. Exercise buttons (up to 4 distinct interactive controls)
+  const mutationsBeforeFirstAction = mutationCount;
   for (const btn of buttons.slice(0, 4)) {
     const label = (btn.innerText || btn.getAttribute('aria-label') || btn.id || btn.className || 'button').trim().replace(/\\s+/g, ' ').slice(0, 40);
     try {
@@ -372,13 +374,29 @@ const IN_PAGE_DRIVER = `(async () => {
   }
 
   // 6. Settle animation frames
+  const mutationsBeforeSettle = mutationCount;
   await new Promise(r => setTimeout(r, 350));
   observer.disconnect();
 
+  const settleMutations = mutationCount - mutationsBeforeSettle;
   result.mutations = mutationCount;
+  result.settleMutations = settleMutations;
   result.domMutated = mutationCount > 0;
   result.readoutsAfter = snapshotReadouts();
-  result.stateChanged = result.domMutated || JSON.stringify(result.readoutsBefore) !== JSON.stringify(result.readoutsAfter);
+  result.stateChanged = (result.controlsExercised > 0 ? (mutationCount - mutationsBeforeFirstAction > 0) : result.domMutated) || JSON.stringify(result.readoutsBefore) !== JSON.stringify(result.readoutsAfter);
+
+  // If delayed mutations or readout moves occurred during settle and the last action
+  // observed 0 mutations in its immediate window, attribute the settle effect to that action.
+  if (result.interactions.length > 0) {
+    const last = result.interactions[result.interactions.length - 1];
+    if (last.mutations === 0 && settleMutations > 0) {
+      last.mutations = settleMutations;
+    }
+    const readoutsChanged = JSON.stringify(result.readoutsBefore) !== JSON.stringify(result.readoutsAfter);
+    if (readoutsChanged && JSON.stringify(result.readoutsBefore) === JSON.stringify(last.readoutsAfter)) {
+      last.readoutsAfter = result.readoutsAfter;
+    }
+  }
 
   return result;
 })()`;
@@ -388,81 +406,12 @@ const IN_PAGE_DRIVER = `(async () => {
 // driven through its controls, and a spec's own assertions must be able to fail
 // the case it belongs to.
 //
-// The previous verdict was `!driveError && errors.length === 0`. That recorded
-// `controlsExercised`, `mutations` and `stateChanged` and then graded none of
-// them, and never read `driveData.assert` at all — so a spec written specifically
-// to detect a missing Blink feature reported PASS identically with and without
-// the flag, and an untouched reference page scored the same as a demo driven
-// through seven controls (beads chrome-platform-showcase-6s3 and -aa5).
-//
 // Only FAIL means "something is broken". The not-demonstrated statuses mean
 // "this run is not evidence that the demo works" — a different claim, which must
 // not be reported as a pass.
-function gradeRun({
-  isSpecCase,
-  driveData,
-  driveError,
-  errors,
-  visualDelta = null,
-  beforeHash = null,
-  afterHash = null,
-}) {
-  if (driveError) return { status: "FAIL", reason: driveError };
-  if (errors.length) return { status: "FAIL", reason: errors.join("; ") };
-
-  // A spec case carries its own contract, so grade that and nothing else: spec
-  // scripts return their own shape and have no controlsFound/controlsExercised.
-  const assertMap = driveData && typeof driveData.assert === "object" && driveData.assert;
-  if (assertMap) {
-    const failed = Object.entries(assertMap).filter(([, ok]) => !ok).map(([name]) => name);
-    if (failed.length) {
-      return {
-        status: "FAIL",
-        reason: `assertion(s) failed: ${failed.join("; ")}`,
-        failedAssertions: failed,
-      };
-    }
-    return { status: "PASS" };
-  }
-  if (isSpecCase) {
-    return {
-      status: "NOT-ASSERTED",
-      reason: "spec case returned no `assert` map, so it asserted nothing",
-    };
-  }
-
-  // Generic driver: grade the interaction evidence it already collects.
-  const found = driveData?.controlsFound ?? 0;
-  const exercised = driveData?.controlsExercised ?? 0;
-  const effect = classifyDriveEffect({
-    interactions: driveData?.interactions ?? [],
-    readoutsBefore: driveData?.readoutsBefore ?? [],
-    visualDelta,
-  });
-  if (found === 0) {
-    return {
-      status: "NO-CONTROLS",
-      reason: "no interactive controls found — reference page, not a driven demo",
-    };
-  }
-  if (exercised === 0) {
-    return {
-      status: "NOT-DRIVEABLE",
-      reason:
-        `${found} control(s) found, none exercisable by the driver (gesture- or selection-dependent?)`,
-    };
-  }
-  // "No DOM mutation or readout change" is NOT "nothing happened": a control can
-  // only paint (canvas, WebGL), and the before/after screenshots are then the only
-  // evidence there is. Discarding a differing pair because the DOM was quiet
-  // reported NO-EFFECT for demos that plainly responded (bead c3p).
-  //
-  // But a differing pair is NON-CAUSAL — an animation, clock or autoplay produces
-  // one identically — so it is NOT an ordinary pass either. It is reported as
-  // VISUAL-ONLY, a not-demonstrated status carrying both hashes and that limit.
-  const outcome = gradeEffectOutcome({ effect, exercised, beforeHash, afterHash });
-  return outcome.status === DRIVE_STATUS.PASS ? { status: DRIVE_STATUS.PASS, effect } : outcome;
-}
+//
+// The complete grading logic and outcome mapping live in ./lib/drive-effect.mjs
+// (exported as gradeRun), wired into test-drive-effect.
 
 // The not-demonstrated status list (including VISUAL-ONLY) lives in
 // ./lib/drive-effect.mjs, where the test can assert that a visual-only effect is
@@ -639,7 +588,12 @@ try {
     const effect = verdict.effect ?? classifyDriveEffect({
       interactions: driveData?.interactions ?? [],
       readoutsBefore: driveData?.readoutsBefore ?? [],
+      readoutsAfter: driveData?.readoutsAfter ?? [],
       visualDelta,
+      cumulativeMutations: driveData?.mutations ?? 0,
+      settleMutations: driveData?.settleMutations ?? null,
+      mutations: driveData?.mutations ?? 0,
+      stateChanged: driveData?.stateChanged ?? false,
     });
 
     const record = {

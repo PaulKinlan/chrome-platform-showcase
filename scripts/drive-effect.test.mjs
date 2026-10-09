@@ -33,6 +33,7 @@ import {
   DRIVE_STATUS,
   EFFECT_KIND,
   gradeEffectOutcome,
+  gradeRun,
   NOT_DEMONSTRATED_STATUSES,
 } from "./lib/drive-effect.mjs";
 
@@ -376,6 +377,198 @@ section("the run summary attributes mutations to actions", () => {
   assertEqual(describeActions([{ action: "click: Run", mutations: 1 }]), "click: Run (1 mutation)");
   assertEqual(describeActions([]), "", "no interactions renders nothing");
   assertEqual(describeActions([], "fallback text"), "fallback text");
+});
+
+// ── Delayed DOM Mutations & Unrelated DOM Churn Guard (bead 1je) ────────────
+
+let disableDelayedMutations = false;
+try {
+  disableDelayedMutations = Deno.args.includes("--disable-delayed-mutations") ||
+    Deno.env.get("DISABLE_DELAYED_MUTATIONS") === "1";
+} catch {
+  // permission or environment without env access
+}
+
+section(
+  "delayed DOM mutations landing 250-550ms after click are attributed and graded PASS",
+  () => {
+    // A demo whose DOM mutation lands 250-550 ms after the click has 0 mutations
+    // in the 200 ms per-action window. Cumulative / settle evidence must attribute
+    // the mutation to the action that triggered it and grade PASS.
+    const effect = classifyDriveEffect({
+      interactions: [{ action: "click: Run Delayed", mutations: 0, readoutsAfter: IDLE }],
+      readoutsBefore: IDLE,
+      readoutsAfter: IDLE,
+      visualDelta: false,
+      cumulativeMutations: 7,
+      settleMutations: 7,
+      stateChanged: true,
+      disableDelayedMutations,
+    });
+    assert(effect.hasEffect, "delayed mutations must count as an effect");
+    assertEqual(effect.kind, EFFECT_KIND.DOM, "delayed DOM mutation is a dom-kind effect");
+    assertEqual(
+      effect.effectiveActions.map((a) => a.action),
+      ["click: Run Delayed"],
+      "attributed to click: Run Delayed",
+    );
+    assertEqual(effect.effectiveActions[0].mutations, 7, "attributed 7 mutations");
+    assertEqual(effect.effectiveActions[0].delayed, true, "flagged as delayed effect");
+    const outcome = gradeEffectOutcome({ effect, exercised: 1 });
+    assertEqual(outcome.status, DRIVE_STATUS.PASS, "delayed mutations must grade PASS");
+  },
+);
+
+section("delayed DOM mutations prevent false VISUAL-ONLY when screenshots differ", () => {
+  // If the screenshot pair differs AND delayed DOM mutations landed during settle,
+  // the run must be graded PASS, not VISUAL-ONLY (which is not-demonstrated).
+  const effect = classifyDriveEffect({
+    interactions: [{ action: "click: Run Async", mutations: 0, readoutsAfter: IDLE }],
+    readoutsBefore: IDLE,
+    readoutsAfter: IDLE,
+    visualDelta: true,
+    cumulativeMutations: 5,
+    settleMutations: 5,
+    stateChanged: true,
+    disableDelayedMutations,
+  });
+  assertEqual(effect.kind, EFFECT_KIND.DOM, "DOM effect takes precedence over visual-only");
+  const outcome = gradeEffectOutcome({
+    effect,
+    exercised: 1,
+    beforeHash: "711590282133ce74",
+    afterHash: "9e8b1d60f4c2f37e",
+  });
+  assertEqual(outcome.status, DRIVE_STATUS.PASS, "must grade PASS rather than VISUAL-ONLY");
+});
+
+section(
+  "delayed readout move landing after per-action window is attributed and graded PASS",
+  () => {
+    const effect = classifyDriveEffect({
+      interactions: [{ action: "click: Fetch Data", mutations: 0, readoutsAfter: IDLE }],
+      readoutsBefore: IDLE,
+      readoutsAfter: ["loaded: 42 records"],
+      visualDelta: false,
+      cumulativeMutations: 0,
+      settleMutations: 0,
+      stateChanged: true,
+      disableDelayedMutations,
+    });
+    assert(effect.hasEffect, "delayed readout change must count as an effect");
+    assertEqual(effect.kind, EFFECT_KIND.DOM, "readout move is a dom-kind effect");
+    assertEqual(effect.effectiveActions[0].readoutMoved, true, "flagged as readout move");
+    const outcome = gradeEffectOutcome({ effect, exercised: 1 });
+    assertEqual(outcome.status, DRIVE_STATUS.PASS, "delayed readout move grades PASS");
+  },
+);
+
+section("unrelated pre-action DOM churn with a no-op action does NOT count as demo effect", () => {
+  // Page had 5 mutations before any control was exercised, but 0 during action
+  // and 0 during settle. This is pre-action churn, not an interaction effect.
+  const effect = classifyDriveEffect({
+    interactions: [{ action: "click: No-op", mutations: 0, readoutsAfter: IDLE }],
+    readoutsBefore: IDLE,
+    readoutsAfter: IDLE,
+    visualDelta: false,
+    cumulativeMutations: 5,
+    settleMutations: 0,
+    stateChanged: false,
+  });
+  assert(!effect.hasEffect, "pre-action churn must not count as an effect");
+  assertEqual(effect.kind, EFFECT_KIND.NONE, "kind none");
+  const outcome = gradeEffectOutcome({ effect, exercised: 1 });
+  assertEqual(
+    outcome.status,
+    DRIVE_STATUS.NO_EFFECT,
+    "no-op with pre-action churn stays NO-EFFECT",
+  );
+});
+
+section("unrelated DOM churn on an un-exercised page does NOT count as demo effect", () => {
+  // No controls were exercised (interactions empty). Cumulative mutations cannot
+  // be attributed to any action.
+  const effect = classifyDriveEffect({
+    interactions: [],
+    readoutsBefore: IDLE,
+    readoutsAfter: IDLE,
+    visualDelta: false,
+    cumulativeMutations: 10,
+    settleMutations: 10,
+    stateChanged: true,
+  });
+  assert(!effect.hasEffect, "un-exercised churn must not count as an effect");
+  assertEqual(effect.kind, EFFECT_KIND.NONE, "kind none");
+  assertEqual(effect.effectiveActions, [], "no actions to attribute");
+});
+
+section("gradeRun grades delayed DOM mutations as PASS end-to-end", () => {
+  const verdict = gradeRun({
+    driveData: {
+      controlsFound: 1,
+      controlsExercised: 1,
+      actions: ["click: Run Delayed"],
+      interactions: [{ action: "click: Run Delayed", mutations: 0, readoutsAfter: IDLE }],
+      readoutsBefore: IDLE,
+      readoutsAfter: IDLE,
+      mutations: 6,
+      settleMutations: 6,
+      stateChanged: true,
+    },
+    disableDelayedMutations,
+  });
+  assertEqual(verdict.status, DRIVE_STATUS.PASS, "gradeRun must grade delayed mutations PASS");
+  assertEqual(verdict.effect?.kind, EFFECT_KIND.DOM, "verdict carries dom effect");
+});
+
+section("mutation disabling mechanism proves test suite turns red when disabled", () => {
+  // Disabling the delayed mutation mechanism reproduces the exact prior defect:
+  // per-action 200 ms window saw 0 mutations, so classifyDriveEffect returns
+  // kind "none" and gradeRun reports NO-EFFECT (or VISUAL-ONLY when screenshots differ).
+  const disabled = classifyDriveEffect({
+    interactions: [{ action: "click: Run Delayed", mutations: 0, readoutsAfter: IDLE }],
+    readoutsBefore: IDLE,
+    readoutsAfter: IDLE,
+    visualDelta: false,
+    cumulativeMutations: 7,
+    settleMutations: 7,
+    stateChanged: true,
+    disableDelayedMutations: true,
+  });
+  assertEqual(
+    disabled.kind,
+    EFFECT_KIND.NONE,
+    "disabling delayed mutation handling must yield kind none",
+  );
+  assertEqual(disabled.effectiveActions, [], "no effective actions when disabled");
+  const outcome = gradeEffectOutcome({ effect: disabled, exercised: 1 });
+  assertEqual(
+    outcome.status,
+    DRIVE_STATUS.NO_EFFECT,
+    "disabling delayed mutation handling must yield NO-EFFECT (showing red for genuine passes)",
+  );
+
+  const visualDisabled = classifyDriveEffect({
+    interactions: [{ action: "click: Run Delayed", mutations: 0, readoutsAfter: IDLE }],
+    readoutsBefore: IDLE,
+    readoutsAfter: IDLE,
+    visualDelta: true,
+    cumulativeMutations: 7,
+    settleMutations: 7,
+    stateChanged: true,
+    disableDelayedMutations: true,
+  });
+  assertEqual(
+    visualDisabled.kind,
+    EFFECT_KIND.VISUAL,
+    "disabling delayed mutation handling with visual delta yields visual-kind",
+  );
+  const visualOutcome = gradeEffectOutcome({ effect: visualDisabled, exercised: 1 });
+  assertEqual(
+    visualOutcome.status,
+    DRIVE_STATUS.VISUAL_ONLY,
+    "disabling delayed mutation handling with visual delta yields VISUAL-ONLY",
+  );
 });
 
 if (failures > 0) {

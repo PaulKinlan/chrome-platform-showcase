@@ -72,23 +72,62 @@ export function readoutsMoved(before, after) {
  *   resetBy: string|null, note: string|null}}
  */
 export function classifyDriveEffect(
-  { interactions = [], readoutsBefore = [], visualDelta = null } = {},
+  {
+    interactions = [],
+    readoutsBefore = [],
+    readoutsAfter = null,
+    visualDelta = null,
+    cumulativeMutations = 0,
+    settleMutations = null,
+    mutations = null,
+    stateChanged = null,
+    disableDelayedMutations = false,
+  } = {},
 ) {
   const effectiveActions = [];
   let resetBy = null;
 
   interactions.forEach((interaction, index) => {
-    const mutations = Number(interaction?.mutations ?? 0) || 0;
+    const actionMutations = Number(interaction?.mutations ?? 0) || 0;
     const moved = readoutsMoved(readoutsBefore, interaction?.readoutsAfter);
-    if (mutations > 0 || moved) {
+    if (actionMutations > 0 || moved) {
       effectiveActions.push({
         index,
         action: interaction?.action ?? `action ${index + 1}`,
-        mutations,
+        mutations: actionMutations,
         readoutMoved: moved,
       });
     }
   });
+
+  // When per-action windows (200 ms) observe no mutations or readout moves,
+  // slower DOM effects that land during the post-action settle (250-550 ms after
+  // click) are preserved by cumulative run evidence. Settle mutations are
+  // attributed to the last exercised action rather than discarded.
+  //
+  // Unrelated DOM churn is guarded:
+  //   * If no controls were exercised (interactions empty), cumulative mutations
+  //     cannot be attributed to any action and remain un-promoted.
+  //   * If settleMutations is explicitly 0 (pre-action churn occurred before any
+  //     click, but nothing happened during or after actions), it is not counted.
+  if (!disableDelayedMutations && effectiveActions.length === 0 && interactions.length > 0) {
+    const runMutations = settleMutations != null
+      ? (Number(settleMutations) || 0)
+      : (Number(mutations ?? cumulativeMutations ?? 0) || 0);
+    const runMoved = readoutsAfter != null ? readoutsMoved(readoutsBefore, readoutsAfter) : false;
+    const hasCumulativeDom = runMutations > 0 || runMoved || Boolean(stateChanged);
+    if (hasCumulativeDom) {
+      const lastIndex = interactions.length - 1;
+      const lastInteraction = interactions[lastIndex];
+      effectiveActions.push({
+        index: lastIndex,
+        action: lastInteraction?.action ?? `action ${lastIndex + 1}`,
+        mutations: runMutations,
+        readoutMoved: runMoved,
+        delayed: true,
+      });
+    }
+  }
 
   // Reset detection needs the sequence in order: the FIRST action that changed
   // the DOM and left the readouts at their initial values, after some earlier
@@ -103,14 +142,14 @@ export function classifyDriveEffect(
   if (effectiveActions.length) {
     let movedYet = false;
     for (const interaction of interactions) {
-      const mutations = Number(interaction?.mutations ?? 0) || 0;
+      const actionMutations = Number(interaction?.mutations ?? 0) || 0;
       const moved = readoutsMoved(readoutsBefore, interaction?.readoutsAfter);
       if (moved) {
         movedYet = true;
         resetTarget = interaction?.action ?? null;
         continue;
       }
-      if (movedYet && mutations > 0) {
+      if (movedYet && actionMutations > 0) {
         resetBy = interaction?.action ?? null;
         break;
       }
@@ -189,4 +228,83 @@ export function describeActions(interactions = [], fallback = "") {
   });
   if (!parts.length) return fallback;
   return parts.slice(0, 4).join(", ");
+}
+
+/**
+ * Turn run evidence into a final verdict.
+ *
+ * @param {object} input
+ * @param {boolean} [input.isSpecCase]
+ * @param {object} [input.driveData]
+ * @param {string|null} [input.driveError]
+ * @param {string[]} [input.errors]
+ * @param {boolean|null} [input.visualDelta]
+ * @param {string|null} [input.beforeHash]
+ * @param {string|null} [input.afterHash]
+ * @param {boolean} [input.disableDelayedMutations]
+ * @returns {object}
+ */
+export function gradeRun({
+  isSpecCase = false,
+  driveData = null,
+  driveError = null,
+  errors = [],
+  visualDelta = null,
+  beforeHash = null,
+  afterHash = null,
+  disableDelayedMutations = false,
+}) {
+  if (driveError) return { status: "FAIL", reason: driveError };
+  if (errors.length) return { status: "FAIL", reason: errors.join("; ") };
+
+  // A spec case carries its own contract, so grade that and nothing else: spec
+  // scripts return their own shape and have no controlsFound/controlsExercised.
+  const assertMap = driveData && typeof driveData.assert === "object" && driveData.assert;
+  if (assertMap) {
+    const failed = Object.entries(assertMap).filter(([, ok]) => !ok).map(([name]) => name);
+    if (failed.length) {
+      return {
+        status: "FAIL",
+        reason: `assertion(s) failed: ${failed.join("; ")}`,
+        failedAssertions: failed,
+      };
+    }
+    return { status: "PASS" };
+  }
+  if (isSpecCase) {
+    return {
+      status: "NOT-ASSERTED",
+      reason: "spec case returned no `assert` map, so it asserted nothing",
+    };
+  }
+
+  // Generic driver: grade the interaction evidence it already collects.
+  const found = driveData?.controlsFound ?? 0;
+  const exercised = driveData?.controlsExercised ?? 0;
+  const effect = classifyDriveEffect({
+    interactions: driveData?.interactions ?? [],
+    readoutsBefore: driveData?.readoutsBefore ?? [],
+    readoutsAfter: driveData?.readoutsAfter ?? [],
+    visualDelta,
+    cumulativeMutations: driveData?.mutations ?? 0,
+    settleMutations: driveData?.settleMutations ?? null,
+    mutations: driveData?.mutations ?? 0,
+    stateChanged: driveData?.stateChanged ?? false,
+    disableDelayedMutations,
+  });
+  if (found === 0) {
+    return {
+      status: "NO-CONTROLS",
+      reason: "no interactive controls found — reference page, not a driven demo",
+    };
+  }
+  if (exercised === 0) {
+    return {
+      status: "NOT-DRIVEABLE",
+      reason:
+        `${found} control(s) found, none exercisable by the driver (gesture- or selection-dependent?)`,
+    };
+  }
+  const outcome = gradeEffectOutcome({ effect, exercised, beforeHash, afterHash });
+  return outcome.status === DRIVE_STATUS.PASS ? { status: DRIVE_STATUS.PASS, effect } : outcome;
 }
