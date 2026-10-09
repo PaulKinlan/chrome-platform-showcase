@@ -67,28 +67,22 @@ export const GATE_STEPS = [
     what: "responsive support coverage report + monotonicity",
   },
 
-  // PENDING UNION — fleet/evp-6tg (reviewed, may land before this branch): that
-  // branch appends `deno task test-support-ref-fail-closed` at chain position 7
-  // (here, right after responsive-support-report and before test-session-bounds)
-  // running scripts/support-ref-fail-closed.test.mjs. When it lands, add:
-  //   { id: "test-support-ref-fail-closed", task: "test-support-ref-fail-closed",
-  //     tier: "affected", what: "support snapshot read failures fail closed" },
-  // at this position, AND a rule in scripts/affected-tests.mjs that names it:
-  // add "test-support-ref-fail-closed" to the steps of the scripts/check-routes.mjs
-  // rule (the suite's subject is the support snapshot check-routes reads);
-  // scripts/lib/support.mjs already selects the FULL gate.
-  //
-  // Both guards fail closed on a partial union, deliberately: test-gate-parity
-  // fails until the step is in the plan, and test-affected-tests fails until a
-  // rule names it — a gate-wide (`all: true`) rule does NOT count as naming a
-  // step, because "reachable only by a change to some suite file" is not the
-  // same as selectable by the change that should run it.
-
   {
     id: "test-session-bounds",
     task: "test-session-bounds",
     tier: "affected",
     what: "release session store bounds",
+  },
+  // fleet/evp-6tg landed on main as 3fb49ba7 and registered its suite at chain
+  // position 7 — right here, after test-session-bounds and before
+  // test-header-grammar. scripts/affected-tests.mjs names it on the
+  // scripts/check-routes.mjs rule (the suite pins the baseline support snapshot
+  // loader that check-routes reads); scripts/lib/** selects the full gate.
+  {
+    id: "test-support-ref-fail-closed",
+    task: "test-support-ref-fail-closed",
+    tier: "affected",
+    what: "baseline support snapshot read failures fail closed (6tg)",
   },
   {
     id: "test-header-grammar",

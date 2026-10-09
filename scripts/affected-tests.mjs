@@ -215,7 +215,11 @@ export const RULES = [
 
   // ---- gate-side scripts ----------------------------------------------
   { pattern: ".route-manifest.baseline.json", steps: ["check-routes"], note: "route baseline" },
-  { pattern: "scripts/check-routes.mjs", steps: ["check-routes"], note: "route gate" },
+  {
+    pattern: "scripts/check-routes.mjs",
+    steps: ["check-routes", "test-support-ref-fail-closed"],
+    note: "route gate + the baseline snapshot loader it reads (6tg)",
+  },
   { pattern: "scripts/build-demo-index.mjs", steps: ["check-demo-index"], note: "index builder" },
   {
     pattern: "scripts/check-duplicate-features.mjs",

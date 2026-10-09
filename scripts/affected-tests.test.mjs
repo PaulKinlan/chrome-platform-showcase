@@ -48,7 +48,8 @@ const ids = GATE_STEPS.map((s) => s.id);
 // be reordered: the order is where a failure reports, and reordering it silently
 // invalidates every cached gate log. `typecheck` and `audit-strict` are the two
 // steps that were inline commands in that chain and are now named tasks, at the
-// same positions. Verified command-for-command against 82fabde3:deno.json.
+// same positions; `test-support-ref-fail-closed` is the step 6tg landed at chain
+// position 7 (3fb49ba7). Verified command-for-command against the chain order.
 const CHAIN_ORDER = [
   "typecheck",
   "fmt-check",
@@ -56,6 +57,7 @@ const CHAIN_ORDER = [
   "check-routes",
   "responsive-support-report",
   "test-session-bounds",
+  "test-support-ref-fail-closed",
   "test-header-grammar",
   "test-spc-bbk-device-name",
   "test-spc-bbk-jwk-shape",
@@ -267,6 +269,14 @@ check(
 check(
   "known paths together stay in the affected tier",
   selectSteps(["v156/a/index.html", "responsive-support.json"]).tier === "affected",
+);
+check(
+  "the 6tg support-snapshot suite is selectable from the route gate it belongs to",
+  selectSteps(["scripts/check-routes.mjs"]).steps.includes("test-support-ref-fail-closed"),
+);
+check(
+  "a shared support-helper change selects the full gate (so the 6tg suite runs)",
+  selectSteps(["scripts/lib/support.mjs"]).tier === "full",
 );
 check("an unknown change set fails closed", selectSteps(null).tier === "full");
 check("an empty change set runs the static tier", selectSteps([]).tier === "static");
