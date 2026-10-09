@@ -84,6 +84,16 @@ export const GATE_STEPS = [
     tier: "affected",
     what: "baseline support snapshot read failures fail closed (6tg)",
   },
+  // fleet/evp-3rg landed on main as 45819f9d and registered its suite at chain
+  // position 8 — right here, after the 6tg suite and before test-header-grammar.
+  // Same subjects: scripts/lib/support.mjs (changedFeatureIds, already → full
+  // gate) and scripts/check-routes.mjs (the rule named below).
+  {
+    id: "test-check-routes-changed-demos",
+    task: "test-check-routes-changed-demos",
+    tier: "affected",
+    what: "touched-demo set read failures fail closed (3rg)",
+  },
   {
     id: "test-header-grammar",
     task: "test-header-grammar",

@@ -49,8 +49,9 @@ const ids = GATE_STEPS.map((s) => s.id);
 // be reordered: the order is where a failure reports, and reordering it silently
 // invalidates every cached gate log. `typecheck` and `audit-strict` are the two
 // steps that were inline commands in that chain and are now named tasks, at the
-// same positions; `test-support-ref-fail-closed` is the step 6tg landed at chain
-// position 7 (3fb49ba7). Verified command-for-command against the chain order.
+// same positions; `test-support-ref-fail-closed` (6tg) and
+// `test-check-routes-changed-demos` (3rg) are the steps that landed at chain
+// positions 7 and 8. Verified command-for-command against the chain order.
 const CHAIN_ORDER = [
   "typecheck",
   "fmt-check",
@@ -59,6 +60,7 @@ const CHAIN_ORDER = [
   "responsive-support-report",
   "test-session-bounds",
   "test-support-ref-fail-closed",
+  "test-check-routes-changed-demos",
   "test-header-grammar",
   "test-spc-bbk-device-name",
   "test-spc-bbk-jwk-shape",
@@ -276,7 +278,11 @@ check(
   selectSteps(["scripts/check-routes.mjs"]).steps.includes("test-support-ref-fail-closed"),
 );
 check(
-  "a shared support-helper change selects the full gate (so the 6tg suite runs)",
+  "the 3rg touched-demo suite is selectable from the route gate it belongs to",
+  selectSteps(["scripts/check-routes.mjs"]).steps.includes("test-check-routes-changed-demos"),
+);
+check(
+  "a shared support-helper change selects the full gate (so the 6tg and 3rg suites run)",
   selectSteps(["scripts/lib/support.mjs"]).tier === "full",
 );
 check("an unknown change set fails closed", selectSteps(null).tier === "full");

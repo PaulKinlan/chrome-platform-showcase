@@ -217,8 +217,8 @@ export const RULES = [
   { pattern: ".route-manifest.baseline.json", steps: ["check-routes"], note: "route baseline" },
   {
     pattern: "scripts/check-routes.mjs",
-    steps: ["check-routes", "test-support-ref-fail-closed"],
-    note: "route gate + the baseline snapshot loader it reads (6tg)",
+    steps: ["check-routes", "test-support-ref-fail-closed", "test-check-routes-changed-demos"],
+    note: "route gate + the baseline snapshot and touched-demo readers it uses (6tg, 3rg)",
   },
   { pattern: "scripts/build-demo-index.mjs", steps: ["check-demo-index"], note: "index builder" },
   {
