@@ -202,6 +202,204 @@ check("the diagnostics name the ref they are about", () => {
   assert(err.message.includes(D), `message must name ${D}: ${err.message}`);
 });
 
+// ── Node runtime contract (bead chrome_platform_showcase-ay4) ───────────────
+function nodeEvalSidecar(ref, targetRoot = root, extraOpts = opts) {
+  const code = `
+    import { loadSidecarFromRef, SupportSnapshotError } from "./scripts/lib/support.mjs";
+    try {
+      const res = loadSidecarFromRef(${JSON.stringify(ref)}, ${JSON.stringify(targetRoot)}, ${
+    JSON.stringify(extraOpts)
+  });
+      console.log(JSON.stringify({ ok: true, value: res }));
+    } catch (err) {
+      console.log(JSON.stringify({
+        ok: false,
+        name: err?.name,
+        isSupportSnapshotError: err instanceof SupportSnapshotError,
+        message: err?.message,
+        ref: err?.ref,
+        reason: err?.reason
+      }));
+    }
+  `;
+  const out = new Deno.Command("node", {
+    args: ["--input-type=module", "-e", code],
+    cwd: REPO_ROOT,
+    stdout: "piped",
+    stderr: "piped",
+  }).outputSync();
+  assert(out.code === 0, `node invocation failed: ${new TextDecoder().decode(out.stderr)}`);
+  return JSON.parse(new TextDecoder().decode(out.stdout).trim());
+}
+
+check("Node: a readable map at a ref is returned", () => {
+  const res = nodeEvalSidecar(B);
+  assert(res.ok === true, `expected ok, got ${JSON.stringify(res)}`);
+  assert(
+    res.value && res.value["v1/demo"]?.desktop === "ok",
+    `unexpected value ${JSON.stringify(res.value)}`,
+  );
+});
+
+check("Node: an existing but EMPTY map is {}, not the absent signal", () => {
+  const res = nodeEvalSidecar(E);
+  assert(res.ok === true, `expected ok, got ${JSON.stringify(res)}`);
+  assert(res.value !== null, "empty map must not be reported as absent");
+  assert(
+    typeof res.value === "object" && Object.keys(res.value).length === 0,
+    `expected {}, got ${JSON.stringify(res.value)}`,
+  );
+});
+
+check("Node: a ref that predates the map returns null (documented skip)", () => {
+  const res = nodeEvalSidecar(A);
+  assert(res.ok === true, `expected ok, got ${JSON.stringify(res)}`);
+  assert(res.value === null, `expected null, got ${JSON.stringify(res.value)}`);
+});
+
+check("Node: a map deleted after its introduction throws SupportSnapshotError", () => {
+  const res = nodeEvalSidecar(D);
+  assert(res.ok === false && res.isSupportSnapshotError, "expected SupportSnapshotError");
+  assert(/absent/.test(res.message), `unexpected message ${res.message}`);
+});
+
+check("Node: a malformed map throws SupportSnapshotError", () => {
+  const res = nodeEvalSidecar(C);
+  assert(res.ok === false && res.isSupportSnapshotError, "expected SupportSnapshotError");
+  assert(/not valid JSON/.test(res.message), `unexpected message ${res.message}`);
+});
+
+check("Node: an unresolvable ref throws SupportSnapshotError naming git error", () => {
+  const res = nodeEvalSidecar("refs/heads/does-not-exist");
+  assert(res.ok === false && res.isSupportSnapshotError, "expected SupportSnapshotError");
+  assert(
+    /could not be resolved as a commit/.test(res.message),
+    `unexpected message ${res.message}`,
+  );
+  assert(/does-not-exist/.test(res.message), `message must name bad ref: ${res.message}`);
+});
+
+check("Node: a clone that cannot adjudicate throws with unshallow hint", () => {
+  const res = nodeEvalSidecar(A, root, { introducedIn: "0".repeat(40) });
+  assert(res.ok === false && res.isSupportSnapshotError, "expected SupportSnapshotError");
+  assert(/unshallow/.test(res.message), `unexpected message ${res.message}`);
+});
+
+check("Node (e8x): JSON null fails closed", () => {
+  const res = nodeEvalSidecar(F);
+  assert(res.ok === false && res.isSupportSnapshotError, "expected SupportSnapshotError");
+  assert(/is null, not a JSON object/.test(res.message), `unexpected message ${res.message}`);
+});
+
+check("Node (e8x): JSON array fails closed", () => {
+  const res = nodeEvalSidecar(G);
+  assert(res.ok === false && res.isSupportSnapshotError, "expected SupportSnapshotError");
+  assert(/is an array, not a JSON object/.test(res.message), `unexpected message ${res.message}`);
+});
+
+check("Node (e8x): JSON string fails closed", () => {
+  const res = nodeEvalSidecar(H);
+  assert(res.ok === false && res.isSupportSnapshotError, "expected SupportSnapshotError");
+  assert(/is a string, not a JSON object/.test(res.message), `unexpected message ${res.message}`);
+});
+
+check("Node (e8x): JSON number fails closed", () => {
+  const res = nodeEvalSidecar(I);
+  assert(res.ok === false && res.isSupportSnapshotError, "expected SupportSnapshotError");
+  assert(/is a number, not a JSON object/.test(res.message), `unexpected message ${res.message}`);
+});
+
+check("Node (7kr): an unrelated history fails closed", () => {
+  const res = nodeEvalSidecar(UNRELATED);
+  assert(res.ok === false && res.isSupportSnapshotError, "expected SupportSnapshotError");
+  assert(/shares no ancestry/.test(res.message), `unexpected message ${res.message}`);
+});
+
+// ── check-routes gate integration (Node and Deno) ───────────────────────────
+check("node scripts/check-routes.mjs passes on valid baseline", () => {
+  const out = new Deno.Command("node", {
+    args: ["scripts/check-routes.mjs"],
+    cwd: REPO_ROOT,
+    stdout: "piped",
+    stderr: "piped",
+  }).outputSync();
+  const stdout = new TextDecoder().decode(out.stdout);
+  const stderr = new TextDecoder().decode(out.stderr);
+  assert(out.code === 0, `expected exit code 0, got ${out.code}: ${stderr || stdout}`);
+  assert(
+    stdout.includes("PASS: no published demo route or identity was destructively changed."),
+    `unexpected output: ${stdout}`,
+  );
+});
+
+check("deno task check-routes passes on valid baseline", () => {
+  const out = new Deno.Command("deno", {
+    args: ["run", "--allow-read", "--allow-run", "--allow-env", "scripts/check-routes.mjs"],
+    cwd: REPO_ROOT,
+    stdout: "piped",
+    stderr: "piped",
+  }).outputSync();
+  const stdout = new TextDecoder().decode(out.stdout);
+  const stderr = new TextDecoder().decode(out.stderr);
+  assert(out.code === 0, `expected exit code 0, got ${out.code}: ${stderr || stdout}`);
+  assert(
+    stdout.includes("PASS: no published demo route or identity was destructively changed."),
+    `unexpected output: ${stdout}`,
+  );
+});
+
+check("check-routes gate fails on support downgrade under both Node and Deno", () => {
+  const sidecarPath = join(REPO_ROOT, "responsive-support.json");
+  const original = Deno.readTextFileSync(sidecarPath);
+  try {
+    const data = JSON.parse(original);
+    const targetKey = Object.keys(data).find((k) => data[k]?.mobile === "ok");
+    assert(targetKey, "could not find key with mobile=ok");
+    data[targetKey].mobile = "needs-review";
+    Deno.writeTextFileSync(sidecarPath, JSON.stringify(data, null, 2) + "\n");
+
+    // Node gate run
+    const nodeOut = new Deno.Command("node", {
+      args: ["scripts/check-routes.mjs"],
+      cwd: REPO_ROOT,
+      stdout: "piped",
+      stderr: "piped",
+    }).outputSync();
+    assert(nodeOut.code === 1, `Node expected exit code 1, got ${nodeOut.code}`);
+    const nodeText = new TextDecoder().decode(nodeOut.stdout) +
+      new TextDecoder().decode(nodeOut.stderr);
+    assert(
+      nodeText.includes("FAIL: 1 contract violation(s):"),
+      "Node output missing violation header",
+    );
+    assert(
+      nodeText.includes(`${targetKey}: mobile support regressed ok -> needs-review`),
+      `Node output missing regression notice: ${nodeText}`,
+    );
+
+    // Deno gate run
+    const denoOut = new Deno.Command("deno", {
+      args: ["run", "--allow-read", "--allow-run", "--allow-env", "scripts/check-routes.mjs"],
+      cwd: REPO_ROOT,
+      stdout: "piped",
+      stderr: "piped",
+    }).outputSync();
+    assert(denoOut.code === 1, `Deno expected exit code 1, got ${denoOut.code}`);
+    const denoText = new TextDecoder().decode(denoOut.stdout) +
+      new TextDecoder().decode(denoOut.stderr);
+    assert(
+      denoText.includes("FAIL: 1 contract violation(s):"),
+      "Deno output missing violation header",
+    );
+    assert(
+      denoText.includes(`${targetKey}: mobile support regressed ok -> needs-review`),
+      `Deno output missing regression notice: ${denoText}`,
+    );
+  } finally {
+    Deno.writeTextFileSync(sidecarPath, original);
+  }
+});
+
 // ── the recorded evidence must still be true in the real repo ───────────────
 check("SUPPORT_MAP_INTRODUCED_IN matches the commit that added the map", () => {
   const out = new Deno.Command("git", {

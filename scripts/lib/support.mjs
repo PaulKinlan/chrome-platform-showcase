@@ -44,25 +44,54 @@ export class SupportSnapshotError extends Error {
 }
 
 function gitIn(root, args) {
-  // Deno.Command rather than node's execFileSync: the latter needs --allow-env
-  // merely to spawn, so a caller that did not grant it got a permission error
-  // that looked like a missing git object. A read-only git query should need
-  // only --allow-run.
-  const out = new Deno.Command("git", {
-    args,
-    cwd: root,
-    stdout: "piped",
-    stderr: "piped",
-  }).outputSync();
-  if (out.code !== 0) {
-    const cause = new TextDecoder().decode(out.stderr).trim().split("\n")[0] ?? "";
-    const err = new Error(
-      `git ${args.join(" ")} exited ${out.code}${cause ? `: ${cause}` : ""}`,
-    );
-    err.status = out.code;
+  if (typeof Deno !== "undefined" && typeof Deno.Command === "function") {
+    // Deno.Command rather than node's execFileSync: the latter needs --allow-env
+    // merely to spawn, so a caller that did not grant it got a permission error
+    // that looked like a missing git object. A read-only git query should need
+    // only --allow-run.
+    const out = new Deno.Command("git", {
+      args,
+      cwd: root,
+      stdout: "piped",
+      stderr: "piped",
+    }).outputSync();
+    if (out.code !== 0) {
+      const cause = new TextDecoder().decode(out.stderr).trim().split("\n")[0] ?? "";
+      const err = new Error(
+        `git ${args.join(" ")} exited ${out.code}${cause ? `: ${cause}` : ""}`,
+      );
+      err.status = out.code;
+      throw err;
+    }
+    return new TextDecoder().decode(out.stdout);
+  }
+
+  // Node runtime branch: use node:child_process execFileSync.
+  // Guarded so Deno does not run this path (Deno's node:child_process polyfill
+  // requires --allow-env merely to spawn).
+  try {
+    return execFileSync("git", args, {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (err) {
+    if (typeof err?.status === "number") {
+      const stderr = typeof err.stderr === "string"
+        ? err.stderr
+        : err.stderr
+        ? String(err.stderr)
+        : "";
+      const cause = stderr.trim().split("\n")[0] ?? "";
+      const customErr = new Error(
+        `git ${args.join(" ")} exited ${err.status}${cause ? `: ${cause}` : ""}`,
+      );
+      customErr.status = err.status;
+      throw customErr;
+    }
     throw err;
   }
-  return new TextDecoder().decode(out.stdout);
 }
 
 // Returns the support map at `ref`, `null` when the ref provably predates the
