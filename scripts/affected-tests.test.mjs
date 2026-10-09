@@ -21,6 +21,7 @@ import {
   changedPaths,
   matchPath,
   orphanedSteps,
+  RULES,
   selectSteps,
   unknownRuleSteps,
 } from "./affected-tests.mjs";
@@ -284,6 +285,22 @@ check(
     tier: "affected",
     what: "new",
   }]).includes("test-brand-new"),
+);
+check(
+  "a gate-wide (`all`) rule does not count as naming a step",
+  // Deliberate strictness, pinned after the 98a802f1 review: a step reachable
+  // only by editing some suite file — which runs the whole gate — is still
+  // orphaned for the change that should have selected it, so the map must name
+  // it. If this ever becomes false, the map has been silently weakened.
+  orphanedSteps(
+    [...GATE_STEPS, {
+      id: "test-brand-new",
+      task: "test-brand-new",
+      tier: "affected",
+      what: "new",
+    }],
+    [...RULES, { pattern: "everywhere/**", all: true, note: "probe" }],
+  ).includes("test-brand-new"),
 );
 check(
   "no rule names a step that is not in the plan",

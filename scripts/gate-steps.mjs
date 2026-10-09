@@ -73,9 +73,16 @@ export const GATE_STEPS = [
   // running scripts/support-ref-fail-closed.test.mjs. When it lands, add:
   //   { id: "test-support-ref-fail-closed", task: "test-support-ref-fail-closed",
   //     tier: "affected", what: "support snapshot read failures fail closed" },
-  // at this position. The existing rules already select it (scripts/*.test.mjs
-  // and scripts/lib/** both select the full gate), and test-gate-parity FAILS
-  // until the step is in the plan, so the union cannot silently drop it.
+  // at this position, AND a rule in scripts/affected-tests.mjs that names it:
+  // add "test-support-ref-fail-closed" to the steps of the scripts/check-routes.mjs
+  // rule (the suite's subject is the support snapshot check-routes reads);
+  // scripts/lib/support.mjs already selects the FULL gate.
+  //
+  // Both guards fail closed on a partial union, deliberately: test-gate-parity
+  // fails until the step is in the plan, and test-affected-tests fails until a
+  // rule names it — a gate-wide (`all: true`) rule does NOT count as naming a
+  // step, because "reachable only by a change to some suite file" is not the
+  // same as selectable by the change that should run it.
 
   {
     id: "test-session-bounds",

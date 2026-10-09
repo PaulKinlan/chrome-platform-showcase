@@ -45,17 +45,6 @@ function assertTaskExists(step, tasks) {
   }
 }
 
-function commandFor(step, tasks) {
-  const raw = tasks[step.task];
-  if (raw == null) {
-    throw new Error(
-      `gate plan names task "${step.task}" (step ${step.id}) but deno.json has no such task — ` +
-        `the plan and deno.json have drifted`,
-    );
-  }
-  return [raw, ...(step.args ?? [])].join(" ");
-}
-
 function parseArgs(argv) {
   const value = (name) => {
     const i = argv.indexOf(name);
@@ -72,10 +61,14 @@ function parseArgs(argv) {
   };
 }
 
+// A child killed by a signal reports code === null, and `signal` may be a
+// number (Deno on Linux) or a name. Either way the shell convention is
+// 128 + signal, so 137/143 still mean SIGKILL/SIGTERM to every fleet wrapper
+// (reviewer finding, 2026-10-09: the name branch returned the bare signal).
 function signalToCode(signal) {
-  if (typeof signal === "number") return 128 + signal;
   const names = { SIGINT: 2, SIGKILL: 9, SIGTERM: 15 };
-  return names[signal] ?? 15;
+  const num = typeof signal === "number" ? signal : names[signal] ?? 15;
+  return 128 + num;
 }
 
 function fmt(ms) {
