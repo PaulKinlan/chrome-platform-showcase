@@ -276,7 +276,18 @@ function main() {
     );
   }
   const cov = coverage(curSupport);
-  const touched = changedFeatureIds(base.ref);
+  // Rule (C) below iterates the touched set, so a git failure must not read as
+  // "no demos were touched": that made the invariant vacuous and let a touched
+  // demo sit untested/needs-review with the gate green (bead
+  // chrome_platform_showcase-3rg). An indeterminate touched set is a failure in
+  // its own right; the remaining checks still run and report.
+  let touched;
+  try {
+    touched = changedFeatureIds(base.ref);
+  } catch (err) {
+    failures.push(`touched demos: ${err.message}`);
+    touched = new Set();
+  }
 
   // (A) GLOBAL: any published demo recorded `broken` on a class it claims to
   // support fails the gate — a demo must never ship broken on a supported class.
