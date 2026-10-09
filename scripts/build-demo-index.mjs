@@ -90,7 +90,6 @@ export async function buildIndex(root = ROOT) {
   }
 
   return {
-    generated: new Date().toISOString().slice(0, 10),
     count: Object.keys(demos).length,
     demos,
     probes,
@@ -110,7 +109,11 @@ if (import.meta.main) {
     }
     const before = JSON.stringify(existing.demos ?? {});
     const after = JSON.stringify(built.demos);
+    const probesBefore = JSON.stringify(existing.probes ?? {});
+    const probesAfter = JSON.stringify(built.probes);
+    const stale = [];
     if (before !== after) {
+      stale.push("demos");
       const oldKeys = new Set(Object.keys(existing.demos ?? {}));
       const newKeys = new Set(Object.keys(built.demos));
       const added = [...newKeys].filter((k) => !oldKeys.has(k));
@@ -118,20 +121,56 @@ if (import.meta.main) {
       const moved = [...newKeys].filter((k) =>
         oldKeys.has(k) && existing.demos[k] !== built.demos[k]
       );
-      console.error("FAIL — demo-index.json is stale. Run `deno task demo-index`.");
+      console.error("  demos:");
       if (added.length) {
         console.error(
-          `  ${added.length} feature(s) newly covered: ${added.slice(0, 5).join(", ")}`,
+          `    ${added.length} feature(s) newly covered: ${added.slice(0, 5).join(", ")}`,
         );
       }
       if (removed.length) {
         console.error(
-          `  ${removed.length} feature(s) no longer covered: ${removed.slice(0, 5).join(", ")}`,
+          `    ${removed.length} feature(s) no longer covered: ${removed.slice(0, 5).join(", ")}`,
         );
       }
       if (moved.length) {
-        console.error(`  ${moved.length} feature(s) moved folder: ${moved.slice(0, 5).join(", ")}`);
+        console.error(
+          `    ${moved.length} feature(s) moved folder: ${moved.slice(0, 5).join(", ")}`,
+        );
       }
+    }
+    // `probes` is derived from the same `conformance.json` files, but was not
+    // compared here, so a probes-only change passed this gate while the served
+    // index stayed stale (bead chrome_platform_showcase-92w).
+    if (probesBefore !== probesAfter) {
+      stale.push("probes");
+      const oldKeys = new Set(Object.keys(existing.probes ?? {}));
+      const newKeys = new Set(Object.keys(built.probes));
+      const added = [...newKeys].filter((k) => !oldKeys.has(k));
+      const removed = [...oldKeys].filter((k) => !newKeys.has(k));
+      const changed = [...newKeys].filter((k) =>
+        oldKeys.has(k) && JSON.stringify(existing.probes[k]) !== JSON.stringify(built.probes[k])
+      );
+      console.error("  probes:");
+      if (added.length) {
+        console.error(
+          `    ${added.length} probe(s) newly derivable: ${added.slice(0, 5).join(", ")}`,
+        );
+      }
+      if (removed.length) {
+        console.error(
+          `    ${removed.length} probe(s) no longer derivable: ${removed.slice(0, 5).join(", ")}`,
+        );
+      }
+      if (changed.length) {
+        console.error(
+          `    ${changed.length} probe(s) changed: ${changed.slice(0, 5).join(", ")}`,
+        );
+      }
+    }
+    if (stale.length) {
+      console.error(
+        `FAIL — demo-index.json is stale (${stale.join(" + ")}). Run \`deno task demo-index\`.`,
+      );
       Deno.exit(1);
     }
     console.log(`PASS — demo-index.json matches disk (${built.count} features covered)`);
