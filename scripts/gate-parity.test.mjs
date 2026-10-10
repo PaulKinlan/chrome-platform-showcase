@@ -199,33 +199,50 @@ check(
 // tests/unit/ and is deliberately NOT on the gate plan: it is opt-in, it runs
 // with zero permissions, and nothing about it may change the full gate, CI or
 // the fleet CHECK_CMD. It must not be invisible either, so it is pinned here:
-// a suite exists, the directory holds nothing but suites, and the runner task is
-// exactly the directory form with no --allow flags. The directory form is what
-// keeps the pilot off the plan — a task command naming a *.test.mjs path would
-// have to be plan-reachable (the task-level rule above) and would therefore
-// change `deno task check`. Deno also discovers `*_test.mjs`, so a stray helper
-// in this directory would be imported as a zero-test module that exits 0.
+// a suite exists, the directory is flat and holds nothing but suites, and the
+// runner task is exactly the directory form with no --allow flags. The directory
+// form is what keeps the pilot off the plan — a task command naming a
+// *.test.mjs path would have to be plan-reachable (the task-level rule above)
+// and would therefore change `deno task check`.
+//
+// The pin has to cover everything the runner can reach (finding 08a):
+// `deno test <dir>` recurses, so a nested suite is discovered and imported, and
+// it also discovers `*_test.mjs` (a stray helper is imported as a zero-test
+// module that exits 0). A symlinked entry could put content outside this
+// directory in the runner's reach. So every entry must be a REGULAR
+// *.test.mjs FILE — no subdirectories, no symlinks. That is why the pilot
+// directory is required to stay flat rather than matched recursively: a flat
+// directory makes the single-level scan exhaustive, and a nested suite fails
+// loudly here instead of silently joining the run.
 const UNIT_DIR = "tests/unit";
 const UNIT_RUNNER = "deno test --parallel tests/unit/";
-let unitFiles = [];
+let unitEntries = [];
 try {
-  unitFiles = [...Deno.readDirSync(`${REPO}${UNIT_DIR}`)]
-    .filter((entry) => entry.isFile)
-    .map((entry) => entry.name)
-    .sort();
+  unitEntries = [...Deno.readDirSync(`${REPO}${UNIT_DIR}`)].sort((a, b) =>
+    a.name.localeCompare(b.name)
+  );
 } catch {
   // Reported by the first check below, which fails with a readable message.
 }
-const strayUnitFiles = unitFiles.filter((name) => !name.endsWith(".test.mjs"));
+const isRegularSuite = (entry) =>
+  entry.isFile && !entry.isSymlink && entry.name.endsWith(".test.mjs");
+const unitFiles = unitEntries.filter(isRegularSuite).map((entry) => entry.name);
+const unreachableByScan = unitEntries
+  .filter((entry) => !isRegularSuite(entry))
+  .map((entry) => `${entry.name}${entry.isDirectory ? "/" : entry.isSymlink ? " (symlink)" : ""}`);
 check(
   "the opt-in pilot declares at least one *.test.mjs suite",
-  unitFiles.some((name) => name.endsWith(".test.mjs")),
+  unitFiles.length > 0,
   `${UNIT_DIR} holds no suite — delete this guard only together with the pilot`,
 );
 check(
-  "the opt-in pilot directory holds nothing but *.test.mjs files",
-  strayUnitFiles.length === 0,
-  `stray files that deno test would import as zero-test modules: ${strayUnitFiles.join(", ")}`,
+  "the opt-in pilot directory is flat: only regular *.test.mjs files",
+  unreachableByScan.length === 0,
+  `entries outside a single-level scan: ${
+    unreachableByScan.join(", ")
+  } — deno test recurses into ` +
+    "subdirectories, imports `*_test.mjs`, and can follow a symlink, so a nested suite, a nested " +
+    "helper or a symlink would join the run unnoticed",
 );
 check(
   "the opt-in pilot runner is exactly the zero-permission directory invocation",
