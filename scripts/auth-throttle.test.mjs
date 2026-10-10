@@ -19,6 +19,36 @@
 // the empirical check is tracked as separate work).
 //
 // Run: deno task test-auth-throttle
+//
+// Migrated in place to named Deno.test cases (Stage 14 of the dty proposal, bead
+// dty.18): same file path, same task id, the same ordered gate step 20, the same
+// subjects, the same assertion sites and the same messages - the `section()` and
+// `asyncSection()` registries with their shared `failures` counter, the trailing
+// `Deno.exit(1)` branch and the legacy summary line are gone, so a failure names the
+// case it broke and Deno's runner owns the exit code.
+//
+// SEVENTEEN subjects, not nine: this file has TWO registries. There are 11 `section(`
+// occurrences, but only nine are declarations - the other two are the sync helper's
+// own definition and the template string in the removed summary - plus eight
+// `await asyncSection(...)` cases, which a `section(`-keyed count cannot see. The
+// sync nine and the async eight keep their declared order, interleaved as in the
+// original: the sync cases at :50, :57, :73, :88, :104, :113, :142 and :168, the async
+// eight after them, then the sync "stated limit" case and the final two async ones.
+// The asserted limitation is preserved verbatim - this migration must not "fix" it.
+//
+// Permissions: the child is granted `--allow-env` ALONE. The suite mutates the
+// environment at module scope (it sets the operator password before any case runs,
+// and deletes and re-sets both spellings inside a case) and the route under test reads
+// it on demand, so the flag is required for the whole process; a full focused run of
+// all seventeen cases through this runner with `--allow-env` alone exits 0, which is
+// what allowed the suite's previously-granted `--allow-read` to be dropped - it had no
+// consumer, since the file opens no files and its imports are modules. No network,
+// port, browser or GC flag, so no `--serial` and no `--dir`; the cases run one file per
+// process and deno runs them in order.
+//
+// Output rebaseline (deliberate): the legacy final line was `\nauth throttle tests:
+// all sections passed` and a repo-wide scan found no consumer, so the task now prints
+// `PASS - auth throttle tests` / `FAIL - ...`, truthfully prefixed in both directions.
 
 import {
   AUTH_THROTTLE_KEY_MAX_CHARS,
@@ -33,25 +63,6 @@ import { handleDemoTelemetryRoute } from "../routes/demo-telemetry.ts";
 const TEST_PASSWORD = "test-only-value-not-a-real-credential";
 Deno.env.set("showcase_password", TEST_PASSWORD);
 
-let failures = 0;
-function section(name, fn) {
-  try {
-    fn();
-    console.log(`ok   ${name}`);
-  } catch (error) {
-    failures++;
-    console.error(`FAIL ${name}: ${error.message}`);
-  }
-}
-async function asyncSection(name, fn) {
-  try {
-    await fn();
-    console.log(`ok   ${name}`);
-  } catch (error) {
-    failures++;
-    console.error(`FAIL ${name}: ${error.message}`);
-  }
-}
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -75,14 +86,14 @@ function request(path, { method = "GET", headers = {} } = {}) {
   return new Request(`http://localhost${path}`, { method, headers });
 }
 
-section("a fresh source may authenticate", () => {
+Deno.test("a fresh source may authenticate", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now });
   assert(throttle.check("1.2.3.4").allowed, "an unseen source is allowed");
   assert(throttle.size() >= 1 || throttle.size() === 1, "and is now tracked");
 });
 
-section("failures are spent exactly to the budget, then the source must wait", () => {
+Deno.test("failures are spent exactly to the budget, then the source must wait", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now });
   const key = "5.6.7.8";
@@ -98,7 +109,7 @@ section("failures are spent exactly to the budget, then the source must wait", (
   );
 });
 
-section("the bucket refills, so an over-budget source recovers without intervention", () => {
+Deno.test("the bucket refills, so an over-budget source recovers without intervention", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now, refillMs: 10_000 });
   const key = "9.9.9.9";
@@ -113,7 +124,7 @@ section("the bucket refills, so an over-budget source recovers without intervent
   assert(throttle.check(key).allowed, "and a long idle period refills to full");
 });
 
-section("a success clears the record, so earlier failures do not accumulate", () => {
+Deno.test("a success clears the record, so earlier failures do not accumulate", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now });
   const key = "10.0.0.1";
@@ -129,7 +140,7 @@ section("a success clears the record, so earlier failures do not accumulate", ()
   assert(!throttle.check(key).allowed, "and only then is the budget spent again");
 });
 
-section("one source exhausting its budget does not affect any other (no shared denial)", () => {
+Deno.test("one source exhausting its budget does not affect any other (no shared denial)", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now });
   for (let i = 0; i < 100; i++) throttle.recordFailure("attacker");
@@ -138,7 +149,7 @@ section("one source exhausting its budget does not affect any other (no shared d
   assert(throttle.check("someone-else-2").allowed, "and so is another");
 });
 
-section("per-source state is bounded, and an idle source is really forgotten", () => {
+Deno.test("per-source state is bounded, and an idle source is really forgotten", () => {
   const clock = fakeClock();
   // Room to spare: 3 sources against a cap of 8, so the cap cannot explain what the
   // assertions below observe.
@@ -167,7 +178,7 @@ section("per-source state is bounded, and an idle source is really forgotten", (
   assert(throttle.size() === 8, `the cap must hold under a flood, got ${throttle.size()}`);
 });
 
-section("the advertised wait is bounded, non-growing, and sufficient at the decision level", () => {
+Deno.test("the advertised wait is bounded, non-growing, and sufficient at the decision level", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now, refillMs: 10_000 });
   const key = "203.0.113.200";
@@ -193,7 +204,7 @@ section("the advertised wait is bounded, non-growing, and sufficient at the deci
   );
 });
 
-section(
+Deno.test(
   "eviction: one source cannot churn its own state away, but other peers' churn resets it",
   () => {
     // Coordinator's eviction question, answered precisely — including the part that does
@@ -239,7 +250,7 @@ const PROTECTED = [
   ["/telemetry/demo/reset", "POST"],
 ];
 
-await asyncSection("every protected endpoint is throttled after failed attempts", async () => {
+Deno.test("every protected endpoint is throttled after failed attempts", async () => {
   const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
   for (const [path, method] of PROTECTED) {
     telemetryAuthThrottle.reset();
@@ -268,7 +279,7 @@ await asyncSection("every protected endpoint is throttled after failed attempts"
   }
 });
 
-await asyncSection(
+Deno.test(
   "throttling happens BEFORE the comparison, and a valid credential clears it",
   async () => {
     const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
@@ -309,7 +320,7 @@ await asyncSection(
   },
 );
 
-await asyncSection("a successful authentication clears the source's failure record", async () => {
+Deno.test("a successful authentication clears the source's failure record", async () => {
   const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
   telemetryAuthThrottle.reset();
   const peer = "203.0.113.88";
@@ -348,7 +359,7 @@ await asyncSection("a successful authentication clears the source's failure reco
   assert(spent?.status === 429, `and then be throttled, got ${spent?.status}`);
 });
 
-await asyncSection("one source's exhaustion leaves another source working", async () => {
+Deno.test("one source's exhaustion leaves another source working", async () => {
   const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
   telemetryAuthThrottle.reset();
   const attacker = "192.0.2.10";
@@ -374,7 +385,7 @@ await asyncSection("one source's exhaustion leaves another source working", asyn
   );
 });
 
-await asyncSection(
+Deno.test(
   "no response echoes the credential, and configured is indistinguishable",
   async () => {
     const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
@@ -420,7 +431,7 @@ await asyncSection(
   },
 );
 
-await asyncSection("a client cannot rotate its own key with x-forwarded-for", async () => {
+Deno.test("a client cannot rotate its own key with x-forwarded-for", async () => {
   const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
   telemetryAuthThrottle.reset();
   const peer = "192.0.2.44";
@@ -453,7 +464,7 @@ await asyncSection("a client cannot rotate its own key with x-forwarded-for", as
   );
 });
 
-section("stated limit: while a flood continues, each refilled token is taken by it", () => {
+Deno.test("stated limit: while a flood continues, each refilled token is taken by it", () => {
   // The honest, executable statement of what a source-keyed throttle cannot do: two
   // clients behind one address are one source, so an operator sharing an address with
   // a flooding attacker is not guaranteed an attempt while the flood lasts. Asserted
@@ -472,7 +483,7 @@ section("stated limit: while a flood continues, each refilled token is taken by 
   );
 });
 
-await asyncSection(
+Deno.test(
   "without a peer, every request shares one bounded anonymous bucket",
   async () => {
     const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
@@ -501,7 +512,7 @@ await asyncSection(
   },
 );
 
-await asyncSection(
+Deno.test(
   "the 429 advertises the decision's own wait, not a formatter's guess",
   async () => {
     const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
@@ -537,9 +548,3 @@ await asyncSection(
     assert(advertised >= 1, `the advertised wait must never be zero, got ${header}`);
   },
 );
-
-if (failures > 0) {
-  console.error(`\nauth throttle tests: ${failures} section(s) failed`);
-  Deno.exit(1);
-}
-console.log("\nauth throttle tests: all sections passed");
