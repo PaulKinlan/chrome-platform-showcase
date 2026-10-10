@@ -572,10 +572,12 @@ default 300000, exit 124 when exceeded), and grants the test processes **no** pe
 **not** a step of `deno task check`, not wired into CI, and does not change the fleet `CHECK_CMD`;
 the suites are not migrated and a green pilot is not migration progress.
 `scripts/conformance-runner.test.mjs` is the first suite migrated in place (same task id and gate
-step, legacy final `PASS — …` line preserved through the runner), and `deno task test:harness` runs
-the off-plan end-to-end regression for the runner itself. Three assertions in
-`scripts/gate-parity.test.mjs` pin the pilot's dir (flat: only regular `*.test.mjs` files) and
-runner, and any change under `tests/**` selects the full gate (see AGENTS.md).
+step, legacy final `PASS — …` line preserved through the runner),
+`scripts/corner-shape-values.test.mjs` is the second (its child keeps exactly `--allow-read`, and
+fails `NotCapable` without it), and `deno task test:harness` runs the off-plan end-to-end regression
+for the runner itself. Three assertions in `scripts/gate-parity.test.mjs` pin the pilot's dir (flat:
+only regular `*.test.mjs` files) and runner, and any change under `tests/**` selects the full gate
+(see AGENTS.md).
 
 For demo changes and bug fixes, also verify with `chrome-devtools-mcp`:
 

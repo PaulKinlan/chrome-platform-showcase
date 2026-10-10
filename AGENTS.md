@@ -115,6 +115,13 @@ with `deno task test-conformance-runner`. A migrated suite keeps its own permiss
 gets exactly the flags after `--`, never a union); this suite's child needs none, which was proven
 by running it with no flags before the flag was dropped.
 
+`scripts/corner-shape-values.test.mjs` is the second (bead dty.1), and it is the case where the
+child's permission is **kept**: it reads two demo files, so its task still passes exactly
+`--allow-read` to the child, and running it without that flag fails `NotCapable` — the proof that
+the flag is required and confined. Its 37 assertions are now eight named cases, and its legacy final
+`PASS — corner-shape vocabulary and rendered gallery (…)` line is byte-identical to the one the old
+task printed.
+
 That guard covers that one direction only, so this is **not** a general CI-parity guarantee: a
 future CI step is not automatically mirrored in `deno task check`, and nothing fails if it is
 missing. Wire it into the gate (and, if it can run locally, into the guard's expectation) in the
