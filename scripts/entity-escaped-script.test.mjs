@@ -14,6 +14,20 @@
 // file:line. Entities inside strings, template text, comments, regex literals,
 // `<pre>`/`<code>` samples and JSON-ish script types are correct and ignored.
 //
+// Migrated in place to ONE native Deno.test case (Stage 18 of the dty proposal,
+// bead chrome_platform_showcase-dty.25), under the dty.19 policy for this class
+// of suite: the non-throwing `check(label, ok, detail)` helper, the `failures`
+// counter, the three bodies in their original order and the failure and success
+// wording all survive, so a run still reports EVERY failing subject rather than
+// the first, and no check became a throwing assert. What moved is the scan: the
+// module-scope reads (`listDemoHtml()`'s recursive `Deno.readDirSync`, the
+// `Deno.readTextFileSync` of every selected file, and the two targeted sample
+// reads) now happen inside the case, in the same order, so a read failure still
+// fails loudly instead of aborting the module before any check could report.
+// The trailing `Deno.exit(1)` is gone because exiting inside a case kills the
+// test process before Deno can report it; the counter now raises the same
+// message as the case's failure.
+//
 // Run: deno task test-entity-scripts
 
 const REPO = new URL("..", import.meta.url).pathname;
@@ -333,49 +347,52 @@ function findingsFor(html) {
   return findings;
 }
 
-const files = listDemoHtml();
-let totalFindings = 0;
-const reported = [];
-for (const abs of files) {
-  const rel = abs.slice(REPO.length);
-  const text = Deno.readTextFileSync(abs);
-  const findings = rel.endsWith(".html") ? findingsFor(text) : codeEntities(text).map((h) => ({
-    line: text.slice(0, h.index).split("\n").length,
-    text: h.text,
-    where: "standalone script",
-  }));
-  for (const f of findings) {
-    totalFindings++;
-    reported.push(`${rel}:${f.line} — ${f.text} in ${f.where}`);
+Deno.test("the published demos contain no HTML-entity escapes in executable JavaScript", () => {
+  const files = listDemoHtml();
+  let totalFindings = 0;
+  const reported = [];
+  for (const abs of files) {
+    const rel = abs.slice(REPO.length);
+    const text = Deno.readTextFileSync(abs);
+    const findings = rel.endsWith(".html") ? findingsFor(text) : codeEntities(text).map((h) => ({
+      line: text.slice(0, h.index).split("\n").length,
+      text: h.text,
+      where: "standalone script",
+    }));
+    for (const f of findings) {
+      totalFindings++;
+      reported.push(`${rel}:${f.line} — ${f.text} in ${f.where}`);
+    }
   }
-}
-check(
-  `${files.length} demo files have no HTML-entity escapes in executable JavaScript`,
-  totalFindings === 0,
-  reported.slice(0, 20).join("\n      ") +
-    (reported.length > 20 ? `\n      …and ${reported.length - 20} more` : ""),
-);
+  check(
+    `${files.length} demo files have no HTML-entity escapes in executable JavaScript`,
+    totalFindings === 0,
+    reported.slice(0, 20).join("\n      ") +
+      (reported.length > 20 ? `\n      …and ${reported.length - 20} more` : ""),
+  );
 
-// The entity inside a `<pre>`/`<code>` sample is correct and must stay — a guard
-// that stripped entities everywhere would corrupt the displayed source. Assert
-// the surviving samples are still present so a "fix" cannot have over-reached.
-const partition = read(
-  "/v137/blob-url-partitioning-fetching-navigation/partition-inspector/index.html",
-);
-check(
-  "partition-inspector keeps its displayed code sample escaped inside <pre><code>",
-  partition.includes("fetch(url).then((r) =&gt; r.text())"),
-);
-const catchDemo = read(
-  "/v139/fire-error-event-instead-of-throwing-for-csp-blocked-worker/catch-vs-onerror/index.html",
-);
-check(
-  "catch-vs-onerror keeps its displayed code sample escaped where it is markup",
-  catchDemo.includes("=&gt;"),
-);
-
-if (failures) {
-  console.error(`\n${failures} entity-escape guard check(s) failed`);
-  Deno.exit(1);
-}
-console.log("\nentity-escape guard: all checks passed");
+  // The entity inside a `<pre>`/`<code>` sample is correct and must stay — a guard
+  // that stripped entities everywhere would corrupt the displayed source. Assert
+  // the surviving samples are still present so a "fix" cannot have over-reached.
+  const partition = read(
+    "/v137/blob-url-partitioning-fetching-navigation/partition-inspector/index.html",
+  );
+  check(
+    "partition-inspector keeps its displayed code sample escaped inside <pre><code>",
+    partition.includes("fetch(url).then((r) =&gt; r.text())"),
+  );
+  const catchDemo = read(
+    "/v139/fire-error-event-instead-of-throwing-for-csp-blocked-worker/catch-vs-onerror/index.html",
+  );
+  check(
+    "catch-vs-onerror keeps its displayed code sample escaped where it is markup",
+    catchDemo.includes("=&gt;"),
+  );
+  // The legacy tail exited non-zero on a non-zero counter. `Deno.exit(1)` cannot
+  // live inside a case - it kills the test process before Deno can report the case
+  // - so the counter is carried into the failure message instead: every failing
+  // label above has already printed, and this makes the case fail loudly with the
+  // same wording the suite used before the migration.
+  if (failures) throw new Error(`${failures} entity-escape guard check(s) failed`);
+  console.log("\nentity-escape guard: all checks passed");
+});
