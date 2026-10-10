@@ -506,12 +506,12 @@ Deno.test("the local gate and CI declare the same commands, and every suite is n
   // the runner must be on this explicit legacy direct-run list, and every list
   // entry must be a currently unrouted suite — the list must EQUAL the
   // unrouted set, in both directions. A brand-new suite on a plain `deno run`
-  // task goes RED until a reviewed edit adds it here; a migration that moves a
-  // legacy suite onto the runner (dty.37: server-hardening) MUST remove its
-  // entry in the same reviewed diff, or the stale entry goes RED. C1 always
-  // wins: a listed suite that gains a registration trace while staying
+  // task goes RED until a reviewed edit adds it here. The list is EMPTY because
+  // dty.37 moved the last legacy direct-run suite (server-hardening) onto the
+  // runner; it stays as the deliberate, reviewed place for a future one. C1
+  // always wins: a listed suite that gains a registration trace while staying
   // direct-run is RED under C1 regardless of this list.
-  const LEGACY_DIRECT_RUN = ["server-hardening.test.mjs"];
+  const LEGACY_DIRECT_RUN = [];
   const unroutedSuites = scriptTests.filter((file) =>
     !tasksRunning(file).some((name) => taskRoutes(name, `scripts/${file}`))
   );
