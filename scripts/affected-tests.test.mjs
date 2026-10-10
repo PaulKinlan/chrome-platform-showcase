@@ -269,6 +269,16 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
       "v150/css-url-request-modifiers/_server.ts",
     ]).steps.includes("test-header-grammar"),
   );
+  check(
+    "any feature sidecar change (even one with no per-file rule) selects the header-grammar suite",
+    selectSteps([
+      "v158/spec-compliant-xml-mime-type-detection/_server.ts",
+    ]).steps.includes("test-header-grammar"),
+  );
+  check(
+    "a STATIC_FEATURE_SERVERS registry edit selects the header-grammar suite",
+    selectSteps(["routes/release.ts"]).steps.includes("test-header-grammar"),
+  );
 
   const gc = selectSteps(["routes/release-endpoints.ts"]);
   check(
@@ -543,6 +553,93 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
     );
   } finally {
     await Deno.remove(fixture, { recursive: true });
+  }
+
+  // ---------------------------------------------------- registry completeness
+  // vo6: the local server resolves a feature sidecar through
+  // STATIC_FEATURE_SERVERS first and then a computed dynamic-import fallback
+  // (routes/release.ts). That fallback is NOT in the deployed static module
+  // graph, so an unregistered sidecar still answers locally while production
+  // 404s — and the sidecar suites call handleFeatureRequest directly, so they
+  // cannot see it. Pin the invariant statically: the set of on-disk
+  // v*/<slug>/_server.ts files must equal the set of statically imported +
+  // registered keys, and each key's import identifier must be the identifier
+  // named in the registry. Textual parsing (gate-parity precedent), robust to
+  // comments and line wrapping, fails closed if the expected blocks vanish.
+  {
+    const releaseSource = read("routes/release.ts");
+    const imported = new Map();
+    for (
+      const match of releaseSource.matchAll(
+        /import\s*\{\s*handleFeatureRequest\s+as\s+(\w+)\s*\}\s*from\s*"\.\.\/([^"]+)\/_server\.ts"\s*;/g,
+      )
+    ) {
+      imported.set(match[2], match[1]);
+    }
+    const registryMarker = "const STATIC_FEATURE_SERVERS";
+    const registryStart = releaseSource.indexOf(registryMarker);
+    check(
+      "STATIC_FEATURE_SERVERS block exists in routes/release.ts",
+      registryStart >= 0,
+    );
+    const registryEnd = registryStart >= 0 ? releaseSource.indexOf("};", registryStart) : -1;
+    check("STATIC_FEATURE_SERVERS block is terminated", registryEnd > registryStart);
+    const registered = new Map();
+    if (registryEnd > registryStart) {
+      const block = releaseSource.slice(registryStart, registryEnd);
+      for (const match of block.matchAll(/"([^"]+)"\s*:\s*(\w+)/g)) {
+        registered.set(match[1], match[2]);
+      }
+    }
+    const onDisk = new Set();
+    for (const release of Deno.readDirSync(REPO)) {
+      if (!release.isDirectory || !/^v\d+$/.test(release.name)) continue;
+      for (const feature of Deno.readDirSync(`${REPO}${release.name}`)) {
+        if (!feature.isDirectory) continue;
+        try {
+          if (
+            Deno.statSync(
+              `${REPO}${release.name}/${feature.name}/_server.ts`,
+            ).isFile
+          ) {
+            onDisk.add(`${release.name}/${feature.name}`);
+          }
+        } catch {
+          // no sidecar here
+        }
+      }
+    }
+    for (const key of onDisk) {
+      check(
+        `sidecar ${key} is statically imported AND registered with the same binding`,
+        imported.has(key) && registered.get(key) === imported.get(key),
+        imported.has(key)
+          ? registered.has(key)
+            ? `registry names ${registered.get(key)}, import binds ${imported.get(key)}`
+            : "missing from STATIC_FEATURE_SERVERS (the local dynamic-import fallback would mask the 404 production returns)"
+          : "no static import in routes/release.ts",
+      );
+    }
+    for (const key of registered.keys()) {
+      check(
+        `registry key ${key} has a sidecar file on disk and a static import`,
+        onDisk.has(key) && imported.has(key),
+        onDisk.has(key) ? "never statically imported" : "no _server.ts on disk",
+      );
+    }
+    for (const key of imported.keys()) {
+      check(
+        `imported sidecar ${key} is registered`,
+        registered.has(key),
+        "statically imported but absent from STATIC_FEATURE_SERVERS",
+      );
+    }
+    check(
+      "on-disk sidecars and registry keys are the same set",
+      onDisk.size === registered.size &&
+        [...onDisk].every((k) => registered.has(k)),
+      `disk=${onDisk.size} registered=${registered.size}`,
+    );
   }
 
   // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot

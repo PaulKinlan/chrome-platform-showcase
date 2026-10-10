@@ -183,6 +183,18 @@ export const RULES = [
     steps: ["test-header-grammar", "check-routes"],
     note: "CSS URL request modifiers referrer-echo sidecar",
   },
+  {
+    pattern: "v*/**/_server.ts",
+    steps: ["test-header-grammar", "check-routes"],
+    note:
+      "any feature sidecar change runs the registry-completeness pin (vo6), including sidecars with no per-file rule",
+  },
+  {
+    pattern: "routes/release.ts",
+    steps: ["test-header-grammar"],
+    note:
+      "STATIC_FEATURE_SERVERS edits run the registry-completeness pin (vo6); unions with routes/**",
+  },
   ...SPEECH_DEMOS.map((pattern) => ({
     pattern,
     steps: [
