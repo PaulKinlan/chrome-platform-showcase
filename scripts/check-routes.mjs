@@ -98,14 +98,39 @@ function idFromRoute(route) {
   return String(route).replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
+// Raised when the baseline ref RESOLVES but publishes no routes. The committed
+// snapshot describes a different tree, so nothing derived from that ref — above
+// all the touched-demo set — is comparable. Charging the branch one violation
+// per demo reported 726 of them on a clean tree (bead
+// chrome_platform_showcase-jj7), so this is fatal and actionable instead.
+class RouteLessBaselineError extends Error {
+  constructor(ref) {
+    super(
+      `${ref} resolves but its tree contains no published routes — refusing to gate against it ` +
+        `(the committed .route-manifest.baseline.json describes a different tree, so nothing ` +
+        `derived from this ref is comparable). Fix: set SHOWCASE_BASELINE_REF (or the fork point) ` +
+        `to a ref that contains the demos you are comparing against; if this clone is shallow, ` +
+        `run: git fetch --unshallow`,
+    );
+    this.name = "RouteLessBaselineError";
+    this.ref = ref;
+  }
+}
+
 function loadBaseline(base) {
   const ref = base.ref;
+  let manifest = null;
   try {
-    const manifest = buildFromGitRef(ref);
-    if (manifest.length > 0) return { manifest, source: base.label };
+    manifest = buildFromGitRef(ref);
   } catch {
-    // fall through to the committed snapshot
+    manifest = null; // unreadable ref: fall through to the documented offline fallback
   }
+  if (manifest && manifest.length > 0) return { manifest, source: base.label };
+  // Resolved, but with no routes: not "no baseline available" — a baseline that
+  // cannot be used. The offline snapshot stays the fallback for refs that could
+  // not be read at all (AGENTS.md: the committed .route-manifest.baseline.json
+  // is the offline fallback baseline).
+  if (manifest) throw new RouteLessBaselineError(ref);
   const snapshot = join(REPO_ROOT, ".route-manifest.baseline.json");
   if (existsSync(snapshot)) {
     return {
@@ -165,7 +190,21 @@ function index(manifest) {
 
 function main() {
   const base = branchBase();
-  const { manifest: baseline, source } = loadBaseline(base);
+  let baseline;
+  let source;
+  try {
+    ({ manifest: baseline, source } = loadBaseline(base));
+  } catch (err) {
+    if (!(err instanceof RouteLessBaselineError)) throw err;
+    // Fail closed with one actionable diagnostic. No rule is evaluated against
+    // an invented baseline, and nothing is skipped silently: the run stops here
+    // with exit 1 (bead chrome_platform_showcase-jj7).
+    process.stdout.write(
+      `route regression gate (baseline: ${base.ref} — unusable)\n` +
+        `\nFAIL: 1 contract violation(s):\n  - baseline: ${err.message}\n`,
+    );
+    process.exit(1);
+  }
   const current = buildFromDisk();
   const migrations = loadMigrations();
 
