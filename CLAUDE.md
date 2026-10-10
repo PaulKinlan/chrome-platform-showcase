@@ -563,12 +563,15 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
 that CI's formatter and type-check steps are in the gate, so a new CI step must be wired into the
 gate by hand (see AGENTS.md).
 
-`deno task test:unit` (`deno test --parallel tests/unit/`) is the **opt-in** Stage 0 native
-`Deno.test` pilot (bead 9th, from dty): it runs with zero permissions, is **not** a step of
-`deno task check`, is not wired into CI, and does not change the fleet `CHECK_CMD`. The suites are
-not migrated and a green pilot is not migration progress; three assertions in
-`scripts/gate-parity.test.mjs` pin the pilot's dir (flat: only regular `*.test.mjs` files, no
-subdirectories or symlinks) and runner, and any change under `tests/**` selects the full gate (see
+`deno task test:unit` runs `scripts/native-test.mjs --dir tests/unit` — the opt-in Stage 0/1 native
+`Deno.test` pilot (beads 9th, 0a0, from dty). It runs one file per `deno test` process, fails a file
+that registers no tests (a 0-test file exits 0 under `deno test`), refuses nested dirs and symlinks,
+and grants the test processes **no** permissions. It is **not** a step of `deno task check`, not
+wired into CI, and does not change the fleet `CHECK_CMD`; the suites are not migrated and a green
+pilot is not migration progress. `scripts/conformance-runner.test.mjs` is the first suite migrated
+in place (same task id and gate step, legacy final `PASS — …` line preserved through the runner).
+Three assertions in `scripts/gate-parity.test.mjs` pin the pilot's dir (flat: only regular
+`*.test.mjs` files) and runner, and any change under `tests/**` selects the full gate (see
 AGENTS.md).
 
 For demo changes and bug fixes, also verify with `chrome-devtools-mcp`:
