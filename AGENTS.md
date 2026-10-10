@@ -69,19 +69,51 @@ full gate omits, or if a plan step names a task `deno.json` does not define.
 ### Opt-in native Deno.test pilot (`deno task test:unit`) — Stage 0, NOT part of the gate
 
 `tests/unit/` holds an **opt-in** pilot proving a native `Deno.test` suite can live beside the
-current suites (bead 9th, Stage 0 of the dty proposal). Run it with `deno task test:unit`
-(`deno test --parallel tests/unit/`). It is **deliberately not on the gate plan**: it is not a step
-of `deno task check`, not wired into CI, and does not change the fleet `CHECK_CMD` — do not describe
-the suites as migrated, and do not treat a green pilot as migration progress. The runner grants
-**zero permissions**, so a pilot case that touches the filesystem fails `NotCapable` rather than
-quietly widening the runner; use the built-in `node:assert/strict` so the pilot adds no dependency.
-Three assertions in `scripts/gate-parity.test.mjs` pin it where the existing guards do not look: at
-least one `*.test.mjs` exists, the directory is **flat** — only regular `*.test.mjs` files, no
-subdirectories and no symlinks (Deno also discovers `*_test.mjs`, imports a zero-test module that
-exits 0, recurses into subdirectories and can follow a symlink, so the nested content has to be
-refused rather than matched), and the task string is exactly the zero-permission directory form. A
-change under `tests/**` is unmatched by `scripts/affected-tests.mjs`, so it selects the **full**
-gate.
+current suites (bead 9th, Stage 0 of the dty proposal; Stage 1 is bead 0a0). Run it with
+`deno task test:unit`, which is `scripts/native-test.mjs --dir tests/unit`: it runs **one file per
+`deno test` process** and requires each process to exit 0 **and** report at least one executed test,
+so a file that registers nothing fails instead of passing quietly (`deno test` exits 0 with
+`0 passed | 0 failed` for such a file, and so did the old direct directory run — measured). It never
+passes `--permit-no-files`, and it refuses a subdirectory, a symlink or a non-suite file in the
+directory, the same rule the guard pins below.
+
+The pilot is **deliberately not on the gate plan**: it is not a step of `deno task check`, not wired
+into CI, and does not change the fleet `CHECK_CMD` — do not describe the suites as migrated, and do
+not treat a green pilot as migration progress. The runner grants the **test processes zero
+permissions** (a case that touches the filesystem fails `NotCapable` rather than quietly widening
+the runner) and its own `--allow-read --allow-run` never reach them; use the built-in
+`node:assert/strict` so the pilot adds no dependency. Three assertions in
+`scripts/gate-parity.test.mjs` pin it where the existing guards do not look: at least one
+`*.test.mjs` exists, the directory is **flat** — only regular `*.test.mjs` files, no subdirectories
+and no symlinks (Deno also discovers `*_test.mjs`, imports a zero-test module that exits 0, recurses
+into subdirectories and can follow a symlink, so nested content has to be refused rather than
+matched) — and the task string is exactly the runner invocation. A change under `tests/**` is
+unmatched by `scripts/affected-tests.mjs`, so it selects the **full** gate.
+
+The runner enforces three more things that a bare `deno test` call could not: every child's report
+is **relayed exactly once** (a passing run shows its per-test names, not just its summary),
+forwarded child flags are **validated against an allowlist** (permission flags, `--v8-flags`,
+`--no-check`) and positioned **before exactly one file path**, so a forwarded flag or an extra path
+can never change which tests run — a `--` separator or a directory handed to `deno test` used to
+discover the whole repository instead of the target — and each child has a **per-file bound**
+(`--timeout-ms`, default 300000; a file that exceeds it is killed and the run exits 124).
+
+The end-to-end regression for all of that is `deno task test:harness`
+(`tests/integration/native-test-harness.mjs`): it is a plain assert-and-exit script, not a
+`*.test.mjs` module, precisely because it must spawn processes and write fixtures — the same shape
+as `test-font-loading`. Like the pilot it is opt-in and **off the gate plan**; the merger's full
+gate and the CI do not run it.
+
+#### Migrating a suite in place (Stage 1)
+
+`scripts/conformance-runner.test.mjs` is the first suite migrated in place (bead 0a0): same file
+path, same task id `test-conformance-runner`, same ordered gate step, same subject. Its assertions
+became `Deno.test` cases, its task runs through the same runner, and the runner keeps the legacy
+final line (`PASS — shared conformance assertion runner`, via `--summary`) so drills that grep suite
+output keep working; a failing case now names itself and the task prints `FAIL — <label>`. Run it
+with `deno task test-conformance-runner`. A migrated suite keeps its own permission flags (the child
+gets exactly the flags after `--`, never a union); this suite's child needs none, which was proven
+by running it with no flags before the flag was dropped.
 
 That guard covers that one direction only, so this is **not** a general CI-parity guarantee: a
 future CI step is not automatically mirrored in `deno task check`, and nothing fails if it is

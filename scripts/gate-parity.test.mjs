@@ -200,10 +200,11 @@ check(
 // with zero permissions, and nothing about it may change the full gate, CI or
 // the fleet CHECK_CMD. It must not be invisible either, so it is pinned here:
 // a suite exists, the directory is flat and holds nothing but suites, and the
-// runner task is exactly the directory form with no --allow flags. The directory
-// form is what keeps the pilot off the plan — a task command naming a
-// *.test.mjs path would have to be plan-reachable (the task-level rule above)
-// and would therefore change `deno task check`.
+// runner task is exactly the runner invocation below. The runner is what keeps
+// the pilot off the plan — the task command names scripts/native-test.mjs, not a
+// *.test.mjs path, so the task-level rule above has nothing to demand of the
+// plan; it also carries the zero-test rule that `deno test <dir>` cannot express
+// (Stage 1, bead 0a0).
 //
 // The pin has to cover everything the runner can reach (finding 08a):
 // `deno test <dir>` recurses, so a nested suite is discovered and imported, and
@@ -213,9 +214,10 @@ check(
 // *.test.mjs FILE — no subdirectories, no symlinks. That is why the pilot
 // directory is required to stay flat rather than matched recursively: a flat
 // directory makes the single-level scan exhaustive, and a nested suite fails
-// loudly here instead of silently joining the run.
+// loudly here instead of silently joining the run (the runner refuses it too,
+// through the same rule in scripts/lib/native-test.mjs).
 const UNIT_DIR = "tests/unit";
-const UNIT_RUNNER = "deno test --parallel tests/unit/";
+const UNIT_RUNNER = "deno run --allow-read --allow-run scripts/native-test.mjs --dir tests/unit";
 let unitEntries = [];
 try {
   unitEntries = [...Deno.readDirSync(`${REPO}${UNIT_DIR}`)].sort((a, b) =>
@@ -245,7 +247,7 @@ check(
     "helper or a symlink would join the run unnoticed",
 );
 check(
-  "the opt-in pilot runner is exactly the zero-permission directory invocation",
+  "the opt-in pilot runner is exactly the fail-closed native-test invocation",
   tasks["test:unit"] === UNIT_RUNNER,
   `test:unit = ${JSON.stringify(tasks["test:unit"])} — expected ${JSON.stringify(UNIT_RUNNER)}`,
 );
