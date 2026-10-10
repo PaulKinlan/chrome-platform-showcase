@@ -26,6 +26,28 @@
 // and is kept out of the pass count.
 //
 // Run: deno task test-drive-effect
+//
+// Migrated in place to named Deno.test cases (Stage 13 of the dty proposal, bead
+// dty.17): same file path, same task id `test-drive-effect`, the same ordered gate
+// step 18, the same TWENTY-ONE subjects (note: the file has 23 `section(`
+// occurrences, but two of them are the helper's own definition and the template
+// string in the removed failure summary, not subjects) and the same assertion
+// sites - the `section()` registry with its `failures` counter, the trailing
+// `Deno.exit(1)` branch and the legacy summary line are gone, so a failure names
+// the case it broke and Deno's runner owns the exit code. All 21 subjects keep
+// their declaration order, which is not load-bearing here: every case is
+// independent and reads its own fixtures.
+//
+// The child needs `--allow-read`: the suite reads scripts/drive-demos.mjs at module
+// scope (the driver source is part of what it guards), so the task forwards that one
+// permission to its child instead of dropping it, and grants nothing else. There is
+// no network, no port, no browser and no `--v8-flags` here, so one file per process
+// is enough and `--serial` is not needed - do not batch this file with `--dir`.
+//
+// Output rebaseline (deliberate, documented): the legacy final line had no
+// `PASS — ` prefix, so the task now prints `PASS — drive effect tests` /
+// `FAIL — drive effect tests (1 file(s) failed)` - a neutral label, truthfully
+// prefixed in both directions. A per-suite audit found no consumer of the old text.
 
 import {
   classifyDriveEffect,
@@ -39,16 +61,6 @@ import {
 
 const driveDemosSource = Deno.readTextFileSync("scripts/drive-demos.mjs");
 
-let failures = 0;
-function section(name, fn) {
-  try {
-    fn();
-    console.log(`ok   ${name}`);
-  } catch (error) {
-    failures++;
-    console.error(`FAIL ${name}: ${error.message}`);
-  }
-}
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -63,7 +75,7 @@ function assertEqual(actual, expected, message) {
 const IDLE = ["idle"];
 const RAN = ["ran: 3 rows"];
 
-section("an action that mutates is an effect and is attributed to that action", () => {
+Deno.test("an action that mutates is an effect and is attributed to that action", () => {
   const effect = classifyDriveEffect({
     interactions: [{ action: "click: Run", mutations: 3, readoutsAfter: RAN }],
     readoutsBefore: IDLE,
@@ -80,7 +92,7 @@ section("an action that mutates is an effect and is attributed to that action", 
   assertEqual(effect.note, null, "no caveat is needed for a plain attributable effect");
 });
 
-section("a run followed by a reset keeps the earlier effect AND names the reset", () => {
+Deno.test("a run followed by a reset keeps the earlier effect AND names the reset", () => {
   // The measured fixture: Run appends three rows, Clear removes them and puts the
   // readout back, so the screenshot pair hashes the same. The bug was calling this
   // ambiguous; the fixture proves the sequence, so the run states it.
@@ -105,7 +117,7 @@ section("a run followed by a reset keeps the earlier effect AND names the reset"
   );
 });
 
-section("no action is reported as a reset unless a readout actually moved first", () => {
+Deno.test("no action is reported as a reset unless a readout actually moved first", () => {
   // Clearing an already-empty list changes nothing. Calling that a reset would
   // invent an effect that never happened, so this must stay a no-op.
   const noop = classifyDriveEffect({
@@ -133,7 +145,7 @@ section("no action is reported as a reset unless a readout actually moved first"
   assertEqual(mutating.resetTarget, null, "and it has no target");
 });
 
-section("the reset is attributed to the action whose effect it undid, not the first one", () => {
+Deno.test("the reset is attributed to the action whose effect it undid, not the first one", () => {
   // A theme toggle can mutate the DOM without touching any readout. Naming it as
   // the target of a later Clear would blame the wrong control.
   const effect = classifyDriveEffect({
@@ -157,7 +169,7 @@ section("the reset is attributed to the action whose effect it undid, not the fi
   );
 });
 
-section("a reset does not claim a byte-identical pair when the screenshots differ", () => {
+Deno.test("a reset does not claim a byte-identical pair when the screenshots differ", () => {
   // Run then Clear ends where it started, but Run-Clear-Run does not. Claiming
   // "byte-identical" from the reset alone asserts something the run never saw.
   const single = classifyDriveEffect({
@@ -226,7 +238,7 @@ section("a reset does not claim a byte-identical pair when the screenshots diffe
   assert(uncaptured.resetBy === "click: Clear", "the reset is still reported");
 });
 
-section("a readout-only change is an effect even with no DOM mutation", () => {
+Deno.test("a readout-only change is an effect even with no DOM mutation", () => {
   const effect = classifyDriveEffect({
     interactions: [{ action: "select preset: strict", mutations: 0, readoutsAfter: ["strict"] }],
     readoutsBefore: IDLE,
@@ -237,7 +249,7 @@ section("a readout-only change is an effect even with no DOM mutation", () => {
   assertEqual(effect.effectiveActions[0].readoutMoved, true, "and is flagged as a readout move");
 });
 
-section("a control that only paints is a visual effect, not NO-EFFECT", () => {
+Deno.test("a control that only paints is a visual effect, not NO-EFFECT", () => {
   // The measured canvas fixture: one click, no DOM mutation, no readout move, and
   // two different screenshot hashes. Reporting NO-EFFECT here discarded the only
   // evidence the run had.
@@ -255,7 +267,7 @@ section("a control that only paints is a visual effect, not NO-EFFECT", () => {
   );
 });
 
-section("a visual-only effect is graded VISUAL-ONLY, never PASS", () => {
+Deno.test("a visual-only effect is graded VISUAL-ONLY, never PASS", () => {
   // The ruling: a differing pair is non-causal, so it must not be folded into the
   // pass count. The row keeps both hashes so the reviewer can look at the pair.
   const effect = classifyDriveEffect({
@@ -293,7 +305,7 @@ section("a visual-only effect is graded VISUAL-ONLY, never PASS", () => {
   );
 });
 
-section("only an action-level effect is graded PASS", () => {
+Deno.test("only an action-level effect is graded PASS", () => {
   const dom = gradeEffectOutcome({
     effect: classifyDriveEffect({
       interactions: [{ action: "click: Run", mutations: 2, readoutsAfter: RAN }],
@@ -335,7 +347,7 @@ section("only an action-level effect is graded PASS", () => {
   assert(hashless.reason.includes("2 control"), "the exercised count is reported");
 });
 
-section("nothing changed at all still reports no effect", () => {
+Deno.test("nothing changed at all still reports no effect", () => {
   const effect = classifyDriveEffect({
     interactions: [{ action: "click: Run", mutations: 0, readoutsAfter: IDLE }],
     readoutsBefore: IDLE,
@@ -346,7 +358,7 @@ section("nothing changed at all still reports no effect", () => {
   assertEqual(effect.note, null, "and needs no caveat");
 });
 
-section("a missing screenshot is not a visual effect", () => {
+Deno.test("a missing screenshot is not a visual effect", () => {
   // `visualDelta` is null when no pair was captured. Reading null as "changed"
   // would turn every screenshot-less run into a pass.
   const effect = classifyDriveEffect({
@@ -358,7 +370,7 @@ section("a missing screenshot is not a visual effect", () => {
   assertEqual(effect.kind, EFFECT_KIND.NONE, "kind none");
 });
 
-section("two actions that both move the readouts are not a reset", () => {
+Deno.test("two actions that both move the readouts are not a reset", () => {
   const effect = classifyDriveEffect({
     interactions: [
       { action: "select preset: prefetch", mutations: 1, readoutsAfter: ["prefetch"] },
@@ -371,7 +383,7 @@ section("two actions that both move the readouts are not a reset", () => {
   assertEqual(effect.resetBy, null, "the readouts never went back to their initial values");
 });
 
-section("the run summary attributes mutations to actions", () => {
+Deno.test("the run summary attributes mutations to actions", () => {
   const summary = describeActions([
     { action: "click: Run", mutations: 3 },
     { action: "click: Clear", mutations: 3 },
@@ -387,7 +399,7 @@ section("the run summary attributes mutations to actions", () => {
 
 // ── Delayed DOM Mutations & Unrelated DOM Churn Guard (beads 1je and 1vl) ───
 
-section("in-page driver retains per-action evidence without rewrite promotion", () => {
+Deno.test("in-page driver retains per-action evidence without rewrite promotion", () => {
   // In-page driver must not rewrite last interaction's mutations or readouts
   // from aggregate settle evidence. Per-action windows must stay pure.
   assert(
@@ -408,7 +420,7 @@ section("in-page driver retains per-action evidence without rewrite promotion", 
   );
 });
 
-section(
+Deno.test(
   "no-op click with ambient settle mutations is classified DELAYED-CHANGE and NOT PASS",
   () => {
     // Reviewer counter-case (bead 1vl): a no-op click produces 0 mutations in its
@@ -455,7 +467,7 @@ section(
   },
 );
 
-section(
+Deno.test(
   "genuine delayed click is OBSERVED as DELAYED-CHANGE, but NOT PASS without demo-specific assertion",
   () => {
     // Slower-landing DOM effect (250-550ms) has 0 mutations in immediate 200ms window.
@@ -502,7 +514,7 @@ section(
   },
 );
 
-section("stateChanged alone with zero settle mutations does NOT cause PASS", () => {
+Deno.test("stateChanged alone with zero settle mutations does NOT cause PASS", () => {
   // A run where stateChanged is true (e.g. from pre-action churn or stale state)
   // but settleMutations is 0 and readouts did not move must NOT grade PASS.
   const effect = classifyDriveEffect({
@@ -540,7 +552,7 @@ section("stateChanged alone with zero settle mutations does NOT cause PASS", () 
   );
 });
 
-section(
+Deno.test(
   "delayed readout move landing during settle is classified DELAYED-CHANGE and NOT PASS",
   () => {
     const effect = classifyDriveEffect({
@@ -562,7 +574,7 @@ section(
   },
 );
 
-section(
+Deno.test(
   "delayed change takes precedence over visual delta and remains DELAYED-CHANGE (NOT PASS)",
   () => {
     // If the screenshot pair differs AND delayed DOM mutations landed during settle,
@@ -596,7 +608,7 @@ section(
   },
 );
 
-section("unrelated pre-action DOM churn with a no-op action does NOT count as demo effect", () => {
+Deno.test("unrelated pre-action DOM churn with a no-op action does NOT count as demo effect", () => {
   // Page had 5 mutations before any control was exercised, but 0 during action
   // and 0 during settle. This is pre-action churn, not an interaction effect.
   const effect = classifyDriveEffect({
@@ -618,7 +630,7 @@ section("unrelated pre-action DOM churn with a no-op action does NOT count as de
   );
 });
 
-section("unrelated DOM churn on an un-exercised page does NOT count as demo effect", () => {
+Deno.test("unrelated DOM churn on an un-exercised page does NOT count as demo effect", () => {
   // No controls were exercised (interactions empty). Cumulative mutations cannot
   // be attributed to any action.
   const effect = classifyDriveEffect({
@@ -634,9 +646,3 @@ section("unrelated DOM churn on an un-exercised page does NOT count as demo effe
   assertEqual(effect.kind, EFFECT_KIND.NONE, "kind none");
   assertEqual(effect.effectiveActions, [], "no actions to attribute");
 });
-
-if (failures > 0) {
-  console.error(`\ndrive effect tests: ${failures} section(s) failed`);
-  Deno.exit(1);
-}
-console.log("\ndrive effect tests: all sections passed");
