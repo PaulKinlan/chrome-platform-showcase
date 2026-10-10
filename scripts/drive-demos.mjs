@@ -343,19 +343,6 @@ async function runDrive(opts, io, holder, selection) {
     return trackBootChild(holder.serverChild);
   }
 
-  // Boot recovery and the final cleanup retire a server child the same way: it is
-  // only retired when its exit is CONFIRMED. A child whose exit could not be
-  // confirmed keeps its HANDLE here, so the caller re-attempts it and reports it -
-  // dropping the handle along with a refused signal is what made a live child
-  // unreapable and invisible.
-  async function retireServerChild() {
-    const child = holder.serverChild;
-    if (!child) return;
-    holder.serverChild = null;
-    const failure = await reapServerChild(child, { boundMs: holder.reapBoundMs });
-    if (failure) holder.retiredChildren.push(child);
-  }
-
   // Poll until the CHILD reports it is listening and answers, or the bound elapses.
   //
   // Readiness is decided by `assessReadiness` and is fail-closed: it requires the
@@ -425,7 +412,7 @@ async function runDrive(opts, io, holder, selection) {
       base = `http://localhost:${port}`;
       const outcome = await awaitServerReady(port);
       if (outcome.ok) return;
-      await retireServerChild();
+      await retireServerChild(holder, holder.reapBoundMs);
       const message = describeBootFailure({ port, ...outcome });
       failures.push(message);
       // A crash or a 10-second silent boot is not going to be fixed by another
@@ -794,6 +781,19 @@ export async function closeConnection(conn, { boundMs = CONNECTION_CLOSE_BOUND_M
   } finally {
     if (timer !== null) clearTimeout(timer);
   }
+}
+
+// Boot recovery and the final cleanup retire a server child the same way: it is
+// only retired when its exit is CONFIRMED. A child whose exit could not be
+// confirmed keeps its HANDLE in `holder.retiredChildren`, so the caller
+// re-attempts it and reports it - dropping the handle along with a refused signal
+// is what made a live child unreapable and invisible.
+export async function retireServerChild(holder, boundMs) {
+  const child = holder.serverChild;
+  if (!child) return;
+  holder.serverChild = null;
+  const failure = await reapServerChild(child, { boundMs });
+  if (failure) holder.retiredChildren.push(child);
 }
 
 // Stage 2 contract, in order: validate targets before acquiring anything; run

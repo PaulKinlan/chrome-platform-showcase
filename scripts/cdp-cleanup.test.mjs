@@ -48,6 +48,7 @@ import {
   main as driveDemosMain,
   parseArgs as driveDemosParseArgs,
   reapServerChild as driveDemosReap,
+  retireServerChild as driveDemosRetire,
 } from "./drive-demos.mjs";
 
 const root = await Deno.makeTempDir({ prefix: "dty1w1-cdp-root-" });
@@ -1030,6 +1031,41 @@ Deno.test("reapServerChild: a status that never settles is bounded, not awaited 
     );
   }
   assert.ok(Date.now() - started < 1000, "the bound must be the bound, not a longer wait");
+});
+
+Deno.test("retireServerChild: a child that cannot be retired keeps its handle for the caller", async () => {
+  const shapes = [
+    fakeServerChild({
+      killThrows: "Operation not permitted (os error 1)",
+      status: () => Promise.resolve(0),
+    }),
+    fakeServerChild({ status: () => new Promise(() => {}) }),
+    fakeServerChild({ status: () => Promise.reject(new Error("status could not be read")) }),
+  ];
+  for (const child of shapes) {
+    const holder = { serverChild: child, retiredChildren: [] };
+    await driveDemosRetire(holder, 25);
+    assert.equal(holder.serverChild, null, "the live slot must be cleared");
+    if (child === shapes[0]) {
+      assert.deepEqual(
+        holder.retiredChildren,
+        [],
+        "an exit confirmed on the first attempt needs no re-attempt",
+      );
+    } else {
+      assert.deepEqual(
+        holder.retiredChildren,
+        [child],
+        "an unconfirmed child must keep its HANDLE so the caller can re-attempt it",
+      );
+    }
+  }
+});
+
+Deno.test("retireServerChild: nothing to retire is a no-op", async () => {
+  const holder = { serverChild: null, retiredChildren: [] };
+  await driveDemosRetire(holder, 25);
+  assert.deepEqual(holder.retiredChildren, [], "no child means nothing to retain");
 });
 
 // The bound is part of the contract, so a silent change to it is a finding.
