@@ -402,6 +402,7 @@ function callerHarness(
   const teardownArgs = [];
   const connCloses = [];
   const serverKills = [];
+  let statusReads = 0;
   const chrome = { tag: "chrome-handle" };
   const deps = {
     argv: [],
@@ -409,16 +410,20 @@ function callerHarness(
       holder.chrome = chrome;
       if (resources) {
         if (retiredChildren) {
-          // What a server child that boot recovery could not retire looks like to
-          // the caller: the HANDLE is retained, never dropped with the failure.
-          holder.retiredChildren = [
-            {
-              kill: (signal) => serverKills.push(signal ?? "SIGTERM"),
-              get status() {
-                return retiredChildren === "resolves" ? Promise.resolve(0) : new Promise(() => {});
-              },
+          // The reviewer's shape: boot recovery spawned ONE child, killed it once
+          // and read its status once, could not confirm the exit, and retained the
+          // handle. The counters are what let a case assert the finalizer makes its
+          // OWN second attempt instead of merely re-reading the earlier failure.
+          const child = {
+            kill: (signal) => serverKills.push(signal ?? "SIGTERM"),
+            get status() {
+              statusReads += 1;
+              return retiredChildren === "resolves" ? Promise.resolve(0) : new Promise(() => {});
             },
-          ];
+          };
+          child.kill("SIGKILL");
+          void child.status;
+          holder.retiredChildren = [child];
         }
         holder.conn = {
           close: () => {
@@ -444,6 +449,11 @@ function callerHarness(
             return Promise.resolve(0);
           },
         };
+        if (retiredChildren) {
+          // The boot-recovery scenario has exactly one child: retiring it cleared
+          // the live slot, so the finalizer's attempt on it must be the SECOND one.
+          holder.serverChild = null;
+        }
       }
       if (primary) throw primary;
       return result;
@@ -477,6 +487,9 @@ function callerHarness(
     teardownArgs,
     connCloses,
     serverKills,
+    get statusReads() {
+      return statusReads;
+    },
   };
 }
 
@@ -965,6 +978,16 @@ Deno.test("drive-demos main: a child boot recovery could not retire is re-attemp
       reported(t.errors, "boot recovery could not retire"),
       "a retained child must be re-attempted and named, not dropped with its failure",
     );
+    assert.equal(
+      t.serverKills.length,
+      2,
+      "the finalizer must make its own kill attempt on the retained child",
+    );
+    assert.equal(
+      t.statusReads,
+      2,
+      "and its own bounded status read, not just re-report the earlier failure",
+    );
     assert.deepEqual(t.codes, [1], "a child that may still be alive must not be a green run");
   });
 });
@@ -973,6 +996,8 @@ Deno.test("drive-demos main: a retained child whose exit is confirmed is not a f
   await withScratchOut("retired-resolves", async (out) => {
     const t = driveHarness({ retiredChildren: "resolves" });
     await driveDemosMain({ ...t.deps, serverReapBoundMs: 25, argv: driveArgv(out) });
+    assert.equal(t.serverKills.length, 2, "the second attempt happens either way");
+    assert.equal(t.statusReads, 2, "and it is what confirms the exit");
     assert.deepEqual(t.errors, [], "an exit confirmed on the re-attempt leaves nothing behind");
     assert.deepEqual(t.codes, [0], "so the run stays green rather than inventing a failure");
   });
@@ -1044,8 +1069,13 @@ Deno.test("retireServerChild: a child that cannot be retired keeps its handle fo
   ];
   for (const child of shapes) {
     const holder = { serverChild: child, retiredChildren: [] };
-    await driveDemosRetire(holder, 25);
+    const failure = await driveDemosRetire(holder, 25);
     assert.equal(holder.serverChild, null, "the live slot must be cleared");
+    assert.equal(
+      failure === null,
+      child === shapes[0],
+      "the helper must REPORT the failure, because boot recovery stops retrying on it",
+    );
     if (child === shapes[0]) {
       assert.deepEqual(
         holder.retiredChildren,
@@ -1060,6 +1090,21 @@ Deno.test("retireServerChild: a child that cannot be retired keeps its handle fo
       );
     }
   }
+});
+
+Deno.test("drive-demos main: the finalizer's second attempt is bounded, not awaited forever", async () => {
+  await withScratchOut("retired-bounded", async (out) => {
+    const t = driveHarness({ retiredChildren: "pending" });
+    const started = Date.now();
+    await driveDemosMain({ ...t.deps, serverReapBoundMs: 25, argv: driveArgv(out) });
+    assert.equal(t.statusReads, 2, "the second read must be attempted");
+    assert.ok(
+      Date.now() - started < 5000,
+      "an exit that never arrives on the second attempt must be bounded by the bound",
+    );
+    assert.ok(reported(t.errors, "within 25ms"), "and reported with the bound that produced it");
+    assert.deepEqual(t.codes, [1], "an unconfirmed child is not a green run");
+  });
 });
 
 Deno.test("retireServerChild: nothing to retire is a no-op", async () => {
