@@ -137,10 +137,13 @@ const started = performance.now();
 const root = await Deno.makeTempDir({ prefix: "gate-plan-harness-" });
 const shrunk = await Deno.makeTempDir({ prefix: "gate-plan-shrunk-" });
 try {
-  // Writing anywhere but the temp dir is a bug in this harness, not a hazard for the repo.
+  // The property that matters is that nothing of ours is ever written inside the
+  // repository — asserted portably, without assuming a POSIX absolute-path shape,
+  // because this step also runs on a developer's machine (the gate itself is
+  // deliberately cross-platform). Cleanliness is asserted at the end of the run.
   check(
-    "the scratch tree lives under the OS temp dir, never in the repository",
-    root.startsWith("/") && !root.startsWith(REPO),
+    "the scratch tree is outside the repository",
+    !root.startsWith(REPO) && Deno.realPathSync(root) !== REPO,
     `scratch root ${root} vs repo ${REPO}`,
   );
 
