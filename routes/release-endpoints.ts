@@ -4071,7 +4071,6 @@ async function renderV151CapabilityEcho(req: Request): Promise<Response> {
 // demo is showing or makes the Headers constructor throw on a CR/LF, answering
 // the request with a 500; both are now a 400 with an explanation.
 const SERVER_TIMING_LABEL_RE = /^[A-Za-z0-9 ._:-]{1,64}$/;
-const PERMISSIONS_POLICY_SOURCE_RE = /^(self|\*|)$/;
 
 async function renderV151DelayedEcho(req: Request): Promise<Response> {
   const url = new URL(req.url);
@@ -4097,36 +4096,6 @@ async function renderV151DelayedEcho(req: Request): Promise<Response> {
       "Use PerformanceResourceTiming to inspect duration, transfer size, Server-Timing, and Chrome 151 service-worker router fields when a static router is active.",
   }, {
     headers: { "server-timing": `edge;dur=${delay};desc="${label}"` },
-  });
-}
-
-function renderV151PolicyEcho(req: Request): Response {
-  const url = new URL(req.url);
-  const local = url.searchParams.get("local") ?? "self";
-  const loopback = url.searchParams.get("loopback") ?? "self";
-  const allow = url.searchParams.get("allow") ?? "none";
-  if (!PERMISSIONS_POLICY_SOURCE_RE.test(local) || !PERMISSIONS_POLICY_SOURCE_RE.test(loopback)) {
-    return jsonResponse({
-      error:
-        "local and loopback must each be self, * or empty (none) — the allowlist sources this fixture demonstrates.",
-    }, { status: 400 });
-  }
-  const policy = `local-network=(${local}), loopback-network=(${loopback})`;
-  return jsonResponse({
-    permissionsPolicy: policy,
-    iframeAllow: allow === "trusted" ? "local-network; loopback-network" : "",
-    request: {
-      origin: req.headers.get("origin") ?? "",
-      referer: req.headers.get("referer") ?? "",
-      secFetchSite: req.headers.get("sec-fetch-site") ?? "",
-    },
-    migration: {
-      chrome150:
-        `Permissions-Policy: direct-sockets-private=(${local}), local-network=(${local}), loopback-network=(${loopback})`,
-      chrome151: `Permissions-Policy: ${policy}`,
-    },
-  }, {
-    headers: { "permissions-policy": policy },
   });
 }
 
@@ -4938,13 +4907,6 @@ export async function handleLegacyReleaseEndpoints(
       "/resource-timing-add-spec-compliant-service-worker-router-timing-fields/delayed-echo"
   ) {
     return await renderV151DelayedEcho(req);
-  }
-  if (
-    release === "v151" &&
-    sub ===
-      "/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/policy-echo"
-  ) {
-    return renderV151PolicyEcho(req);
   }
   if (
     (release === "v151" || release === "v152") &&

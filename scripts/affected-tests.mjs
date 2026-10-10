@@ -161,6 +161,12 @@ export const RULES = [
     steps: ["test-corner-shape-values"],
     note: "corner-shape demo",
   },
+  {
+    pattern:
+      "v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/_server.ts",
+    steps: ["test-header-grammar", "check-routes"],
+    note: "permission-policy-merger policy-echo sidecar",
+  },
   ...SPEECH_DEMOS.map((pattern) => ({
     pattern,
     steps: [

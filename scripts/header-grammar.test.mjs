@@ -18,6 +18,7 @@
 // Run: deno task test-header-grammar
 
 import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
+import { handleFeatureRequest as handlePolicyEchoFeatureRequest } from "../v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/_server.ts";
 
 const noAsset = async () => null;
 
@@ -42,6 +43,16 @@ async function call(release, sub, query) {
   const req = new Request(`http://localhost:3000/${release}${sub}${query ?? ""}`);
   try {
     return await handleLegacyReleaseEndpoints(req, release, sub, noAsset);
+  } catch (err) {
+    return new Response(JSON.stringify({ thrown: String(err) }), { status: 500 });
+  }
+}
+
+async function callPolicyEchoSidecar(sub, query) {
+  const req = new Request(`http://localhost:3000/v151${sub}${query ?? ""}`);
+  try {
+    const res = await handlePolicyEchoFeatureRequest(req, sub);
+    return res ?? new Response(null, { status: 404 });
   } catch (err) {
     return new Response(JSON.stringify({ thrown: String(err) }), { status: 500 });
   }
@@ -100,14 +111,17 @@ section("delayed-echo bounds the label length", async () => {
 // Permissions-Policy: local-network=(<local>), loopback-network=(<loopback>)
 
 section("policy-echo keeps the demo's own allowlist values working", async () => {
-  const selfStar = await call("v151", POLICY_SUB, "?local=self&loopback=*&allow=trusted");
+  const selfStar = await callPolicyEchoSidecar(
+    POLICY_SUB,
+    "?local=self&loopback=*&allow=trusted",
+  );
   assert(selfStar.status === 200, `self/* should still work, got ${selfStar.status}`);
   assert(
     selfStar.headers.get("permissions-policy") === "local-network=(self), loopback-network=(*)",
     `unexpected header: ${JSON.stringify(selfStar.headers.get("permissions-policy"))}`,
   );
 
-  const empty = await call("v151", POLICY_SUB, "?local=&loopback=&allow=none");
+  const empty = await callPolicyEchoSidecar(POLICY_SUB, "?local=&loopback=&allow=none");
   assert(empty.status === 200, `the "none" option should still work, got ${empty.status}`);
   assert(
     empty.headers.get("permissions-policy") === "local-network=(), loopback-network=()",
@@ -118,7 +132,10 @@ section("policy-echo keeps the demo's own allowlist values working", async () =>
 });
 
 section("policy-echo never 500s on a CR/LF value", async () => {
-  const res = await call("v151", POLICY_SUB, `?local=a${CRLF_ENC}X-Injected:%20yes&loopback=self`);
+  const res = await callPolicyEchoSidecar(
+    POLICY_SUB,
+    `?local=a${CRLF_ENC}X-Injected:%20yes&loopback=self`,
+  );
   assert(
     res.status !== 500,
     "a CR/LF policy value must not crash the route (it currently throws while building the header)",
@@ -130,8 +147,7 @@ section("policy-echo never 500s on a CR/LF value", async () => {
 });
 
 section("policy-echo rejects a value that rewrites the demonstrated header", async () => {
-  const res = await call(
-    "v151",
+  const res = await callPolicyEchoSidecar(
     POLICY_SUB,
     `?local=${encodeURIComponent("self), loopback-network=(*")}`,
   );
