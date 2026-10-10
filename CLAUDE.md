@@ -563,6 +563,13 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
 that CI's formatter and type-check steps are in the gate, so a new CI step must be wired into the
 gate by hand (see AGENTS.md).
 
+`deno task test:unit` (`deno test --parallel tests/unit/`) is the **opt-in** Stage 0 native
+`Deno.test` pilot (bead 9th, from dty): it runs with zero permissions, is **not** a step of
+`deno task check`, is not wired into CI, and does not change the fleet `CHECK_CMD`. The suites are
+not migrated and a green pilot is not migration progress; three assertions in
+`scripts/gate-parity.test.mjs` pin the pilot's dir and runner, and any change under `tests/**`
+selects the full gate (see AGENTS.md).
+
 For demo changes and bug fixes, also verify with `chrome-devtools-mcp`:
 
 - Open the exact route, using Chrome Canary when the target milestone requires it.
