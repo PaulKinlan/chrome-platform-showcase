@@ -17,6 +17,36 @@
 // be replayed once 4096 newer nonces had filled the cache).
 //
 // Run: deno task test-evp-nonce-replay   (needs --v8-flags=--expose-gc)
+//
+// Migrated in place to named Deno.test cases (Stage 12 of the dty proposal, bead
+// dty.14): same file path, same task id `test-evp-nonce-replay`, the same ordered
+// gate step 15, the same seven subjects and the same assertions — the custom
+// `section()` registry, its trailing loop and the legacy `Deno.exit(1)` branch are
+// gone, so a failure names the case it broke and Deno's runner owns the exit code.
+//
+// ORDER IS LOAD-BEARING in one direction only, and it is why this file must run
+// alone: the memory case ("retained nonce memory stays bounded") asserts that EVERY
+// one of its samples validates, and the last case saturates the module-level replay
+// cache on purpose, so any later sample would be refused. The memory case therefore
+// has to come first and the saturating case has to stay LAST. Deno.test runs the
+// tests of one file serially in declaration order and scripts/native-test.mjs runs
+// exactly one file per process, so the ordering holds; do not add per-test
+// concurrency, do not batch this file with `--dir`, and do not run it with
+// --parallel.
+//
+// The child needs NO permission (the imported modules are imported, not read), so
+// the task forwards ONLY `--v8-flags=--expose-gc` — measured, not assumed: the whole
+// seven-case suite passes on the native runner with the flag alone, which is what
+// justified dropping the `--allow-read` the old direct-run task carried. The flag is
+// what the memory case needs to measure anything at all, it stays confined to this
+// one file by the task's `--serial evp-nonce-replay.test.mjs` and by one process per
+// file, and it is never set repository-wide. Without the flag that case fails loudly
+// by name rather than passing vacuously.
+//
+// Output rebaseline (deliberate, documented): the legacy final line had no
+// `PASS — ` prefix, so the task now prints `PASS — evp nonce replay tests` /
+// `FAIL — evp nonce replay tests (1 file(s) failed)` - a neutral label, truthfully
+// prefixed in both directions. A per-suite audit found no consumer of the old text.
 
 import {
   EVP_NONCE_REPLAY_MAX_ENTRIES,
@@ -37,12 +67,6 @@ const NO_ASSET = async () => null;
 const LONG_NONCE_CHARS = 64 * 1024;
 const WARMUP_SAMPLES = 20;
 const LONG_SAMPLES = 200;
-
-const failures = [];
-const sections = [];
-function section(label, fn) {
-  sections.push({ label, fn });
-}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -74,9 +98,7 @@ async function validate(token, nonce, aud = "https://myapp.example.com") {
   return body;
 }
 
-// ── sections ────────────────────────────────────────────────────────────────
-
-section("a validated nonce is rejected when it is replayed", async () => {
+Deno.test("a validated nonce is rejected when it is replayed", async () => {
   const nonce = `replay-${crypto.randomUUID()}`;
   const token = await sample(nonce);
 
@@ -95,7 +117,7 @@ section("a validated nonce is rejected when it is replayed", async () => {
   );
 });
 
-section("replay rejection survives an arbitrarily long nonce", async () => {
+Deno.test("replay rejection survives an arbitrarily long nonce", async () => {
   const nonce = "L".repeat(LONG_NONCE_CHARS);
   const token = await sample(nonce);
   assert((await validate(token, nonce)).valid === true, "a long nonce should validate once");
@@ -105,7 +127,7 @@ section("replay rejection survives an arbitrarily long nonce", async () => {
   );
 });
 
-section("two long nonces sharing a prefix are still distinct", async () => {
+Deno.test("two long nonces sharing a prefix are still distinct", async () => {
   // Guards the choice of fingerprinting over truncation: a truncated key would
   // collide here and reject a nonce that was never seen.
   const base = "P".repeat(LONG_NONCE_CHARS);
@@ -120,15 +142,15 @@ section("two long nonces sharing a prefix are still distinct", async () => {
   const secondToken = await sample(second);
   assert(
     (await validate(secondToken, second)).valid === true,
-    "a second nonce sharing a 4 KiB prefix must not be treated as a replay (fingerprint collision)",
+    "a second nonce sharing a 64 KiB prefix must not be treated as a replay (fingerprint collision)",
   );
 });
 
-section("the sample endpoint re-arms a nonce for a deliberate re-run", async () => {
+Deno.test("the sample endpoint re-arms a nonce for a deliberate re-run", async () => {
   // The mock mail provider's "send the email again" action: /sample clears the
   // marker for the nonce it mints. That is the fixture's existing behaviour and
   // is deliberately unchanged here - replay rejection still applies to a token
-  // that has already been validated (the section above), it is just re-armed by
+  // that has already been validated (the case above), it is just re-armed by
   // asking for a fresh sample.
   const nonce = `rearm-${crypto.randomUUID()}`;
   const token = await sample(nonce);
@@ -143,7 +165,7 @@ section("the sample endpoint re-arms a nonce for a deliberate re-run", async () 
   );
 });
 
-section("the replay TTL outlives the token it guards", () => {
+Deno.test("the replay TTL outlives the token it guards", () => {
   // The executable form of "bounding must not weaken replay rejection": an entry
   // may only disappear after any token carrying that nonce has expired anyway.
   assert(
@@ -156,10 +178,10 @@ section("the replay TTL outlives the token it guards", () => {
   );
 });
 
-section("retained nonce memory stays bounded", async () => {
+Deno.test("retained nonce memory stays bounded", async () => {
   assert(
     typeof globalThis.gc === "function",
-    "this section measures retained heap and needs a real GC: run deno task test-evp-nonce-replay",
+    "this case measures retained heap and needs a real GC: run deno task test-evp-nonce-replay",
   );
   const offered = (LONG_SAMPLES * LONG_NONCE_CHARS) / (1024 * 1024);
 
@@ -173,7 +195,7 @@ section("retained nonce memory stays bounded", async () => {
 
   // Warm up first. Signing and verifying 200 tokens would otherwise charge JIT
   // code and crypto buffer pools to the measurement: before this warmup was
-  // added, a 1000-sample run of the same section reported 1.3 MiB of noise as
+  // added, a 1000-sample run of the same case reported 1.3 MiB of noise as
   // "retained", against a 0.6 MiB reading with it.
   await batch(WARMUP_SAMPLES, 0);
   globalThis.gc();
@@ -197,7 +219,7 @@ section("retained nonce memory stays bounded", async () => {
   );
 });
 
-section("a nonce validated before the entry cap is still rejected after it fills", async () => {
+Deno.test("a nonce validated before the entry cap is still rejected after it fills", async () => {
   // Regression for chrome_platform_showcase-lri. The cache is a deny-list, so an
   // evicting entry cap silently defeated replay rejection: once 4096 newer
   // nonces had been validated the oldest marker was gone and a token still
@@ -205,7 +227,7 @@ section("a nonce validated before the entry cap is still rejected after it fills
   // markers instead of evicting live ones, which has to be measured across a
   // real crossing - the store's eviction only happens on a successful write.
   //
-  // This section saturates the module-level cache, so it runs last.
+  // This case saturates the module-level cache, so it runs last.
   const nonce = `cap-${crypto.randomUUID()}`;
   const token = await sample(nonce);
   assert(
@@ -248,21 +270,3 @@ section("a nonce validated before the entry cap is still rejected after it fills
     "the post-cap rejection must be the replay check specifically",
   );
 });
-
-// ── runner ──────────────────────────────────────────────────────────────────
-
-for (const { label, fn } of sections) {
-  try {
-    await fn();
-    console.log(`ok   ${label}`);
-  } catch (err) {
-    failures.push({ label, err });
-    console.log(`FAIL ${label}: ${err?.message ?? err}`);
-  }
-}
-
-if (failures.length > 0) {
-  console.error(`\nevp nonce replay tests: ${failures.length} section(s) failed`);
-  Deno.exit(1);
-}
-console.log("\nevp nonce replay tests: all sections passed");
