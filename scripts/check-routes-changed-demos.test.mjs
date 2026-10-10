@@ -70,8 +70,14 @@ function assertThrows(fn, match) {
 }
 
 // ── fixture repos ───────────────────────────────────────────────────────────
+// Temp roots are registered HERE, at the moment they are created, not by the
+// caller after the helper returns: `git init` below can throw (a missing or
+// unspawnable git), and a root created just before that throw would otherwise
+// be unreachable by the case's `finally` in the migrated guard.
+const created = [];
 function makeFixture(prefix) {
   const root = Deno.makeTempDirSync({ prefix });
+  created.push(root);
   function git(args) {
     const out = new Deno.Command("git", {
       args,
@@ -117,10 +123,8 @@ function writeFile(root, relPath, content) {
 
 // ── working cases ───────────────────────────────────────────────────────────
 Deno.test("the touched-demo set fails closed and the real gate rejects a route-less baseline", () => {
-  const created = [];
   try {
     const f1 = makeFixture("3rg-changed-");
-    created.push(f1.root);
     writeFile(f1.root, "README.md", "fixture\n");
     writeFile(f1.root, "v1/alpha/one/index.html", "alpha\n");
     const BASE = f1.commit("base");
@@ -157,7 +161,6 @@ Deno.test("the touched-demo set fails closed and the real gate rejects a route-l
 
     // ── fail-closed cases ───────────────────────────────────────────────────────
     const f2 = makeFixture("3rg-fail-");
-    created.push(f2.root);
     writeFile(f2.root, "v1/alpha/one/index.html", "alpha\n");
     const BASE2 = f2.commit("base");
 
