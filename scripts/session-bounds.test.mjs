@@ -52,8 +52,6 @@
 
 import {
   handleLegacyReleaseEndpoints,
-  WEBAUTHN_SIGNAL_CREDENTIAL_ID_MAX_LENGTH,
-  WEBAUTHN_SIGNAL_CREDENTIAL_ID_MAX_RAW_BYTES,
   WEBAUTHN_SIGNAL_MAX_CREDENTIALS,
 } from "../routes/release-endpoints.ts";
 import { BoundedSessionStore } from "../lib/session-store.ts";
@@ -568,4 +566,70 @@ Deno.test("default store key bound is exactly 128 characters", () => {
   assert(store.get(refused) === undefined, "a 129-character key must never be retrievable");
   assert(store.has(refused) === false, "a 129-character key must report a miss");
   assert(store.size === 1, "a refused key must not occupy an entry");
+});
+
+// ---------------------------------------------------------------------------
+// The project's declared credential cap, pinned numerically (bead dty.11).
+//
+// The credential-cap case above asserts
+// `state.credentials.length === WEBAUTHN_SIGNAL_MAX_CREDENTIALS` - the SAME constant
+// the route slices with (routes/release-endpoints.ts:1076 - `unshift` then
+// `slice(0, WEBAUTHN_SIGNAL_MAX_CREDENTIALS)`) - so it pins the RELATION (capped at
+// whatever the route declares, oldest evicted, newest first) and cannot catch a wrong
+// value: 20 could become 5 or 500 and every assertion there would still pass.
+//
+// The number below is the project's own policy, stated in the comment above
+// `WEBAUTHN_SIGNAL_MAX_CREDENTIALS` as "Retained count is capped at 20 per session
+// with oldest-first eviction (beads chrome_platform_showcase-dpp and a68)". It is NOT
+// a WebAuthn specification number: the W3C WebAuthn Level 3 (5.1) citation in that
+// comment covers the 1023-byte credential-ID limit only.
+//
+// The expectation is therefore a hard-coded literal 20, deliberately NOT the imported
+// constant, so a narrowed or widened cap fails HERE instead of moving the expectation
+// with the implementation. If the policy value legitimately changes, this case must
+// fail and be updated on purpose - that is the point.
+
+Deno.test("webauthn signal retains exactly 20 credentials per session", async () => {
+  // An empty cookie mints a fresh session, exactly as the credential-cap case above
+  // does, so this case shares no state with the others.
+  let cookie = "";
+  for (let i = 0; i < 20; i++) {
+    const res = await registerWebAuthnCredential(cookie, `cap20-${i}`);
+    cookie = res.cookie;
+  }
+
+  let state = await (await callWebAuthnSession(cookie)).json();
+  assert(
+    state.credentials.length === 20,
+    `the project caps a session at 20 credentials, the route retained ${state.credentials.length}`,
+  );
+  assert(
+    state.credentials.some((c) => c.id === "cap20-0"),
+    "all 20 registrations must be retained: the oldest is only evicted PAST the cap",
+  );
+
+  // A re-registered ID does not consume a slot (the route only unshifts when the ID
+  // is not already present), so a duplicate must leave the count where it was.
+  await registerWebAuthnCredential(cookie, "cap20-19");
+  state = await (await callWebAuthnSession(cookie)).json();
+  assert(
+    state.credentials.length === 20,
+    `re-registering an existing credential must not grow the session, got ${state.credentials.length}`,
+  );
+
+  // The 21st distinct ID pins the cap from the other side: a cap of 21 would keep it.
+  await registerWebAuthnCredential(cookie, "cap20-20");
+  state = await (await callWebAuthnSession(cookie)).json();
+  assert(
+    state.credentials.length === 20,
+    `a 21st credential must be evicted, the route retained ${state.credentials.length}`,
+  );
+  assert(
+    !state.credentials.some((c) => c.id === "cap20-0"),
+    "past the cap the OLDEST credential must be the one evicted",
+  );
+  assert(
+    state.credentials[0]?.id === "cap20-20",
+    `the newest credential must be first, got ${state.credentials[0]?.id}`,
+  );
 });
