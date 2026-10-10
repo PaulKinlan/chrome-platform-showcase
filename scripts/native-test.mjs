@@ -2,8 +2,8 @@
 // Per-file native Deno.test runner (Stage 1 of the dty proposal; bead 0a0).
 //
 // One file per `deno test` process, fail-closed on zero registered tests. The
-// rule, the parse and the flat-directory rule live in scripts/lib/native-test.mjs
-// so the guard and the unit tests read the same code.
+// rule, the parse, the argument validation and the flat-directory rule live in
+// scripts/lib/native-test.mjs so the guard and the unit tests read the same code.
 //
 //   deno run --allow-read --allow-run scripts/native-test.mjs [options] <file>... [-- <child flags>]
 //
@@ -14,20 +14,29 @@
 //                       working after a suite moves to Deno.test
 //   --concurrency <n>   child processes at once (default min(2, cpus))
 //   --serial <a,b>      basenames that must run alone (browser/port/GC suites)
-//   --                  everything after this goes to the child `deno test`
+//   --timeout-ms <n>    per-file bound (default 300000; 0 disables it)
+//   --                  the rest must be child flags: permission flags,
+//                       --v8-flags=… or --no-check. They are validated, the
+//                       separator is stripped, and they are positioned before the
+//                       single file path (`deno test <flags> <file>`). Anything
+//                       else is refused, because a forwarded flag or extra path
+//                       must never change WHICH tests run (finding 2yh).
 //
 // No `--permit-no-files` is ever passed: a directory with no suite must fail, not
 // pass quietly. Nothing here widens the tests' permissions — the child gets
-// exactly the flags after `--`, and nothing when there are none.
+// exactly the validated flags, and nothing when there are none. Every child's
+// stdout/stderr is relayed exactly once, pass or fail (finding i43).
 //
-// Exit codes: 0 all files passed; 1 any file failed (128+signal when the child was
-// killed, so 137/143 stay visible in the gate); 2 misuse.
+// Exit codes: 0 all files passed; 1 any file failed; 124 a file exceeded the
+// bound; 128+signal for a killed child (so 137/143 stay visible in the gate);
+// 2 misuse.
 
 import {
   enumerateSuiteDir,
   mapWithConcurrency,
+  parseNativeTestArgs,
+  relayText,
   runNativeFile,
-  signalExitCode,
 } from "./lib/native-test.mjs";
 
 const USAGE =
@@ -36,54 +45,25 @@ const USAGE =
   --summary <label>   print the legacy "PASS — <label>" / "FAIL — <label>" line last
   --concurrency <n>   child processes at once (default min(2, cpus))
   --serial <a,b>      basenames that must run alone
-  --                  pass the rest to the child \`deno test\``;
+  --timeout-ms <n>    per-file bound (default 300000; 0 disables it)
+  --                  forwarded child flags: permission flags, --v8-flags=…, --no-check`;
 
 function usageError(message) {
   console.error(`native-test: ${message}\n\n${USAGE}`);
   Deno.exit(2);
 }
 
-const argv = [...Deno.args];
-const childFlags = [];
-const separator = argv.indexOf("--");
-if (separator !== -1) childFlags.push(...argv.splice(separator));
+const parsed = parseNativeTestArgs(Deno.args);
+if (parsed.error) usageError(parsed.error);
 
-const targets = [];
-let summaryLabel = null;
-let concurrency = null;
-const serial = new Set();
-
-while (argv.length > 0) {
-  const arg = argv.shift();
-  if (arg === "--dir") {
-    const dir = argv.shift() ?? usageError("--dir needs a path");
-    const enumerated = enumerateSuiteDir(dir);
-    if (enumerated.error) usageError(enumerated.error);
-    targets.push(...enumerated.files.map((name) => `${dir.replace(/\/+$/, "")}/${name}`));
-  } else if (arg === "--summary") {
-    summaryLabel = argv.shift() ?? usageError("--summary needs a label");
-  } else if (arg === "--concurrency") {
-    const raw = argv.shift() ?? usageError("--concurrency needs a number");
-    const value = Number(raw);
-    if (!Number.isInteger(value) || value < 1) {
-      usageError(`--concurrency must be a positive integer, got ${raw}`);
-    }
-    concurrency = value;
-  } else if (arg === "--serial") {
-    for (const name of (argv.shift() ?? usageError("--serial needs a comma list")).split(",")) {
-      if (name.trim().length > 0) serial.add(name.trim());
-    }
-  } else if (arg === "--") {
-    childFlags.push(...argv.splice(argv.length));
-  } else if (arg.startsWith("-")) {
-    usageError(`unknown option ${arg}`);
-  } else {
-    targets.push(arg);
-  }
+const targets = [...parsed.files];
+for (const dir of parsed.dirs) {
+  const enumerated = enumerateSuiteDir(dir);
+  if (enumerated.error) usageError(enumerated.error);
+  targets.push(...enumerated.files.map((name) => `${dir.replace(/\/+$/, "")}/${name}`));
 }
 
-if (targets.length === 0) usageError("no target: pass a file, or --dir <path>");
-if (targets.length > 1 && (summaryLabel != null || serial.size > 0)) {
+if (targets.length > 1 && (parsed.summaryLabel != null || parsed.serial.length > 0)) {
   usageError(
     "--summary and --serial are for a single target; a multi-file run aggregates its own result",
   );
@@ -91,18 +71,25 @@ if (targets.length > 1 && (summaryLabel != null || serial.size > 0)) {
 
 const unique = [...new Set(targets)];
 const cpus = globalThis.navigator?.hardwareConcurrency ?? 2;
-const limit = concurrency ?? Math.max(1, Math.min(2, cpus));
-const serialTargets = unique.filter((file) => serial.has(file.split("/").pop()));
-const parallelTargets = unique.filter((file) => !serial.has(file.split("/").pop()));
+const limit = parsed.concurrency ?? Math.max(1, Math.min(2, cpus));
+const serialNames = new Set(parsed.serial);
+const serialTargets = unique.filter((file) => serialNames.has(file.split("/").pop()));
+const parallelTargets = unique.filter((file) => !serialNames.has(file.split("/").pop()));
 
 const runOne = async (file) => {
-  const result = await runNativeFile({ file, childFlags });
+  const result = await runNativeFile({
+    file,
+    childFlags: parsed.childFlags,
+    timeoutMs: parsed.timeoutMs,
+  });
+  // Relay the child's report exactly once — its per-test names are the point of
+  // migrating a suite, so they are shown for passing runs too.
+  if (relayText(result).length > 0) console.log(relayText(result));
   const reported = result.parsed.ok ? `${result.parsed.tests} test(s)` : "unparsed report";
   console.log(
     `native-test: ${result.ok ? "ok" : "FAIL"} — ${file} (${reported}, ${result.elapsedMs}ms)` +
       (result.ok ? "" : `: ${result.reason}`),
   );
-  if (!result.ok && result.output.trim().length > 0) console.error(result.output.trimEnd());
   return result;
 };
 
@@ -123,15 +110,17 @@ console.log(
   `native-test: ${results.length} file(s), ${tests} test(s), ` +
     `${failed.length} failing file(s), slowest ${slowest?.elapsedMs ?? 0}ms`,
 );
-if (summaryLabel != null) {
+if (parsed.summaryLabel != null) {
   console.log(
     failed.length === 0
-      ? `PASS — ${summaryLabel}`
-      : `FAIL — ${summaryLabel} (${failed.length} file(s) failed)`,
+      ? `PASS — ${parsed.summaryLabel}`
+      : `FAIL — ${parsed.summaryLabel} (${failed.length} file(s) failed)`,
   );
 }
 
 if (failed.length > 0) {
+  // 124 (bounded) wins over a plain failure, then a signal code, then 1.
+  if (failed.some((result) => result.code === 124)) Deno.exit(124);
   const signalCode = failed.map((result) => result.code).find((code) => code != null && code > 128);
   Deno.exit(signalCode ?? 1);
 }

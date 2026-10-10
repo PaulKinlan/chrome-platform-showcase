@@ -131,31 +131,196 @@ export function signalExitCode(signal) {
   return number == null ? null : 128 + number;
 }
 
+/** Default per-file bound: a hung child must fail the step, not hang the gate. */
+export const DEFAULT_TIMEOUT_MS = 300_000;
+
+// Child flags are an allowlist, not "whatever the caller typed" (finding 2yh).
+// Permission flags adjust the child deliberately, --v8-flags carries the GC suites'
+// --expose-gc, and --no-check only skips type-checking. Everything else is refused,
+// because flags like --permit-no-files, --filter or a second path change WHICH tests
+// run — the one thing this runner must control for the >=1-test rule to mean anything.
+const ALLOWED_CHILD_FLAG =
+  /^--(?:allow-(?:read|write|net|env|run|ffi|sys|hrtime)|deny-(?:read|write|net|env|run|ffi|sys|hrtime)|v8-flags|no-check)(?:=.*)?$/;
+
+/** Validate one forwarded child flag; returns null when it is acceptable. */
+export function childFlagError(flag) {
+  if (flag === "--") {
+    return "the `--` separator is not forwarded to the child: flags are positioned before the single file path";
+  }
+  if (ALLOWED_CHILD_FLAG.test(flag)) return null;
+  return `refused child flag ${
+    JSON.stringify(flag)
+  } — only permission flags, --v8-flags and --no-check are forwarded, ` +
+    "so a forwarded flag can never change which tests run";
+}
+
+/**
+ * Parse the runner's own argv (pure, so a regression test can pin the 2yh shape).
+ *
+ * Returns `{ files, dirs, childFlags, summaryLabel, concurrency, serial, timeoutMs }`
+ * or `{ error }`. Everything after `--` is a candidate child flag, the separator
+ * itself is stripped, and every candidate must pass the allowlist, so the child is
+ * always invoked as `deno test <validated flags> <exactly one file>`. A positional
+ * target must be a `*.test.mjs` file: anything else is refused rather than handed
+ * to Deno, which would discover the whole repository (the reported 37-suite run).
+ */
+export function parseNativeTestArgs(argv) {
+  const rest = [...argv];
+  const files = [];
+  const dirs = [];
+  const childFlags = [];
+  const serial = [];
+  let summaryLabel = null;
+  let concurrency = null;
+  let timeoutMs = DEFAULT_TIMEOUT_MS;
+
+  const take = (
+    name,
+  ) => (rest.length === 0 ? { error: `${name} needs a value` } : { value: rest.shift() });
+
+  while (rest.length > 0) {
+    const arg = rest.shift();
+    if (arg === "--") {
+      // Everything after the separator is a child flag, except a *.test.mjs path,
+      // which is a target. Both orders (`<file> -- <flags>` and
+      // `-- <flags> <file>`) therefore give the child validated flags and exactly
+      // one file path, and a non-suite path is still refused as a flag.
+      for (const restArg of rest.splice(0, rest.length)) {
+        if (restArg.endsWith(".test.mjs")) {
+          files.push(restArg);
+          continue;
+        }
+        const error = childFlagError(restArg);
+        if (error) return { error };
+        childFlags.push(restArg);
+      }
+    } else if (arg === "--dir") {
+      const taken = take("--dir");
+      if (taken.error) return { error: taken.error };
+      dirs.push(taken.value);
+    } else if (arg === "--summary") {
+      const taken = take("--summary");
+      if (taken.error) return { error: taken.error };
+      summaryLabel = taken.value;
+    } else if (arg === "--concurrency") {
+      const taken = take("--concurrency");
+      if (taken.error) return { error: taken.error };
+      const value = Number(taken.value);
+      if (!Number.isInteger(value) || value < 1) {
+        return { error: `--concurrency must be a positive integer, got ${taken.value}` };
+      }
+      concurrency = value;
+    } else if (arg === "--timeout-ms") {
+      const taken = take("--timeout-ms");
+      if (taken.error) return { error: taken.error };
+      const value = Number(taken.value);
+      if (!Number.isInteger(value) || value < 0) {
+        return {
+          error:
+            `--timeout-ms must be a non-negative integer (0 disables the bound), got ${taken.value}`,
+        };
+      }
+      timeoutMs = value;
+    } else if (arg === "--serial") {
+      const taken = take("--serial");
+      if (taken.error) return { error: taken.error };
+      for (const name of taken.value.split(",")) {
+        if (name.trim().length > 0) serial.push(name.trim());
+      }
+    } else if (arg.startsWith("-")) {
+      return { error: `unknown option ${arg}` };
+    } else if (arg.endsWith(".test.mjs")) {
+      files.push(arg);
+    } else {
+      return {
+        error:
+          `refused target ${JSON.stringify(arg)} — a target must be a single *.test.mjs file ` +
+          "(or a directory through --dir), so the runner can never start a repo-wide discovery",
+      };
+    }
+  }
+
+  if (files.length === 0 && dirs.length === 0) {
+    return { error: "no target: pass a file, or --dir <path>" };
+  }
+  return { files, dirs, childFlags, summaryLabel, concurrency, serial, timeoutMs };
+}
+
+/**
+ * The text of a child's report to relay — always, and exactly once (finding i43).
+ * Relaying only on failure hid the per-test names of a passing run, which is the
+ * main reason a suite was migrated to native tests at all.
+ */
+export function relayText(result) {
+  return result.output.trimEnd();
+}
+
+/**
+ * The exact child invocation: validated flags first, then exactly one file path.
+ * Exported and used by the runner so the 2yh shape is pinned by a test, not just by
+ * a comment — a `--` separator or a stray path here is what made Deno discover the
+ * whole repository instead of the one target file.
+ */
+export function childArgs(file, childFlags) {
+  return ["test", ...childFlags, file];
+}
+
 /**
  * Run one file in its own `deno test` process with exactly `childFlags`.
  *
  * Returns `{ file, ok, code, reason, output, parsed }`. `ok` is true only when the
- * child exited 0 and its own summary reported at least one executed test.
+ * child exited 0 and its own summary reported at least one executed test. A child
+ * that outlives `timeoutMs` is killed and reported as code 124 (the fleet's "the
+ * bound killed it" code).
  */
-export async function runNativeFile({ file, childFlags = [], denoPath = Deno.execPath() }) {
+export async function runNativeFile(
+  { file, childFlags = [], denoPath = Deno.execPath(), timeoutMs = DEFAULT_TIMEOUT_MS },
+) {
   const started = performance.now();
+  // Flags first, exactly one file path last: `deno test <flags> <file>`.
+  const args = childArgs(file, childFlags);
   const command = new Deno.Command(denoPath, {
-    args: ["test", ...childFlags, file],
+    args,
     stdout: "piped",
     stderr: "piped",
   });
-  const result = await command.output();
-  const decoder = new TextDecoder();
-  const stdout = decoder.decode(result.stdout);
-  const stderr = decoder.decode(result.stderr);
+  const child = command.spawn();
+  let timedOut = false;
+  const timer = timeoutMs > 0
+    ? setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Already exited; the status below is authoritative.
+      }
+    }, timeoutMs)
+    : null;
+  const [status, stdout, stderr] = await Promise.all([
+    child.status,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  if (timer !== null) clearTimeout(timer);
   const output = stdout + (stderr.length > 0 ? (stdout.endsWith("\n") ? "" : "\n") + stderr : "");
   const elapsedMs = Math.round(performance.now() - started);
   // stdout only: that is where the reporter writes its summary, and parsing a
   // single stream keeps a suite's stderr chatter from being mistaken for one.
   const parsed = parseReporterSummary(stdout);
-  const signalCode = result.signal ? signalExitCode(result.signal) : null;
+  const signalCode = status.signal ? signalExitCode(status.signal) : null;
 
-  if (result.signal) {
+  if (timedOut) {
+    return {
+      file,
+      ok: false,
+      code: 124,
+      elapsedMs,
+      output,
+      parsed,
+      reason: `the test process exceeded the ${timeoutMs}ms bound and was killed`,
+    };
+  }
+  if (status.signal) {
     return {
       file,
       ok: false,
@@ -163,20 +328,20 @@ export async function runNativeFile({ file, childFlags = [], denoPath = Deno.exe
       elapsedMs,
       output,
       parsed,
-      reason: `the test process was killed by ${result.signal}`,
+      reason: `the test process was killed by ${status.signal}`,
     };
   }
-  if (result.code !== 0) {
+  if (status.code !== 0) {
     return {
       file,
       ok: false,
-      code: result.code,
+      code: status.code,
       elapsedMs,
       output,
       parsed,
       reason: parsed.ok
-        ? `the test process exited ${result.code} (${parsed.passed} passed, ${parsed.failed} failed)`
-        : `the test process exited ${result.code}`,
+        ? `the test process exited ${status.code} (${parsed.passed} passed, ${parsed.failed} failed)`
+        : `the test process exited ${status.code}`,
     };
   }
   if (!parsed.ok) {

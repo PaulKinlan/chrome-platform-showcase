@@ -566,13 +566,16 @@ gate by hand (see AGENTS.md).
 `deno task test:unit` runs `scripts/native-test.mjs --dir tests/unit` — the opt-in Stage 0/1 native
 `Deno.test` pilot (beads 9th, 0a0, from dty). It runs one file per `deno test` process, fails a file
 that registers no tests (a 0-test file exits 0 under `deno test`), refuses nested dirs and symlinks,
-and grants the test processes **no** permissions. It is **not** a step of `deno task check`, not
-wired into CI, and does not change the fleet `CHECK_CMD`; the suites are not migrated and a green
-pilot is not migration progress. `scripts/conformance-runner.test.mjs` is the first suite migrated
-in place (same task id and gate step, legacy final `PASS — …` line preserved through the runner).
-Three assertions in `scripts/gate-parity.test.mjs` pin the pilot's dir (flat: only regular
-`*.test.mjs` files) and runner, and any change under `tests/**` selects the full gate (see
-AGENTS.md).
+relays each child's report exactly once (per-test names included on success), validates forwarded
+child flags and positions them before exactly one file path, bounds each child (`--timeout-ms`,
+default 300000, exit 124 when exceeded), and grants the test processes **no** permissions. It is
+**not** a step of `deno task check`, not wired into CI, and does not change the fleet `CHECK_CMD`;
+the suites are not migrated and a green pilot is not migration progress.
+`scripts/conformance-runner.test.mjs` is the first suite migrated in place (same task id and gate
+step, legacy final `PASS — …` line preserved through the runner), and `deno task test:harness` runs
+the off-plan end-to-end regression for the runner itself. Three assertions in
+`scripts/gate-parity.test.mjs` pin the pilot's dir (flat: only regular `*.test.mjs` files) and
+runner, and any change under `tests/**` selects the full gate (see AGENTS.md).
 
 For demo changes and bug fixes, also verify with `chrome-devtools-mcp`:
 

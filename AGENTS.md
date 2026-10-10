@@ -90,6 +90,20 @@ into subdirectories and can follow a symlink, so nested content has to be refuse
 matched) — and the task string is exactly the runner invocation. A change under `tests/**` is
 unmatched by `scripts/affected-tests.mjs`, so it selects the **full** gate.
 
+The runner enforces three more things that a bare `deno test` call could not: every child's report
+is **relayed exactly once** (a passing run shows its per-test names, not just its summary),
+forwarded child flags are **validated against an allowlist** (permission flags, `--v8-flags`,
+`--no-check`) and positioned **before exactly one file path**, so a forwarded flag or an extra path
+can never change which tests run — a `--` separator or a directory handed to `deno test` used to
+discover the whole repository instead of the target — and each child has a **per-file bound**
+(`--timeout-ms`, default 300000; a file that exceeds it is killed and the run exits 124).
+
+The end-to-end regression for all of that is `deno task test:harness`
+(`tests/integration/native-test-harness.mjs`): it is a plain assert-and-exit script, not a
+`*.test.mjs` module, precisely because it must spawn processes and write fixtures — the same shape
+as `test-font-loading`. Like the pilot it is opt-in and **off the gate plan**; the merger's full
+gate and the CI do not run it.
+
 #### Migrating a suite in place (Stage 1)
 
 `scripts/conformance-runner.test.mjs` is the first suite migrated in place (bead 0a0): same file

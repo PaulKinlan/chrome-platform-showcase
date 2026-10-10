@@ -13,10 +13,140 @@
 import assert from "node:assert/strict";
 
 import {
+  childArgs,
+  childFlagError,
   classifySuiteEntries,
+  DEFAULT_TIMEOUT_MS,
+  parseNativeTestArgs,
   parseReporterSummary,
+  relayText,
   signalExitCode,
 } from "../../scripts/lib/native-test.mjs";
+
+Deno.test("the child invocation is validated flags then exactly one file (finding 2yh)", async (t) => {
+  await t.step("a `--` separator is stripped, never forwarded", () => {
+    const parsed = parseNativeTestArgs(["scripts/x.test.mjs", "--", "--allow-read"]);
+    assert.equal(parsed.error, undefined);
+    assert.equal(parsed.childFlags.includes("--"), false, "the separator must not reach deno test");
+    assert.deepEqual(parsed.childFlags, ["--allow-read"]);
+    assert.deepEqual(childArgs("scripts/x.test.mjs", parsed.childFlags), [
+      "test",
+      "--allow-read",
+      "scripts/x.test.mjs",
+    ]);
+  });
+
+  await t.step("the old shape handed deno paths that were not the target", () => {
+    // The counterexample, pinned: with the separator kept, `--` ends flag parsing
+    // and what follows is read as paths, so `deno test` discovered the repository
+    // (measured: 37 suites, 22 failures) instead of the one file.
+    const broken = childArgs("scripts/x.test.mjs", ["--", "--allow-read", "scripts/x.test.mjs"]);
+    assert.notDeepEqual(broken, ["test", "--allow-read", "scripts/x.test.mjs"]);
+    assert.deepEqual(broken.slice(0, 2), ["test", "--"]);
+  });
+
+  await t.step(
+    "flags may come before or after the target, and the child still gets one file",
+    () => {
+      for (
+        const argv of [
+          ["scripts/x.test.mjs", "--", "--allow-read"],
+          ["--", "--allow-read", "scripts/x.test.mjs"],
+          ["scripts/x.test.mjs", "--", "--v8-flags=--expose-gc", "--allow-read"],
+        ]
+      ) {
+        const parsed = parseNativeTestArgs(argv);
+        assert.equal(parsed.error, undefined, `argv ${JSON.stringify(argv)}`);
+        assert.deepEqual(parsed.files, ["scripts/x.test.mjs"]);
+        const args = childArgs(parsed.files[0], parsed.childFlags);
+        assert.equal(args.filter((argument) => argument.endsWith(".test.mjs")).length, 1);
+        assert.equal(args.includes("--"), false);
+      }
+    },
+  );
+
+  await t.step("only permission, v8-flags and no-check flags are forwarded", () => {
+    for (
+      const flag of [
+        "--allow-read",
+        "--allow-run=deno",
+        "--deny-net",
+        "--v8-flags=--expose-gc",
+        "--no-check",
+      ]
+    ) {
+      assert.equal(childFlagError(flag), null, flag);
+    }
+    for (
+      const flag of [
+        "--",
+        "--permit-no-files",
+        "--filter=x",
+        "-A",
+        "--allow-all",
+        "scripts/y.test.mjs",
+      ]
+    ) {
+      assert.notEqual(childFlagError(flag), null, `${flag} must be refused`);
+    }
+    // --allow-all is refused on purpose: one deliberate flag per privilege keeps a
+    // child's privileges reviewable.
+    assert.match(
+      parseNativeTestArgs(["scripts/x.test.mjs", "--", "--permit-no-files"]).error,
+      /refused child flag/,
+    );
+  });
+
+  await t.step(
+    "a target that is not a *.test.mjs file is refused, so discovery cannot start",
+    () => {
+      assert.match(parseNativeTestArgs(["."]).error, /refused target/);
+      assert.match(parseNativeTestArgs(["scripts"]).error, /refused target/);
+      assert.match(
+        parseNativeTestArgs(["scripts/conformance-runner.test.mjs", "scripts/check-routes.mjs"])
+          .error,
+        /refused target/,
+      );
+      assert.match(parseNativeTestArgs([]).error, /no target/);
+    },
+  );
+
+  await t.step("the per-file bound defaults to a real bound and can be set or disabled", () => {
+    assert.equal(parseNativeTestArgs(["scripts/x.test.mjs"]).timeoutMs, DEFAULT_TIMEOUT_MS);
+    assert.equal(
+      parseNativeTestArgs(["scripts/x.test.mjs", "--timeout-ms", "1500"]).timeoutMs,
+      1500,
+    );
+    assert.equal(parseNativeTestArgs(["scripts/x.test.mjs", "--timeout-ms", "0"]).timeoutMs, 0);
+    assert.match(
+      parseNativeTestArgs(["scripts/x.test.mjs", "--timeout-ms", "-5"]).error,
+      /non-negative/,
+    );
+  });
+
+  await t.step("--dir is collected, and unknown options are refused", () => {
+    const parsed = parseNativeTestArgs(["--dir", "tests/unit", "--", "--allow-read"]);
+    assert.deepEqual(parsed.dirs, ["tests/unit"]);
+    assert.deepEqual(parsed.childFlags, ["--allow-read"]);
+    assert.match(parseNativeTestArgs(["--nope"]).error, /unknown option/);
+  });
+});
+
+Deno.test("the child's report is relayed whether it passed or failed (finding i43)", async (t) => {
+  await t.step("a passing run's per-test names are relayed", () => {
+    const relay = relayText({
+      ok: true,
+      output: "./x.test.mjs => ok — named case ... ok (1ms)\nok | 1 passed | 0 failed (5ms)\n",
+    });
+    assert.match(relay, /named case/, "a green run must still show its test names");
+    assert.equal(relay.endsWith("\n"), false, "relayed once, trimmed");
+  });
+
+  await t.step("a failing run's output is relayed too, and empty output relays nothing", () => {
+    assert.match(relayText({ ok: false, output: "error: boom\n" }), /boom/);
+    assert.equal(relayText({ ok: true, output: "" }), "");
+  });
+});
 
 Deno.test("parseReporterSummary reads a real Deno summary", async (t) => {
   await t.step("passing run with steps", () => {
