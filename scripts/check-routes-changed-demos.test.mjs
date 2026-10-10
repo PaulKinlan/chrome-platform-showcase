@@ -15,10 +15,15 @@
 //   - a git failure throws TouchedSetError naming the ref and what git said, so
 //     "git could not answer" can never read as "nothing was touched".
 //
+// It also runs the REAL gate against a local clone, because the fixture repos
+// below are too small to reach the baseline stage: that is where the gate's own
+// policy for an unusable baseline is pinned (bead chrome_platform_showcase-jj7).
+//
 // Run: deno task test-check-routes-changed-demos
 
 import { join } from "node:path";
 import { changedFeatureIds, TouchedSetError } from "./lib/support.mjs";
+import { REPO_ROOT } from "./lib/manifest.mjs";
 
 const failures = [];
 function check(label, fn) {
@@ -163,6 +168,81 @@ check("the helper still answers in the real repository", () => {
   const ids = changedFeatureIds("HEAD");
   assert(ids instanceof Set, `expected a Set, got ${typeof ids}`);
 });
+
+// ── the gate's own policy for a resolved-but-route-less baseline (jj7) ─────
+// A local clone of this worktree, so the gate under test is THIS branch's
+// check-routes.mjs, and origin/main can be repointed at an immovable route-less
+// commit (the repository root) without touching the shared refs of the real
+// checkout.
+function cloneGit(cwd, args) {
+  const out = new Deno.Command("git", {
+    args: ["-C", cwd, ...args],
+    stdout: "piped",
+    stderr: "piped",
+  }).outputSync();
+  return {
+    code: out.code,
+    stdout: new TextDecoder().decode(out.stdout).trim(),
+    stderr: new TextDecoder().decode(out.stderr).trim(),
+  };
+}
+function runRealGate(cwd) {
+  const out = new Deno.Command("deno", {
+    args: ["run", "--allow-read", "--allow-run", "--allow-env", "scripts/check-routes.mjs"],
+    cwd,
+    stdout: "piped",
+    stderr: "piped",
+  }).outputSync();
+  const strip = (b) => new TextDecoder().decode(b).replace(/\x1b\[[0-9;]*m/g, "");
+  return { code: out.code, text: strip(out.stdout) + strip(out.stderr) };
+}
+const gateClone = Deno.makeTempDirSync({ prefix: "3rg-gate-" });
+const clone = cloneGit("/tmp", ["clone", "--quiet", "--local", REPO_ROOT, gateClone]);
+assert(clone.code === 0, `git clone failed: ${clone.stderr}`);
+// A clone carries COMMITTED state; copy the file under test so this suite
+// validates the working tree (committed or not) rather than whatever HEAD holds.
+Deno.copyFileSync(
+  join(REPO_ROOT, "scripts/check-routes.mjs"),
+  join(gateClone, "scripts/check-routes.mjs"),
+);
+const realMain = cloneGit(gateClone, ["rev-parse", "refs/remotes/origin/main"]).stdout;
+const routeLess = cloneGit(gateClone, ["rev-list", "--max-parents=0", "HEAD"]).stdout.split("\n")
+  .pop();
+
+check("a normal baseline still gates normally (control)", () => {
+  const res = runRealGate(gateClone);
+  assert(
+    !/resolves but its tree contains no published routes/.test(res.text),
+    "the route-less diagnostic fired on a normal baseline",
+  );
+  assert(res.code === 0, `expected a clean gate, got exit ${res.code}: ${res.text.slice(-400)}`);
+});
+
+check("a ref that resolves but publishes no routes FAILS CLOSED with one diagnostic", () => {
+  assert(
+    cloneGit(gateClone, ["update-ref", "refs/remotes/origin/main", routeLess]).code === 0,
+    "could not repoint origin/main in the clone",
+  );
+  const res = runRealGate(gateClone);
+  assert(res.code === 1, `expected exit 1, got ${res.code}`);
+  assert(
+    /resolves but its tree contains no published routes/.test(res.text),
+    "missing the actionable diagnostic",
+  );
+  assert(/FAIL: 1 contract violation\(s\)/.test(res.text), "should be exactly one violation");
+  assert(!/touched demo left/.test(res.text), "must not charge one violation per demo any more");
+  assert(/git fetch --unshallow/.test(res.text), "the diagnostic should say how to fix it");
+});
+
+check("the same clone with a real baseline is clean again (control)", () => {
+  assert(
+    cloneGit(gateClone, ["update-ref", "refs/remotes/origin/main", realMain]).code === 0,
+    "could not restore origin/main in the clone",
+  );
+  const res = runRealGate(gateClone);
+  assert(res.code === 0, `expected a clean gate after restoring the baseline, got ${res.code}`);
+});
+Deno.removeSync(gateClone, { recursive: true });
 
 Deno.removeSync(f1.root, { recursive: true });
 Deno.removeSync(f2.root, { recursive: true });
