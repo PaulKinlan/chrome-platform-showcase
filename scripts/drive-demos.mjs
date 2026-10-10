@@ -16,7 +16,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
+import { cdpConnection, launchChrome, teardownChrome } from "./lib/cdp.mjs";
 import {
   classifyDriveEffect,
   describeActions,
@@ -40,193 +40,108 @@ import {
   trackBootChild,
 } from "./lib/server-boot.mjs";
 
-const args = [...Deno.args];
-function flag(name, fallback = null) {
-  const at = args.indexOf(name);
-  if (at < 0) return fallback;
-  const value = args[at + 1];
-  args.splice(at, 2);
-  return value;
-}
-function boolFlag(name) {
-  const at = args.indexOf(name);
-  if (at < 0) return false;
-  args.splice(at, 1);
-  return true;
-}
-
-const noServer = boolFlag("--no-server");
-let base = flag("--base");
-const milestone = flag("--milestone");
-const feature = flag("--feature");
-const targetUrl = flag("--url");
-const sampleN = Number(flag("--sample") ?? 0);
-const limitN = Number(flag("--limit") ?? 0);
-const outDir = flag("--out", join(REPO_ROOT, "reports/interactive-proof"));
-const positional = args.find((a) => !a.startsWith("--"));
-
-// ── Select test targets ───────────────────────────────────────────────────────
-let specCases = null;
-let targets = [];
-
-if (
-  positional && (positional.endsWith(".mjs") || positional.endsWith(".js")) &&
-  existsSync(positional)
-) {
-  const specPath = positional.startsWith("/") ? positional : `${Deno.cwd()}/${positional}`;
-  const imported = await import(`file://${specPath}`);
-  specCases = imported.cases ?? [];
-} else if (targetUrl) {
-  targets = [{
-    url: targetUrl.startsWith("/") ? targetUrl : `/${targetUrl}/`,
-    name: targetUrl,
-    slug: targetUrl.replace(/^\/+|\/+$/g, "").replace(/\//g, "--"),
-  }];
-} else {
-  const manifest = buildFromDisk().filter((m) => m.status === "built");
-  let features = manifest;
-  if (feature) {
-    features = manifest.filter((m) => m.id === feature || m.id.endsWith(feature));
-  } else if (milestone) {
-    features = manifest.filter((m) => m.id.startsWith(`${milestone}/`));
-  }
-
-  // Flatten into concept targets
-  const allConcepts = [];
-  for (const f of features) {
-    for (const c of f.concepts) {
-      allConcepts.push({
-        url: `/${f.id}/${c}/`,
-        name: `${f.id}/${c}`,
-        slug: `${f.id.replace(/\//g, "--")}--${c}`,
-        featureId: f.id,
-        concept: c,
-      });
-    }
-  }
-
-  if (sampleN > 0 && allConcepts.length > 0) {
-    const step = Math.max(1, Math.floor(allConcepts.length / sampleN));
-    targets = allConcepts.filter((_, i) => i % step === 0).slice(0, sampleN);
-  } else if (allConcepts.length > 0) {
-    targets = allConcepts;
-  }
-
-  if (limitN > 0) {
-    targets = targets.slice(0, limitN);
-  }
-}
-
-if (!specCases && targets.length === 0) {
-  console.error(
-    "No targets found. Specify a spec file, --milestone, --feature, --url, or --sample.",
-  );
-  Deno.exit(2);
-}
-
-// ── Server lifecycle ─────────────────────────────────────────────────────────
-let serverChild = null;
-
-function spawnServer(port) {
-  serverChild = new Deno.Command("deno", {
-    args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
-    env: { PORT: String(port) },
-    // Captured rather than discarded: the child's own output is the only thing
-    // that can explain a failed boot, and a full pipe would block it.
-    stdout: "piped",
-    stderr: "piped",
-  }).spawn();
-  return trackBootChild(serverChild);
-}
-
-function killServerChild() {
-  if (!serverChild) return;
-  try {
-    serverChild.kill("SIGKILL");
-  } catch {
-    // already gone
-  }
-  serverChild = null;
-}
-
-// Poll until the CHILD reports it is listening and answers, or the bound elapses.
+// ── Stage 2 of bead chrome_platform_showcase-3gt (bead pka) ──────────────────
+// This file is import-safe. Everything that touches a browser, a server, the
+// network or the filesystem lives inside `main(deps)` / `runDrive`; importing the
+// module registers and does nothing, so a Chrome-free test can drive the REAL
+// caller through `main` with injected phases. The command line is unchanged:
+// same flags, same defaults, same report paths and write order.
 //
-// Readiness is decided by `assessReadiness` and is fail-closed: it requires the
-// child's own "Listening on http://localhost:<port>" line, so a process that took
-// the port after the preflight — the window between the preflight and the bind —
-// can never be accepted as the server. A child that has exited is never ready
-// even if the port answers. Accepting a stranger silently was the worst failure
-// this code had: the driver drove the wrong server and reported ordinary-looking
-// statuses with exit 0.
-async function awaitServerReady(port) {
-  const boot = spawnServer(port);
-  const startedAt = Date.now();
-  const failed = (kind) => ({
-    ok: false,
-    kind,
-    exitCode: boot.exit.code,
-    stderrTail: boot.tails.stderr,
-    stdoutTail: boot.tails.stdout,
-    waitedMs: Date.now() - startedAt,
-  });
-  for (let i = 0; i < BOOT_POLL_ATTEMPTS; i++) {
-    let httpAnswered = false;
-    try {
-      const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(1000) });
-      await r.body?.cancel();
-      httpAnswered = true;
-    } catch {
-      // not up yet
-    }
-    const verdict = assessReadiness({
-      httpAnswered,
-      childExited: boot.exit.exited,
-      listeningReported: serverReportsListening(boot.tails.stdout, port),
-      waitedMs: Date.now() - startedAt,
-      boundMs: BOOT_READY_BOUND_MS,
-    });
-    if (verdict === READINESS.READY) return { ok: true };
-    if (verdict !== READINESS.WAIT) return failed(verdict);
-    await new Promise((r) => setTimeout(r, BOOT_POLL_MS));
+// The target-validation `Deno.exit(2)` that used to run at module scope now runs
+// inside `main`, BEFORE any acquisition. Cleanup is the same sequence as the old
+// run-level finally - connection, Chrome profile, server child - but it is
+// captured rather than thrown, so it can never replace the run's own error, and
+// every artefact that can be written is still written. An unconfirmed cleanup or
+// report write prints a NAMED line and exits non-zero even when every assertion
+// passed; a failure in the drive phase is rethrown with its identity intact.
+
+// Pure argv parsing: no IO, no exit, no module state.
+export function parseArgs(argv) {
+  const args = [...argv];
+  function flag(name, fallback = null) {
+    const at = args.indexOf(name);
+    if (at < 0) return fallback;
+    const value = args[at + 1];
+    args.splice(at, 2);
+    return value;
   }
-  return failed(
-    assessReadiness({
-      childExited: boot.exit.exited,
-      waitedMs: BOOT_READY_BOUND_MS,
-      boundMs: BOOT_READY_BOUND_MS,
-    }),
-  );
+  function boolFlag(name) {
+    const at = args.indexOf(name);
+    if (at < 0) return false;
+    args.splice(at, 1);
+    return true;
+  }
+
+  const noServer = boolFlag("--no-server");
+  const base = flag("--base");
+  const milestone = flag("--milestone");
+  const feature = flag("--feature");
+  const targetUrl = flag("--url");
+  const sampleN = Number(flag("--sample") ?? 0);
+  const limitN = Number(flag("--limit") ?? 0);
+  const outDir = flag("--out", join(REPO_ROOT, "reports/interactive-proof"));
+  const positional = args.find((a) => !a.startsWith("--"));
+  return { noServer, base, milestone, feature, targetUrl, sampleN, limitN, outDir, positional };
 }
 
-async function bootServer() {
-  if (noServer) {
-    base = base ?? "http://localhost:3000";
-    return;
-  }
-  const pinnedPort = base ? Number(new URL(base).port) || 3000 : null;
-  const attempts = pinnedPort ? 1 : BOOT_MAX_PORT_ATTEMPTS;
-  const failures = [];
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    const port = pinnedPort ?? 3800 + Math.floor(Math.random() * 400);
-    // Never spawn onto a port that already accepts connections.
-    if (await portIsTaken(port)) {
-      const message = describeBootFailure({ port, kind: "port-in-use" });
-      failures.push(message);
-      if (pinnedPort) throw new Error(message);
-      continue;
+// Target selection, split out of the old module scope so importing this file
+// cannot pick targets, read the manifest or exit. It reads; it does not exit -
+// the empty-selection failure is the caller's decision.
+async function selectTargets(opts) {
+  const { milestone, feature, targetUrl, sampleN, limitN, positional } = opts;
+  // ── Select test targets ───────────────────────────────────────────────────────
+  let specCases = null;
+  let targets = [];
+
+  if (
+    positional && (positional.endsWith(".mjs") || positional.endsWith(".js")) &&
+    existsSync(positional)
+  ) {
+    const specPath = positional.startsWith("/") ? positional : `${Deno.cwd()}/${positional}`;
+    const imported = await import(`file://${specPath}`);
+    specCases = imported.cases ?? [];
+  } else if (targetUrl) {
+    targets = [{
+      url: targetUrl.startsWith("/") ? targetUrl : `/${targetUrl}/`,
+      name: targetUrl,
+      slug: targetUrl.replace(/^\/+|\/+$/g, "").replace(/\//g, "--"),
+    }];
+  } else {
+    const manifest = buildFromDisk().filter((m) => m.status === "built");
+    let features = manifest;
+    if (feature) {
+      features = manifest.filter((m) => m.id === feature || m.id.endsWith(feature));
+    } else if (milestone) {
+      features = manifest.filter((m) => m.id.startsWith(`${milestone}/`));
     }
-    base = `http://localhost:${port}`;
-    const outcome = await awaitServerReady(port);
-    if (outcome.ok) return;
-    killServerChild();
-    const message = describeBootFailure({ port, ...outcome });
-    failures.push(message);
-    // A crash or a 10-second silent boot is not going to be fixed by another
-    // random port; only a takeover between the check above and the bind is worth
-    // retrying, and that shows up as the child exiting at once.
-    if (pinnedPort || outcome.kind === "timeout") throw new Error(message);
+
+    // Flatten into concept targets
+    const allConcepts = [];
+    for (const f of features) {
+      for (const c of f.concepts) {
+        allConcepts.push({
+          url: `/${f.id}/${c}/`,
+          name: `${f.id}/${c}`,
+          slug: `${f.id.replace(/\//g, "--")}--${c}`,
+          featureId: f.id,
+          concept: c,
+        });
+      }
+    }
+
+    if (sampleN > 0 && allConcepts.length > 0) {
+      const step = Math.max(1, Math.floor(allConcepts.length / sampleN));
+      targets = allConcepts.filter((_, i) => i % step === 0).slice(0, sampleN);
+    } else if (allConcepts.length > 0) {
+      targets = allConcepts;
+    }
+
+    if (limitN > 0) {
+      targets = targets.slice(0, limitN);
+    }
   }
-  throw new Error(`could not start the local server:\n- ${failures.join("\n- ")}`);
+
+  return { specCases, targets };
 }
 
 // ── Screenshot settle and pair hashing ──────────────────────────────────────
@@ -403,23 +318,139 @@ const IN_PAGE_DRIVER = `(async () => {
 // ./lib/drive-effect.mjs, where the test can assert that a visual-only effect is
 // not counted as a pass.
 
-// ── Main Execution ──────────────────────────────────────────────────────────
-await bootServer();
-console.log(`Server ready at ${base}`);
+// The browser/server phase: boot or reuse the local server, launch Chrome,
+// drive every selected demo and return the counters the report needs. Its
+// resource handles are published into `holder` the moment they exist, so the
+// caller can still clean up when this throws halfway through.
+async function runDrive(opts, io, holder, selection) {
+  const { noServer, outDir } = opts;
+  let base = opts.base;
+  const { log, error } = io;
+  const { specCases, targets } = selection;
 
-let chrome = null;
-let conn = null;
-const results = [];
-let passedCount = 0;
-let failedCount = 0;
-let notDemonstratedCount = 0;
-let noVisualDeltaCount = 0;
-let visualOnlyCount = 0;
-let delayedChangeCount = 0;
+  // ── Server lifecycle ─────────────────────────────────────────────────────────
+  holder.serverChild = null;
 
-try {
+  function spawnServer(port) {
+    holder.serverChild = new Deno.Command("deno", {
+      args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
+      env: { PORT: String(port) },
+      // Captured rather than discarded: the child's own output is the only thing
+      // that can explain a failed boot, and a full pipe would block it.
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    return trackBootChild(holder.serverChild);
+  }
+
+  function killServerChild() {
+    if (!holder.serverChild) return;
+    try {
+      holder.serverChild.kill("SIGKILL");
+    } catch {
+      // already gone
+    }
+    holder.serverChild = null;
+  }
+
+  // Poll until the CHILD reports it is listening and answers, or the bound elapses.
+  //
+  // Readiness is decided by `assessReadiness` and is fail-closed: it requires the
+  // child's own "Listening on http://localhost:<port>" line, so a process that took
+  // the port after the preflight — the window between the preflight and the bind —
+  // can never be accepted as the server. A child that has exited is never ready
+  // even if the port answers. Accepting a stranger silently was the worst failure
+  // this code had: the driver drove the wrong server and reported ordinary-looking
+  // statuses with exit 0.
+  async function awaitServerReady(port) {
+    const boot = spawnServer(port);
+    const startedAt = Date.now();
+    const failed = (kind) => ({
+      ok: false,
+      kind,
+      exitCode: boot.exit.code,
+      stderrTail: boot.tails.stderr,
+      stdoutTail: boot.tails.stdout,
+      waitedMs: Date.now() - startedAt,
+    });
+    for (let i = 0; i < BOOT_POLL_ATTEMPTS; i++) {
+      let httpAnswered = false;
+      try {
+        const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(1000) });
+        await r.body?.cancel();
+        httpAnswered = true;
+      } catch {
+        // not up yet
+      }
+      const verdict = assessReadiness({
+        httpAnswered,
+        childExited: boot.exit.exited,
+        listeningReported: serverReportsListening(boot.tails.stdout, port),
+        waitedMs: Date.now() - startedAt,
+        boundMs: BOOT_READY_BOUND_MS,
+      });
+      if (verdict === READINESS.READY) return { ok: true };
+      if (verdict !== READINESS.WAIT) return failed(verdict);
+      await new Promise((r) => setTimeout(r, BOOT_POLL_MS));
+    }
+    return failed(
+      assessReadiness({
+        childExited: boot.exit.exited,
+        waitedMs: BOOT_READY_BOUND_MS,
+        boundMs: BOOT_READY_BOUND_MS,
+      }),
+    );
+  }
+
+  async function bootServer() {
+    if (noServer) {
+      base = base ?? "http://localhost:3000";
+      return;
+    }
+    const pinnedPort = base ? Number(new URL(base).port) || 3000 : null;
+    const attempts = pinnedPort ? 1 : BOOT_MAX_PORT_ATTEMPTS;
+    const failures = [];
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const port = pinnedPort ?? 3800 + Math.floor(Math.random() * 400);
+      // Never spawn onto a port that already accepts connections.
+      if (await portIsTaken(port)) {
+        const message = describeBootFailure({ port, kind: "port-in-use" });
+        failures.push(message);
+        if (pinnedPort) throw new Error(message);
+        continue;
+      }
+      base = `http://localhost:${port}`;
+      const outcome = await awaitServerReady(port);
+      if (outcome.ok) return;
+      killServerChild();
+      const message = describeBootFailure({ port, ...outcome });
+      failures.push(message);
+      // A crash or a 10-second silent boot is not going to be fixed by another
+      // random port; only a takeover between the check above and the bind is worth
+      // retrying, and that shows up as the child exiting at once.
+      if (pinnedPort || outcome.kind === "timeout") throw new Error(message);
+    }
+    throw new Error(`could not start the local server:\n- ${failures.join("\n- ")}`);
+  }
+
+  // ── Main Execution ──────────────────────────────────────────────────────────
+  await bootServer();
+  log(`Server ready at ${base}`);
+
+  let chrome = null;
+  let conn = null;
+  const results = [];
+  let passedCount = 0;
+  let failedCount = 0;
+  let notDemonstratedCount = 0;
+  let noVisualDeltaCount = 0;
+  let visualOnlyCount = 0;
+  let delayedChangeCount = 0;
+
   chrome = await launchChrome();
+  holder.chrome = chrome;
   conn = await cdpConnection(chrome.wsUrl);
+  holder.conn = conn;
 
   const sessions = new Map();
   conn.onEvent((message) => {
@@ -450,7 +481,7 @@ try {
     }))
     : targets;
 
-  console.log(`Driving ${runList.length} showcase demo(s) in headless Chrome...`);
+  log(`Driving ${runList.length} showcase demo(s) in headless Chrome...`);
   await Deno.mkdir(outDir, { recursive: true });
 
   for (const item of runList) {
@@ -631,7 +662,7 @@ try {
     const wasDriven = record.controlsExercised > 0 || record.mutations > 0;
     if (record.visualDelta === false && wasDriven) {
       noVisualDeltaCount++;
-      console.warn(
+      error(
         `  NO-VISUAL-DELTA  ${item.url} — ${
           effect.resetBy
             ? `the pair is byte-identical because the effect observed on ${
@@ -651,7 +682,7 @@ try {
         )
         : `${Object.keys(record.assertions ?? {}).length} assertion(s) held`;
       const caveat = "";
-      console.log(
+      log(
         `PASS  ${item.url} — ${actionSummary} (run total: ${record.mutations} mutations)${caveat}`,
       );
     } else if (verdict.status === DRIVE_STATUS.VISUAL_ONLY) {
@@ -662,231 +693,349 @@ try {
       // introduced to avoid.
       visualOnlyCount++;
       notDemonstratedCount++;
-      console.warn(
+      error(
         `  VISUAL-ONLY  ${item.url} — screenshots differ (${record.screenshots.beforeHash} -> ${record.screenshots.afterHash}) with no DOM mutation or readout change; a differing pair is non-causal, so this needs review rather than a pass`,
       );
     } else if (verdict.status === DRIVE_STATUS.DELAYED_CHANGE) {
       delayedChangeCount++;
       notDemonstratedCount++;
-      console.warn(
+      error(
         `  DELAYED-CHANGE  ${item.url} — ${verdict.reason}`,
       );
     } else if (verdict.status === "FAIL") {
       failedCount++;
-      console.error(`FAIL  ${item.url} — ${verdict.reason}`);
+      error(`FAIL  ${item.url} — ${verdict.reason}`);
     } else {
       // Not broken, but not demonstrated either. Say so rather than calling it a pass.
       notDemonstratedCount++;
-      console.warn(`${verdict.status}  ${item.url} — ${verdict.reason}`);
+      error(`${verdict.status}  ${item.url} — ${verdict.reason}`);
     }
   }
-} finally {
-  if (conn) conn.close?.();
-  if (chrome) await cleanupChrome(chrome);
-  if (serverChild) {
-    try {
-      serverChild.kill("SIGKILL");
-      await serverChild.status;
-    } catch {
-      // ignore
-    }
-  }
+
+  return {
+    base,
+    results,
+    passedCount,
+    failedCount,
+    notDemonstratedCount,
+    noVisualDeltaCount,
+    visualOnlyCount,
+    delayedChangeCount,
+  };
 }
 
-// ── Merge & Write Summary Reports ───────────────────────────────────────────
-const reportPath = join(outDir, "verification-report.json");
-const mergedMap = new Map();
+// Stage 2 contract, in order: validate targets before acquiring anything; run
+// the drive phase; clean up (connection, Chrome, server child) capturing every
+// failure instead of throwing it over the real error; then attempt BOTH report
+// writes even when one fails; then decide the exit. A drive failure rethrows the
+// ORIGINAL error with its identity intact after the others are reported. A
+// cleanup or write failure that leaves the run unconfirmed is a NAMED non-zero
+// even when every assertion passed.
+export async function main(deps = {}) {
+  const {
+    argv = Deno.args,
+    run = runDrive,
+    writeJson = Deno.writeTextFile,
+    writeMd = Deno.writeTextFile,
+    teardown = teardownChrome,
+    exit = Deno.exit,
+    log = console.log,
+    error = console.error,
+  } = deps;
+  const opts = parseArgs(argv);
+  const selection = await selectTargets(opts);
+  // Pre-acquisition validation, exactly as before: no targets is exit 2, and
+  // nothing has been acquired at this point.
+  if (!selection.specCases && selection.targets.length === 0) {
+    error("No targets found. Specify a spec file, --milestone, --feature, --url, or --sample.");
+    exit(2);
+    return;
+  }
 
-// 1. Recover and load existing results from verification-report.json
-if (existsSync(reportPath)) {
+  const holder = { chrome: null, conn: null, serverChild: null };
+  let runResult = null;
+  let primary = null;
   try {
-    const raw = await Deno.readTextFile(reportPath);
-    const existing = JSON.parse(raw);
-    for (const r of existing.results ?? []) {
-      if (r?.url) mergedMap.set(r.url, r);
-    }
-  } catch (e) {
-    console.warn(`Warning: failed to read existing ${reportPath}: ${e.message}`);
+    runResult = await run(opts, { log, error }, holder, selection);
+  } catch (err) {
+    primary = err;
   }
-}
 
-// 2. Discover any valid screenshot directories on disk that may have been orphaned
-try {
-  for (const entry of Deno.readDirSync(outDir)) {
-    if (!entry.isDirectory) continue;
-    const initialShot = join(outDir, entry.name, "01-initial.png");
-    const afterShot = join(outDir, entry.name, "02-interactive.png");
-    if (existsSync(initialShot) && existsSync(afterShot)) {
-      const parts = entry.name.split("--");
-      if (parts.length >= 3) {
-        const milestone = parts[0];
-        const concept = parts[parts.length - 1];
-        const feature = parts.slice(1, -1).join("--");
-        const url = `/${milestone}/${feature}/${concept}/`;
-        if (!mergedMap.has(url)) {
-          mergedMap.set(url, {
-            url,
-            name: `${milestone}/${feature}/${concept}`,
-            slug: entry.name,
-            status: "UNVERIFIED",
-            controlsFound: 0,
-            controlsExercised: 0,
-            actions: ["recovered from disk screenshot artifacts"],
-            domMutated: false,
-            mutations: 0,
-            stateChanged: false,
-            consoleErrors: [],
-            driveError: null,
-            screenshots: {
-              initial: `${entry.name}/01-initial.png`,
-              interactive: `${entry.name}/02-interactive.png`,
-            },
-          });
+  // Same cleanup sequence as the old run-level finally, captured per step so a
+  // cleanup failure can never replace the run's own error or skip the report.
+  const cleanupFailures = [];
+  try {
+    if (holder.conn) await holder.conn.close?.();
+  } catch (err) {
+    cleanupFailures.push({ what: "the CDP connection", error: err });
+  }
+  try {
+    await teardown(holder.chrome);
+  } catch (err) {
+    cleanupFailures.push({ what: "Chrome", error: err });
+  }
+  try {
+    if (holder.serverChild) {
+      holder.serverChild.kill("SIGKILL");
+      await holder.serverChild.status;
+    }
+  } catch (err) {
+    cleanupFailures.push({ what: "the local server child", error: err });
+  }
+
+  const writeFailures = [];
+  let exitCode = 1;
+  if (runResult) {
+    const {
+      base,
+      results,
+      passedCount,
+      failedCount,
+      notDemonstratedCount,
+      noVisualDeltaCount,
+      visualOnlyCount,
+      delayedChangeCount,
+    } = runResult;
+    const { outDir } = opts;
+    // ── Merge & Write Summary Reports ───────────────────────────────────────────
+    const reportPath = join(outDir, "verification-report.json");
+    const mergedMap = new Map();
+
+    // 1. Recover and load existing results from verification-report.json
+    if (existsSync(reportPath)) {
+      try {
+        const raw = await Deno.readTextFile(reportPath);
+        const existing = JSON.parse(raw);
+        for (const r of existing.results ?? []) {
+          if (r?.url) mergedMap.set(r.url, r);
+        }
+      } catch (e) {
+        error(`Warning: failed to read existing ${reportPath}: ${e.message}`);
+      }
+    }
+
+    // 2. Discover any valid screenshot directories on disk that may have been orphaned
+    try {
+      for (const entry of Deno.readDirSync(outDir)) {
+        if (!entry.isDirectory) continue;
+        const initialShot = join(outDir, entry.name, "01-initial.png");
+        const afterShot = join(outDir, entry.name, "02-interactive.png");
+        if (existsSync(initialShot) && existsSync(afterShot)) {
+          const parts = entry.name.split("--");
+          if (parts.length >= 3) {
+            const milestone = parts[0];
+            const concept = parts[parts.length - 1];
+            const feature = parts.slice(1, -1).join("--");
+            const url = `/${milestone}/${feature}/${concept}/`;
+            if (!mergedMap.has(url)) {
+              mergedMap.set(url, {
+                url,
+                name: `${milestone}/${feature}/${concept}`,
+                slug: entry.name,
+                status: "UNVERIFIED",
+                controlsFound: 0,
+                controlsExercised: 0,
+                actions: ["recovered from disk screenshot artifacts"],
+                domMutated: false,
+                mutations: 0,
+                stateChanged: false,
+                consoleErrors: [],
+                driveError: null,
+                screenshots: {
+                  initial: `${entry.name}/01-initial.png`,
+                  interactive: `${entry.name}/02-interactive.png`,
+                },
+              });
+            }
+          }
+        }
+      }
+    } catch {
+      // non-fatal
+    }
+
+    // 3. Merge new run results (monotonic update)
+    for (const r of results) {
+      mergedMap.set(r.url, r);
+    }
+
+    const allResults = Array.from(mergedMap.values()).sort((a, b) => a.url.localeCompare(b.url));
+    const totalPassed = allResults.filter((r) => r.status === "PASS").length;
+    const totalUnverified = allResults.filter((r) => r.status === "UNVERIFIED").length;
+    const totalFailed = allResults.filter((r) => r.status === "FAIL").length;
+    const notDemonstrated = allResults.filter((r) => NOT_DEMONSTRATED_STATUSES.includes(r.status));
+
+    // Total catalogue concepts denominator (per bead cix and mox)
+    let totalCatalogueConcepts = 3893;
+    try {
+      const manifest = buildFromDisk().filter((m) => m.status === "built");
+      const count = manifest.reduce((acc, f) => acc + f.concepts.length, 0);
+      if (count > 0) totalCatalogueConcepts = count;
+    } catch {}
+
+    const summaryJson = {
+      timestamp: new Date().toISOString(),
+      lastRunBase: base,
+      catalogueConceptsTotal: totalCatalogueConcepts,
+      totalIndexed: allResults.length,
+      passed: totalPassed,
+      notDemonstrated: notDemonstrated.length,
+      unverified: totalUnverified,
+      failed: totalFailed,
+      lastRunTested: results.length,
+      lastRunPassed: passedCount,
+      lastRunNotDemonstrated: notDemonstratedCount,
+      lastRunNoVisualDelta: noVisualDeltaCount,
+      lastRunVisualOnly: visualOnlyCount,
+      lastRunDelayedChange: delayedChangeCount,
+      lastRunFailed: failedCount,
+      results: allResults,
+    };
+
+    try {
+      await writeJson(
+        reportPath,
+        JSON.stringify(summaryJson, null, 2) + "\n",
+      );
+    } catch (err) {
+      writeFailures.push({ what: `the report JSON at ${reportPath}`, error: err });
+    }
+
+    let md = `# Interactive Demo Verification Report\n\n`;
+    md += `- **Last Updated:** ${new Date().toISOString()}\n`;
+    md +=
+      `- **Catalogue Coverage:** ${allResults.length} / ${totalCatalogueConcepts} concepts indexed (${
+        ((allResults.length / totalCatalogueConcepts) * 100).toFixed(1)
+      }%)\n`;
+    md +=
+      `- **Overall Status:** ${totalPassed} passed, ${notDemonstrated.length} not demonstrated, ${totalUnverified} unverified (recovered artifacts), ${totalFailed} failed\n`;
+    md +=
+      `- **Latest Run:** ${results.length} tested (${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed)\n\n`;
+    md +=
+      `Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT**, **NOT-ASSERTED**, **VISUAL-ONLY** and **DELAYED-CHANGE** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.\n\n`;
+    md +=
+      `**NO-VISUAL-DELTA** is a caveat on a row, not a status: the before/after screenshots hash the same, so the pair is not proof of the interaction. When the run's per-action evidence identifies the cause it is named — a control whose effect was returned to its initial state by a later reset control — otherwise the pair is simply not claimed: the paint may not have landed.\n\n`;
+    md +=
+      `**Per-action evidence.** The driver records what each control did, so a mutation total is never presented without attribution, and a later reset cannot be mistaken for the whole run having done nothing.\n\n`;
+    md +=
+      `**VISUAL-ONLY** covers the case where the only signal is that the screenshots differ — a control that paints without touching the DOM, or ambient motion. A differing pair is **non-causal**: an animation, a clock or an autoplay produces one identically, so it is not evidence that the control did anything, and the row is reported for review with both hashes rather than counted as a pass.\n\n`;
+    md +=
+      `**DELAYED-CHANGE** covers runs where DOM mutations or readout moves occurred during post-action settle, but could not be attributed to an immediate action window. Aggregate settle change is **non-causal**: an animation, a clock, an autoplay or ambient page churn produces one identically, so it is not evidence that the control caused the change without a demo-specific assertion, and the row is reported for review rather than counted as a pass.\n\n`;
+    // Heading says what the table actually contains: driven passes, failures,
+    // not-demonstrated rows and recovered artifacts all appear here.
+    md += `## Indexed Demos\n\n`;
+    md +=
+      `| Demo URL | Controls Found / Tested | Mutations (run total) | Status | Screenshot Proof |\n`;
+    md += `| :--- | :---: | :---: | :---: | :--- |\n`;
+
+    for (const r of allResults) {
+      const proofLinks = [
+        r.screenshots?.initial ? `[Initial](${r.screenshots.initial})` : "",
+        r.status === DRIVE_STATUS.VISUAL_ONLY
+          ? `pair differs (${r.screenshots?.beforeHash} -> ${r.screenshots?.afterHash}) — non-causal, needs review`
+          : r.status === DRIVE_STATUS.DELAYED_CHANGE
+          ? `delayed change (${
+            r.settleMutations ?? r.mutations
+          } settle mutation(s)) — non-causal, needs review`
+          : r.visualDelta === false
+          ? (r.resetBy
+            ? `NO-VISUAL-DELTA (effect on ${r.resetTarget ?? "a control"} reset by ${r.resetBy})`
+            : "NO-VISUAL-DELTA (pair byte-identical)")
+          : r.screenshots?.interactive
+          ? `[Interactive](${r.screenshots.interactive})`
+          : "",
+      ].filter(Boolean).join(" · ");
+      md +=
+        `| \`${r.url}\` | ${r.controlsFound} / ${r.controlsExercised} | ${r.mutations} | **${r.status}** | ${proofLinks} |\n`;
+    }
+
+    const failedItems = allResults.filter((x) => x.status === "FAIL");
+    if (failedItems.length > 0) {
+      md += `\n## Failures\n\n`;
+      for (const r of failedItems) {
+        md += `### \`${r.url}\`\n`;
+        if (r.failedAssertions?.length) {
+          md += `- **Failed assertion(s):** ${
+            r.failedAssertions.map((a) => `\`${a}\``).join(", ")
+          }\n`;
+        }
+        if (r.driveError) md += `- **Drive Error:** \`${r.driveError}\`\n`;
+        for (const err of r.consoleErrors ?? []) {
+          md += `- **Console Error:** \`${err}\`\n`;
         }
       }
     }
-  }
-} catch {
-  // non-fatal
-}
 
-// 3. Merge new run results (monotonic update)
-for (const r of results) {
-  mergedMap.set(r.url, r);
-}
-
-const allResults = Array.from(mergedMap.values()).sort((a, b) => a.url.localeCompare(b.url));
-const totalPassed = allResults.filter((r) => r.status === "PASS").length;
-const totalUnverified = allResults.filter((r) => r.status === "UNVERIFIED").length;
-const totalFailed = allResults.filter((r) => r.status === "FAIL").length;
-const notDemonstrated = allResults.filter((r) => NOT_DEMONSTRATED_STATUSES.includes(r.status));
-
-// Total catalogue concepts denominator (per bead cix and mox)
-let totalCatalogueConcepts = 3893;
-try {
-  const manifest = buildFromDisk().filter((m) => m.status === "built");
-  const count = manifest.reduce((acc, f) => acc + f.concepts.length, 0);
-  if (count > 0) totalCatalogueConcepts = count;
-} catch {}
-
-const summaryJson = {
-  timestamp: new Date().toISOString(),
-  lastRunBase: base,
-  catalogueConceptsTotal: totalCatalogueConcepts,
-  totalIndexed: allResults.length,
-  passed: totalPassed,
-  notDemonstrated: notDemonstrated.length,
-  unverified: totalUnverified,
-  failed: totalFailed,
-  lastRunTested: results.length,
-  lastRunPassed: passedCount,
-  lastRunNotDemonstrated: notDemonstratedCount,
-  lastRunNoVisualDelta: noVisualDeltaCount,
-  lastRunVisualOnly: visualOnlyCount,
-  lastRunDelayedChange: delayedChangeCount,
-  lastRunFailed: failedCount,
-  results: allResults,
-};
-
-await Deno.writeTextFile(
-  reportPath,
-  JSON.stringify(summaryJson, null, 2) + "\n",
-);
-
-let md = `# Interactive Demo Verification Report\n\n`;
-md += `- **Last Updated:** ${new Date().toISOString()}\n`;
-md +=
-  `- **Catalogue Coverage:** ${allResults.length} / ${totalCatalogueConcepts} concepts indexed (${
-    ((allResults.length / totalCatalogueConcepts) * 100).toFixed(1)
-  }%)\n`;
-md +=
-  `- **Overall Status:** ${totalPassed} passed, ${notDemonstrated.length} not demonstrated, ${totalUnverified} unverified (recovered artifacts), ${totalFailed} failed\n`;
-md +=
-  `- **Latest Run:** ${results.length} tested (${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed)\n\n`;
-md +=
-  `Only **PASS** means the demo was driven and observably responded. **NO-CONTROLS**, **NOT-DRIVEABLE**, **NO-EFFECT**, **NOT-ASSERTED**, **VISUAL-ONLY** and **DELAYED-CHANGE** mean this run is not evidence that the demo works — they are neither failures nor passes. **UNVERIFIED** rows were recovered from screenshot artifacts and were never driven.\n\n`;
-md +=
-  `**NO-VISUAL-DELTA** is a caveat on a row, not a status: the before/after screenshots hash the same, so the pair is not proof of the interaction. When the run's per-action evidence identifies the cause it is named — a control whose effect was returned to its initial state by a later reset control — otherwise the pair is simply not claimed: the paint may not have landed.\n\n`;
-md +=
-  `**Per-action evidence.** The driver records what each control did, so a mutation total is never presented without attribution, and a later reset cannot be mistaken for the whole run having done nothing.\n\n`;
-md +=
-  `**VISUAL-ONLY** covers the case where the only signal is that the screenshots differ — a control that paints without touching the DOM, or ambient motion. A differing pair is **non-causal**: an animation, a clock or an autoplay produces one identically, so it is not evidence that the control did anything, and the row is reported for review with both hashes rather than counted as a pass.\n\n`;
-md +=
-  `**DELAYED-CHANGE** covers runs where DOM mutations or readout moves occurred during post-action settle, but could not be attributed to an immediate action window. Aggregate settle change is **non-causal**: an animation, a clock, an autoplay or ambient page churn produces one identically, so it is not evidence that the control caused the change without a demo-specific assertion, and the row is reported for review rather than counted as a pass.\n\n`;
-// Heading says what the table actually contains: driven passes, failures,
-// not-demonstrated rows and recovered artifacts all appear here.
-md += `## Indexed Demos\n\n`;
-md +=
-  `| Demo URL | Controls Found / Tested | Mutations (run total) | Status | Screenshot Proof |\n`;
-md += `| :--- | :---: | :---: | :---: | :--- |\n`;
-
-for (const r of allResults) {
-  const proofLinks = [
-    r.screenshots?.initial ? `[Initial](${r.screenshots.initial})` : "",
-    r.status === DRIVE_STATUS.VISUAL_ONLY
-      ? `pair differs (${r.screenshots?.beforeHash} -> ${r.screenshots?.afterHash}) — non-causal, needs review`
-      : r.status === DRIVE_STATUS.DELAYED_CHANGE
-      ? `delayed change (${
-        r.settleMutations ?? r.mutations
-      } settle mutation(s)) — non-causal, needs review`
-      : r.visualDelta === false
-      ? (r.resetBy
-        ? `NO-VISUAL-DELTA (effect on ${r.resetTarget ?? "a control"} reset by ${r.resetBy})`
-        : "NO-VISUAL-DELTA (pair byte-identical)")
-      : r.screenshots?.interactive
-      ? `[Interactive](${r.screenshots.interactive})`
-      : "",
-  ].filter(Boolean).join(" · ");
-  md +=
-    `| \`${r.url}\` | ${r.controlsFound} / ${r.controlsExercised} | ${r.mutations} | **${r.status}** | ${proofLinks} |\n`;
-}
-
-const failedItems = allResults.filter((x) => x.status === "FAIL");
-if (failedItems.length > 0) {
-  md += `\n## Failures\n\n`;
-  for (const r of failedItems) {
-    md += `### \`${r.url}\`\n`;
-    if (r.failedAssertions?.length) {
-      md += `- **Failed assertion(s):** ${r.failedAssertions.map((a) => `\`${a}\``).join(", ")}\n`;
+    // Listed separately and never folded into the pass count: the showcase
+    // auto-research SKILL requires zero-control reference pages and blocked routes
+    // to be reported apart from exercised demos.
+    if (notDemonstrated.length > 0) {
+      md += `\n## Not demonstrated (indexed, not evidence of working behaviour)\n\n`;
+      for (const r of notDemonstrated) {
+        md += `- \`${r.url}\` — **${r.status}**: ${r.verdictReason ?? "no reason recorded"}\n`;
+      }
     }
-    if (r.driveError) md += `- **Drive Error:** \`${r.driveError}\`\n`;
-    for (const err of r.consoleErrors ?? []) {
-      md += `- **Console Error:** \`${err}\`\n`;
+
+    try {
+      await writeMd(join(outDir, "REPORT.md"), md);
+    } catch (err) {
+      writeFailures.push({
+        what: `the markdown report at ${join(outDir, "REPORT.md")}`,
+        error: err,
+      });
     }
+
+    log(
+      `\nVerification complete this run: ${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed (of ${results.length} tested).`,
+      ...(noVisualDeltaCount
+        ? [
+          `\nNO-VISUAL-DELTA: ${noVisualDeltaCount} driven row(s) produced byte-identical before/after screenshots — not proof of the interaction; see the table.`,
+        ]
+        : []),
+      ...(visualOnlyCount
+        ? [
+          `\nVISUAL-ONLY: ${visualOnlyCount} row(s) produced a differing screenshot pair with no DOM mutation or readout change — a differing pair is NON-CAUSAL, so these are NOT passes and need review; see the row notes.`,
+        ]
+        : []),
+    );
+    log(
+      `Cumulative index: ${totalPassed} passed, ${notDemonstrated.length} not demonstrated, ${totalUnverified} unverified (${allResults.length}/${totalCatalogueConcepts} catalogue concepts indexed).`,
+    );
+    log(`Reports merged into ${outDir}/REPORT.md and ${outDir}/verification-report.json`);
+
+    // A spec case that asserted nothing is a broken spec, not a quiet pass — exit
+    // non-zero so it cannot be cited as evidence (bead chrome-platform-showcase-6s3).
+    const notAssertedCount = results.filter((r) => r.status === "NOT-ASSERTED").length;
+    exitCode = failedCount || notAssertedCount ? 1 : 0;
   }
+
+  const describe = (err) => err?.message ?? String(err);
+  if (primary) {
+    // The drive phase's own error is reported FIRST and rethrown unchanged, so
+    // a cleanup or report failure can never take its place.
+    error(`drive-demos: ${describe(primary)}`);
+    for (const { what, error: err } of cleanupFailures) {
+      error(`drive-demos: ${what} was not cleaned up: ${describe(err)}`);
+    }
+    for (const { what, error: err } of writeFailures) {
+      error(`drive-demos: ${what} could not be written: ${describe(err)}`);
+    }
+    throw primary;
+  }
+  if (cleanupFailures.length > 0 || writeFailures.length > 0) {
+    for (const { what, error: err } of cleanupFailures) {
+      error(`drive-demos: ${what} was not cleaned up: ${describe(err)}`);
+    }
+    for (const { what, error: err } of writeFailures) {
+      error(`drive-demos: ${what} could not be written: ${describe(err)}`);
+    }
+    error(
+      "drive-demos: the run finished but report-writing or cleanup was not confirmed",
+    );
+    exit(1);
+    return;
+  }
+  exit(exitCode);
 }
 
-// Listed separately and never folded into the pass count: the showcase
-// auto-research SKILL requires zero-control reference pages and blocked routes
-// to be reported apart from exercised demos.
-if (notDemonstrated.length > 0) {
-  md += `\n## Not demonstrated (indexed, not evidence of working behaviour)\n\n`;
-  for (const r of notDemonstrated) {
-    md += `- \`${r.url}\` — **${r.status}**: ${r.verdictReason ?? "no reason recorded"}\n`;
-  }
-}
-
-await Deno.writeTextFile(join(outDir, "REPORT.md"), md);
-
-console.log(
-  `\nVerification complete this run: ${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed (of ${results.length} tested).`,
-  ...(noVisualDeltaCount
-    ? [
-      `\nNO-VISUAL-DELTA: ${noVisualDeltaCount} driven row(s) produced byte-identical before/after screenshots — not proof of the interaction; see the table.`,
-    ]
-    : []),
-  ...(visualOnlyCount
-    ? [
-      `\nVISUAL-ONLY: ${visualOnlyCount} row(s) produced a differing screenshot pair with no DOM mutation or readout change — a differing pair is NON-CAUSAL, so these are NOT passes and need review; see the row notes.`,
-    ]
-    : []),
-);
-console.log(
-  `Cumulative index: ${totalPassed} passed, ${notDemonstrated.length} not demonstrated, ${totalUnverified} unverified (${allResults.length}/${totalCatalogueConcepts} catalogue concepts indexed).`,
-);
-console.log(`Reports merged into ${outDir}/REPORT.md and ${outDir}/verification-report.json`);
-
-// A spec case that asserted nothing is a broken spec, not a quiet pass — exit
-// non-zero so it cannot be cited as evidence (bead chrome-platform-showcase-6s3).
-const notAssertedCount = results.filter((r) => r.status === "NOT-ASSERTED").length;
-Deno.exit(failedCount || notAssertedCount ? 1 : 0);
+if (import.meta.main) await main();
