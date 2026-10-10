@@ -15,6 +15,24 @@
 // reject a value outside the grammar the fixture actually uses, with a 4xx, and
 // never 500.
 //
+// Migrated in place to named Deno.test cases (Stage 6 of the dty proposal, bead
+// dty.6): same file path, same task id `test-header-grammar`, same ordered gate
+// step, same seven subjects and the same assertions — the custom `section()`
+// registry, its trailing loop and the legacy `Deno.exit(1)` branch are gone, so a
+// failure names the sidecar behaviour it broke and Deno's runner owns the exit code.
+//
+// The child needs NO permission (the two sidecar modules are imported, not read), so
+// the task passes no child flags and no `--` separator, as Stage 5 does.
+//
+// Output rebaseline (deliberate, documented): the legacy final line had no
+// `PASS — ` prefix, so the task now prints `PASS — header-grammar tests` /
+// `FAIL — header-grammar tests (1 file(s) failed)` — a neutral label, truthfully
+// prefixed in both directions. A read-only audit found no consumer of the old text.
+//
+// The legacy `call()` helper and its handleLegacyReleaseEndpoints import are kept
+// verbatim even though no case uses them: removing them would change the module
+// graph this suite loads, so that cleanup belongs in its own bead.
+//
 // Run: deno task test-header-grammar
 
 import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
@@ -27,12 +45,6 @@ const DELAY_SUB =
   "/resource-timing-add-spec-compliant-service-worker-router-timing-fields/delayed-echo";
 const POLICY_SUB =
   "/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/policy-echo";
-
-const failures = [];
-const sections = [];
-function section(label, fn) {
-  sections.push({ label, fn });
-}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -75,7 +87,7 @@ const EXPECTED_BAD_STATUS = 400;
 // ---------------------------------------------------------------------------
 // Server-Timing: desc="<label>"
 
-section("delayed-echo keeps the demo's own label working", async () => {
+Deno.test("ok — delayed-echo keeps the demo's own label working", async () => {
   const res = await callDelayedEchoSidecar(DELAY_SUB, "?label=run-1759988000000-1&delay=0");
   assert(res.status === 200, `a normal demo label should still work, got ${res.status}`);
   const timing = res.headers.get("server-timing");
@@ -86,7 +98,7 @@ section("delayed-echo keeps the demo's own label working", async () => {
   );
 });
 
-section("delayed-echo never 500s on a CR/LF label", async () => {
+Deno.test("ok — delayed-echo never 500s on a CR/LF label", async () => {
   const res = await callDelayedEchoSidecar(
     DELAY_SUB,
     `?label=a${CRLF_ENC}X-Injected:%20yes&delay=0`,
@@ -101,7 +113,7 @@ section("delayed-echo never 500s on a CR/LF label", async () => {
   );
 });
 
-section("delayed-echo rejects a label that breaks the desc quoted-string", async () => {
+Deno.test("ok — delayed-echo rejects a label that breaks the desc quoted-string", async () => {
   const res = await callDelayedEchoSidecar(
     DELAY_SUB,
     `?label=${encodeURIComponent('a", evil;dur=1')}&delay=0`,
@@ -112,7 +124,7 @@ section("delayed-echo rejects a label that breaks the desc quoted-string", async
   );
 });
 
-section("delayed-echo bounds the label length", async () => {
+Deno.test("ok — delayed-echo bounds the label length", async () => {
   const res = await callDelayedEchoSidecar(
     DELAY_SUB,
     `?label=${"l".repeat(4096)}&delay=0`,
@@ -126,7 +138,7 @@ section("delayed-echo bounds the label length", async () => {
 // ---------------------------------------------------------------------------
 // Permissions-Policy: local-network=(<local>), loopback-network=(<loopback>)
 
-section("policy-echo keeps the demo's own allowlist values working", async () => {
+Deno.test("ok — policy-echo keeps the demo's own allowlist values working", async () => {
   const selfStar = await callPolicyEchoSidecar(
     POLICY_SUB,
     "?local=self&loopback=*&allow=trusted",
@@ -147,7 +159,7 @@ section("policy-echo keeps the demo's own allowlist values working", async () =>
   );
 });
 
-section("policy-echo never 500s on a CR/LF value", async () => {
+Deno.test("ok — policy-echo never 500s on a CR/LF value", async () => {
   const res = await callPolicyEchoSidecar(
     POLICY_SUB,
     `?local=a${CRLF_ENC}X-Injected:%20yes&loopback=self`,
@@ -162,7 +174,7 @@ section("policy-echo never 500s on a CR/LF value", async () => {
   );
 });
 
-section("policy-echo rejects a value that rewrites the demonstrated header", async () => {
+Deno.test("ok — policy-echo rejects a value that rewrites the demonstrated header", async () => {
   const res = await callPolicyEchoSidecar(
     POLICY_SUB,
     `?local=${encodeURIComponent("self), loopback-network=(*")}`,
@@ -172,21 +184,3 @@ section("policy-echo rejects a value that rewrites the demonstrated header", asy
     `a paren value alters the demonstrated policy and should be rejected with ${EXPECTED_BAD_STATUS}, got ${res.status}`,
   );
 });
-
-// ---------------------------------------------------------------------------
-
-for (const { label, fn } of sections) {
-  try {
-    await fn();
-    console.log(`ok   ${label}`);
-  } catch (err) {
-    failures.push({ label, err });
-    console.log(`FAIL ${label}: ${err?.message ?? err}`);
-  }
-}
-
-if (failures.length > 0) {
-  console.error(`\nheader-grammar tests: ${failures.length} section(s) failed`);
-  Deno.exit(1);
-}
-console.log("\nheader-grammar tests: all sections passed");
