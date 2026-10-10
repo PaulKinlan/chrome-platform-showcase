@@ -42,8 +42,13 @@ import {
 import {
   main as conformanceSweepMain,
   parseArgs as conformanceSweepParseArgs,
+  reapServerChild as conformanceSweepReap,
 } from "./conformance-sweep.mjs";
-import { main as driveDemosMain, parseArgs as driveDemosParseArgs } from "./drive-demos.mjs";
+import {
+  main as driveDemosMain,
+  parseArgs as driveDemosParseArgs,
+  reapServerChild as driveDemosReap,
+} from "./drive-demos.mjs";
 
 const root = await Deno.makeTempDir({ prefix: "dty1w1-cdp-root-" });
 Deno.env.set("TMPDIR", root);
@@ -385,7 +390,7 @@ function callerHarness(
     serverKill = "ok",
     serverStatus = "resolve",
     connClose = "ok",
-    bootKillFailures = false,
+    retiredChildren = null,
   } = {},
 ) {
   const attempts = [];
@@ -402,9 +407,17 @@ function callerHarness(
     run: async (_opts, _io, holder) => {
       holder.chrome = chrome;
       if (resources) {
-        if (bootKillFailures) {
-          // What a refused signal during boot recovery looks like to the caller.
-          holder.killFailures = [new Error("Operation not permitted (os error 1)")];
+        if (retiredChildren) {
+          // What a server child that boot recovery could not retire looks like to
+          // the caller: the HANDLE is retained, never dropped with the failure.
+          holder.retiredChildren = [
+            {
+              kill: (signal) => serverKills.push(signal ?? "SIGTERM"),
+              get status() {
+                return retiredChildren === "resolves" ? Promise.resolve(0) : new Promise(() => {});
+              },
+            },
+          ];
         }
         holder.conn = {
           close: () => {
@@ -919,20 +932,104 @@ Deno.test("drive-demos main: a connection that never closes is bounded and named
   });
 });
 
-Deno.test("drive-demos main: a signal refused during boot recovery is reported, not forgotten", async () => {
-  await withScratchOut("boot-kill", async (out) => {
-    const t = driveHarness({ bootKillFailures: true });
-    await driveDemosMain({ ...t.deps, argv: driveArgv(out) });
+// ── retained server children and the exported reap helper ────────────────────
+//
+// The reviewer's reading of the boot-recovery path was right: the helper nulled
+// the handle even when the signal was refused, so that child's exit was never
+// confirmed and the handle was gone, leaving nothing for the caller to re-attempt
+// or report. A child that cannot be retired now keeps its HANDLE, and the caller
+// gives every retained child one authoritative bounded re-attempt. These cases pin
+// both halves: the wiring through main, and the rule inside the helper itself,
+// which is exported so the shapes are driven natively instead of read.
+
+const fakeServerChild = ({ killThrows = null, status }) => ({
+  kill: () => {
+    if (killThrows) throw new Error(killThrows);
+  },
+  get status() {
+    return status();
+  },
+});
+
+const bothReaps = [
+  ["conformance-sweep", conformanceSweepReap],
+  ["drive-demos", driveDemosReap],
+];
+
+Deno.test("drive-demos main: a child boot recovery could not retire is re-attempted and reported", async () => {
+  await withScratchOut("retired-pending", async (out) => {
+    const t = driveHarness({ retiredChildren: "pending" });
+    await driveDemosMain({ ...t.deps, serverReapBoundMs: 25, argv: driveArgv(out) });
     assert.ok(
-      reported(t.errors, "a server child that could not be signalled"),
-      "the refused boot-recovery signal must be reported",
+      reported(t.errors, "boot recovery could not retire"),
+      "a retained child must be re-attempted and named, not dropped with its failure",
     );
-    assert.deepEqual(
-      t.codes,
-      [1],
-      "a child that may have survived boot recovery is not a green run",
-    );
+    assert.deepEqual(t.codes, [1], "a child that may still be alive must not be a green run");
   });
+});
+
+Deno.test("drive-demos main: a retained child whose exit is confirmed is not a failure", async () => {
+  await withScratchOut("retired-resolves", async (out) => {
+    const t = driveHarness({ retiredChildren: "resolves" });
+    await driveDemosMain({ ...t.deps, serverReapBoundMs: 25, argv: driveArgv(out) });
+    assert.deepEqual(t.errors, [], "an exit confirmed on the re-attempt leaves nothing behind");
+    assert.deepEqual(t.codes, [0], "so the run stays green rather than inventing a failure");
+  });
+});
+
+Deno.test("reapServerChild: a refused signal with a confirmed exit is not a failure", async () => {
+  for (const [name, reap] of bothReaps) {
+    const err = await reap(
+      fakeServerChild({
+        killThrows: "Operation not permitted (os error 1)",
+        status: () => Promise.resolve(0),
+      }),
+      { boundMs: 25 },
+    );
+    assert.equal(err, null, `${name}: a confirmed exit must make a refused signal moot`);
+  }
+});
+
+Deno.test("reapServerChild: a refused signal with an unconfirmed exit names both", async () => {
+  for (const [name, reap] of bothReaps) {
+    const err = await reap(
+      fakeServerChild({
+        killThrows: "Operation not permitted (os error 1)",
+        status: () => new Promise(() => {}),
+      }),
+      { boundMs: 25 },
+    );
+    assert.ok(err instanceof Error, `${name}: an unconfirmed reap must be a failure`);
+    assert.ok(err.message.includes("could not be signalled"), `${name}: the refusal must be named`);
+    assert.ok(err.message.includes("not confirmed"), `${name}: the unconfirmed exit must be named`);
+  }
+});
+
+Deno.test("reapServerChild: a status that cannot be read is a named failure", async () => {
+  for (const [name, reap] of bothReaps) {
+    const err = await reap(
+      fakeServerChild({ status: () => Promise.reject(new Error("status could not be read")) }),
+      { boundMs: 25 },
+    );
+    assert.ok(
+      err instanceof Error && err.message.includes("could not be confirmed"),
+      `${name}: an unreadable status must be named`,
+    );
+  }
+});
+
+Deno.test("reapServerChild: a status that never settles is bounded, not awaited forever", async () => {
+  const started = Date.now();
+  for (const [name, reap] of bothReaps) {
+    const err = await reap(fakeServerChild({ status: () => new Promise(() => {}) }), {
+      boundMs: 25,
+    });
+    assert.ok(
+      err instanceof Error && err.message.includes("within 25ms"),
+      `${name}: the timeout must be reported with the bound that produced it`,
+    );
+  }
+  assert.ok(Date.now() - started < 1000, "the bound must be the bound, not a longer wait");
 });
 
 // The bound is part of the contract, so a silent change to it is a finding.
