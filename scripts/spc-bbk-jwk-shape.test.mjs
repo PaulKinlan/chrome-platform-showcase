@@ -13,6 +13,21 @@
 // full enroll -> challenge -> verify payment flow with oversized extras attached,
 // a rotation, and the retained heap cost measured with a real GC.
 //
+// Migrated in place to named Deno.test cases (Stage 3 of the dty proposal, bead
+// dty.2): same file path, same task id `test-spc-bbk-jwk-shape`, same ordered gate
+// step, same five subjects and the same assertions — the custom `section()`
+// registry became five Deno.test cases so a failure names the behaviour. The task
+// runs through scripts/native-test.mjs, which passes the child exactly the legacy
+// flags (`--allow-read --v8-flags=--expose-gc`) and runs this single file alone
+// (`--serial`), so the runner-wide GC flag can never reach another suite.
+//
+// Output rebaseline (deliberate, documented): the legacy final line had no
+// `PASS — ` prefix, so the task now prints `PASS — spc-bbk jwk-shape tests` /
+// `FAIL — spc-bbk jwk-shape tests (1 file(s) failed)` — a neutral label, truthfully
+// prefixed in both directions. The old text `all sections passed` is gone; a
+// read-only audit found no consumer of it (all 14 occurrences repo-wide are the
+// suites' own prints), so no drill needed updating.
+//
 // Run: deno task test-spc-bbk-jwk-shape   (needs --v8-flags=--expose-gc)
 
 import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
@@ -29,12 +44,6 @@ const VERIFY_SUB = `/${PREFIX}/verify`;
 const ROTATE_SUB = `/${PREFIX}/rotate`;
 
 const noAsset = async () => null;
-
-const failures = [];
-const sections = [];
-function section(label, fn) {
-  sections.push({ label, fn });
-}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -99,9 +108,9 @@ async function publicJwkWithExtras(extraChars = 0) {
   return jwk;
 }
 
-// ── sections ────────────────────────────────────────────────────────────────
+// ── cases ────────────────────────────────────────────────────────────────
 
-section("the projection keeps exactly the fields the fixture consumes", () => {
+Deno.test("ok — the projection keeps exactly the fields the fixture consumes", () => {
   const source = {
     kty: "EC",
     crv: "P-256",
@@ -126,7 +135,7 @@ section("the projection keeps exactly the fields the fixture consumes", () => {
   );
 });
 
-section("a projected key still imports and verifies signatures", async () => {
+Deno.test("ok — a projected key still imports and verifies signatures", async () => {
   const { publicJwk, privateKey } = await p256Pair();
   const projected = p256PublicJwkForStorage(
     { ...publicJwk, ext: true, key_ops: ["verify"], junk: "ignored" },
@@ -155,7 +164,7 @@ section("a projected key still imports and verifies signatures", async () => {
   assert(verified, "a projected public key must still verify its signatures");
 });
 
-section("oversized JWK extras do not break the enroll -> challenge -> verify flow", async () => {
+Deno.test("ok — oversized JWK extras do not break the enroll -> challenge -> verify flow", async () => {
   const passkey = await p256Pair();
   const browserBound = await p256Pair();
   const extras = OVERSIZED_JWK_CHARS;
@@ -186,7 +195,7 @@ section("oversized JWK extras do not break the enroll -> challenge -> verify flo
   );
 });
 
-section("a rotation stores only the consumed fields", async () => {
+Deno.test("ok — a rotation stores only the consumed fields", async () => {
   const passkey = await p256Pair();
   const oldBound = await p256Pair();
   const newBound = await p256Pair();
@@ -229,7 +238,7 @@ section("a rotation stores only the consumed fields", async () => {
   assert(verified.accepted === true, "the rotated browser-bound key must verify");
 });
 
-section("the extras are not retained across a full store", async () => {
+Deno.test("ok — the extras are not retained across a full store", async () => {
   assert(
     typeof globalThis.gc === "function",
     "this section measures retained heap and needs a real GC: run deno task test-spc-bbk-jwk-shape",
@@ -265,21 +274,3 @@ section("the extras are not retained across a full store", async () => {
     `     (offered ${offered} MiB of padding; retained ${retainedMiB.toFixed(1)} MiB of heap)`,
   );
 });
-
-// ── runner ──────────────────────────────────────────────────────────────────
-
-for (const { label, fn } of sections) {
-  try {
-    await fn();
-    console.log(`ok   ${label}`);
-  } catch (err) {
-    failures.push({ label, err });
-    console.log(`FAIL ${label}: ${err?.message ?? err}`);
-  }
-}
-
-if (failures.length > 0) {
-  console.error(`\nspc-bbk jwk-shape tests: ${failures.length} section(s) failed`);
-  Deno.exit(1);
-}
-console.log("\nspc-bbk jwk-shape tests: all sections passed");
