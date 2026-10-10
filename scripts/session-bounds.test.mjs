@@ -474,3 +474,95 @@ Deno.test("store evicts the oldest written entry past its cap", async () => {
   assert(store.get("a") === 10, "the most recently written entry should survive");
   assert(store.get("c") === 3 && store.get("d") === 4, "other live entries should survive");
 });
+
+// ---------------------------------------------------------------------------
+// The DEFAULT VALUES of the store, pinned directly (bead dty.10).
+//
+// The cases above prove the route's fixtures use the store, and the three store
+// cases above pin the store's behaviour when it is given explicit options. None
+// of them pins the three numbers a default-constructed store actually uses:
+// SESSION_STORE_MAX_ENTRIES, SESSION_STORE_TTL_MS and SESSION_KEY_MAX_LENGTH.
+// The route cases that DO use default-constructed stores assert only that an old
+// entry is gone, which catches a cap made larger or unbounded and cannot catch one
+// made smaller.
+//
+// These three cases close that gap. Every expectation is a hard-coded literal
+// (512, 21_600_000, 128) and NEVER the module constant, so a widened or narrowed
+// default fails here instead of moving the expectation with the implementation.
+// If one of those defaults legitimately changes, these cases must fail and be
+// updated on purpose - that is the point.
+//
+// The cap and key cases use an argument-free `new BoundedSessionStore()`. The ttl
+// case overrides ONLY the clock seam - `{ now: () => clock }` - and therefore is
+// NOT argument-free; ttlMs, maxEntries and maxKeyLength are all omitted, so all
+// three numeric defaults still apply. A global `Date.now` patch was considered and
+// rejected: it mutates shared state for no extra coverage.
+//
+// Known limits, unchanged and not claimed here: the runner's rule is >=1 executed
+// test, so it cannot pin the case count; and the route's own
+// WEBAUTHN_SIGNAL_MAX_CREDENTIALS (routes/release-endpoints.ts:934) is compared
+// against itself by the credential-cap case earlier in this file and stays
+// unpinned.
+
+Deno.test("default store cap is exactly 512 entries", () => {
+  const store = new BoundedSessionStore();
+  for (let i = 0; i < 512; i++) store.set(`cap-key-${i}`, i);
+  assert(
+    store.size === 512,
+    `a default store must hold exactly 512 entries, it held ${store.size}`,
+  );
+  assert(
+    store.get("cap-key-0") === 0,
+    "the 512th insert must not evict the oldest entry",
+  );
+
+  store.set("cap-key-512", 512);
+  assert(
+    store.size === 512,
+    `a default store must stay at 512 entries, it held ${store.size}`,
+  );
+  assert(store.get("cap-key-0") === undefined, "the 513th insert must evict the oldest entry");
+  assert(store.get("cap-key-1") === 1, "only the oldest entry may be evicted");
+  assert(store.get("cap-key-512") === 512, "the newest entry must survive");
+
+  // Control: the fixture is not vacuous - a store with an explicit, different cap
+  // must show THAT boundary, so a passing default case is a real measurement.
+  const five = new BoundedSessionStore({ maxEntries: 5 });
+  for (let i = 0; i < 6; i++) five.set(`ctrl-${i}`, i);
+  assert(five.size === 5, `an explicit 5-entry cap must hold 5, it held ${five.size}`);
+  assert(five.get("ctrl-0") === undefined, "the explicit cap must evict the oldest entry");
+});
+
+Deno.test("default store ttl is exactly six hours", () => {
+  const base = 1_700_000_000_000;
+  let clock = base;
+  const store = new BoundedSessionStore({ now: () => clock });
+  store.set("ttl-key", "value");
+
+  clock = base + 21_600_000 - 1;
+  assert(
+    store.get("ttl-key") === "value",
+    "an entry must survive until its six-hour ttl has passed",
+  );
+
+  clock = base + 21_600_000;
+  assert(
+    store.get("ttl-key") === undefined,
+    "an entry must be gone once exactly six hours have passed",
+  );
+  assert(store.size === 0, "an expired entry must not still count towards the store size");
+});
+
+Deno.test("default store key bound is exactly 128 characters", () => {
+  const store = new BoundedSessionStore();
+  const accepted = "k".repeat(128);
+  const refused = "k".repeat(129);
+
+  store.set(accepted, "kept");
+  store.set(refused, "refused");
+
+  assert(store.get(accepted) === "kept", "a 128-character key must be stored");
+  assert(store.get(refused) === undefined, "a 129-character key must never be retrievable");
+  assert(store.has(refused) === false, "a 129-character key must report a miss");
+  assert(store.size === 1, "a refused key must not occupy an entry");
+});
