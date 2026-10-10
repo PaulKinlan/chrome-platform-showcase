@@ -18,6 +18,33 @@
 // checks both halves: the arrays stay bounded, and what the demo shows is intact.
 //
 // Run: deno task test-speculation-probe-docs
+//
+// Migrated in place to named Deno.test cases (Stage 11 of the dty proposal, bead
+// dty.12): same file path, same task id `test-speculation-probe-docs`, the same
+// ordered gate step 17, the same eight subjects and the same assertions — the
+// custom `section()` registry, its trailing loop and the legacy `Deno.exit(1)`
+// branch are gone, so a failure names the case it broke and Deno's runner owns the
+// exit code.
+//
+// ORDER IS LOAD-BEARING: the last case measures retained heap and belongs last so
+// nothing it allocates is charged to another case, and the route cases before it
+// flood one record each with their own token. Deno.test runs the tests of one file
+// serially in declaration order and this task runs exactly one file per process, so
+// the ordering holds; do not add per-test concurrency or run this file with
+// --parallel.
+//
+// The child needs no permission (the imported modules are imported, not read), so
+// the task forwards ONLY `--v8-flags=--expose-gc` — that flag is what the last case
+// needs to measure anything at all, and it stays confined to this one file by the
+// task's `--serial speculation-probe-docs.test.mjs` and by one process per file.
+// Without the flag the last case fails loudly by name rather than passing
+// vacuously; the flag is never set repository-wide.
+//
+// Output rebaseline (deliberate, documented): the legacy final line had no
+// `PASS — ` prefix, so the task now prints `PASS — speculation probe docs tests` /
+// `FAIL — speculation probe docs tests (1 file(s) failed)` - a neutral label,
+// truthfully prefixed in both directions. A per-suite audit found no consumer of
+// the old text.
 
 import {
   recordProbeDoc,
@@ -37,25 +64,20 @@ const MAX_CHARS = SPECULATION_RULES_PROBE_MAX_DOC_CHARS;
 // paths. The bounds must never interfere with that.
 const DEMO_DOCS = ["/rules.json", "/a/b.json", "/prefetch-target.json"];
 
-const failures = [];
-const sections = [];
-function section(label, fn) {
-  sections.push({ label, fn });
-}
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
 // ── the helper's contract ───────────────────────────────────────────────────
 
-section("a short doc is recorded once and duplicates are ignored", () => {
+Deno.test("a short doc is recorded once and duplicates are ignored", () => {
   const docs = [];
   assert(recordProbeDoc(docs, "/rules.json") === true, "a fresh doc should be recorded");
   assert(recordProbeDoc(docs, "/rules.json") === false, "a duplicate should not be recorded");
   assert(docs.length === 1, `expected one entry, got ${docs.length}`);
 });
 
-section("an over-long doc is ignored, not truncated, and later docs still record", () => {
+Deno.test("an over-long doc is ignored, not truncated, and later docs still record", () => {
   const docs = [];
   const tooLong = "/" + "y".repeat(MAX_CHARS);
   assert(recordProbeDoc(docs, tooLong) === false, "an over-long doc must be ignored");
@@ -70,7 +92,7 @@ section("an over-long doc is ignored, not truncated, and later docs still record
   );
 });
 
-section("the boundary is exact", () => {
+Deno.test("the boundary is exact", () => {
   const atLimit = "/" + "z".repeat(MAX_CHARS - 1);
   const oneOver = "/" + "z".repeat(MAX_CHARS);
   assert(atLimit.length === MAX_CHARS, "the boundary fixture must sit exactly at the limit");
@@ -82,7 +104,7 @@ section("the boundary is exact", () => {
   assert(dropped.length === 0, `a doc of ${MAX_CHARS + 1} chars must be dropped`);
 });
 
-section("the per-record count is capped and the cap is exact", () => {
+Deno.test("the per-record count is capped and the cap is exact", () => {
   const docs = [];
   for (let i = 0; i < MAX_DOCS; i++) {
     assert(recordProbeDoc(docs, `/doc-${i}.json`) === true, `doc ${i} should fit in the cap`);
@@ -104,7 +126,7 @@ section("the per-record count is capped and the cap is exact", () => {
   );
 });
 
-section("a full array refuses new docs without scanning or mutating it", () => {
+Deno.test("a full array refuses new docs without scanning or mutating it", () => {
   // `recordProbeDoc` checks the count BEFORE its `includes` scan, which is what
   // makes the per-append cost constant again. That ordering is asserted here
   // rather than described: the array is wrapped so a call to `includes` is
@@ -163,7 +185,7 @@ async function probeRoute(route, params = {}) {
   return { res, body: await res.json().catch(() => ({})) };
 }
 
-section("a demo-shaped run records every doc it asks for", async () => {
+Deno.test("a demo-shaped run records every doc it asks for", async () => {
   const token = `rh7-demo-${crypto.randomUUID().slice(0, 8)}`;
   for (const doc of DEMO_DOCS) await probeRoute("rules.json", { token, doc });
   for (const doc of DEMO_DOCS) await probeRoute("prefetch-target", { token, doc });
@@ -185,7 +207,7 @@ section("a demo-shaped run records every doc it asks for", async () => {
   );
 });
 
-section("the route refuses over-long docs and caps a flooded record", async () => {
+Deno.test("the route refuses over-long docs and caps a flooded record", async () => {
   const token = `rh7-flood-${crypto.randomUUID().slice(0, 8)}`;
   const huge = "/" + "q".repeat(8 * 1024);
   await probeRoute("rules.json", { token, doc: huge });
@@ -207,10 +229,10 @@ section("the route refuses over-long docs and caps a flooded record", async () =
   );
 });
 
-section("one record cannot retain unbounded doc memory", async () => {
+Deno.test("one record cannot retain unbounded doc memory", async () => {
   assert(
     typeof globalThis.gc === "function",
-    "this section measures retained heap and needs a real GC: run deno task test-speculation-probe-docs",
+    "this case measures retained heap and needs a real GC: run deno task test-speculation-probe-docs",
   );
   const docs = 500;
   const docChars = 8 * 1024;
@@ -244,21 +266,3 @@ section("one record cannot retain unbounded doc memory", async () => {
     } MiB)`,
   );
 });
-
-// ── runner ─────────────────────────────────────────────────────────────────
-
-for (const { label, fn } of sections) {
-  try {
-    await fn();
-    console.log(`ok   ${label}`);
-  } catch (err) {
-    failures.push({ label, err });
-    console.log(`FAIL ${label}: ${err?.message ?? err}`);
-  }
-}
-
-if (failures.length > 0) {
-  console.error(`\nspeculation probe doc tests: ${failures.length} section(s) failed`);
-  Deno.exit(1);
-}
-console.log("\nspeculation probe doc tests: all sections passed");
