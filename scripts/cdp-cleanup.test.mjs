@@ -382,6 +382,8 @@ function callerHarness(
     failTeardown = null,
     result = CALLER_REPORT,
     resources = false,
+    serverKill = "ok",
+    serverStatus = "resolve",
   } = {},
 ) {
   const attempts = [];
@@ -400,8 +402,21 @@ function callerHarness(
       if (resources) {
         holder.conn = { close: () => connCloses.push("closed") };
         holder.serverChild = {
-          kill: (signal) => serverKills.push(signal ?? "SIGTERM"),
-          status: Promise.resolve(0),
+          kill: (signal) => {
+            if (serverKill === "refuse") {
+              // What the reviewer injected: a real EPERM from an owned child.
+              throw new Error("Operation not permitted (os error 1)");
+            }
+            serverKills.push(signal ?? "SIGTERM");
+          },
+          // A getter, so a rejecting status is only created when it is awaited.
+          get status() {
+            if (serverStatus === "reject") {
+              return Promise.reject(new Error("status could not be read"));
+            }
+            if (serverStatus === "pending") return new Promise(() => {});
+            return Promise.resolve(0);
+          },
         };
       }
       if (primary) throw primary;
@@ -769,6 +784,95 @@ Deno.test("drive-demos is import-safe: importing it exports a caller and runs no
     },
     "an injected argv must be parsed exactly like the process argv used to be",
   );
+});
+
+// ── server-child reap, both callers (review finding 8ab) ─────────────────────
+//
+// The reviewer's reproduction was real. An injected conformance main(deps) whose
+// serverChild.kill threw `Operation not permitted` still reported SUCCESS,
+// because that step was wrapped in a blanket ignore that never looked at the
+// child again. A SIGKILL is a request, so the contract is explicit in BOTH
+// callers: a refused signal is moot once the child's exit is positively
+// confirmed, and every other outcome is a NAMED failure - an exit that never
+// arrives (bounded, never awaited forever) or a status that cannot be read at
+// all. These pin the four shapes so a regression cannot quietly restore the
+// swallow.
+
+Deno.test("conformance-sweep main: a refused server signal is moot once the child's exit is confirmed", async () => {
+  const t = callerHarness({ resources: true, serverKill: "refuse", serverStatus: "resolve" });
+  await conformanceSweepMain({ ...t.deps, serverReapBoundMs: 25 });
+  assert.deepEqual(t.codes, [], "a confirmed exit means nothing leaked: success stays implicit 0");
+  assert.deepEqual(t.errors, [], "and no failure line is printed");
+});
+
+Deno.test("conformance-sweep main: a server exit that never arrives is bounded and named non-zero", async () => {
+  const t = callerHarness({ resources: true, serverStatus: "pending" });
+  await conformanceSweepMain({ ...t.deps, serverReapBoundMs: 25 });
+  assert.ok(reported(t.errors, "server child exit"), "the unconfirmed exit must be named");
+  assert.ok(
+    reported(t.errors, "not confirmed"),
+    "and named as unconfirmed rather than silently assumed",
+  );
+  assert.deepEqual(t.codes, [1], "an unconfirmed reap is not a green sweep");
+});
+
+Deno.test("conformance-sweep main: a refused signal AND an unconfirmed exit are both named", async () => {
+  const t = callerHarness({ resources: true, serverKill: "refuse", serverStatus: "pending" });
+  await conformanceSweepMain({ ...t.deps, serverReapBoundMs: 25 });
+  assert.ok(reported(t.errors, "could not be signalled"), "the refused signal must be named");
+  assert.ok(reported(t.errors, "not confirmed"), "so must the unconfirmed exit");
+  assert.deepEqual(t.codes, [1], "the reviewer's exact shape must not be a false green");
+});
+
+Deno.test("conformance-sweep main: a status that cannot be read is a named failure", async () => {
+  const t = callerHarness({ resources: true, serverStatus: "reject" });
+  await conformanceSweepMain({ ...t.deps, serverReapBoundMs: 25 });
+  assert.ok(
+    reported(t.errors, "server child exit could not be confirmed"),
+    "the unreadable status must be named",
+  );
+  assert.deepEqual(t.codes, [1]);
+});
+
+Deno.test("drive-demos main: a refused server signal is moot once the child's exit is confirmed", async () => {
+  await withScratchOut("reap-moot", async (out) => {
+    const t = driveHarness({ serverKill: "refuse", serverStatus: "resolve" });
+    await driveDemosMain({ ...t.deps, serverReapBoundMs: 25, argv: driveArgv(out) });
+    assert.deepEqual(t.codes, [0], "the run still states exit 0 when the exit is confirmed");
+    assert.deepEqual(t.errors, [], "and prints no failure line");
+  });
+});
+
+Deno.test("drive-demos main: a server exit that never arrives is bounded and named non-zero", async () => {
+  await withScratchOut("reap-pending", async (out) => {
+    const t = driveHarness({ serverStatus: "pending" });
+    await driveDemosMain({ ...t.deps, serverReapBoundMs: 25, argv: driveArgv(out) });
+    assert.ok(reported(t.errors, "server child exit"), "the unconfirmed exit must be named");
+    assert.ok(reported(t.errors, "not confirmed"), "and named as unconfirmed");
+    assert.deepEqual(t.codes, [1], "an unconfirmed reap must not exit 0");
+  });
+});
+
+Deno.test("drive-demos main: a refused signal AND an unconfirmed exit are both named", async () => {
+  await withScratchOut("reap-refused", async (out) => {
+    const t = driveHarness({ serverKill: "refuse", serverStatus: "pending" });
+    await driveDemosMain({ ...t.deps, serverReapBoundMs: 25, argv: driveArgv(out) });
+    assert.ok(reported(t.errors, "could not be signalled"), "the refused signal must be named");
+    assert.ok(reported(t.errors, "not confirmed"), "so must the unconfirmed exit");
+    assert.deepEqual(t.codes, [1]);
+  });
+});
+
+Deno.test("drive-demos main: a status that cannot be read is a named failure", async () => {
+  await withScratchOut("reap-reject", async (out) => {
+    const t = driveHarness({ serverStatus: "reject" });
+    await driveDemosMain({ ...t.deps, serverReapBoundMs: 25, argv: driveArgv(out) });
+    assert.ok(
+      reported(t.errors, "server child exit could not be confirmed"),
+      "the unreadable status must be named",
+    );
+    assert.deepEqual(t.codes, [1]);
+  });
 });
 
 // The bound is part of the contract, so a silent change to it is a finding.
