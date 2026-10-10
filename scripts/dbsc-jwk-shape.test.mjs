@@ -17,6 +17,22 @@
 // accepted, proves the STORED key still verifies a refresh proof (so a
 // projection cannot break the crypto), and measures the retained heap.
 //
+// Migrated in place to named Deno.test cases (Stage 4 of the dty proposal, bead
+// dty.4): same file path, same task id `test-dbsc-jwk-shape`, same ordered gate
+// step, same four subjects and the same assertions — the custom `section()`
+// registry and its trailing loop are gone, so a failure names the behaviour and the
+// legacy `Deno.exit(1)` branch is no longer needed (Deno's runner owns the exit
+// code). The task runs through scripts/native-test.mjs, which passes the child
+// exactly the legacy flags (`--allow-read --v8-flags=--expose-gc`) and runs this
+// single file alone (`--serial`), so the runner-wide GC flag can never reach another
+// suite and the heap delta is measured in a process with nothing else in it.
+//
+// Output rebaseline (deliberate, documented): the legacy final line had no
+// `PASS — ` prefix, so the task now prints `PASS — dbsc jwk-shape tests` /
+// `FAIL — dbsc jwk-shape tests (1 file(s) failed)` — a neutral label, truthfully
+// prefixed in both directions. The old text `all sections passed` is gone; a
+// read-only audit found no consumer of it.
+//
 // Run: deno task test-dbsc-jwk-shape   (needs --v8-flags=--expose-gc)
 
 import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
@@ -31,12 +47,6 @@ const NO_ASSET = async () => null;
 // becomes ~683 KiB of proof. A larger number would measure the body ceiling
 // rather than the retention shape.
 const PADDING_CHARS = 512 * 1024;
-
-const failures = [];
-const sections = [];
-function section(label, fn) {
-  sections.push({ label, fn });
-}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -131,9 +141,9 @@ async function registerAndVerifyStoredKey({ paddingChars = 0 } = {}) {
   return refreshed;
 }
 
-// ── sections ────────────────────────────────────────────────────────────────
+// ── cases ────────────────────────────────────────────────────────────────
 
-section("an ordinary registration is accepted and its stored key verifies", async () => {
+Deno.test("ok — an ordinary registration is accepted and its stored key verifies", async () => {
   const refreshed = await registerAndVerifyStoredKey();
   assert(
     refreshed.res.status === 200 && refreshed.body.proofVerified === true,
@@ -141,7 +151,7 @@ section("an ordinary registration is accepted and its stored key verifies", asyn
   );
 });
 
-section("a registration with a padded header JWK is accepted", async () => {
+Deno.test("ok — a registration with a padded header JWK is accepted", async () => {
   const { id, challenge } = await login();
   const { publicJwk, privateKey } = await p256Pair();
   const { res, body } = await call(`${PREFIX}/register`, {
@@ -160,7 +170,7 @@ section("a registration with a padded header JWK is accepted", async () => {
   assert(body.registered === true, "the padded registration should be recorded");
 });
 
-section("a padded registration still verifies through its stored key", async () => {
+Deno.test("ok — a padded registration still verifies through its stored key", async () => {
   const refreshed = await registerAndVerifyStoredKey({ paddingChars: PADDING_CHARS });
   assert(
     refreshed.res.status === 200 && refreshed.body.proofVerified === true,
@@ -168,7 +178,7 @@ section("a padded registration still verifies through its stored key", async () 
   );
 });
 
-section("the JWK padding is not retained across many registrations", async () => {
+Deno.test("ok — the JWK padding is not retained across many registrations", async () => {
   assert(
     typeof globalThis.gc === "function",
     "this section measures retained heap and needs a real GC: run deno task test-dbsc-jwk-shape",
@@ -208,21 +218,3 @@ section("the JWK padding is not retained across many registrations", async () =>
     `     (offered ${offered} MiB of padding; retained ${retainedMiB.toFixed(1)} MiB of heap)`,
   );
 });
-
-// ── runner ──────────────────────────────────────────────────────────────────
-
-for (const { label, fn } of sections) {
-  try {
-    await fn();
-    console.log(`ok   ${label}`);
-  } catch (err) {
-    failures.push({ label, err });
-    console.log(`FAIL ${label}: ${err?.message ?? err}`);
-  }
-}
-
-if (failures.length > 0) {
-  console.error(`\ndbsc jwk-shape tests: ${failures.length} section(s) failed`);
-  Deno.exit(1);
-}
-console.log("\ndbsc jwk-shape tests: all sections passed");
