@@ -19,6 +19,7 @@
 
 import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
 import { handleFeatureRequest as handlePolicyEchoFeatureRequest } from "../v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/_server.ts";
+import { handleFeatureRequest as handleDelayedEchoFeatureRequest } from "../v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields/_server.ts";
 
 const noAsset = async () => null;
 
@@ -58,6 +59,16 @@ async function callPolicyEchoSidecar(sub, query) {
   }
 }
 
+async function callDelayedEchoSidecar(sub, query) {
+  const req = new Request(`http://localhost:3000/v151${sub}${query ?? ""}`);
+  try {
+    const res = await handleDelayedEchoFeatureRequest(req, sub);
+    return res ?? new Response(null, { status: 404 });
+  } catch (err) {
+    return new Response(JSON.stringify({ thrown: String(err) }), { status: 500 });
+  }
+}
+
 const CRLF_ENC = "%0D%0A";
 const EXPECTED_BAD_STATUS = 400;
 
@@ -65,7 +76,7 @@ const EXPECTED_BAD_STATUS = 400;
 // Server-Timing: desc="<label>"
 
 section("delayed-echo keeps the demo's own label working", async () => {
-  const res = await call("v151", DELAY_SUB, "?label=run-1759988000000-1&delay=0");
+  const res = await callDelayedEchoSidecar(DELAY_SUB, "?label=run-1759988000000-1&delay=0");
   assert(res.status === 200, `a normal demo label should still work, got ${res.status}`);
   const timing = res.headers.get("server-timing");
   assert(timing, "the response should still carry Server-Timing");
@@ -76,7 +87,10 @@ section("delayed-echo keeps the demo's own label working", async () => {
 });
 
 section("delayed-echo never 500s on a CR/LF label", async () => {
-  const res = await call("v151", DELAY_SUB, `?label=a${CRLF_ENC}X-Injected:%20yes&delay=0`);
+  const res = await callDelayedEchoSidecar(
+    DELAY_SUB,
+    `?label=a${CRLF_ENC}X-Injected:%20yes&delay=0`,
+  );
   assert(
     res.status !== 500,
     "a CR/LF label must not crash the route (it currently throws while building the header)",
@@ -88,8 +102,7 @@ section("delayed-echo never 500s on a CR/LF label", async () => {
 });
 
 section("delayed-echo rejects a label that breaks the desc quoted-string", async () => {
-  const res = await call(
-    "v151",
+  const res = await callDelayedEchoSidecar(
     DELAY_SUB,
     `?label=${encodeURIComponent('a", evil;dur=1')}&delay=0`,
   );
@@ -100,7 +113,10 @@ section("delayed-echo rejects a label that breaks the desc quoted-string", async
 });
 
 section("delayed-echo bounds the label length", async () => {
-  const res = await call("v151", DELAY_SUB, `?label=${"l".repeat(4096)}&delay=0`);
+  const res = await callDelayedEchoSidecar(
+    DELAY_SUB,
+    `?label=${"l".repeat(4096)}&delay=0`,
+  );
   assert(
     res.status === EXPECTED_BAD_STATUS,
     `an oversized label should be rejected with ${EXPECTED_BAD_STATUS}, got ${res.status}`,

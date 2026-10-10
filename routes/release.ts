@@ -4,6 +4,7 @@ import { handleFeatureRequest as handleDpoServer } from "../v151/declarative-per
 import { handleFeatureRequest as handleXmlMimeServer } from "../v158/spec-compliant-xml-mime-type-detection/_server.ts";
 import { handleFeatureRequest as handleRedirectChainServer } from "../v151/cross-origin-redirect-timing-opt-in/_server.ts";
 import { handleFeatureRequest as handlePolicyEchoServer } from "../v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/_server.ts";
+import { handleFeatureRequest as handleDelayedEchoServer } from "../v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields/_server.ts";
 import { escapeHTML } from "./html.ts";
 import { knownReleaseMilestones, renderReleasePage } from "./pages.ts";
 import {
@@ -29,6 +30,8 @@ const STATIC_FEATURE_SERVERS: Record<string, FeatureServerHandler> = {
   "v151/cross-origin-redirect-timing-opt-in": handleRedirectChainServer,
   "v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-":
     handlePolicyEchoServer,
+  "v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields":
+    handleDelayedEchoServer,
 };
 
 const dynamicFeatureServerCache = new Map<string, FeatureServerHandler | null>();
