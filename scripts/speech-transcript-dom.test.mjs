@@ -11,27 +11,32 @@
 // gate step 23, the same first-failure abort - ONE case covers BOTH demo files,
 // deliberately, so that a failure in the first file still stops the second from
 // being checked. The scanner itself was rebuilt (bead chrome_platform_showcase-vbp,
-// architect design pass) after four rounds of literal-needle bypasses: a transcript
-// 'must never be parsed as markup', and the guard now enforces that by
+// architect design pass) after four rounds of literal-needle bypasses. What this
+// guard IS: a lexical regression net that recognises the listed sink spellings in
+// the two demo files and fails if one (re)appears. What it is NOT: proof that a
+// transcript can never be parsed as markup - five independently reviewed bypass
+// classes were found in earlier committed iterations (Range variant, no-space
+// setter/srcdoc, Object.assign key with a spaced colon, comment-inside-bracket,
+// logical assignment), so the claim here is deliberately limited to the recognised
+// spellings below. It works by
 //   1. extracting the inline <script> bodies - so inert markup (an
 //      `srcdoc="..."` attribute) never reaches the patterns - and
 //   2. matching a small set of whitespace-AND-comment-tolerant regexes against
 //      the extracted JavaScript only. `deno fmt` excludes these HTML files, so
 //      nothing normalises hand-edited spacing; the WS token below spans spaces,
-//      line and block comments, so `outerHTML /*x*/ = text` is the same write as
-//      `outerHTML=text`.
-// Covered: direct writes to `innerHTML`/`outerHTML`/`srcdoc` at any spacing,
-// their object-key forms (`Object.assign(el, { outerHTML : text })`, quoted or
-// not), computed-bracket assignment (`el["innerHTML"] = text`), the parse-family
-// calls (`createContextualFragment`, `parseFromString`, `setHTML`/`setHTMLUnsafe`,
-// `parseHTMLUnsafe`, `sanitize`, `insertAdjacentHTML`) at any spacing before the
-// paren, `setAttribute("srcdoc", ...)` and `document.write/writeln` in both
-// casings (`contentDocument.write`). ONE gap primitive (WS below: whitespace,
-// line and block comments) is applied at EVERY token boundary the patterns
-// contain - before/after `[`, the key string and `]`, around the property dot,
-// before the operator or colon, and before the call paren - so a comment dropped
-// into any syntactic gap of a sink is the same sink (`el[/*x*/"innerHTML"] = t`,
-// `outerHTML /*x*/ = t`, `document /*x*/ . /*x*/ write /*x*/ (t)`).
+//      line and block comments, so `outerHTML /*x*/ = text` is recognised as the
+//      same spelling as `outerHTML=text`.
+// Recognised spellings (the guard's entire positive scope): direct writes to
+// `innerHTML`/`outerHTML`/`srcdoc`, their object-key forms (`Object.assign(el,
+// { outerHTML : text })`, quoted or not), computed-bracket assignment
+// (`el["innerHTML"] = text`), the parse-family calls (`createContextualFragment`,
+// `parseFromString`, `setHTML`/`setHTMLUnsafe`, `parseHTMLUnsafe`, `sanitize`,
+// `insertAdjacentHTML`), `setAttribute("srcdoc", ...)` and
+// `document.write/writeln` in both casings (`contentDocument.write`). The WS gap
+// primitive (whitespace, line and block comments) is applied at the token
+// boundaries inside these patterns, and the guard's matrix covers comment
+// insertion at each of those boundaries; it says nothing about JavaScript
+// shapes the patterns do not spell out.
 // Green by construction: reads of `outerHTML`/`srcdoc`/`el["innerHTML"]`, inert
 // markup, a quoted string that merely names an accessor (`const s =
 // "innerHTML"`), `Node.importNode` (a clone/adopt step whose parse half is
@@ -40,13 +45,16 @@
 // string/comment containing e.g. `innerHTML =` trips the guard, as does an
 // `==`/`===` comparison of an accessor or a JS label spelled `innerHTML:` -
 // neither demo does any of that, and a future author who does gets a clear
-// message and restructures. Honest residual limits, NOT a universal static
-// proof: alias evasion (`const d = document; d.write(text)`) is out of scope, the
-// scan covers inline <script> bodies only (external <script src> would also
-// break the required-needle presence checks below, failing closed), and a sink
-// spelled across a line-comment newline boundary that changes the token stream
-// is the same alias class. The browser evidence for the behaviour stays on bead
-// 5c8 and is not restated here.
+// message and restructures. Known residual gaps (recognised as out of scope,
+// NOT covered): the logical-assignment operators - `transEl.innerHTML ||= text`
+// (and `&&=`, `??=`) invoke the same parsing setter but are not recognised
+// spellings (rev-4w9d); alias evasion (`const d = document; d.write(text)`); any
+// sink spelling outside the list above. The scan covers inline <script> bodies
+// only (external <script src> would also break the required-needle presence
+// checks below, failing closed). A syntax-aware instrument that could make the
+// stronger claim is tracked as separately funded work by the hub; until then
+// this file is a net with an honest boundary, not a proof. The browser evidence
+// for the behaviour stays on bead 5c8 and is not restated here.
 //
 // Permissions: the child is granted `--allow-read` alone, and that flag is genuinely
 // required - the guard reads the two demo files it guards - so it is forwarded rather
@@ -147,6 +155,6 @@ Deno.test("the speech transcript now speaks in text nodes, in both demos", () =>
   console.log(
     `PASS — speech transcript DOM rendering (${assertions} assertions over ${
       Object.keys(files).length
-    } demos: no prohibited HTML-writing or HTML-parsing calls found, expected text-node render code present)`,
+    } demos: none of the recognised HTML-writing/parsing spellings found (lexical net, not a proof), expected text-node render code present)`,
   );
 });
