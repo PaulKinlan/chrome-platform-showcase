@@ -53,6 +53,75 @@ function check(label, ok, detail = "") {
 }
 
 const read = (path) => Deno.readTextFileSync(`${REPO}${path}`);
+
+// String-aware comment stripper for the vo6 registry pin: a naive regex would
+// count a COMMENTED-OUT registry entry or import as live wiring (review
+// finding chrome_platform_showcase-188), while a naive "//" stripper would
+// corrupt string literals containing "https://...". Handles ', " and `
+// strings with escapes; template-literal ${} nesting is not needed for the
+// parsed blocks and is treated as plain string content.
+function stripJsComments(src) {
+  let out = "";
+  let i = 0;
+  let string = null;
+  while (i < src.length) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (string) {
+      out += c;
+      if (c === "\\") {
+        out += next ?? "";
+        i += 2;
+        continue;
+      }
+      if (c === string) string = null;
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      string = c;
+      out += c;
+      i++;
+      continue;
+    }
+    if (c === "/" && next === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+function parseSidecarWiring(source) {
+  const code = stripJsComments(source);
+  const imported = new Map();
+  for (
+    const match of code.matchAll(
+      /import\s*\{\s*handleFeatureRequest\s+as\s+(\w+)\s*\}\s*from\s*"\.\.\/([^"]+)\/_server\.ts"\s*;/g,
+    )
+  ) {
+    imported.set(match[2], match[1]);
+  }
+  const registryMarker = "const STATIC_FEATURE_SERVERS";
+  const registryStart = code.indexOf(registryMarker);
+  const registryEnd = registryStart >= 0 ? code.indexOf("};", registryStart) : -1;
+  const registered = new Map();
+  if (registryEnd > registryStart) {
+    const block = code.slice(registryStart, registryEnd);
+    for (const match of block.matchAll(/"([^"]+)"\s*:\s*(\w+)/g)) {
+      registered.set(match[1], match[2]);
+    }
+  }
+  return { imported, registered, registryFound: registryEnd > registryStart };
+}
 Deno.test("the affected-file map fails closed and never orphans a suite", async () => {
   const tasks = JSON.parse(read("deno.json")).tasks ?? {};
 
@@ -268,6 +337,16 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
     selectSteps([
       "v150/css-url-request-modifiers/_server.ts",
     ]).steps.includes("test-header-grammar"),
+  );
+  check(
+    "any feature sidecar change (even one with no per-file rule) selects the header-grammar suite",
+    selectSteps([
+      "v158/spec-compliant-xml-mime-type-detection/_server.ts",
+    ]).steps.includes("test-header-grammar"),
+  );
+  check(
+    "a STATIC_FEATURE_SERVERS registry edit selects the header-grammar suite",
+    selectSteps(["routes/release.ts"]).steps.includes("test-header-grammar"),
   );
 
   const gc = selectSteps(["routes/release-endpoints.ts"]);
@@ -543,6 +622,122 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
     );
   } finally {
     await Deno.remove(fixture, { recursive: true });
+  }
+
+  // ---------------------------------------------------- registry completeness
+  // vo6: the local server resolves a feature sidecar through
+  // STATIC_FEATURE_SERVERS first and then a computed dynamic-import fallback
+  // (routes/release.ts). That fallback is NOT in the deployed static module
+  // graph, so an unregistered sidecar still answers locally while production
+  // 404s — and the sidecar suites call handleFeatureRequest directly, so they
+  // cannot see it. Pin the invariant statically: the set of on-disk
+  // v*/<slug>/_server.ts files must equal the set of statically imported +
+  // registered keys, and each key's import identifier must be the identifier
+  // named in the registry. Textual parsing (gate-parity precedent), robust to
+  // comments and line wrapping, fails closed if the expected blocks vanish.
+  {
+    // 188: the parser must count EFFECTIVE code, not commented-out text. Pin
+    // the comment handling with permanent synthetic negatives before trusting
+    // it on the real tree.
+    const synthetic = [
+      {
+        label: "a line-commented registry entry is not counted",
+        source: 'const STATIC_FEATURE_SERVERS = {\n// "v9/x": h,\n};',
+        imported: 0,
+        registered: 0,
+      },
+      {
+        label: "a block-commented registry entry is not counted",
+        source: 'const STATIC_FEATURE_SERVERS = {\n/* "v9/x": h, */\n};',
+        imported: 0,
+        registered: 0,
+      },
+      {
+        label: "a line-commented sidecar import is not counted",
+        source:
+          '// import { handleFeatureRequest as h } from "../v9/x/_server.ts";\nconst STATIC_FEATURE_SERVERS = {};',
+        imported: 0,
+        registered: 0,
+      },
+      {
+        label: "a block-commented sidecar import is not counted",
+        source:
+          '/* import { handleFeatureRequest as h } from "../v9/x/_server.ts"; */\nconst STATIC_FEATURE_SERVERS = {};',
+        imported: 0,
+        registered: 0,
+      },
+      {
+        label: "a live pair IS counted even next to an https:// string literal",
+        source:
+          'const u = "https://example.com/x"; // trailing note\nimport { handleFeatureRequest as h } from "../v9/x/_server.ts";\nconst STATIC_FEATURE_SERVERS = {\n  "v9/x": h,\n};',
+        imported: 1,
+        registered: 1,
+      },
+    ];
+    for (const { label, source, imported: ni, registered: nr } of synthetic) {
+      const parsed = parseSidecarWiring(source);
+      check(
+        `comment-aware wiring parse: ${label}`,
+        parsed.imported.size === ni && parsed.registered.size === nr,
+        `imported=${parsed.imported.size} registered=${parsed.registered.size} (wanted ${ni}/${nr})`,
+      );
+    }
+
+    const releaseSource = read("routes/release.ts");
+    const { imported, registered, registryFound } = parseSidecarWiring(releaseSource);
+    check(
+      "STATIC_FEATURE_SERVERS block exists and is terminated in routes/release.ts",
+      registryFound,
+    );
+    const onDisk = new Set();
+    for (const release of Deno.readDirSync(REPO)) {
+      if (!release.isDirectory || !/^v\d+$/.test(release.name)) continue;
+      for (const feature of Deno.readDirSync(`${REPO}${release.name}`)) {
+        if (!feature.isDirectory) continue;
+        try {
+          if (
+            Deno.statSync(
+              `${REPO}${release.name}/${feature.name}/_server.ts`,
+            ).isFile
+          ) {
+            onDisk.add(`${release.name}/${feature.name}`);
+          }
+        } catch {
+          // no sidecar here
+        }
+      }
+    }
+    for (const key of onDisk) {
+      check(
+        `sidecar ${key} is statically imported AND registered with the same binding`,
+        imported.has(key) && registered.get(key) === imported.get(key),
+        imported.has(key)
+          ? registered.has(key)
+            ? `registry names ${registered.get(key)}, import binds ${imported.get(key)}`
+            : "missing from STATIC_FEATURE_SERVERS (the local dynamic-import fallback would mask the 404 production returns)"
+          : "no static import in routes/release.ts",
+      );
+    }
+    for (const key of registered.keys()) {
+      check(
+        `registry key ${key} has a sidecar file on disk and a static import`,
+        onDisk.has(key) && imported.has(key),
+        onDisk.has(key) ? "never statically imported" : "no _server.ts on disk",
+      );
+    }
+    for (const key of imported.keys()) {
+      check(
+        `imported sidecar ${key} is registered`,
+        registered.has(key),
+        "statically imported but absent from STATIC_FEATURE_SERVERS",
+      );
+    }
+    check(
+      "on-disk sidecars and registry keys are the same set",
+      onDisk.size === registered.size &&
+        [...onDisk].every((k) => registered.has(k)),
+      `disk=${onDisk.size} registered=${registered.size}`,
+    );
   }
 
   // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
