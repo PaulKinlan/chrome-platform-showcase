@@ -69,18 +69,24 @@ async function runBoundedChild(args, { cwd, deadlineMs = 20_000 } = {}) {
   try {
     const exit = await boundedRace(child.status.then((status) => status.code), deadlineMs, null);
     let killError = null;
+    let status = null;
     if (exit === null) {
       try {
-        Deno.kill(child.pid, "SIGKILL");
+        // The OWNED HANDLE, not Deno.kill(pid). The handle form is permitted under a
+        // narrow --allow-run=deno,git allowlist; the pid form reports NotCapable under
+        // it (finding 0l7), which is what forced this task to grant broad process
+        // execution it did not need.
+        child.kill("SIGKILL");
       } catch (error) {
         // Never swallow this: a silent no-op here is exactly how the harness once
-        // kept a killed-looking child alive. `Deno.kill` needs --allow-run with no
-        // path restriction; a path-restricted allowlist reports NotCapable.
+        // kept a killed-looking child alive.
         killError = error;
       }
+      status = await boundedRace(child.status, 2000, null);
     }
     return {
       exit,
+      status,
       timedOut: exit === null,
       killError,
       elapsedMs: Math.round(performance.now() - started),
@@ -199,14 +205,19 @@ async function runGate(root, args, timeoutMs = 45_000) {
   };
 
   let timedOut = false;
+  let killError = null;
   const deadline = setTimeout(async () => {
     timedOut = true;
     try {
       await Deno.writeTextFile(cancelPath, "cancel");
     } catch { /* the tree may already be gone */ }
     try {
-      Deno.kill(child.pid, "SIGKILL");
-    } catch { /* already exited */ }
+      // The owned handle, not Deno.kill(pid): only the handle form is permitted under
+      // this task's narrow --allow-run=deno,git allowlist (finding 0l7).
+      child.kill("SIGKILL");
+    } catch (error) {
+      killError = error; // surfaced in the timeout error below, never swallowed
+    }
     for (const stream of [child.stdout, child.stderr]) {
       try {
         await stream?.cancel();
@@ -223,7 +234,12 @@ async function runGate(root, args, timeoutMs = 45_000) {
     // A surviving grandchild holds the inherited stdio, so this read is bounded too.
     const text = await Promise.race([io, bounded(500, "")]);
     if (timedOut) {
-      throw new HarnessTimeout(`run-gate.mjs ${args.join(" ") || "(full plan)"}`, timeoutMs);
+      throw new HarnessTimeout(
+        `run-gate.mjs ${args.join(" ") || "(full plan)"}${
+          killError ? ` (the runner could not be stopped: ${killError.message})` : ""
+        }`,
+        timeoutMs,
+      );
     }
     // Fail-closed runs print `gate: FAIL-CLOSED …` BEFORE the JSON object, so the
     // payload has to be taken from the first brace rather than from the whole output.
@@ -505,11 +521,26 @@ try {
     // Note what does NOT hang: `deno eval "await new Promise(() => {})"` fails fast with
     // "Top-level await promise never resolved" (rc 1 in ~40ms) — the first version of
     // this proof used exactly that, and the check caught it.
+    // Printed, not just asserted: the mechanism (owned handle, real signal) should be
+    // visible in the log, since a success prints no detail line for the check below.
+    console.log(
+      `focused proof detail — uncooperative child stopped via the owned handle: kill=${
+        hung.killError?.name ?? "ok"
+      } signal=${hung.status?.signal ?? "n/a"} code=${
+        hung.status?.code ?? "n/a"
+      } after ${hung.elapsedMs}ms`,
+    );
     check(
       "focused proof: the watchdog stops a hanging child and reports a named failure",
       hung.timedOut && hung.exit === null && hung.error instanceof HarnessTimeout &&
-        hung.elapsedMs >= 700 && hung.elapsedMs < 5000,
-      `timedOut=${hung.timedOut} exit=${hung.exit} error=${hung.error?.name} after ${hung.elapsedMs}ms (watchdog 700ms)`,
+        hung.elapsedMs >= 700 && hung.elapsedMs < 5000 &&
+        // An uncooperative child (an idle interval that ignores the cancel file) must be
+        // stopped by the owned handle, and the reap must show the signal actually landed.
+        hung.killError === null &&
+        (hung.status?.signal === "SIGKILL" || hung.status?.code === 137),
+      `timedOut=${hung.timedOut} exit=${hung.exit} error=${hung.error?.name} after ${hung.elapsedMs}ms, kill=${
+        hung.killError?.name ?? "ok"
+      } signal=${hung.status?.signal ?? "n/a"} code=${hung.status?.code ?? "n/a"} (watchdog 700ms)`,
     );
     const green = childExitVerdict(0, 20_000);
     const failed = childExitVerdict(1, 10);
