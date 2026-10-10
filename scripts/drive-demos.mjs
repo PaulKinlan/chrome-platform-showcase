@@ -347,8 +347,11 @@ async function runDrive(opts, io, holder, selection) {
     if (!holder.serverChild) return;
     try {
       holder.serverChild.kill("SIGKILL");
-    } catch {
-      // already gone
+    } catch (err) {
+      // A refused signal on a child we own must not be dropped on the floor with
+      // the handle: record it so the caller reports a named cleanup failure
+      // instead of continuing as if the child were gone.
+      holder.killFailures.push(err);
     }
     holder.serverChild = null;
   }
@@ -766,6 +769,33 @@ async function reapServerChild(child, { boundMs = SERVER_REAP_BOUND_MS } = {}) {
   }
 }
 
+// Same rule as the server child: closing a socket is a request, not a result. A
+// close that never settles is bounded and reported rather than awaited forever,
+// so a wedged connection cannot stop the report phase - or the exit - from
+// happening, and a close that fails is never mistaken for a clean shutdown.
+const CONNECTION_CLOSE_BOUND_MS = 2000;
+
+async function closeConnection(conn, { boundMs = CONNECTION_CLOSE_BOUND_MS } = {}) {
+  if (!conn?.close) return null;
+  let timer = null;
+  try {
+    await Promise.race([
+      Promise.resolve(conn.close()),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`the connection did not close within ${boundMs}ms`)),
+          boundMs,
+        );
+      }),
+    ]);
+    return null;
+  } catch (err) {
+    return new Error(`the connection could not be closed: ${err?.message ?? String(err)}`);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 // Stage 2 contract, in order: validate targets before acquiring anything; run
 // the drive phase; clean up (connection, Chrome, server child) capturing every
 // failure instead of throwing it over the real error; then attempt BOTH report
@@ -781,6 +811,7 @@ export async function main(deps = {}) {
     writeMd = Deno.writeTextFile,
     teardown = teardownChrome,
     serverReapBoundMs = SERVER_REAP_BOUND_MS,
+    connectionCloseBoundMs = CONNECTION_CLOSE_BOUND_MS,
     exit = Deno.exit,
     log = console.log,
     error = console.error,
@@ -795,7 +826,7 @@ export async function main(deps = {}) {
     return;
   }
 
-  const holder = { chrome: null, conn: null, serverChild: null };
+  const holder = { chrome: null, conn: null, serverChild: null, killFailures: [] };
   let runResult = null;
   let primary = null;
   try {
@@ -807,11 +838,13 @@ export async function main(deps = {}) {
   // Same cleanup sequence as the old run-level finally, captured per step so a
   // cleanup failure can never replace the run's own error or skip the report.
   const cleanupFailures = [];
-  try {
-    if (holder.conn) await holder.conn.close?.();
-  } catch (err) {
-    cleanupFailures.push({ what: "the CDP connection", error: err });
+  // A refused signal during boot recovery is a cleanup failure that already
+  // happened: it must be reported rather than forgotten.
+  for (const err of holder.killFailures ?? []) {
+    cleanupFailures.push({ what: "a server child that could not be signalled", error: err });
   }
+  const closeFailure = await closeConnection(holder.conn, { boundMs: connectionCloseBoundMs });
+  if (closeFailure) cleanupFailures.push({ what: "the CDP connection", error: closeFailure });
   try {
     await teardown(holder.chrome);
   } catch (err) {
