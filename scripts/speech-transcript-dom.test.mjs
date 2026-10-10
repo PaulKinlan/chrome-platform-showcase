@@ -17,19 +17,24 @@
 // (including the `contentDocument.write` spelling), `Range.createContextualFragment`,
 // `DOMParser.parseFromString`, `Element.setHTML`/`setHTMLUnsafe`,
 // `document.parseHTMLUnsafe`, `Sanitizer.sanitize` on a string and writes to iframe
-// `srcdoc` (assignment or `setAttribute`). The bans are scoped to string-to-markup
-// signatures, and each is listed in its spaced and unspaced spellings because
-// `deno fmt` excludes these HTML files, so nothing normalises hand-edited spacing:
-// a read of `outerHTML`, an inert `srcdoc="..."` attribute and `Node.importNode` (a
-// clone/adopt step whose parse half is already in the list) stay green. Known
-// overreach, accepted in the safe direction: the `outerHTML` write needles also
-// trip on an `==`/`===` comparison of `outerHTML` - neither file compares it, and a
-// future author who does gets a clear message and restructures. This is a lexical
-// `String.includes` guard on these two files, not a proof about arbitrary
-// JavaScript: alias evasion (`const d = document; d.write(text)`) is out of scope
-// by design. Because this guard is source `String.includes` and a length floor, no
-// browser is involved; the browser evidence for the behaviour stays on bead 5c8
-// and is not restated here.
+// `srcdoc` (assignment or `setAttribute`), including the indirect `[[Set]]` routes
+// to the accessor setters: `Object.assign(el, { outerHTML: text })`,
+// `el["outerHTML"] = text` and quoted `setAttribute`/`defineProperty` keys (the
+// bare-key and quoted spellings of `innerHTML`, `outerHTML` and `srcdoc` are all
+// banned). The bans are scoped to string-to-markup signatures, and each is listed
+// in its spaced and unspaced spellings because `deno fmt` excludes these HTML
+// files, so nothing normalises hand-edited spacing: a read of `outerHTML` or
+// `srcdoc`, an inert `srcdoc="..."` attribute and `Node.importNode` (a clone/adopt
+// step whose parse half is already in the list) stay green. Known overreach,
+// accepted in the safe direction: the `outerHTML` write needles also trip on an
+// `==`/`===` comparison of `outerHTML`, and the key-form needles also trip an
+// inert object literal or string that merely mentions one of the three keys -
+// neither file does either today, and a future author who does gets a clear
+// message and restructures. This is a lexical `String.includes` guard on these
+// two files, not a proof about arbitrary JavaScript: alias evasion (`const d =
+// document; d.write(text)`) is out of scope by design. Because this guard is
+// source `String.includes` and a length floor, no browser is involved; the
+// browser evidence for the behaviour stays on bead 5c8 and is not restated here.
 //
 // Permissions: the child is granted `--allow-read` alone, and that flag is genuinely
 // required - the guard reads the two demo files it guards - so it is forwarded rather
@@ -37,7 +42,7 @@
 // `--serial` and no `--dir`.
 //
 // Output: the case keeps the file's own count line, which is the evidence that the
-// guard actually executed its checks (47 assertions over 2 demos), and the task adds
+// guard actually executed its checks (61 assertions over 2 demos), and the task adds
 // the runner's `PASS — speech transcript DOM contract` line, matching the gate step's
 // own wording.
 
@@ -85,6 +90,19 @@ const forbidden = [
   ".srcdoc=",
   '"srcdoc"',
   "'srcdoc'",
+  // Indirect `[[Set]]` routes to the accessor setters: `Object.assign(el,
+  // { outerHTML: text })` performs the same parsing set as an assignment, and
+  // `el["outerHTML"] = text` / `Object.defineProperty(el, "outerHTML", ...)`
+  // spell the key as a string. Bare-key and quoted forms of all three
+  // accessors; an inert object literal or prose string mentioning a key also
+  // trips - accepted, safe direction, noted in the header.
+  "innerHTML:",
+  '"innerHTML"',
+  "'innerHTML'",
+  "outerHTML:",
+  '"outerHTML"',
+  "'outerHTML'",
+  "srcdoc:",
   // Non-literal HTML-parsing sinks, listed without a trailing paren so a space
   // before the call paren cannot slip past: each of these parses a string as
   // markup, so feeding one a transcript re-opens the quote-breakout hole from
