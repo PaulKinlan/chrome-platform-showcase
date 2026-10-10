@@ -43,6 +43,7 @@ import {
   main as conformanceSweepMain,
   parseArgs as conformanceSweepParseArgs,
 } from "./conformance-sweep.mjs";
+import { main as driveDemosMain, parseArgs as driveDemosParseArgs } from "./drive-demos.mjs";
 
 const root = await Deno.makeTempDir({ prefix: "dty1w1-cdp-root-" });
 Deno.env.set("TMPDIR", root);
@@ -374,7 +375,14 @@ const CALLER_REPORT = {
 // successful write, so "the sibling was still attempted" stays assertable even
 // when the sibling is the thing that throws.
 function callerHarness(
-  { primary = null, failJson = null, failMd = null, failTeardown = null } = {},
+  {
+    primary = null,
+    failJson = null,
+    failMd = null,
+    failTeardown = null,
+    result = CALLER_REPORT,
+    resources = false,
+  } = {},
 ) {
   const attempts = [];
   const writes = [];
@@ -382,13 +390,22 @@ function callerHarness(
   const errors = [];
   const codes = [];
   const teardownArgs = [];
+  const connCloses = [];
+  const serverKills = [];
   const chrome = { tag: "chrome-handle" };
   const deps = {
     argv: [],
     run: async (_opts, _io, holder) => {
       holder.chrome = chrome;
+      if (resources) {
+        holder.conn = { close: () => connCloses.push("closed") };
+        holder.serverChild = {
+          kill: (signal) => serverKills.push(signal ?? "SIGTERM"),
+          status: Promise.resolve(0),
+        };
+      }
       if (primary) throw primary;
-      return CALLER_REPORT;
+      return result;
     },
     writeJson: async (path, text) => {
       attempts.push({ kind: "json", path });
@@ -408,7 +425,18 @@ function callerHarness(
     log: (line) => log.push(String(line)),
     error: (line) => errors.push(String(line)),
   };
-  return { deps, chrome, attempts, writes, log, errors, codes, teardownArgs };
+  return {
+    deps,
+    chrome,
+    attempts,
+    writes,
+    log,
+    errors,
+    codes,
+    teardownArgs,
+    connCloses,
+    serverKills,
+  };
 }
 
 const reported = (errors, needle) => errors.some((line) => line.includes(needle));
@@ -551,6 +579,195 @@ Deno.test("conformance-sweep is import-safe: importing it exports a caller and r
       timeoutMin: 60,
     },
     "the CLI defaults must not drift when the module is imported rather than run",
+  );
+});
+
+// ── drive-demos caller-level controls (same Stage 2 contract) ────────────────
+//
+// The second migrated caller, driven the same way: the real main(deps) with an
+// injected drive phase, injected writers, the strict teardown and a recorded
+// exit. Two of these cases exist only here - the pre-acquisition `exit(2)` for an
+// empty selection, and the long-standing failedCount / NOT-ASSERTED exit
+// semantics - because they are behaviour this caller must keep, not gain.
+
+const DRIVE_RESULT = {
+  base: "http://localhost:3999",
+  results: [{ url: "/v150/accentcolor-explorer/contrast-explorer/", status: "PASS" }],
+  passedCount: 1,
+  failedCount: 0,
+  notDemonstratedCount: 0,
+  noVisualDeltaCount: 0,
+  visualOnlyCount: 0,
+  delayedChangeCount: 0,
+};
+
+// Every drive case needs a drive-shaped run result and the resource handles the
+// cleanup contract walks, so they all start from the same harness.
+const driveHarness = (over = {}) =>
+  callerHarness({ resources: true, result: DRIVE_RESULT, ...over });
+
+const driveArgv = (outDir) => [
+  "--url",
+  "/v150/accentcolor-explorer/contrast-explorer/",
+  "--out",
+  outDir,
+];
+
+// The report phase reads the output directory, so give it a real one this suite
+// owns and removes again - never a tracked reports/ directory.
+async function withScratchOut(label, fn) {
+  const dir = await Deno.makeTempDir({ prefix: `dty2-${label}-`, dir: root });
+  try {
+    return await fn(dir);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+Deno.test("drive-demos main: an empty selection is the pre-acquisition exit 2", async () => {
+  const t = driveHarness();
+  let ran = 0;
+  t.deps.run = async () => {
+    ran++;
+    return DRIVE_RESULT;
+  };
+  await driveDemosMain({ ...t.deps, argv: ["--feature", "no-such-feature-dty2"] });
+  assert.deepEqual(t.codes, [2], "an empty selection must still exit 2");
+  assert.equal(ran, 0, "the validation must run BEFORE the drive phase acquires anything");
+  assert.deepEqual(t.teardownArgs, [], "nothing was acquired, so nothing may be torn down");
+});
+
+Deno.test("drive-demos main: a clean run states exit 0 and cleans up connection, Chrome and server", async () => {
+  await withScratchOut("clean", async (out) => {
+    const t = driveHarness();
+    await driveDemosMain({ ...t.deps, argv: driveArgv(out) });
+    assert.deepEqual(t.codes, [0], "this caller always states its exit code");
+    assert.deepEqual(t.attempts.map((a) => a.kind), ["json", "md"], "both artefacts, JSON first");
+    assert.deepEqual(t.connCloses, ["closed"], "the CDP connection must be closed");
+    assert.deepEqual(
+      t.teardownArgs,
+      [t.chrome],
+      "teardown must receive the handle the run published",
+    );
+    assert.deepEqual(t.serverKills, ["SIGKILL"], "the server child must be killed");
+    assert.deepEqual(t.errors, [], "a clean run prints no failure line");
+  });
+});
+
+Deno.test("drive-demos main: a failed demo still exits 1 when nothing else failed", async () => {
+  await withScratchOut("failed", async (out) => {
+    const t = driveHarness({ result: { ...DRIVE_RESULT, failedCount: 1 } });
+    await driveDemosMain({ ...t.deps, argv: driveArgv(out) });
+    assert.deepEqual(t.codes, [1], "the pre-existing failedCount semantics must be preserved");
+  });
+});
+
+Deno.test("drive-demos main: a NOT-ASSERTED spec case is non-zero, not a quiet pass", async () => {
+  await withScratchOut("notasserted", async (out) => {
+    const t = driveHarness({
+      result: {
+        ...DRIVE_RESULT,
+        results: [{ ...DRIVE_RESULT.results[0], status: "NOT-ASSERTED" }],
+      },
+    });
+    await driveDemosMain({ ...t.deps, argv: driveArgv(out) });
+    assert.deepEqual(t.codes, [1], "a spec that asserted nothing must not exit 0");
+  });
+});
+
+Deno.test("drive-demos main: a report-write failure is named non-zero and still attempts the sibling", async () => {
+  await withScratchOut("writefail", async (out) => {
+    const t = driveHarness({ failJson: "disk full (drive json)" });
+    await driveDemosMain({ ...t.deps, argv: driveArgv(out) });
+    assert.deepEqual(
+      t.attempts.map((a) => a.kind),
+      ["json", "md"],
+      "the markdown must still be attempted",
+    );
+    assert.ok(reported(t.errors, "disk full (drive json)"), "the cause must be carried");
+    assert.ok(
+      reported(t.errors, "could not be written"),
+      "the failure must be named as a write failure",
+    );
+    assert.deepEqual(t.codes, [1], "an unconfirmed report write must not be a green run");
+  });
+});
+
+Deno.test("drive-demos main: a cleanup-only failure is named non-zero after the report was written", async () => {
+  await withScratchOut("cleanfail", async (out) => {
+    const t = driveHarness({
+      failTeardown: "profile dty2 was not confirmed removed",
+    });
+    await driveDemosMain({ ...t.deps, argv: driveArgv(out) });
+    assert.deepEqual(
+      t.writes.map((w) => w.kind),
+      ["json", "md"],
+      "cleanup must not suppress the report",
+    );
+    assert.ok(
+      reported(t.errors, "profile dty2 was not confirmed removed"),
+      "the failure must be named",
+    );
+    assert.deepEqual(
+      t.codes,
+      [1],
+      "a run that cannot confirm cleanup is not green even when every assertion passed",
+    );
+  });
+});
+
+Deno.test("drive-demos main: a frozen drive-phase error keeps its identity and is reported first", async () => {
+  await withScratchOut("primary", async (out) => {
+    const primary = Object.freeze(new Error("chrome never answered"));
+    const t = driveHarness({ primary, failTeardown: "teardown exploded" });
+    const thrown = await driveDemosMain({ ...t.deps, argv: driveArgv(out) }).then(
+      () => null,
+      (err) => err,
+    );
+    assert.equal(thrown, primary, "the caller must rethrow the SAME error");
+    assert.equal(thrown.message, "chrome never answered", "the original message must be intact");
+    assert.ok(t.errors[0]?.includes("chrome never answered"), "the drive error is reported first");
+    assert.ok(
+      reported(t.errors, "teardown exploded"),
+      "the cleanup failure is still reported separately",
+    );
+    assert.ok(
+      !t.errors.some((line) => line.includes("TypeError") || line.includes("not extensible")),
+      "no annotation failure may be reported in place of the real one",
+    );
+    assert.deepEqual(t.codes, [], "a rethrown error is the signal: exit must not be called");
+  });
+});
+
+Deno.test("drive-demos is import-safe: importing it exports a caller and runs nothing", () => {
+  assert.equal(typeof driveDemosMain, "function", "main(deps) must be exported");
+  assert.equal(
+    typeof driveDemosParseArgs,
+    "function",
+    "parseArgs must stay a pure exported function",
+  );
+  const defaults = driveDemosParseArgs([]);
+  assert.equal(defaults.noServer, false);
+  assert.equal(defaults.base, null);
+  assert.equal(defaults.limitN, 0);
+  assert.ok(
+    defaults.outDir.endsWith("reports/interactive-proof"),
+    "the default report directory must not drift",
+  );
+  assert.deepEqual(
+    driveDemosParseArgs(["--url", "/a/b/", "--no-server", "--limit", "2", "--out", "/tmp/x"]),
+    {
+      noServer: true,
+      base: null,
+      milestone: null,
+      feature: null,
+      targetUrl: "/a/b/",
+      sampleN: 0,
+      limitN: 2,
+      outDir: "/tmp/x",
+      positional: undefined,
+    },
+    "an injected argv must be parsed exactly like the process argv used to be",
   );
 });
 
