@@ -92,10 +92,14 @@ async function runBoundedChild(args, { cwd, deadlineMs = 20_000 } = {}) {
 }
 
 /** The property finding 5v8 broke is that the process EXITS. Elapsed time is advisory
- * only: on a shared 2-vCPU VM a green run can approach the 12s design target through
- * contention alone, and a hard wall-clock assertion here would be a false red in the
- * very gate this guards (the reviewer measured a real 11.53s exit against a 12s
- * assertion). The 20s watchdog, not this budget, is what bounds a hang. */
+ * only: a correctness-green child can exceed any fixed performance budget on a loaded
+ * VM, and a hard wall-clock assertion here would be a false red in the very gate this
+ * guards — the same reasoning behind adopting no runtime threshold for the gate itself.
+ * No such failure has been observed, and the 11.53s the review measured was this
+ * check's own PARENT process exiting externally, not this child's elapsed time; the
+ * risk is therefore prospective rather than demonstrated, which is precisely why a
+ * fixed budget here would be quiet until the day a loaded VM tripped it. The 20s
+ * watchdog, not the 12s design target, is what bounds a hang. */
 function childExitVerdict(exit, elapsedMs) {
   return { ok: exit === 0, advisory: elapsedMs >= 12_000, elapsedMs };
 }
