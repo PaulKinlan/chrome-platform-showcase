@@ -195,6 +195,39 @@ Deno.test("the replay TTL outlives the token it guards", () => {
   );
 });
 
+Deno.test("the replay cache uses the project's declared policy numbers", () => {
+  // The case above pins the RELATION between the replay TTL and the token
+  // lifetime, and the case below pins memory. Neither can see the numbers
+  // themselves: both sides of the relation are imported, and the entry count is
+  // only asserted to be positive, so the cache could keep its relation and its
+  // memory bound while the policy silently changed - the cap was measured moving
+  // 4096 -> 1024 with every case still green. These are the declared values
+  // (routes/release-endpoints.ts), stated here as decimal literals rather than
+  // restated as the expressions the route uses, so a change to any of them fails
+  // HERE by name. A rewrite that keeps the same value (15 * 60 * 1000, or 900_000)
+  // is correctly accepted.
+  //
+  // They are checked numerically rather than behaviourally on purpose: the replay
+  // cache is constructed at module scope, so a test cannot inject a clock into it
+  // the way the session-store cases do, and a behavioural TTL test would mean
+  // waiting out the TTL or patching the global Date.now. The value IS the policy,
+  // and the token lifetime is pinned too because the relation above has two moving
+  // sides: raising it to 400s would keep `900000 >= 400000` true while changing
+  // what the relation is supposed to protect.
+  assert(
+    EVP_NONCE_REPLAY_TTL_MS === 900_000,
+    `the replay TTL must be the declared 900000 ms (15 minutes), got ${EVP_NONCE_REPLAY_TTL_MS}`,
+  );
+  assert(
+    EVP_NONCE_REPLAY_MAX_ENTRIES === 4096,
+    `the replay entry cap must be the declared 4096, got ${EVP_NONCE_REPLAY_MAX_ENTRIES}`,
+  );
+  assert(
+    EVP_SAMPLE_TOKEN_TTL_SECONDS === 300,
+    `the token lifetime must be the declared 300 s, got ${EVP_SAMPLE_TOKEN_TTL_SECONDS}`,
+  );
+});
+
 Deno.test("retained nonce memory stays bounded", async () => {
   assert(
     typeof globalThis.gc === "function",
