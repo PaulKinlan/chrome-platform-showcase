@@ -173,6 +173,11 @@ export const RULES = [
     steps: ["test-header-grammar", "check-routes"],
     note: "resource-timing delayed-echo sidecar",
   },
+  {
+    pattern: "v145/reduced-user-agent-strings-by-default/_server.ts",
+    steps: ["test-header-grammar", "check-routes"],
+    note: "UA-CH migration client-hints-echo sidecar",
+  },
   ...SPEECH_DEMOS.map((pattern) => ({
     pattern,
     steps: [
