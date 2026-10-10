@@ -45,6 +45,18 @@
 // `FAIL — speculation probe docs tests (1 file(s) failed)` - a neutral label,
 // truthfully prefixed in both directions. A per-suite audit found no consumer of
 // the old text.
+//
+// The bound VALUES are pinned by the three cases immediately below "the route
+// refuses over-long docs…" and above the heap case (bead dty.13). The older cases
+// cannot see them: they build every fixture from the imported
+// SPECULATION_RULES_PROBE_MAX_DOC_CHARS / …_MAX_DOCS_PER_RECORD and compare against
+// the same imports, so they pin the relation and move with the implementation.
+// Measured on the dty.12 branch: raising the character cap 256 -> 8192 alone, or the
+// per-record count cap 64 -> 4096 alone, left all eight cases green. The three
+// cases added by dty.13 state the project's declared numbers - 256 characters and
+// 64 docs per record - as literals in the fixtures AND in the expectations, from
+// both directions, and one of them drives the route so a route that passed the
+// helper an explicit limit would fail too.
 
 import {
   recordProbeDoc,
@@ -226,6 +238,96 @@ Deno.test("the route refuses over-long docs and caps a flooded record", async ()
   assert(
     status.body.ruleRequests.length === MAX_DOCS,
     `a flooded record must stay at ${MAX_DOCS} docs, got ${status.body.ruleRequests.length}`,
+  );
+});
+
+// ── the project's declared bounds, stated as literals (dty.13) ──────────────
+//
+// These three cases deliberately do NOT import the cap constants as expected
+// values. 256 characters and 64 docs per record are this project's own policy
+// (lib/probe-record-store.ts:52 and :54), so the literals are the specification;
+// the fixtures are asserted against their literal lengths as well, so a fixture
+// that drifted cannot make a case pass.
+
+Deno.test("the per-record document size cap is exactly 256 characters", () => {
+  const atLimit = "/" + "z".repeat(255);
+  const oneOver = "/" + "z".repeat(256);
+  assert(
+    atLimit.length === 256,
+    `the boundary fixture must sit exactly at 256 characters, got ${atLimit.length}`,
+  );
+  assert(
+    oneOver.length === 257,
+    `the over-limit fixture must be exactly 257 characters, got ${oneOver.length}`,
+  );
+
+  const kept = [];
+  assert(recordProbeDoc(kept, atLimit) === true, "a doc of exactly 256 characters must be kept");
+  assert(kept[0] === atLimit, "the kept doc must be the exact string, never a truncation");
+
+  const dropped = [];
+  assert(recordProbeDoc(dropped, oneOver) === false, "a doc of 257 characters must be dropped");
+  assert(dropped.length === 0, "a dropped doc must leave no trace");
+});
+
+Deno.test("the per-record document count cap is exactly 64", () => {
+  const docs = [];
+  for (let i = 0; i < 64; i++) {
+    assert(recordProbeDoc(docs, `/limit-${i}.json`) === true, `doc ${i} must fit the 64-doc cap`);
+  }
+  assert(docs.length === 64, `exactly 64 entries must be retained, got ${docs.length}`);
+  assert(
+    docs[0] === "/limit-0.json" && docs[63] === "/limit-63.json",
+    "the entries kept must be the first 64 (oldest-first, matching the store's own policy)",
+  );
+
+  assert(
+    recordProbeDoc(docs, "/limit-64.json") === false,
+    "a 65th distinct doc must be refused",
+  );
+  assert(docs.length === 64, `the array must stay at exactly 64, got ${docs.length}`);
+});
+
+Deno.test("the route applies the project's document bounds to a probe record", async () => {
+  // Its own token, so this shares no state with the other route cases.
+  const token = `dty13-route-${crypto.randomUUID().slice(0, 8)}`;
+  const atLimit = "/" + "s".repeat(255);
+  const oneOver = "/" + "s".repeat(256);
+  assert(
+    atLimit.length === 256,
+    `the boundary fixture must be 256 characters, got ${atLimit.length}`,
+  );
+  assert(
+    oneOver.length === 257,
+    `the over-limit fixture must be 257 characters, got ${oneOver.length}`,
+  );
+
+  // The over-limit doc goes first so this stays a test of the LENGTH rule rather
+  // than of a full record: a route that accepted it would show it here.
+  await probeRoute("rules.json", { token, doc: oneOver });
+  let status = await probeRoute("probe-status", { token });
+  assert(
+    status.body.ruleRequests.length === 0,
+    `the route must not record a 257-character doc, got ${
+      JSON.stringify(status.body.ruleRequests)
+    }`,
+  );
+
+  await probeRoute("rules.json", { token, doc: atLimit });
+  status = await probeRoute("probe-status", { token });
+  assert(
+    status.body.ruleRequests.length === 1 && status.body.ruleRequests[0] === atLimit,
+    `the route must report a 256-character doc back untruncated, got ${
+      JSON.stringify(status.body.ruleRequests)
+    }`,
+  );
+
+  // 64 distinct docs plus the one already kept: the route must stop at 64.
+  for (let i = 0; i < 64; i++) await probeRoute("rules.json", { token, doc: `/route-${i}.json` });
+  status = await probeRoute("probe-status", { token });
+  assert(
+    status.body.ruleRequests.length === 64,
+    `the route must retain exactly 64 docs, got ${status.body.ruleRequests.length}`,
   );
 });
 
