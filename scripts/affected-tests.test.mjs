@@ -354,13 +354,27 @@ const realGit = (args, cwd) => {
     err: new TextDecoder().decode(p.stderr).trim(),
   };
 };
-const wrapper = (...failingPrefixes) => (args, cwd) => {
-  const key = args.join(" ");
-  if (failingPrefixes.some((p) => key.startsWith(p))) {
-    return { code: 128, out: "", err: `fatal: ${key} unavailable (fixture)` };
-  }
-  return realGit(args, cwd);
+// A wrapper that fails EXACTLY the calls whose full argument list is listed and
+// records every call, so each fixture can prove the query it claims to exercise
+// actually ran, and that the earlier queries succeeded first. A prefix match here
+// is what finding goc caught: `wrapper("diff --name-only")` also failed the
+// committed diff, so the working-tree fixture aborted before reaching the second
+// query and could not catch a regression limited to it.
+const recordingWrapper = (failingExact) => {
+  const calls = [];
+  const run = (args, cwd) => {
+    const key = args.join(" ");
+    const result = failingExact.includes(key)
+      ? { code: 128, out: "", err: `fatal: ${key} unavailable (fixture)` }
+      : realGit(args, cwd);
+    calls.push({ key, code: result.code });
+    return result;
+  };
+  return { run, calls };
 };
+// Only the three change-set queries, so rev-parse/merge-base noise is ignored.
+const queryCalls = (calls) =>
+  calls.filter((c) => c.key.startsWith("diff ") || c.key.startsWith("ls-files "));
 const mustThrow = (label, run) => {
   let threw = null;
   try {
@@ -376,15 +390,56 @@ const mustThrow = (label, run) => {
   return threw;
 };
 
-mustThrow(
+const HEAD_TO_HEAD = `diff --name-only ${changes.mergeBase} HEAD`;
+const WORKING_TREE = "diff --name-only HEAD";
+const UNTRACKED = "ls-files --others --exclude-standard";
+
+// 1. the committed (head-to-head) diff fails
+const headToHead = recordingWrapper([HEAD_TO_HEAD]);
+const headToHeadErr = mustThrow(
   "a failing `git diff <base>..HEAD` fails closed (head-to-head)",
-  wrapper("diff --name-only"),
+  headToHead.run,
 );
-mustThrow(
+check(
+  "the head-to-head fixture fails that query itself, and reaches no other query",
+  queryCalls(headToHead.calls).length === 1 && queryCalls(headToHead.calls)[0].code === 128 &&
+    String(headToHeadErr?.message ?? "").includes(HEAD_TO_HEAD),
+  JSON.stringify(queryCalls(headToHead.calls)),
+);
+
+// 2. ONLY the working-tree diff fails — the point of finding goc: the committed
+//    diff must have RUN and succeeded before the working-tree query fails.
+const workingTree = recordingWrapper([WORKING_TREE]);
+const workingTreeErr = mustThrow(
   "a failing working-tree `git diff --name-only HEAD` fails closed",
-  wrapper("diff --name-only"),
+  workingTree.run,
 );
-mustThrow("a failing `git ls-files --others` fails closed", wrapper("ls-files"));
+const workingTreeQueries = queryCalls(workingTree.calls);
+check(
+  "the committed diff was called and succeeded before the working-tree query",
+  workingTreeQueries.length === 2 && workingTreeQueries[0].key === HEAD_TO_HEAD &&
+    workingTreeQueries[0].code === 0,
+  JSON.stringify(workingTreeQueries),
+);
+check(
+  "the working-tree query alone failed and is what threw (fixture is not vacuous)",
+  workingTreeQueries[1]?.key === WORKING_TREE && workingTreeQueries[1].code === 128 &&
+    String(workingTreeErr?.message ?? "").includes(WORKING_TREE),
+  JSON.stringify(workingTreeQueries),
+);
+
+// 3. only the untracked-files query fails, after both diffs succeeded
+const untracked = recordingWrapper([UNTRACKED]);
+const untrackedErr = mustThrow("a failing `git ls-files --others` fails closed", untracked.run);
+const untrackedQueries = queryCalls(untracked.calls);
+check(
+  "both diffs succeeded before `git ls-files --others` alone failed",
+  untrackedQueries.length === 3 && untrackedQueries[0].code === 0 &&
+    untrackedQueries[1].code === 0 &&
+    untrackedQueries[2].key === UNTRACKED && untrackedQueries[2].code === 128 &&
+    String(untrackedErr?.message ?? "").includes(UNTRACKED),
+  JSON.stringify(untrackedQueries),
+);
 const unknownBase = (() => {
   try {
     // No fallback: an explicit base that does not resolve must not become a
