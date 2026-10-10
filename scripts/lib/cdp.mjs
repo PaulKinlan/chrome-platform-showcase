@@ -160,8 +160,11 @@ async function boundedWait(promise, ms) {
 }
 
 // SIGTERM, one bounded wait, SIGKILL, a second bounded wait. Returns
-// `{ confirmable, failures }`; `confirmable` false means the child was still
-// running when the bound expired, which is reported rather than assumed away.
+// `{ confirmable, failures }`. Only a SETTLED `child.status` counts as a reap: a
+// timeout means it is still running, and a rejection means its exit could not be
+// READ, which is not evidence that it exited. Both escalate to SIGKILL, and
+// whatever the second read says decides the outcome - a second rejection is
+// reported as unreadable rather than quietly counted as a clean exit.
 async function reapChild(child, boundMs) {
   if (!child) return { confirmable: true, failures: [] };
   const failures = [];
@@ -170,17 +173,23 @@ async function reapChild(child, boundMs) {
   } catch (err) {
     if (!alreadyGone(err)) failures.push(`SIGTERM could not be delivered: ${err.message}`);
   }
-  if ((await boundedWait(child.status, boundMs)).status === "timeout") {
-    try {
-      child.kill("SIGKILL");
-    } catch (err) {
-      if (!alreadyGone(err)) failures.push(`SIGKILL could not be delivered: ${err.message}`);
-    }
-    if ((await boundedWait(child.status, boundMs)).status === "timeout") {
-      failures.push(
-        `child was still running ${boundMs}ms after SIGKILL, so it is not confirmed reaped`,
-      );
-    }
+  if ((await boundedWait(child.status, boundMs)).status === "settled") {
+    return { confirmable: failures.length === 0, failures };
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch (err) {
+    if (!alreadyGone(err)) failures.push(`SIGKILL could not be delivered: ${err.message}`);
+  }
+  const second = await boundedWait(child.status, boundMs);
+  if (second.status === "rejected") {
+    failures.push(
+      `child status could not be read after SIGKILL: ${second.error?.message ?? second.error}`,
+    );
+  } else if (second.status === "timeout") {
+    failures.push(
+      `child was still running ${boundMs}ms after SIGKILL, so it is not confirmed reaped`,
+    );
   }
   return { confirmable: failures.length === 0, failures };
 }
@@ -251,13 +260,35 @@ export async function teardownChrome(
   if (failures.length === 0) return result;
   const failure = new CdpTeardownError(`chrome teardown failed: ${failures.join("; ")}`);
   if (!primaryError) throw failure;
-  Object.defineProperty(primaryError, "teardownFailure", {
-    value: failure.message,
-    enumerable: false,
-    configurable: true,
-    writable: true,
-  });
-  if (primaryError.cause === undefined) primaryError.cause = failure;
+  // Annotating the primary is best-effort BY DESIGN. A frozen or non-extensible
+  // error cannot take the property, and letting that throw would replace the
+  // caller's real error with a TypeError about the annotation - leaving the
+  // cleanup problem as the only thing anyone could see. So the annotation is
+  // attempted, and when it cannot be attached the cleanup failure is reported on
+  // stderr instead of being lost.
+  let attached = false;
+  try {
+    Object.defineProperty(primaryError, "teardownFailure", {
+      value: failure.message,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    attached = true;
+  } catch {
+    attached = false;
+  }
+  try {
+    if (primaryError.cause === undefined) primaryError.cause = failure;
+  } catch {
+    // a frozen primary keeps whatever cause it already had
+  }
+  if (!attached) {
+    console.error(
+      `chrome teardown failed alongside another error: ${failure.message} ` +
+        `(the primary error is still thrown unchanged; it could not carry the cleanup failure)`,
+    );
+  }
   throw primaryError;
 }
 

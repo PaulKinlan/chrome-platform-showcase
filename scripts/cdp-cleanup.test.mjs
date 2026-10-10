@@ -155,6 +155,59 @@ Deno.test("an already-reaped child and an already-absent profile are success", a
   );
 });
 
+Deno.test("a child whose exit cannot be read is reported, not counted as reaped", async () => {
+  const { child, signals } = fakeChild({ status: Promise.reject(new Error("status poll failed")) });
+
+  await assert.rejects(
+    teardownChrome({ child, userDataDir: null }, { boundMs: 150 }),
+    (err) =>
+      err instanceof CdpTeardownError &&
+      /child status could not be read after SIGKILL: status poll failed/.test(err.message),
+    "an unreadable exit is not evidence of a clean reap",
+  );
+  assert.deepEqual(
+    signals,
+    ["SIGTERM", "SIGKILL"],
+    "an unreadable exit must still be pursued with a kill",
+  );
+});
+
+Deno.test("the primary error survives a teardown it cannot be annotated with", async () => {
+  const { child } = fakeChild();
+  const primary = Object.freeze(new Error("original failure"));
+  const reported = [];
+  const realError = console.error;
+  console.error = (...args) => reported.push(args.join(" "));
+  try {
+    await assert.rejects(
+      teardownChrome(
+        { child, userDataDir: "/dev/null/dty1w1-unremovable" },
+        { primaryError: primary, boundMs: 400 },
+      ),
+      (err) => {
+        assert.equal(err, primary, "the frozen primary is still the thrown error");
+        assert.equal(err.message, "original failure", "the primary message is untouched");
+        assert.equal(
+          err.teardownFailure,
+          undefined,
+          "an annotation that cannot be attached must not be faked or reported as attached",
+        );
+        return true;
+      },
+    );
+  } finally {
+    console.error = realError;
+  }
+  assert.ok(
+    reported.some((line) =>
+      /could not be removed/.test(line) && /primary error is still thrown unchanged/.test(line)
+    ),
+    `the cleanup failure must be reported rather than lost (stderr said ${
+      JSON.stringify(reported)
+    })`,
+  );
+});
+
 Deno.test("the error that caused a teardown stays the error the caller sees", async () => {
   const { child } = fakeChild();
   const primary = new Error("primary failure: the sweep could not finish");
