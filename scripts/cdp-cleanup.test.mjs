@@ -39,6 +39,10 @@ import {
   launchChrome,
   teardownChrome,
 } from "./lib/cdp.mjs";
+import {
+  main as conformanceSweepMain,
+  parseArgs as conformanceSweepParseArgs,
+} from "./conformance-sweep.mjs";
 
 const root = await Deno.makeTempDir({ prefix: "dty1w1-cdp-root-" });
 Deno.env.set("TMPDIR", root);
@@ -328,6 +332,226 @@ Deno.test("launchChrome removes the profile it created when Chrome never answers
   } finally {
     await Deno.remove(fake);
   }
+});
+
+// ── Stage 2 caller-level controls (bead chrome_platform_showcase-pka) ────────
+//
+// Stage 1 pinned the library. These cases pin the two real CALLERS through their
+// own exported `main(deps)`, because the failure contract that matters lives in
+// the caller's tail: the run phase, both artefact writers, the strict teardown
+// and the exit are injected, so each failure mode is driven exactly and observed
+// rather than inferred from a source read. No browser, no server, no gate.
+//
+// The point of pinning the caller and not a helper: a fault introduced into the
+// CALLER's own tail - a swallowed cleanup error, a skipped sibling write, a lost
+// non-zero exit - must turn this suite red. That is what the disposable-clone
+// negative run at hand-off demonstrates.
+
+const CALLER_REPORT = {
+  generatedAt: "2026-10-10T00:00:00.000Z",
+  base: "http://localhost:3000",
+  chrome: "fake/1.0",
+  method: "test",
+  totals: {
+    assertions: 1,
+    pass: 1,
+    fail: 0,
+    blocked: 0,
+    future: 0,
+    byVerdict: { pass: 1 },
+    realFailures: 0,
+    realBlocked: 0,
+    instrumentFalsePositives: 0,
+  },
+  passRateExecuted: "100%",
+  realFeaturesWithIssues: 0,
+  recheckErrors: [],
+  issues: [],
+  instrumentFalsePositives: [],
+};
+
+// One harness for both callers. It records every attempt separately from every
+// successful write, so "the sibling was still attempted" stays assertable even
+// when the sibling is the thing that throws.
+function callerHarness(
+  { primary = null, failJson = null, failMd = null, failTeardown = null } = {},
+) {
+  const attempts = [];
+  const writes = [];
+  const log = [];
+  const errors = [];
+  const codes = [];
+  const teardownArgs = [];
+  const chrome = { tag: "chrome-handle" };
+  const deps = {
+    argv: [],
+    run: async (_opts, _io, holder) => {
+      holder.chrome = chrome;
+      if (primary) throw primary;
+      return CALLER_REPORT;
+    },
+    writeJson: async (path, text) => {
+      attempts.push({ kind: "json", path });
+      if (failJson) throw new Error(failJson);
+      writes.push({ kind: "json", path, text });
+    },
+    writeMd: async (path, text) => {
+      attempts.push({ kind: "md", path });
+      if (failMd) throw new Error(failMd);
+      writes.push({ kind: "md", path, text });
+    },
+    teardown: async (handle) => {
+      teardownArgs.push(handle);
+      if (failTeardown) throw new Error(failTeardown);
+    },
+    exit: (code) => codes.push(code),
+    log: (line) => log.push(String(line)),
+    error: (line) => errors.push(String(line)),
+  };
+  return { deps, chrome, attempts, writes, log, errors, codes, teardownArgs };
+}
+
+const reported = (errors, needle) => errors.some((line) => line.includes(needle));
+
+Deno.test("conformance-sweep main: a clean run writes both artefacts, cleans up and never calls exit", async () => {
+  const t = callerHarness();
+  await conformanceSweepMain({ ...t.deps, argv: ["--out", "reports/scratch-sweep.json"] });
+  assert.deepEqual(t.attempts.map((a) => a.kind), ["json", "md"], "both artefacts, JSON first");
+  assert.deepEqual(t.writes.map((w) => w.kind), ["json", "md"], "both writes must succeed");
+  assert.equal(t.writes[0].path, "reports/scratch-sweep.json", "--out still selects the JSON path");
+  assert.equal(t.writes[1].path, "reports/conformance-sweep.md", "the markdown path is unchanged");
+  assert.deepEqual(
+    t.teardownArgs,
+    [t.chrome],
+    "teardown must receive the handle the run phase published",
+  );
+  assert.deepEqual(t.codes, [], "success is an implicit 0: exit must not be called at all");
+  assert.deepEqual(t.errors, [], "a clean run prints no failure line");
+});
+
+Deno.test("conformance-sweep main: a JSON write failure still attempts the markdown and is named non-zero", async () => {
+  const t = callerHarness({ failJson: "no space left on device (json)" });
+  await conformanceSweepMain({ ...t.deps, argv: ["--out", "reports/scratch-sweep.json"] });
+  assert.deepEqual(
+    t.attempts.map((a) => a.kind),
+    ["json", "md"],
+    "the sibling artefact must still be attempted",
+  );
+  assert.deepEqual(t.writes.map((w) => w.kind), ["md"], "the markdown must still be written");
+  assert.ok(
+    reported(t.errors, "reports/scratch-sweep.json"),
+    "the failed artefact must be named by path",
+  );
+  assert.ok(
+    reported(t.errors, "no space left on device (json)"),
+    "the cause must be carried, not discarded",
+  );
+  assert.deepEqual(t.codes, [1], "an unconfirmed report write must not be a green run");
+});
+
+Deno.test("conformance-sweep main: a markdown write failure still attempts the JSON and is named non-zero", async () => {
+  const t = callerHarness({ failMd: "no space left on device (md)" });
+  await conformanceSweepMain({ ...t.deps, argv: ["--out", "reports/scratch-sweep.json"] });
+  assert.deepEqual(
+    t.attempts.map((a) => a.kind),
+    ["json", "md"],
+    "the sibling artefact must still be attempted",
+  );
+  assert.deepEqual(t.writes.map((w) => w.kind), ["json"], "the JSON must still be written");
+  assert.ok(
+    reported(t.errors, "reports/conformance-sweep.md"),
+    "the failed artefact must be named by path",
+  );
+  assert.deepEqual(t.codes, [1], "an unconfirmed report write must not be a green run");
+});
+
+Deno.test("conformance-sweep main: a cleanup-only failure is named non-zero only after the artefacts exist", async () => {
+  const t = callerHarness({ failTeardown: "profile dbx was not confirmed removed" });
+  await conformanceSweepMain(t.deps);
+  assert.deepEqual(
+    t.writes.map((w) => w.kind),
+    ["json", "md"],
+    "cleanup must not suppress the artefacts",
+  );
+  assert.ok(
+    reported(t.errors, "profile dbx was not confirmed removed"),
+    "the cleanup failure must be named",
+  );
+  assert.deepEqual(t.codes, [1], "a run that cannot confirm cleanup is not a green run");
+});
+
+Deno.test("conformance-sweep main: three simultaneous failures are reported with breadth, not just the first", async () => {
+  const t = callerHarness({
+    failJson: "json write exploded",
+    failMd: "md write exploded",
+    failTeardown: "teardown exploded",
+  });
+  await conformanceSweepMain(t.deps);
+  assert.deepEqual(
+    t.attempts.map((a) => a.kind),
+    ["json", "md"],
+    "both writes are attempted even when both fail",
+  );
+  assert.ok(reported(t.errors, "json write exploded"), "the JSON failure must be reported");
+  assert.ok(reported(t.errors, "md write exploded"), "the markdown failure must be reported");
+  assert.ok(reported(t.errors, "teardown exploded"), "the cleanup failure must be reported");
+  assert.deepEqual(t.codes, [1], "the run is reported non-zero exactly once");
+});
+
+Deno.test("conformance-sweep main: the run's own error keeps its identity and is reported first", async () => {
+  const primary = new Error("run-all never completed");
+  const t = callerHarness({ primary, failTeardown: "teardown exploded" });
+  const thrown = await conformanceSweepMain(t.deps).then(() => null, (err) => err);
+  assert.equal(thrown, primary, "the caller must rethrow the SAME error, not a wrapper");
+  assert.ok(
+    t.errors[0]?.includes("run-all never completed"),
+    "the run's error must be reported before the cleanup",
+  );
+  assert.ok(
+    reported(t.errors, "teardown exploded"),
+    "the cleanup failure must still be reported, separately",
+  );
+  assert.deepEqual(t.codes, [], "a rethrown error is the failure signal: exit must not be called");
+});
+
+Deno.test("conformance-sweep main: a frozen primary is not replaced by an annotation TypeError", async () => {
+  const primary = Object.freeze(new Error("frozen primary"));
+  const t = callerHarness({ primary, failTeardown: "teardown exploded" });
+  const thrown = await conformanceSweepMain(t.deps).then(() => null, (err) => err);
+  assert.equal(
+    thrown,
+    primary,
+    "identity must survive even when the error object cannot carry anything",
+  );
+  assert.equal(thrown.message, "frozen primary", "the original message must be intact");
+  assert.ok(
+    !t.errors.some((line) => line.includes("TypeError") || line.includes("not extensible")),
+    "no annotation failure may be reported in place of the real one",
+  );
+  assert.ok(
+    reported(t.errors, "teardown exploded"),
+    "the cleanup failure must be reported on stderr instead",
+  );
+});
+
+Deno.test("conformance-sweep is import-safe: importing it exports a caller and runs nothing", () => {
+  assert.equal(typeof conformanceSweepMain, "function", "main(deps) must be exported");
+  assert.equal(
+    typeof conformanceSweepParseArgs,
+    "function",
+    "parseArgs must stay a pure exported function",
+  );
+  assert.deepEqual(
+    conformanceSweepParseArgs([]),
+    {
+      base: "http://localhost:3000",
+      noServer: false,
+      skipRecheck: false,
+      outJson: "reports/conformance-sweep.json",
+      timeoutMin: 60,
+    },
+    "the CLI defaults must not drift when the module is imported rather than run",
+  );
 });
 
 // The bound is part of the contract, so a silent change to it is a finding.
