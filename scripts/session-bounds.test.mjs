@@ -39,13 +39,16 @@
 // `FAIL — session-bounds tests (1 file(s) failed)` - a neutral label, truthfully
 // prefixed in both directions. A per-suite audit found no consumer of the old text.
 //
-// Known blind spot, carried over unchanged and NOT fixed here: the three
+// Blind spot for the twelve cases above, and where it is now covered: the three
 // `BoundedSessionStore` cases below pass explicit options, so they cannot see the
 // module defaults (SESSION_STORE_MAX_ENTRIES / SESSION_STORE_TTL_MS /
 // SESSION_KEY_MAX_LENGTH) at all, while the route cases that do use the
 // default-constructed stores only detect a cap made larger or unbounded, not one
-// made smaller. No case in this file pins the VALUES of those three defaults; a
-// dedicated bead covers that.
+// made smaller. The three cases at the END of this file (bead dty.10) pin those
+// default values directly against hard-coded literals, from both directions - see
+// "The DEFAULT VALUES of the store" below. What remains uncovered is the route's
+// own WEBAUTHN_SIGNAL_MAX_CREDENTIALS, which the credential-cap case above
+// compares against itself.
 
 import {
   handleLegacyReleaseEndpoints,
