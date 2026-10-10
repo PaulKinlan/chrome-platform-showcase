@@ -19,11 +19,36 @@
 // ordered plan in scripts/gate-steps.mjs, executed by scripts/run-gate.mjs and
 // reported with per-step timings (bead 6r8, ADR 15c). This guard reads that
 // plan and expands each step through `deno task`, so the two rules above still
-// hold against the commands the gate actually runs — and it fails if a plan
+// hold against the commands the gate is DECLARED to run — and it fails if a plan
 // step names a task deno.json does not define.
+//
+// What this guard proves, and what it does not (finding 140, bead z4u). It proves
+// DECLARATION parity: that the entrypoints, the gate plan and CI declare the same
+// commands, and that every command it credits is a parsed, reachable invocation of
+// a declared program rather than text that merely looks like one. It does NOT
+// prove that scripts/run-gate.mjs executes every GATE_STEPS entry and tier at run
+// time. That dynamic edge is tracked separately in bead
+// chrome_platform_showcase-z4u and is not claimed here.
+//
+// CI inventory and gate grammar (bead chrome_platform_showcase-uzc). CI is read
+// with a pinned real YAML parser, jsr:@std/yaml@1.3.0, because a regex over
+// `run:` saw only the styles it was written for: a flow-style step, a quoted
+// key, a block or folded scalar and a bare `run:` all slipped past it, and any
+// CI command outside the classes it happened to check was unmirrored and
+// invisible. The dependency needs no network after its first fetch — it is
+// pinned in the import specifier and recorded in deno.lock, so a COLD cache
+// costs one fetch on the first run after a checkout and works offline
+// afterwards (`--cached-only` fails loudly rather than skipping the check); CI
+// never runs this guard. Only .github/workflows/ci.yml is in scope;
+// showcase-worklist.yml is a scheduled work-list job, out of scope on purpose.
+// A CI step must be ONE declared invocation — shell operators are refused by
+// name, never interpreted — and gate or task text may chain with a flat `&&`
+// only. Every command CI runs must be mirrored by a gate plan step, matched BY
+// TASK NAME for `deno task …` steps and by expanded text for raw commands.
 //
 // Run: deno task test-gate-parity
 
+import { parse } from "jsr:@std/yaml@1.3.0";
 import { GATE_STEPS } from "./gate-steps.mjs";
 
 const REPO = new URL("..", import.meta.url).pathname;
@@ -43,27 +68,115 @@ function read(path) {
 
 const squash = (s) => s.replace(/\s+/g, " ").trim();
 
-const ci = read(".github/workflows/ci.yml");
+// ── CI inventory: a real YAML parse, not a regex (bead chrome_platform_showcase-uzc)
+//
+// The regex this replaces (`/^\s*-?\s*run:\s*(.+)$/gm`) saw only the styles it
+// was written for. A flow-style step, a quoted key, a block or folded scalar, a
+// bare `run:` and every CI command outside the three classes it happened to
+// check were all invisible — a plain block-style unmirrored `deno task` step
+// included. The inventory below is parsed, so the style of the YAML cannot
+// change what it sees.
+//
+// Scope is ONLY .github/workflows/ci.yml, the pre-merge gate.
+// .github/workflows/showcase-worklist.yml is OUT OF SCOPE by declaration: it is
+// a scheduled work-list job whose last step is a shell redirect into
+// $GITHUB_STEP_SUMMARY, which the CI grammar below deliberately refuses.
+// Widening the scope is a separate decision, not an accident of parsing.
+const CI_WORKFLOW = ".github/workflows/ci.yml";
+const CI_OUT_OF_SCOPE = ".github/workflows/showcase-worklist.yml";
+const ci = read(CI_WORKFLOW);
 const tasks = JSON.parse(read("deno.json")).tasks ?? {};
 
-// Every command CI runs, in order.
-const ciRuns = [...ci.matchAll(/^\s*-?\s*run:\s*(.+)$/gm)].map((m) => squash(m[1]));
+const ciRunSteps = [];
+for (const [jobName, job] of Object.entries(parse(ci)?.jobs ?? {})) {
+  for (const step of (Array.isArray(job?.steps) ? job.steps : [])) {
+    if (step && typeof step === "object" && "run" in step) {
+      ciRunSteps.push({ job: jobName, name: String(step?.name ?? ""), run: step.run });
+    }
+  }
+}
+// Totality detector: a permissive counter of `run` keys in ANY style (leading
+// `-`/`,`/`{`/whitespace, quoted or not) against the parsed inventory. It is
+// deliberately over-matching: a mismatch can only make this guard louder, never
+// quieter, so a YAML style the parser somehow normalises away still fails here.
+const runKeyCount = (ci.match(/(^|[{,\s]-?\s*)("|')?run\2\s*:/gm) ?? []).length;
+check(
+  "the CI inventory sees every `run` key in the workflow",
+  runKeyCount === ciRunSteps.length,
+  `${CI_WORKFLOW}: ${runKeyCount} \`run\` key(s) counted in the text but ` +
+    `${ciRunSteps.length} parsed as steps — the inventory is incomplete`,
+);
+
+// CI `run` values are NOT a shell language. A CI step must be ONE declared
+// invocation; anything that needs shell semantics to decide what it does is
+// refused by name rather than modelled, because the whole class of findings
+// here (mc6, 049) came from guessing what a shell would do.
+const CI_SHELL_OPERATORS = ["&&", "||", ";", "|", ">", "<", "&", "`", "$(", "${"];
+for (const step of ciRunSteps) {
+  const label = `CI step \`${step.name || "(unnamed)"}\` in job \`${step.job}\``;
+  const run = typeof step.run === "string" ? squash(step.run) : "";
+  if (run === "") {
+    check(`${label} declares one command`, false, "the step has no command (empty or bare `run:`)");
+    continue;
+  }
+  const op = CI_SHELL_OPERATORS.find((o) => run.includes(o));
+  check(
+    `${label} is a single command CI can run`,
+    op === undefined,
+    op === undefined ? "" : `unsupported syntax \`${op}\` in ${JSON.stringify(run)} — model the ` +
+      "step instead of the shell: a CI step is one declared invocation, and shell " +
+      "operators are refused rather than interpreted",
+  );
+}
+const ciRuns = ciRunSteps.map((s) => squash(typeof s.run === "string" ? s.run : ""));
 
 // Expand `deno task <name>` references inside a repo task so the returned text
 // is the commands that actually run. `seen` stops any task cycle.
-function expand(name, seen = new Set()) {
-  const raw = tasks[name];
-  if (raw == null || seen.has(name)) return raw ?? "";
-  seen.add(name);
-  return raw.replace(
-    /deno task ([a-z0-9:-]+)/g,
-    (m, n) => (tasks[n] != null ? expand(n, seen) : m),
-  );
+// Gate and task text may chain with a flat `&&` ONLY. `||`, `;`, a pipe, a
+// redirect, a subshell or any interpolation is refused by name: `a || b && c`
+// does not mean "the gate runs a", it means the text is outside the declared
+// grammar, so the guard fails instead of deciding which side wins (049). No
+// claim of arbitrary shell equivalence is made or needed. The check applies to
+// the task text the gate actually expands — not to every task in deno.json, so
+// an unrelated task cannot produce a false failure here.
+const GATE_TEXT_OPERATOR_RE = /(\|\||;|`|\$\(|\$\{|[<>]|\|(?!\|))/;
+function gateText(label, text) {
+  if (typeof text !== "string" || text.trim() === "") {
+    check(`${label} is a non-empty command`, false, "empty command text");
+    return false;
+  }
+  // A shell comment is not part of the declared grammar. Crediting a command
+  // that appears inside one was a false green (finding 74l): `deno task phantom`
+  // in a trailing comment made the guard report a task as executed, and a
+  // comment's words could even pass as real operands. Nothing in a comment runs,
+  // so nothing in one may be credited.
+  if (text.includes("#")) {
+    check(
+      `${label} contains no shell comment`,
+      false,
+      `\`#\` in ${JSON.stringify(text)} — a comment is unsupported syntax in a gate ` +
+        "command: it cannot execute, and a command written inside it is not a step",
+    );
+    return false;
+  }
+  const bad = text.match(GATE_TEXT_OPERATOR_RE);
+  if (bad) {
+    check(
+      `${label} uses only a flat && chain`,
+      false,
+      `unsupported syntax \`${bad[0]}\` in ${JSON.stringify(text)} — only a flat \`&&\` ` +
+        "chain is a supported gate command, and nothing is inferred about what a " +
+        "shell would do with this text",
+    );
+    return false;
+  }
+  const parts = text.split("&&");
+  if (parts.some((p) => p.trim() === "")) {
+    check(`${label} has no empty && segment`, false, `empty segment in ${JSON.stringify(text)}`);
+    return false;
+  }
+  return true;
 }
-
-// The full gate: every plan step, in order, expanded to the commands it runs.
-const stepCommand = (step) => squash([expand(step.task), ...(step.args ?? [])].join(" "));
-const fullGate = squash(GATE_STEPS.map(stepCommand).join(" && "));
 
 // The gate exists, it is plan-driven, and the plan is wired to deno.json.
 check("deno.json defines the `check` full gate", typeof tasks.check === "string");
@@ -71,17 +184,33 @@ check(
   "deno.json defines the fast `check:affected` gate",
   typeof tasks["check:affected"] === "string",
 );
-check(
-  "the full gate runs the plan through scripts/run-gate.mjs",
-  (tasks.check ?? "").includes("scripts/run-gate.mjs"),
-  `check = ${JSON.stringify(tasks.check)}`,
-);
-check(
-  "the fast gate runs the plan through scripts/run-gate.mjs with --affected",
-  (tasks["check:affected"] ?? "").includes("scripts/run-gate.mjs") &&
-    (tasks["check:affected"] ?? "").includes("--affected"),
-  `check:affected = ${JSON.stringify(tasks["check:affected"])}`,
-);
+// ── Entrypoint binding (finding 140)
+//
+// The gate is reached through two deno.json tasks. Their commands are PARSED and
+// compared as EXACT argv: a task that merely mentions scripts/run-gate.mjs — an
+// `echo`, a `deno eval` that prints the path, a substring, a trailing comment, a
+// dry-run flag, an extra or missing flag, a recursive alias — does not bind the
+// entrypoint to the plan and fails here. Equality of the parsed argv is the whole
+// rule; there is no substring test.
+//
+// DECLARATION PARITY ONLY: this proves which command the entrypoint declares, not
+// that the runner executes it (bead chrome_platform_showcase-z4u).
+const ENTRYPOINT_ARGV = ["deno", "run", "--allow-read", "--allow-run", "scripts/run-gate.mjs"];
+const ENTRYPOINT_ARGV_AFFECTED = [...ENTRYPOINT_ARGV, "--affected"];
+const sameArgv = (a, b) => a.length === b.length && a.every((t, i) => t === b[i]);
+const checkEntrypoint = (label, text, expected) => {
+  const parts = String(text ?? "").trim().split("&&").map((p) => p.trim()).filter((p) => p !== "");
+  const argv = parts.length === 1 ? parts[0].split(/\s+/) : [];
+  check(
+    `${label} declares exactly the gate entrypoint`,
+    sameArgv(argv, expected),
+    `${label} = ${JSON.stringify(text)} — expected exactly \`${expected.join(" ")}\`; a task ` +
+      "that only mentions the path (echo, eval, substring, comment, dry-run, extra or " +
+      "missing flag, recursive alias) does not bind the entrypoint to the plan",
+  );
+};
+checkEntrypoint("`deno task check`", tasks.check, ENTRYPOINT_ARGV);
+checkEntrypoint("`deno task check:affected`", tasks["check:affected"], ENTRYPOINT_ARGV_AFFECTED);
 check(
   "the gate plan declares steps for both tiers",
   GATE_STEPS.length > 0 && GATE_STEPS.some((s) => s.tier === "static") &&
@@ -96,25 +225,121 @@ for (const step of GATE_STEPS.filter((s) => tasks[s.task] == null)) {
 }
 check("deno.json defines a formatter task", typeof tasks.fmt === "string");
 
-// Formatter parity: each formatter command CI enforces must run in the gate.
-const ciFmt = ciRuns.filter((c) => /(^|\s)deno fmt(\s|$)/.test(c));
-check(
-  "CI declares at least one deno fmt gate",
-  ciFmt.length > 0,
-  `CI run steps: ${JSON.stringify(ciRuns)}`,
-);
-for (const cmd of ciFmt) {
-  check(
-    `full gate runs CI's formatter step (\`${cmd}\`)`,
-    fullGate.includes(cmd),
-    "deno task check does not cover this CI step, so an unformatted tree " +
-      "passes locally (fleet-check) and only fails in CI",
-  );
-}
+// ── The MIRRORED contract (bead uzc / dvf, finding 6uk)
+//
+// Every command CI runs must be satisfied by the gate plan, and "satisfied"
+// means EXECUTED, not merely named. Two false greens lived here: a plan step
+// whose task was `true` still reported `deno task check-routes` mirrored
+// because only the task NAME was compared, and `echo deno check server.ts`
+// satisfied CI's `deno check server.ts` through an unanchored substring of the
+// expanded text. Both claimed a command ran while the gate skipped it. So the
+// gate's commands are PARSED, not text-matched: the program must be declared
+// with the argument shape it is allowed to take, `deno task <name>` resolves
+// recursively through deno.json to the invocation it really runs, and the
+// comparison is exact argv identity — never a substring, and never a guess about
+// what a shell would do.
+//
+// A CI command that is not mirrored fails; there is no exemption list, because
+// the escape hatch is to mirror the step or to take a workflow out of scope on
+// purpose.
+const GATE_SUBCOMMANDS = new Set(["check", "fmt", "run", "test", "lint", "task"]);
+const GATE_PROGRAMS = new Map([
+  // deno subcommands a gate step may use.
+  ["deno", (argv) => GATE_SUBCOMMANDS.has(argv[1])],
+  // the one non-deno invocation on the plan (audit-strict): a repo script by
+  // path, never `-c` and never an arbitrary binary.
+  [
+    "python3",
+    (argv) => /^(\.claude|scripts)\/[A-Za-z0-9._\/-]+\.py$/.test(argv[1] ?? ""),
+  ],
+]);
 
-// Type-check parity: CI's `deno check server.ts` must also be in the gate.
-for (const cmd of ciRuns.filter((c) => /(^|\s)deno check\b/.test(c))) {
-  check(`full gate runs CI's type check (\`${cmd}\`)`, fullGate.includes(cmd));
+// Parse text the grammar already accepted into the invocations it runs, or fail
+// the label: a no-op (`true`), an `echo`, `sh -c` or any undeclared binary must
+// never read as a step that ran a check.
+function parseInvocations(label, text) {
+  const argv = [];
+  for (const part of squash(text).split("&&").map((p) => squash(p)).filter((p) => p !== "")) {
+    if (!gateText(`${label} segment`, part)) return null;
+    const tokens = part.split(/\s+/);
+    const declared = GATE_PROGRAMS.get(tokens[0]);
+    if (!declared || !declared(tokens)) {
+      check(
+        `${label} runs a declared gate command`,
+        false,
+        `\`${part}\` is not a declared invocation — a gate step runs ${
+          [...GATE_PROGRAMS.keys()].join("/")
+        } with the argument shapes declared in this guard, so a no-op or an echo ` +
+          "cannot stand in for a check",
+      );
+      return null;
+    }
+    argv.push(tokens);
+  }
+  return argv.length > 0 ? argv : null;
+}
+// The same vocabulary applies to CI's own commands: a workflow file is not a
+// shell script, and the contract only holds if both sides are invocations.
+const parseCiInvocation = (cmd) => {
+  const argv = squash(cmd).split(/\s+/);
+  const declared = GATE_PROGRAMS.get(argv[0]);
+  return declared && declared(argv) ? argv : null;
+};
+const flagsOf = (argv) => argv.filter((a) => a.startsWith("-"));
+const operandsOf = (argv) => argv.filter((a) => !a.startsWith("-")).slice(2);
+// Exact argv identity, with the one declared tolerance: the gate may check the
+// same files PLUS more (`deno check server.ts scripts/…` satisfies CI's
+// `deno check server.ts`). Identical flags, and every CI operand present.
+const sameInvocation = (ci, gate) => {
+  const gateOperands = new Set(operandsOf(gate));
+  return ci[0] === gate[0] && ci[1] === gate[1] &&
+    flagsOf(ci).join(" ") === flagsOf(gate).join(" ") &&
+    operandsOf(ci).every((f) => gateOperands.has(f));
+};
+
+// Every task the plan reaches, resolved through deno.json (nested `deno task`
+// references included), parsed into the commands it really runs.
+// Recursion is driven by the PARSED argv of each task — never by a regex over
+// its raw text — so a `deno task <id>` written inside a comment, a string or any
+// other unsupported syntax cannot pull a task into the reachable set (finding
+// 74l: a phantom task credited through a trailing comment was a false green).
+// A task the grammar refuses contributes no invocations at all.
+const planReachable = new Set();
+const gateCommands = [];
+const walkPlan = (name) => {
+  if (planReachable.has(name) || typeof tasks[name] !== "string") return;
+  planReachable.add(name);
+  const argv = parseInvocations(`task \`${name}\``, tasks[name]);
+  if (argv === null) return;
+  gateCommands.push({ name, argv });
+  for (const tokens of argv) {
+    if (tokens[0] === "deno" && tokens[1] === "task" && tokens[2]) walkPlan(tokens[2]);
+  }
+};
+for (const step of GATE_STEPS) walkPlan(step.task);
+
+const planTasks = new Map(GATE_STEPS.map((s) => [s.task, s]));
+const mirrors = (cmd) => {
+  const task = cmd.match(/^deno task ([a-z0-9:-]+)(?:\s+(.*))?$/);
+  if (task) {
+    const step = planTasks.get(task[1]);
+    if (!step) return false;
+    if (squash(task[2] ?? "") !== squash((step.args ?? []).join(" "))) return false;
+    // …and that task must resolve to a declared invocation that runs it.
+    return gateCommands.some((g) => g.name === task[1]);
+  }
+  const ci = parseCiInvocation(cmd);
+  if (!ci) return false;
+  return gateCommands.some((g) => g.argv.some((argv) => sameInvocation(ci, argv)));
+};
+for (const cmd of ciRuns.filter((c) => c !== "")) {
+  check(
+    `the gate mirrors CI's \`${cmd}\``,
+    mirrors(cmd),
+    `CI runs \`${cmd}\` but no gate plan step EXECUTES it — add a step to ` +
+      "scripts/gate-steps.mjs that runs this command (and a rule in " +
+      "scripts/affected-tests.mjs) or the command runs in CI and nowhere locally",
+  );
 }
 
 // Test-registration parity (bead chrome_platform_showcase-86v).
