@@ -5,6 +5,7 @@ import { handleFeatureRequest as handleXmlMimeServer } from "../v158/spec-compli
 import { handleFeatureRequest as handleRedirectChainServer } from "../v151/cross-origin-redirect-timing-opt-in/_server.ts";
 import { handleFeatureRequest as handlePolicyEchoServer } from "../v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/_server.ts";
 import { handleFeatureRequest as handleDelayedEchoServer } from "../v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields/_server.ts";
+import { handleFeatureRequest as handleContentTypeTimingProbeServer } from "../v148/content-type-in-resource-timing/_server.ts";
 import { handleFeatureRequest as handleCssUrlRequestModifiersServer } from "../v150/css-url-request-modifiers/_server.ts";
 import { handleFeatureRequest as handleUaChMigrationServer } from "../v145/reduced-user-agent-strings-by-default/_server.ts";
 import { escapeHTML } from "./html.ts";
@@ -34,6 +35,7 @@ const STATIC_FEATURE_SERVERS: Record<string, FeatureServerHandler> = {
     handlePolicyEchoServer,
   "v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields":
     handleDelayedEchoServer,
+  "v148/content-type-in-resource-timing": handleContentTypeTimingProbeServer,
   "v150/css-url-request-modifiers": handleCssUrlRequestModifiersServer,
   "v145/reduced-user-agent-strings-by-default": handleUaChMigrationServer,
 };

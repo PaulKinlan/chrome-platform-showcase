@@ -364,3 +364,116 @@ Deno.test("ok — the v150 sidecar returns null for every sibling/asset path", a
     );
   }
 });
+
+// mm5.5: the v148 content-type timing probe route is served by the feature
+// sidecar (v148/content-type-in-resource-timing/_server.ts), moved verbatim
+// from the legacy dispatcher. These tests exercise the sidecar directly.
+
+async function callContentTypeProbe(
+  sub,
+  query = "",
+  method = "GET",
+) {
+  const { handleFeatureRequest } = await import(
+    "../v148/content-type-in-resource-timing/_server.ts"
+  );
+  return handleFeatureRequest(
+    new Request(
+      `https://example.com/v148/content-type-in-resource-timing${sub}${query}`,
+      { method },
+    ),
+    sub,
+  );
+}
+
+Deno.test("ok — every probe kind answers with its content type and timing headers", async () => {
+  const kinds = {
+    "html": "text/html; charset=utf-8",
+    "css": "text/css; charset=utf-8",
+    "js": "text/javascript; charset=utf-8",
+    "json": "application/json; charset=utf-8",
+    "image": "image/svg+xml",
+    "font": "font/woff2",
+    "video": "video/mp4",
+    "wasm": "application/wasm",
+    "script-as-html": "text/html; charset=utf-8",
+    "script-as-plain": "text/plain; charset=utf-8",
+  };
+  for (const [kind, contentType] of Object.entries(kinds)) {
+    const res = await callContentTypeProbe(
+      "/content-type-in-resource-timing/mime-type-performance-analyzer/probe",
+      `?kind=${kind}`,
+    );
+    assert(res, `the sidecar must answer kind=${kind}`);
+    assert(res.status === 200, `kind=${kind}: expected 200, got ${res.status}`);
+    assert(
+      res.headers.get("content-type") === contentType,
+      `kind=${kind}: expected content-type ${contentType}, got ${res.headers.get("content-type")}`,
+    );
+    assert(
+      res.headers.get("timing-allow-origin") === "*" &&
+        res.headers.get("cache-control") === "no-store" &&
+        res.headers.get("x-showcase-probe-kind") === kind,
+      `kind=${kind}: timing/no-store/kind headers must be set`,
+    );
+    const body = await res.text();
+    assert(body.length > 0, `kind=${kind}: GET must have a body`);
+  }
+});
+
+Deno.test("ok — the missing-type probe omits content-type and HEAD sends headers only", async () => {
+  const res = await callContentTypeProbe(
+    "/content-type-in-resource-timing/mime-type-performance-analyzer/probe",
+    "?kind=missing-type",
+  );
+  assert(res && res.status === 200, "missing-type must answer 200");
+  assert(
+    res.headers.get("content-type") === null,
+    `missing-type must declare no content type, got ${res.headers.get("content-type")}`,
+  );
+
+  const head = await callContentTypeProbe(
+    "/content-type-in-resource-timing/mime-type-performance-analyzer/probe",
+    "?kind=css",
+    "HEAD",
+  );
+  assert(head && head.status === 200, "HEAD must answer 200");
+  assert(
+    head.headers.get("content-type") === "text/css; charset=utf-8",
+    "HEAD carries the probe headers",
+  );
+  const headBody = await head.text();
+  assert(headBody === "", `HEAD must have no body, got ${headBody.length} bytes`);
+});
+
+Deno.test("ok — an unknown probe kind is a JSON 404, never a 500", async () => {
+  const res = await callContentTypeProbe(
+    "/content-type-in-resource-timing/mime-type-performance-analyzer/probe",
+    "?kind=bogus",
+  );
+  assert(res, "the sidecar must answer unknown kinds");
+  assert(res.status === 404, `expected 404, got ${res.status}`);
+  const body = await res.json();
+  assert(
+    body.error === "Unknown content type timing probe" && body.kind === "bogus",
+    `the 404 must name the kind, got ${JSON.stringify(body)}`,
+  );
+});
+
+Deno.test("ok — the v148 sidecar returns null for every sibling/FedCM path", async () => {
+  for (
+    const sub of [
+      "/content-type-in-resource-timing",
+      "/content-type-in-resource-timing/mime-type-performance-analyzer/",
+      "/content-type-in-resource-timing/rum-dashboard/",
+      "/fedcm-accounts-endpoint-behavior/",
+      "/unrelated",
+    ]
+  ) {
+    const res = await callContentTypeProbe(sub);
+    assert(
+      res === null,
+      `sidecar must not answer ${sub} (the legacy family/asset pipeline owns it)`,
+    );
+  }
+});
