@@ -55,52 +55,58 @@ function teardownFailed(what) {
 
 // Bounded, rejection-aware listener close: deadline first, graceful close
 // second. A rejected `shutdown()` or `finished` is a failed close, not a pass,
-// and the first genuine rejection message is preserved.
+// and it is reported as soon as it is known: waiting for the OTHER promise to
+// settle first would hide a genuine rejection behind the stall text whenever
+// that other side never settles (bead o56). The first genuine rejection message
+// is preserved, and a second one arriving within the bounded wait is added.
 async function closeListener(listener, what) {
   let shutdownError = null;
   let finishedError = null;
+  const context = () =>
+    [
+      shutdownError ? `shutdown() rejected with ${shutdownError.message ?? shutdownError}` : null,
+      finishedError ? `finished rejected with ${finishedError.message ?? finishedError}` : null,
+    ].filter(Boolean).join("; ");
+  let reportRejection = null;
+  const rejected = new Promise((resolve) => (reportRejection = resolve));
+  const settle = (slot) => (err) => {
+    if (slot === "shutdown") shutdownError = err;
+    else finishedError = err;
+    reportRejection(context());
+    return false;
+  };
+  // The deadline below is created before this expression can run `shutdown()`,
+  // so it starts BEFORE the graceful close, never after it.
   const graceful = Promise.all([
     Promise.resolve()
       .then(() => listener.shutdown())
-      .then(() => true, (err) => {
-        shutdownError = err;
-        return false;
-      }),
+      .then(() => true, settle("shutdown")),
     Promise.resolve()
       .then(() => listener.finished)
-      .then(() => true, (err) => {
-        finishedError = err;
-        return false;
-      }),
+      .then(() => true, settle("finished")),
   ]).then(([closed, released]) => closed === true && released === true);
   const stalled = Symbol("stalled");
   const first = await Promise.race([
     graceful,
+    rejected,
     new Promise((resolve) => setTimeout(() => resolve(stalled), TEARDOWN_BOUND_MS)),
   ]);
   if (first === true) return;
-  if (first === stalled) {
-    teardownFailed(
-      `${what} had not finished closing ${TEARDOWN_BOUND_MS}ms after it was asked to shut down ` +
-        "(a request is still in flight; the listening socket is already closed, and Deno 2.9.7 " +
-        "throws an uncaught BadResource if an abort fires after shutdown, so the listener is left " +
-        "to the runtime rather than force-closed)",
-    );
-    // Bounded second wait, so a close that lands late is still observed.
-    await Promise.race([
-      graceful,
-      new Promise((resolve) => setTimeout(resolve, TEARDOWN_BOUND_MS)),
-    ]);
+  // One bounded second wait, so a second rejection, a late close, or a
+  // rejection that lands after the deadline is still observed and reported.
+  await Promise.race([
+    graceful,
+    new Promise((resolve) => setTimeout(resolve, TEARDOWN_BOUND_MS)),
+  ]);
+  if (shutdownError || finishedError) {
+    teardownFailed(`${what} failed to close cleanly: ${context()}`);
     return;
   }
-  const context = [
-    shutdownError ? `shutdown() rejected with ${shutdownError.message ?? shutdownError}` : null,
-    finishedError ? `finished rejected with ${finishedError.message ?? finishedError}` : null,
-  ].filter(Boolean).join("; ");
   teardownFailed(
-    `${what} failed to close cleanly: ${
-      context || "shutdown and finished did not both report success"
-    }`,
+    `${what} had not finished closing ${TEARDOWN_BOUND_MS}ms after it was asked to shut down ` +
+      "(a request is still in flight; the listening socket is already closed, and Deno 2.9.7 " +
+      "throws an uncaught BadResource if an abort fires after shutdown, so the listener is left " +
+      "to the runtime rather than force-closed)",
   );
 }
 
