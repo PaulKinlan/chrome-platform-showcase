@@ -567,8 +567,9 @@ gate by hand (see AGENTS.md).
 `Deno.test` pilot (bead 9th, from dty): it runs with zero permissions, is **not** a step of
 `deno task check`, is not wired into CI, and does not change the fleet `CHECK_CMD`. The suites are
 not migrated and a green pilot is not migration progress; three assertions in
-`scripts/gate-parity.test.mjs` pin the pilot's dir and runner, and any change under `tests/**`
-selects the full gate (see AGENTS.md).
+`scripts/gate-parity.test.mjs` pin the pilot's dir (flat: only regular `*.test.mjs` files, no
+subdirectories or symlinks) and runner, and any change under `tests/**` selects the full gate (see
+AGENTS.md).
 
 For demo changes and bug fixes, also verify with `chrome-devtools-mcp`:
 

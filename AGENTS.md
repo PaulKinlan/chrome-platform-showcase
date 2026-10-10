@@ -76,10 +76,12 @@ the suites as migrated, and do not treat a green pilot as migration progress. Th
 **zero permissions**, so a pilot case that touches the filesystem fails `NotCapable` rather than
 quietly widening the runner; use the built-in `node:assert/strict` so the pilot adds no dependency.
 Three assertions in `scripts/gate-parity.test.mjs` pin it where the existing guards do not look: at
-least one `*.test.mjs` exists, the directory holds nothing else (Deno also discovers `*_test.mjs`
-and imports a zero-test module that exits 0), and the task string is exactly the zero-permission
-directory form. A change under `tests/**` is unmatched by `scripts/affected-tests.mjs`, so it
-selects the **full** gate.
+least one `*.test.mjs` exists, the directory is **flat** — only regular `*.test.mjs` files, no
+subdirectories and no symlinks (Deno also discovers `*_test.mjs`, imports a zero-test module that
+exits 0, recurses into subdirectories and can follow a symlink, so the nested content has to be
+refused rather than matched), and the task string is exactly the zero-permission directory form. A
+change under `tests/**` is unmatched by `scripts/affected-tests.mjs`, so it selects the **full**
+gate.
 
 That guard covers that one direction only, so this is **not** a general CI-parity guarantee: a
 future CI step is not automatically mirrored in `deno task check`, and nothing fails if it is
