@@ -35,11 +35,12 @@
 // failing subject rather than the first, and no check became a throwing assert.
 // What moved is when the body runs: the shared `public/styles.css` read that
 // used to happen before the first check, and the demo-page reads that follow
-// it, now happen inside the case in the same order — ten read sites yielding
-// twelve runtime reads over eleven distinct pages (two sites are the loop
-// bodies below, each walking two pages, and responsive-tags appears in both
-// loops) — so a read failure fails the case loudly instead of aborting the
-// module before any check could report. Two of the thirty-two sites are template labels inside two loops that
+// it, now happen inside the case in the same order — ten demo-page read
+// sites yielding twelve runtime reads over eleven distinct pages (two sites
+// are the loop bodies below, each walking two pages, and responsive-tags
+// appears in both loops) — so a read failure fails the case loudly instead
+// of aborting the module before any check could report. Two of the
+// thirty-two sites are template labels inside two loops that
 // each walk two page/selector pairs, so a full run prints thirty-four labels.
 // The trailing `Deno.exit(1)` became the counter's failure message because
 // exiting inside a case kills the test process before Deno can report it.
