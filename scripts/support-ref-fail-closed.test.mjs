@@ -349,19 +349,93 @@ check("deno task check-routes passes on valid baseline", () => {
 });
 
 check("check-routes gate fails on support downgrade under both Node and Deno", () => {
-  const sidecarPath = join(REPO_ROOT, "responsive-support.json");
-  const original = Deno.readTextFileSync(sidecarPath);
+  // Isolation (bead chrome_platform_showcase-dty.23, ADR dty.23.1 + errata):
+  // the downgrade is applied ONLY inside a throwaway `git clone --local` of
+  // the executing checkout. A finally-restore of the real tracked sidecar is
+  // NOT kill-safe — SIGKILL, a parent timeout or the reaper bypasses finally
+  // and traps — so kill safety here is STRUCTURAL: this process never writes
+  // the real responsive-support.json at all, and a hard kill can only orphan
+  // a temp dir. An orphaned scratch is bounded residue (~185MB) named
+  // support-ref-scratch-* under the OS temp dir; do NOT assume the OS cleans
+  // it promptly — operators may remove support-ref-scratch-* by hand.
+  const realSidecar = join(REPO_ROOT, "responsive-support.json");
+  const realBefore = Deno.readFileSync(realSidecar);
+  const scratch = Deno.makeTempDirSync({ prefix: "support-ref-scratch-" });
+  const gitIn = (cwd, args) => {
+    const out = new Deno.Command("git", {
+      args,
+      cwd,
+      stdout: "piped",
+      stderr: "piped",
+    }).outputSync();
+    return {
+      code: out.code,
+      stdout: new TextDecoder().decode(out.stdout).trim(),
+      stderr: new TextDecoder().decode(out.stderr),
+    };
+  };
   try {
-    const data = JSON.parse(original);
+    // Structural guard BEFORE any write: the scratch root must resolve
+    // strictly OUTSIDE the real REPO_ROOT, and the scratch sidecar must not
+    // be the real tracked file.
+    const realRoot = Deno.realPathSync(REPO_ROOT);
+    const scratchRoot = Deno.realPathSync(scratch);
+    assert(
+      scratchRoot !== realRoot && !scratchRoot.startsWith(realRoot + "/"),
+      `scratch ${scratchRoot} is not outside REPO_ROOT ${realRoot}`,
+    );
+
+    // Clone the COMMITTED executing HEAD (uncommitted working-tree edits are
+    // deliberately not under test in the negative; the read-only baseline
+    // checks above still exercise the live tree).
+    const srcHead = gitIn(REPO_ROOT, ["rev-parse", "HEAD"]);
+    assert(srcHead.code === 0, `source HEAD unreadable: ${srcHead.stderr}`);
+    const clone = gitIn(REPO_ROOT, ["clone", "--local", "--quiet", REPO_ROOT, scratch]);
+    assert(clone.code === 0, `scratch clone failed: ${clone.stderr}`);
+    const cloneHead = gitIn(scratch, ["rev-parse", "HEAD"]);
+    assert(
+      cloneHead.code === 0 && cloneHead.stdout === srcHead.stdout,
+      `scratch HEAD ${cloneHead.stdout} != executing HEAD ${srcHead.stdout}`,
+    );
+
+    // Base-ref parity: the gate's baseline is the merge-base of origin/main
+    // and HEAD, but a --local clone maps the source's local heads onto
+    // origin/* — NOT the fetched refs/remotes/origin/*. Pin the scratch's
+    // origin/main to the executing checkout's real origin/main and verify,
+    // rather than assuming the clone's remotes match the source's.
+    const srcMain = gitIn(REPO_ROOT, ["rev-parse", "origin/main"]);
+    assert(
+      srcMain.code === 0 && srcMain.stdout,
+      `source origin/main unreadable: ${srcMain.stderr}`,
+    );
+    const pin = gitIn(scratch, [
+      "update-ref",
+      "refs/remotes/origin/main",
+      srcMain.stdout,
+    ]);
+    assert(pin.code === 0, `could not pin scratch origin/main: ${pin.stderr}`);
+    const scratchMain = gitIn(scratch, ["rev-parse", "origin/main"]);
+    assert(
+      scratchMain.stdout === srcMain.stdout,
+      `scratch origin/main ${scratchMain.stdout} != source ${srcMain.stdout}`,
+    );
+
+    const scratchSidecar = join(scratchRoot, "responsive-support.json");
+    assert(
+      Deno.realPathSync(scratchSidecar) !== Deno.realPathSync(realSidecar),
+      "scratch sidecar resolves to the real tracked file",
+    );
+
+    const data = JSON.parse(Deno.readTextFileSync(scratchSidecar));
     const targetKey = Object.keys(data).find((k) => data[k]?.mobile === "ok");
     assert(targetKey, "could not find key with mobile=ok");
     data[targetKey].mobile = "needs-review";
-    Deno.writeTextFileSync(sidecarPath, JSON.stringify(data, null, 2) + "\n");
+    Deno.writeTextFileSync(scratchSidecar, JSON.stringify(data, null, 2) + "\n");
 
-    // Node gate run
+    // Node gate run (cwd: scratch)
     const nodeOut = new Deno.Command("node", {
       args: ["scripts/check-routes.mjs"],
-      cwd: REPO_ROOT,
+      cwd: scratchRoot,
       stdout: "piped",
       stderr: "piped",
     }).outputSync();
@@ -377,10 +451,10 @@ check("check-routes gate fails on support downgrade under both Node and Deno", (
       `Node output missing regression notice: ${nodeText}`,
     );
 
-    // Deno gate run
+    // Deno gate run (cwd: scratch)
     const denoOut = new Deno.Command("deno", {
       args: ["run", "--allow-read", "--allow-run", "--allow-env", "scripts/check-routes.mjs"],
-      cwd: REPO_ROOT,
+      cwd: scratchRoot,
       stdout: "piped",
       stderr: "piped",
     }).outputSync();
@@ -396,7 +470,16 @@ check("check-routes gate fails on support downgrade under both Node and Deno", (
       `Deno output missing regression notice: ${denoText}`,
     );
   } finally {
-    Deno.writeTextFileSync(sidecarPath, original);
+    // Normal-path detectors, NOT kill safety (SIGKILL skips this block):
+    // the real tracked sidecar must be byte-for-byte unchanged...
+    const realAfter = Deno.readFileSync(realSidecar);
+    assert(
+      realBefore.length === realAfter.length &&
+        realBefore.every((b, i) => b === realAfter[i]),
+      "REAL responsive-support.json changed during the isolated run",
+    );
+    // ...and scratch cleanup failure is a visible failure, never swallowed.
+    Deno.removeSync(scratch, { recursive: true });
   }
 });
 
