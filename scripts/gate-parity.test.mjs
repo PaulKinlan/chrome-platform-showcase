@@ -135,7 +135,21 @@ const GATE_TEXT_OPERATOR_RE = /(\|\||;|`|\$\(|\$\{|[<>]|\|(?!\|))/;
 function gateText(label, text) {
   if (typeof text !== "string" || text.trim() === "") {
     check(`${label} is a non-empty command`, false, "empty command text");
-    return;
+    return false;
+  }
+  // A shell comment is not part of the declared grammar. Crediting a command
+  // that appears inside one was a false green (finding 74l): `deno task phantom`
+  // in a trailing comment made the guard report a task as executed, and a
+  // comment's words could even pass as real operands. Nothing in a comment runs,
+  // so nothing in one may be credited.
+  if (text.includes("#")) {
+    check(
+      `${label} contains no shell comment`,
+      false,
+      `\`#\` in ${JSON.stringify(text)} — a comment is unsupported syntax in a gate ` +
+        "command: it cannot execute, and a command written inside it is not a step",
+    );
+    return false;
   }
   const bad = text.match(GATE_TEXT_OPERATOR_RE);
   if (bad) {
@@ -146,12 +160,14 @@ function gateText(label, text) {
         "chain is a supported gate command, and nothing is inferred about what a " +
         "shell would do with this text",
     );
-    return;
+    return false;
   }
   const parts = text.split("&&");
   if (parts.some((p) => p.trim() === "")) {
     check(`${label} has no empty && segment`, false, `empty segment in ${JSON.stringify(text)}`);
+    return false;
   }
+  return true;
 }
 
 // The gate exists, it is plan-driven, and the plan is wired to deno.json.
@@ -219,7 +235,7 @@ const GATE_PROGRAMS = new Map([
 function parseInvocations(label, text) {
   const argv = [];
   for (const part of squash(text).split("&&").map((p) => squash(p)).filter((p) => p !== "")) {
-    gateText(`${label} segment`, part);
+    if (!gateText(`${label} segment`, part)) return null;
     const tokens = part.split(/\s+/);
     const declared = GATE_PROGRAMS.get(tokens[0]);
     if (!declared || !declared(tokens)) {
@@ -256,18 +272,24 @@ const sameInvocation = (ci, gate) =>
 
 // Every task the plan reaches, resolved through deno.json (nested `deno task`
 // references included), parsed into the commands it really runs.
+// Recursion is driven by the PARSED argv of each task — never by a regex over
+// its raw text — so a `deno task <id>` written inside a comment, a string or any
+// other unsupported syntax cannot pull a task into the reachable set (finding
+// 74l: a phantom task credited through a trailing comment was a false green).
+// A task the grammar refuses contributes no invocations at all.
 const planReachable = new Set();
+const gateCommands = [];
 const walkPlan = (name) => {
   if (planReachable.has(name) || typeof tasks[name] !== "string") return;
   planReachable.add(name);
-  for (const m of tasks[name].matchAll(/deno task ([a-z0-9:-]+)/g)) walkPlan(m[1]);
+  const argv = parseInvocations(`task \`${name}\``, tasks[name]);
+  if (argv === null) return;
+  gateCommands.push({ name, argv });
+  for (const tokens of argv) {
+    if (tokens[0] === "deno" && tokens[1] === "task" && tokens[2]) walkPlan(tokens[2]);
+  }
 };
 for (const step of GATE_STEPS) walkPlan(step.task);
-const gateCommands = [];
-for (const name of [...planReachable].sort()) {
-  const argv = parseInvocations(`task \`${name}\``, tasks[name]);
-  if (argv) gateCommands.push({ name, argv });
-}
 
 const planTasks = new Map(GATE_STEPS.map((s) => [s.task, s]));
 const mirrors = (cmd) => {
