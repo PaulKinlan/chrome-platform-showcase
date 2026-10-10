@@ -31,6 +31,17 @@ const REPO = new URL("../", import.meta.url).pathname;
 const PLAN_TASKS = GATE_STEPS.map((s) => s.task);
 const STATIC_IDS = GATE_STEPS.filter((s) => s.tier === "static").map((s) => s.id);
 const STUB = "scripts/_stub.mjs";
+const STUB_COMMAND = `deno run --allow-read --allow-write ${STUB}`;
+const HARNESS_CANCEL = ".harness-cancel";
+/** Thrown when a child outlives the deadline — named so the hung-stub fixture can
+ * assert on the type, not on a message. */
+class HarnessTimeout extends Error {
+  constructor(label, ms) {
+    super(`${label} did not finish within ${ms}ms — the harness deadline fired`);
+    this.name = "HarnessTimeout";
+  }
+}
+
 let failures = 0;
 
 function check(label, ok, detail = "") {
@@ -42,21 +53,98 @@ function check(label, ok, detail = "") {
   }
 }
 
-function stubSource(failTask = null, failCode = 7) {
-  return `const task = Deno.args[0];\nconsole.log(\`RUN \${task}\`);\n` +
-    (failTask ? `if (task === ${JSON.stringify(failTask)}) Deno.exit(${failCode});\n` : "");
+function stubSource(failTask = null, failCode = 7, hangTask = null) {
+  const head = `const task = Deno.args[0];\nconsole.log(\`RUN \${task}\`);\n`;
+  const fail = failTask
+    ? `if (task === ${JSON.stringify(failTask)}) Deno.exit(${failCode});\n`
+    : "";
+  // A child that will never exit on its own. It exits only when the harness
+  // cancels the tree, which is how "no orphan left behind" is asserted rather
+  // than assumed.
+  const hang = hangTask
+    ? `if (task === ${JSON.stringify(hangTask)}) {
+  const cancel = new URL(${JSON.stringify("../" + HARNESS_CANCEL)}, import.meta.url);
+  const done = new URL(${JSON.stringify("../" + HARNESS_CANCEL + ".exited")}, import.meta.url);
+  const exists = (u) => { try { Deno.statSync(u); return true; } catch { return false; } };
+  while (!exists(cancel)) await new Promise((r) => setTimeout(r, 20));
+  await Deno.writeTextFile(done, task);
+  Deno.exit(0);
+}\n`
+    : "";
+  return head + fail + hang;
 }
 
 /** Spawn the scratch tree's real runner. Parses the JSON payload after its human prefix. */
-async function runGate(root, args, timeoutMs = 120_000) {
+async function readStream(stream) {
+  if (!stream) return "";
+  const parts = [];
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+    }
+  } catch {
+    // the deadline cancelled this read; whatever arrived is still useful
+  }
+  const total = parts.reduce((n, part) => n + part.length, 0);
+  const buffer = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    buffer.set(part, offset);
+    offset += part.length;
+  }
+  return new TextDecoder().decode(buffer);
+}
+
+/** A deadline that actually fires. `Deno.Command.output({ timeout })` is IGNORED
+ * in Deno 2.9.7: measured on this VM, a 200ms child given `timeout: 1` still ran
+ * to completion in 239ms and returned rc 0. A harness built on that option can
+ * hang the gate forever, and `elapsed > 30_000` after the await is not a bound.
+ *
+ * So: spawn, keep an explicit deadline, and on expiry (a) write the cancel file
+ * the stubbed tasks poll, (b) SIGKILL the child, (c) cancel our pipe reads — a
+ * surviving grandchild holds the inherited stdio, and without (c) the read never
+ * ends (measured: the pipe stayed open 3s after killing the child). */
+async function runGate(root, args, timeoutMs = 45_000) {
   const command = new Deno.Command("deno", {
     args: ["run", "--allow-read", "--allow-run", "scripts/run-gate.mjs", ...args],
     cwd: root,
     stdout: "piped",
     stderr: "piped",
   });
-  const { code, stdout, stderr } = await command.output({ timeout: timeoutMs });
-  const text = new TextDecoder().decode(stdout) + new TextDecoder().decode(stderr);
+  const child = command.spawn();
+  const cancelPath = new URL(HARNESS_CANCEL, `file://${root}/`);
+  const io = (async () => (await readStream(child.stdout)) + (await readStream(child.stderr)))();
+  const exited = child.status.then((status) => status.code);
+  let timedOut = false;
+  const deadline = setTimeout(async () => {
+    timedOut = true;
+    try {
+      await Deno.writeTextFile(cancelPath, "cancel");
+    } catch { /* the tree may already be gone */ }
+    try {
+      Deno.kill(child.pid, "SIGKILL");
+    } catch { /* already exited */ }
+    for (const stream of [child.stdout, child.stderr]) {
+      try {
+        await stream?.cancel();
+      } catch { /* already closed */ }
+    }
+  }, timeoutMs);
+  const code = await Promise.race([
+    exited,
+    new Promise((resolve) => setTimeout(() => resolve(137), timeoutMs + 2000)),
+  ]);
+  clearTimeout(deadline);
+  const text = await Promise.race([
+    io,
+    new Promise((resolve) => setTimeout(() => resolve(""), 500)),
+  ]);
+  if (timedOut) {
+    throw new HarnessTimeout(`run-gate.mjs ${args.join(" ") || "(full plan)"}`, timeoutMs);
+  }
   // Fail-closed runs print `gate: FAIL-CLOSED …` BEFORE the JSON object, so the
   // payload has to be taken from the first brace rather than from the whole output.
   let payload = null;
@@ -82,13 +170,13 @@ async function buildScratch(root, { withGit = true, failTask = null } = {}) {
   await Deno.writeTextFile(`${root}/${STUB}`, stubSource(failTask));
   const tasks = JSON.parse(await Deno.readTextFile(`${REPO}deno.json`)).tasks ?? {};
   const stubTasks = {};
-  for (const name of Object.keys(tasks)) stubTasks[name] = `deno run --allow-read ${STUB} ${name}`;
+  for (const name of Object.keys(tasks)) stubTasks[name] = `${STUB_COMMAND} ${name}`;
   await Deno.writeTextFile(`${root}/deno.json`, JSON.stringify({ tasks: stubTasks }, null, 2));
   // The mechanical guarantee behind "the real suites never run here": no task may
   // escape the stub program. This is an assertion, not a promise in a comment, and
   // it also makes the harness immune to whatever shape deno.json takes next.
   const escaped = Object.entries(stubTasks).filter(([, cmd]) =>
-    !cmd.startsWith(`deno run --allow-read ${STUB} `)
+    !cmd.startsWith(`${STUB_COMMAND} `)
   );
   check(
     "stub substitution is total — no task in the scratch tree can run a real suite",
@@ -385,6 +473,58 @@ try {
     `rc ${unawaited?.code} while step \`two\` exited 7 — a markers-only harness would call this green`,
   );
 
+  // ── the deadline is a real bound, and cancelling leaves nothing behind ──────
+  //
+  // With `output({ timeout })` this harness could hang the gate forever. The stub
+  // below never exits on its own; the only way this check passes is the deadline
+  // firing, the child being killed, and the stubbed tree observing cancellation
+  // and reporting its own exit. Note the honest limit: the exit proof shows the
+  // *stubbed* child stopped. A hostile uncooperative process is bounded by the
+  // SIGKILL of the child and by the harness never waiting on it again, and the
+  // review evidence additionally checks the process table.
+  const hangTask = PLAN_TASKS[Math.min(3, PLAN_TASKS.length - 1)];
+  const cancelFile = new URL(HARNESS_CANCEL, `file://${root}/`);
+  const exitProof = new URL(`${HARNESS_CANCEL}.exited`, `file://${root}/`);
+  for (const url of [cancelFile, exitProof]) {
+    try {
+      await Deno.remove(url);
+    } catch { /* not there */ }
+  }
+  await Deno.writeTextFile(`${root}/${STUB}`, stubSource(null, 7, hangTask));
+  const hangStart = performance.now();
+  let hangError = null;
+  try {
+    await runGate(root, [], 800);
+  } catch (error) {
+    hangError = error;
+  }
+  const hangMs = Math.round(performance.now() - hangStart);
+  await Deno.writeTextFile(`${root}/${STUB}`, stubSource());
+  check(
+    "a child that never exits is stopped by the deadline, and reported as a named error",
+    hangError instanceof HarnessTimeout && hangMs >= 800 && hangMs < 5000,
+    `${
+      hangError ? `${hangError.name}: ${hangError.message}` : "no error — the child was NOT bounded"
+    } (deadline 800ms, elapsed ${hangMs}ms)`,
+  );
+  let stopped = false;
+  for (let i = 0; i < 150 && !stopped; i++) {
+    try {
+      await Deno.stat(exitProof);
+      stopped = true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+  check(
+    "cancelling the hung child leaves no orphan behind",
+    stopped,
+    "the hung stub never reported its own exit after cancellation — it may still be running",
+  );
+  try {
+    await Deno.remove(exitProof);
+  } catch { /* fine */ }
+
   // Control B — a valid but WRONG selection. It runs on the explicit `--paths` seam:
   // mutating a file inside the scratch repository would make that path itself a
   // changed, unmatched path, and the runner would correctly fail closed to the full
@@ -426,10 +566,11 @@ try {
 }
 
 // Wall-clock: the design budget is ~1.5s with a 12s ceiling, measured in review.
-// The assertion here is deliberately loose (30s) because this runs on a shared VM
-// where a heavy job can starve it; a wall-clock flake must never fail the gate.
-// Exceeding the 12s ceiling with a healthy machine means split this step, not
-// raise the number.
+// The primary bound is the per-child deadline in runGate, which actually fires;
+// this end-of-run assertion is only a secondary pathology guard, deliberately
+// loose (30s) because this runs on a shared VM where a heavy job can starve it.
+// A wall-clock flake must never fail the gate; exceeding the 12s ceiling on a
+// healthy machine means split this step, not raise the number.
 const elapsed = Math.round(performance.now() - started);
 console.log(`\ngate plan harness: ${elapsed}ms (design budget ~1500ms, ceiling 12000ms)`);
 if (elapsed > 30_000) {
