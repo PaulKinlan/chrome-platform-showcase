@@ -67,8 +67,9 @@ const CHILD_MARKER_MAX_AGE_MS = 30_000;
 const HARNESS_ROOT_PREFIX = "gate-plan-harness-";
 
 /** Leave a marker in a scratch root for the child that is about to be spawned.
- * `createdAt` is the parent's clock: the child treats a missing, future or stale
- * stamp as evidence of a replay rather than of a live parent. */
+ * `createdAt` is the parent's clock: the child checks it against the file's own
+ * mtime, so a marker that outlives a hard-killed parent fails rather than being
+ * reused. */
 async function writeChildMarker(root, nonce) {
   const path = `${root}/${CHILD_MARKER_NAME}`;
   await Deno.writeTextFile(path, `${JSON.stringify({ nonce, createdAt: Date.now() })}\n`);
@@ -85,12 +86,18 @@ async function writeChildMarker(root, nonce) {
  * is reported rather than ignored, so an injected or replayed variable cannot
  * silently downgrade the self-exit proof (finding 5v8) to a no-op.
  *
- * Residual limit, stated rather than hidden: an actor who can both forge this
- * variable and produce a marker inside a live `gate-plan-harness-*` directory
- * with the offered nonce and a stamp inside the freshness window can still be
- * treated as a child. The nonce is random per spawn and the marker lives in a
- * directory the parent created seconds earlier, so that window is small and
- * bounded - it is not a claim that replay is impossible.
+ * TWO STAMPS must both be fresh, and they cover different failure modes: the
+ * `createdAt` the parent wrote covers a marker JSON that was forged or copied, and
+ * the marker file's own `mtime` covers an ORPHAN left behind by a parent that was
+ * hard killed after writing it - an orphan keeps a valid nonce and a plausible
+ * `createdAt` forever, but its mtime stops advancing. An mtime that is missing,
+ * unparseable or in the future is a named failure rather than a pass.
+ *
+ * Residual limit, stated rather than hidden: this is a bounded window, not proof
+ * that replay is impossible. An actor who already holds the current marker path
+ * and nonce and can write inside that scratch root can still present both stamps
+ * fresh, and nothing here is a secret - the nonce is unguessable before the spawn
+ * but it is readable afterwards.
  */
 function readChildEvidence() {
   let value = null;
@@ -135,9 +142,30 @@ function readChildEvidence() {
   }
   const ageMs = Date.now() - Number(stamp?.createdAt);
   if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > CHILD_MARKER_MAX_AGE_MS) {
-    return fail(`marker ${realPath} is ${ageMs}ms old, outside 0..${CHILD_MARKER_MAX_AGE_MS}ms`);
+    return fail(
+      `marker ${realPath} wrote ${ageMs}ms ago, outside 0..${CHILD_MARKER_MAX_AGE_MS}ms`,
+    );
   }
-  return { ok: true, path: realPath, ageMs };
+  // The file's own mtime, so a marker that outlived a hard-killed parent cannot
+  // be replayed later: its JSON stamp never changes, but its mtime does.
+  let mtimeMs;
+  try {
+    const info = Deno.statSync(realPath);
+    mtimeMs = info.mtime === null ? Number.NaN : info.mtime.getTime();
+  } catch (error) {
+    return fail(`marker ${realPath} cannot be stat'ed: ${error.message}`);
+  }
+  if (!Number.isFinite(mtimeMs)) {
+    return fail(`marker ${realPath} has no usable mtime`);
+  }
+  const mtimeAgeMs = Date.now() - mtimeMs;
+  if (mtimeAgeMs < 0 || mtimeAgeMs > CHILD_MARKER_MAX_AGE_MS) {
+    return fail(
+      `marker ${realPath} was last modified ${mtimeAgeMs}ms ago, outside ` +
+        `0..${CHILD_MARKER_MAX_AGE_MS}ms`,
+    );
+  }
+  return { ok: true, path: realPath, ageMs, mtimeAgeMs };
 }
 /** Thrown when a child outlives the deadline — named so the hung-stub fixture can
  * assert on the type, not on a message. */
