@@ -63,6 +63,24 @@ function fakeChild({ status = Promise.resolve(0), kill } = {}) {
 
 const entriesInRoot = () => [...Deno.readDirSync(root)].map((e) => e.name).sort();
 
+// Whether the mode actually blocks a recursive removal is MEASURED rather than
+// assumed: for root (and for filesystems that ignore modes) it does not, and
+// `Deno.uid()` would need a sys permission this task deliberately does not
+// grant. The probe owns and removes its own directory either way.
+async function modeBlocksRemoval() {
+  const probe = await Deno.makeTempDir({ prefix: "cps-cdp-probe-" });
+  await Deno.writeTextFile(`${probe}/held-open`, "content");
+  await Deno.chmod(probe, 0o500);
+  try {
+    await Deno.remove(probe, { recursive: true });
+    return false;
+  } catch {
+    await Deno.chmod(probe, 0o700);
+    await Deno.remove(probe, { recursive: true });
+    return true;
+  }
+}
+
 Deno.test("teardownChrome reaps a live child and removes the profile it owns", async () => {
   const dir = await Deno.makeTempDir({ prefix: "cps-cdp-" });
   await Deno.writeTextFile(`${dir}/marker`, "profile content");
@@ -172,18 +190,55 @@ Deno.test("a child whose exit cannot be read is reported, not counted as reaped"
   );
 });
 
+Deno.test("a profile the suite OWNS that cannot be removed is a named failure", async () => {
+  // A real failure inside the suite's own root rather than a path trick: a
+  // non-empty directory whose mode denies writing cannot be emptied, so the
+  // recursive removal genuinely fails with PermissionDenied. Run as root that is
+  // not true, so the case says so loudly instead of reporting a false green.
+  if (!await modeBlocksRemoval()) {
+    console.warn(
+      "skip: this platform does not let a mode-0500 directory block removal (running as root?)",
+    );
+    return;
+  }
+  const dir = await Deno.makeTempDir({ prefix: "cps-cdp-" });
+  await Deno.writeTextFile(`${dir}/held-open`, "content");
+  await Deno.chmod(dir, 0o500);
+  const { child } = fakeChild();
+
+  try {
+    await assert.rejects(
+      teardownChrome({ child, userDataDir: dir }, { boundMs: 400 }),
+      (err) =>
+        err instanceof CdpTeardownError &&
+        /could not be removed after \d+ attempts/.test(err.message) &&
+        /Permission denied/.test(err.message),
+      "a removal that really fails must be named, with the reason it failed",
+    );
+  } finally {
+    await Deno.chmod(dir, 0o700);
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("the primary error survives a teardown it cannot be annotated with", async () => {
+  if (!await modeBlocksRemoval()) {
+    console.warn(
+      "skip: this platform does not let a mode-0500 directory block removal (running as root?)",
+    );
+    return;
+  }
   const { child } = fakeChild();
   const primary = Object.freeze(new Error("original failure"));
+  const locked = await Deno.makeTempDir({ prefix: "cps-cdp-" });
+  await Deno.writeTextFile(`${locked}/held-open`, "content");
+  await Deno.chmod(locked, 0o500);
   const reported = [];
   const realError = console.error;
   console.error = (...args) => reported.push(args.join(" "));
   try {
     await assert.rejects(
-      teardownChrome(
-        { child, userDataDir: "/dev/null/dty1w1-unremovable" },
-        { primaryError: primary, boundMs: 400 },
-      ),
+      teardownChrome({ child, userDataDir: locked }, { primaryError: primary, boundMs: 400 }),
       (err) => {
         assert.equal(err, primary, "the frozen primary is still the thrown error");
         assert.equal(err.message, "original failure", "the primary message is untouched");
@@ -197,6 +252,8 @@ Deno.test("the primary error survives a teardown it cannot be annotated with", a
     );
   } finally {
     console.error = realError;
+    await Deno.chmod(locked, 0o700);
+    await Deno.remove(locked, { recursive: true });
   }
   assert.ok(
     reported.some((line) =>

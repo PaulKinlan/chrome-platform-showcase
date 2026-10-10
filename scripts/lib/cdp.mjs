@@ -209,11 +209,16 @@ async function removeProfile(dir, boundMs, remove) {
   let lastError = null;
   let attempts = 0;
   for (let attempt = 1; attempt <= CDP_REMOVE_ATTEMPTS; attempt++) {
+    // The budget is checked BEFORE an attempt starts, so an attempt is never
+    // raced against an almost-empty window: that made the failure MESSAGE depend
+    // on timing (an exhausted budget could report as a hung IO, or the reverse).
+    // Each blocking wait gets the caller's full bound, and the timeout branch is
+    // therefore reached only when one removal really does hang.
+    if (Date.now() >= deadline) break;
     attempts = attempt;
-    const remaining = Math.max(1, deadline - Date.now());
     let outcome;
     try {
-      outcome = await boundedWait(remove(dir, { recursive: true }), Math.min(boundMs, remaining));
+      outcome = await boundedWait(remove(dir, { recursive: true }), boundMs);
     } catch (err) {
       // A synchronous throw never reaches the race.
       outcome = { status: "rejected", error: err };
@@ -221,14 +226,13 @@ async function removeProfile(dir, boundMs, remove) {
     if (outcome.status === "settled") return { confirmable: true, failures };
     if (outcome.status === "timeout") {
       failures.push(
-        `profile ${dir} was not confirmed removed within ${Math.min(boundMs, remaining)}ms ` +
+        `profile ${dir} was not confirmed removed within ${boundMs}ms ` +
           `(Deno.remove cannot be cancelled, so its deletion is UNCONFIRMED)`,
       );
       return { confirmable: false, failures };
     }
     if (alreadyGone(outcome.error)) return { confirmable: true, failures };
     lastError = outcome.error;
-    if (Date.now() >= deadline) break;
     await new Promise((res) => setTimeout(res, CDP_REMOVE_RETRY_MS));
   }
   failures.push(
