@@ -45,6 +45,61 @@ class HarnessTimeout extends Error {
   }
 }
 
+/** Run a child under a real watchdog and report what happened, clearing EVERY timer.
+ * `timedOut` means the watchdog fired and the child was killed; the caller decides
+ * whether that is a failure. */
+async function runBoundedChild(args, { cwd, deadlineMs = 20_000 } = {}) {
+  const started = performance.now();
+  // stdout/stderr are discarded rather than piped. A pipe held by a child that will not
+  // exit is a live file descriptor with a pending read, which keeps THIS process alive —
+  // measured here after a kill that silently failed (see killError below).
+  const child = new Deno.Command("deno", { args, cwd, stdout: "null", stderr: "null" }).spawn();
+  const timers = [];
+  const boundedRace = (promise, ms, fallback) => {
+    let handle;
+    const timer = new Promise((resolve) => {
+      handle = setTimeout(() => resolve(fallback), ms);
+    });
+    timers.push(handle);
+    try {
+      Deno.unrefTimer(handle);
+    } catch { /* runtime without unrefTimer: the finally still clears it */ }
+    return Promise.race([promise, timer]);
+  };
+  try {
+    const exit = await boundedRace(child.status.then((status) => status.code), deadlineMs, null);
+    let killError = null;
+    if (exit === null) {
+      try {
+        Deno.kill(child.pid, "SIGKILL");
+      } catch (error) {
+        // Never swallow this: a silent no-op here is exactly how the harness once
+        // kept a killed-looking child alive. `Deno.kill` needs --allow-run with no
+        // path restriction; a path-restricted allowlist reports NotCapable.
+        killError = error;
+      }
+    }
+    return {
+      exit,
+      timedOut: exit === null,
+      killError,
+      elapsedMs: Math.round(performance.now() - started),
+      error: exit === null ? new HarnessTimeout(`child ${args.join(" ")}`, deadlineMs) : null,
+    };
+  } finally {
+    for (const handle of timers) clearTimeout(handle);
+  }
+}
+
+/** The property finding 5v8 broke is that the process EXITS. Elapsed time is advisory
+ * only: on a shared 2-vCPU VM a green run can approach the 12s design target through
+ * contention alone, and a hard wall-clock assertion here would be a false red in the
+ * very gate this guards (the reviewer measured a real 11.53s exit against a 12s
+ * assertion). The 20s watchdog, not this budget, is what bounds a hang. */
+function childExitVerdict(exit, elapsedMs) {
+  return { ok: exit === 0, advisory: elapsedMs >= 12_000, elapsedMs };
+}
+
 let failures = 0;
 
 function check(label, ok, detail = "") {
@@ -248,7 +303,6 @@ async function withMutation(root, relative, mutate, args = []) {
   }
 }
 
-let selfExitTimer;
 const started = performance.now();
 const root = await Deno.makeTempDir({ prefix: "gate-plan-harness-" });
 const shrunk = await Deno.makeTempDir({ prefix: "gate-plan-shrunk-" });
@@ -415,46 +469,51 @@ try {
   // and bounds it externally, so a leaked timer or an unclosed pipe fails the gate
   // instead of stalling it.
   if (!CHILD_MODE) {
-    const childStart = performance.now();
-    // Spawn by NAME, not Deno.execPath(): the task's `--allow-run=deno` allowlist is
-    // matched against the literal path, and the absolute execPath is not permitted.
-    const self = new Deno.Command("deno", {
-      args: ["task", "test-run-gate-plan", "--child"],
+    // Bounded from OUTSIDE, because performance.now() inside this process cannot see a
+    // failure to exit (finding 5v8). Spawn by NAME, not Deno.execPath(): the task's
+    // `--allow-run=deno` allowlist matches the literal path, and execPath is absolute.
+    const self = await runBoundedChild(["task", "test-run-gate-plan", "--child"], {
       cwd: REPO,
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
-    const selfIo = (async () =>
-      (await readStream(self.stdout)) + (await readStream(self.stderr)))();
-    const selfExit = await Promise.race([
-      self.status.then((status) => status.code),
-      new Promise((resolve) => {
-        const handle = setTimeout(() => resolve(null), 20_000);
-        try {
-          Deno.unrefTimer(handle);
-        } catch { /* cleared below */ }
-        selfExitTimer = handle;
-      }),
-    ]);
-    clearTimeout(selfExitTimer);
-    const selfText = await Promise.race([
-      selfIo,
-      new Promise((resolve) => setTimeout(() => resolve(""), 250)),
-    ]);
-    const selfMs = Math.round(performance.now() - childStart);
-    if (selfExit === null) {
-      try {
-        Deno.kill(self.pid, "SIGKILL");
-      } catch { /* gone */ }
+      deadlineMs: 20_000,
+    });
+    const verdict = childExitVerdict(self.exit, self.elapsedMs);
+    if (verdict.advisory) {
+      console.log(
+        `advisory — the child copy took ${self.elapsedMs}ms, past the ${12_000}ms design target; not a failure`,
+      );
     }
     check(
-      "the harness process exits on its own, bounded from outside itself",
-      selfExit === 0 && selfMs < 12_000,
-      selfExit === null
-        ? `the child copy did not exit within 20s — the event loop is being held open${
-          selfText ? ` (last output: ${selfText.trim().split("\n").slice(-1)[0]})` : ""
+      "the harness process exits on its own (20s watchdog bounds a hang; elapsed is advisory)",
+      verdict.ok,
+      self.timedOut
+        ? `${self.error.name}: ${self.error.message}${
+          self.killError ? ` (kill failed: ${self.killError.message})` : ""
         }`
-        : `child copy exited rc ${selfExit} after ${selfMs}ms (budget 12s)`,
+        : `child copy exited rc ${self.exit} after ${self.elapsedMs}ms`,
+    );
+
+    // Focused proofs of the two properties that check rests on, so neither is assumed:
+    // the watchdog really stops a hung child with a named failure, and a green child is
+    // not failed for being slow.
+    const hung = await runBoundedChild(["eval", "setInterval(() => {}, 1000);"], {
+      deadlineMs: 700,
+    });
+    // Note what does NOT hang: `deno eval "await new Promise(() => {})"` fails fast with
+    // "Top-level await promise never resolved" (rc 1 in ~40ms) — the first version of
+    // this proof used exactly that, and the check caught it.
+    check(
+      "focused proof: the watchdog stops a hanging child and reports a named failure",
+      hung.timedOut && hung.exit === null && hung.error instanceof HarnessTimeout &&
+        hung.elapsedMs >= 700 && hung.elapsedMs < 5000,
+      `timedOut=${hung.timedOut} exit=${hung.exit} error=${hung.error?.name} after ${hung.elapsedMs}ms (watchdog 700ms)`,
+    );
+    const green = childExitVerdict(0, 20_000);
+    const failed = childExitVerdict(1, 10);
+    const noExit = childExitVerdict(null, 20_000);
+    check(
+      "focused proof: a green child is not failed merely for exceeding the 12s target",
+      green.ok && green.advisory && !failed.ok && !noExit.ok,
+      `green(exit 0, 20s) ok=${green.ok} advisory=${green.advisory}; rc 1 ok=${failed.ok}; no exit ok=${noExit.ok}`,
     );
 
     // ── Controls A and C: mutate the runner on a short plan ─────────────────────
