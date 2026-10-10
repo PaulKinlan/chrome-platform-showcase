@@ -66,6 +66,21 @@ run; `check:affected` is a feedback loop, not a replacement for it.
 reads `.github/workflows/ci.yml`, and fails if CI enforces a formatter or type-check step that the
 full gate omits, or if a plan step names a task `deno.json` does not define.
 
+### Opt-in native Deno.test pilot (`deno task test:unit`) — Stage 0, NOT part of the gate
+
+`tests/unit/` holds an **opt-in** pilot proving a native `Deno.test` suite can live beside the
+current suites (bead 9th, Stage 0 of the dty proposal). Run it with `deno task test:unit`
+(`deno test --parallel tests/unit/`). It is **deliberately not on the gate plan**: it is not a step
+of `deno task check`, not wired into CI, and does not change the fleet `CHECK_CMD` — do not describe
+the suites as migrated, and do not treat a green pilot as migration progress. The runner grants
+**zero permissions**, so a pilot case that touches the filesystem fails `NotCapable` rather than
+quietly widening the runner; use the built-in `node:assert/strict` so the pilot adds no dependency.
+Three assertions in `scripts/gate-parity.test.mjs` pin it where the existing guards do not look: at
+least one `*.test.mjs` exists, the directory holds nothing else (Deno also discovers `*_test.mjs`
+and imports a zero-test module that exits 0), and the task string is exactly the zero-permission
+directory form. A change under `tests/**` is unmatched by `scripts/affected-tests.mjs`, so it
+selects the **full** gate.
+
 That guard covers that one direction only, so this is **not** a general CI-parity guarantee: a
 future CI step is not automatically mirrored in `deno task check`, and nothing fails if it is
 missing. Wire it into the gate (and, if it can run locally, into the guard's expectation) in the

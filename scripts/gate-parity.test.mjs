@@ -195,6 +195,44 @@ check(
     "(and a rule in scripts/affected-tests.mjs selects it), or the suite stops running",
 );
 
+// Stage 0 opt-in native Deno.test pilot (bead 9th, from dty). The pilot lives in
+// tests/unit/ and is deliberately NOT on the gate plan: it is opt-in, it runs
+// with zero permissions, and nothing about it may change the full gate, CI or
+// the fleet CHECK_CMD. It must not be invisible either, so it is pinned here:
+// a suite exists, the directory holds nothing but suites, and the runner task is
+// exactly the directory form with no --allow flags. The directory form is what
+// keeps the pilot off the plan — a task command naming a *.test.mjs path would
+// have to be plan-reachable (the task-level rule above) and would therefore
+// change `deno task check`. Deno also discovers `*_test.mjs`, so a stray helper
+// in this directory would be imported as a zero-test module that exits 0.
+const UNIT_DIR = "tests/unit";
+const UNIT_RUNNER = "deno test --parallel tests/unit/";
+let unitFiles = [];
+try {
+  unitFiles = [...Deno.readDirSync(`${REPO}${UNIT_DIR}`)]
+    .filter((entry) => entry.isFile)
+    .map((entry) => entry.name)
+    .sort();
+} catch {
+  // Reported by the first check below, which fails with a readable message.
+}
+const strayUnitFiles = unitFiles.filter((name) => !name.endsWith(".test.mjs"));
+check(
+  "the opt-in pilot declares at least one *.test.mjs suite",
+  unitFiles.some((name) => name.endsWith(".test.mjs")),
+  `${UNIT_DIR} holds no suite — delete this guard only together with the pilot`,
+);
+check(
+  "the opt-in pilot directory holds nothing but *.test.mjs files",
+  strayUnitFiles.length === 0,
+  `stray files that deno test would import as zero-test modules: ${strayUnitFiles.join(", ")}`,
+);
+check(
+  "the opt-in pilot runner is exactly the zero-permission directory invocation",
+  tasks["test:unit"] === UNIT_RUNNER,
+  `test:unit = ${JSON.stringify(tasks["test:unit"])} — expected ${JSON.stringify(UNIT_RUNNER)}`,
+);
+
 if (failures) {
   console.error(`\n${failures} local-gate/CI parity check(s) failed`);
   Deno.exit(1);
