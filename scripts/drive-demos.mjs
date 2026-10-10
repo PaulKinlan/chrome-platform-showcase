@@ -412,9 +412,19 @@ async function runDrive(opts, io, holder, selection) {
       base = `http://localhost:${port}`;
       const outcome = await awaitServerReady(port);
       if (outcome.ok) return;
-      await retireServerChild(holder, holder.reapBoundMs);
+      const retirement = await retireServerChild(holder, holder.reapBoundMs);
       const message = describeBootFailure({ port, ...outcome });
       failures.push(message);
+      // A child we could not retire may still be alive on that port. Never start a
+      // SECOND server while the first one is unresolved, however retryable the
+      // readiness failure looks: the retained handle is re-attempted once by the
+      // finalizer, which reports a named non-zero failure if the exit still cannot
+      // be confirmed, and this error stops the run before another child exists.
+      if (retirement) {
+        throw new Error(
+          `${message}\n- that attempt's server child could not be retired, so no further server was started while it may still be running: ${retirement.message}`,
+        );
+      }
       // A crash or a 10-second silent boot is not going to be fixed by another
       // random port; only a takeover between the check above and the bind is worth
       // retrying, and that shows up as the child exiting at once.
@@ -790,10 +800,11 @@ export async function closeConnection(conn, { boundMs = CONNECTION_CLOSE_BOUND_M
 // is what made a live child unreapable and invisible.
 export async function retireServerChild(holder, boundMs) {
   const child = holder.serverChild;
-  if (!child) return;
+  if (!child) return null;
   holder.serverChild = null;
   const failure = await reapServerChild(child, { boundMs });
   if (failure) holder.retiredChildren.push(child);
+  return failure;
 }
 
 // Stage 2 contract, in order: validate targets before acquiring anything; run
