@@ -230,6 +230,12 @@ check(
     "v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/_server.ts",
   ]).steps.includes("test-header-grammar"),
 );
+check(
+  "a resource-timing delayed-echo sidecar change selects the header-grammar suite",
+  selectSteps([
+    "v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields/_server.ts",
+  ]).steps.includes("test-header-grammar"),
+);
 
 const gc = selectSteps(["routes/release-endpoints.ts"]);
 check(

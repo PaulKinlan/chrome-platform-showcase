@@ -167,6 +167,12 @@ export const RULES = [
     steps: ["test-header-grammar", "check-routes"],
     note: "permission-policy-merger policy-echo sidecar",
   },
+  {
+    pattern:
+      "v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields/_server.ts",
+    steps: ["test-header-grammar", "check-routes"],
+    note: "resource-timing delayed-echo sidecar",
+  },
   ...SPEECH_DEMOS.map((pattern) => ({
     pattern,
     steps: [
