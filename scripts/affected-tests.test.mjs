@@ -257,6 +257,12 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
       "v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields/_server.ts",
     ]).steps.includes("test-header-grammar"),
   );
+  check(
+    "a UA-CH migration sidecar change selects the header-grammar suite",
+    selectSteps([
+      "v145/reduced-user-agent-strings-by-default/_server.ts",
+    ]).steps.includes("test-header-grammar"),
+  );
 
   const gc = selectSteps(["routes/release-endpoints.ts"]);
   check(

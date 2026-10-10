@@ -1,11 +1,14 @@
-// Header-grammar guards for the two request-influenced response headers
+// Header-grammar guards for the request-influenced response headers
 // (bead chrome_platform_showcase-ypf).
 //
-// Two v151 fixture routes put a request value straight into a response header:
+// Three fixture routes put request input straight into response headers:
 //   - `delayed-echo` builds `Server-Timing: edge;dur=<n>;desc="<label>"` from
-//     `?label=`, and
+//     `?label=`,
 //   - `policy-echo` builds `Permissions-Policy: local-network=(<local>),
-//     loopback-network=(<loopback>)` from `?local=` / `?loopback=`.
+//     loopback-network=(<loopback>)` from `?local=` / `?loopback=`, and
+//   - `client-hints-echo` (v145/reduced-user-agent-strings-by-default, bead
+//     chrome_platform_showcase-mm5.3) builds `Accept-CH: <hints>` and the
+//     `Vary` list from `?hint=` / `?hints=none`.
 //
 // A request value that does not fit the header's grammar either throws while
 // constructing the response headers (a CR/LF makes Deno's Headers reject the
@@ -39,6 +42,7 @@
 
 import { handleFeatureRequest as handlePolicyEchoFeatureRequest } from "../v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/_server.ts";
 import { handleFeatureRequest as handleDelayedEchoFeatureRequest } from "../v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields/_server.ts";
+import { handleFeatureRequest as handleUaChMigrationFeatureRequest } from "../v145/reduced-user-agent-strings-by-default/_server.ts";
 
 const DELAY_SUB =
   "/resource-timing-add-spec-compliant-service-worker-router-timing-fields/delayed-echo";
@@ -171,4 +175,102 @@ Deno.test("ok — policy-echo rejects a value that rewrites the demonstrated hea
     res.status === EXPECTED_BAD_STATUS,
     `a paren value alters the demonstrated policy and should be rejected with ${EXPECTED_BAD_STATUS}, got ${res.status}`,
   );
+});
+
+// ── ua-ch-migration client-hints-echo (v145 sidecar, bead mm5.3) ───────────
+const UA_CH_SUB = "/reduced-user-agent-strings-by-default/ua-ch-migration/client-hints-echo";
+
+async function callUaChSidecar(sub, query, headers = {}) {
+  const req = new Request(`http://localhost:3000/v145${sub}${query ?? ""}`, {
+    headers,
+  });
+  return await handleUaChMigrationFeatureRequest(req, sub);
+}
+
+Deno.test("ok — client-hints-echo opts in to the two default high-entropy hints", async () => {
+  const res = await callUaChSidecar(UA_CH_SUB, "");
+  assert(res && res.status === 200, `expected 200, got ${res?.status}`);
+  assert(
+    res.headers.get("accept-ch") ===
+      "Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List",
+    `unexpected Accept-CH: ${res.headers.get("accept-ch")}`,
+  );
+  const vary = res.headers.get("vary") ?? "";
+  for (
+    const name of [
+      "User-Agent",
+      "Sec-CH-UA",
+      "Sec-CH-UA-Mobile",
+      "Sec-CH-UA-Platform",
+      "Sec-CH-UA-Platform-Version",
+      "Sec-CH-UA-Full-Version-List",
+    ]
+  ) {
+    assert(vary.includes(name), `Vary must include ${name}: ${vary}`);
+  }
+  assert(res.headers.get("cache-control") === "no-store", "must be no-store");
+});
+
+Deno.test("ok — client-hints-echo parses repeated and comma-split hint params, deduped, invalid dropped", async () => {
+  const res = await callUaChSidecar(
+    UA_CH_SUB,
+    "?hint=Sec-CH-UA-Arch&hint=Sec-CH-UA-Arch,%20Not-A-Hint",
+  );
+  const body = await res.json();
+  assert(
+    JSON.stringify(body.optInHints) === JSON.stringify(["Sec-CH-UA-Arch"]),
+    `expected deduped valid hints only, got ${JSON.stringify(body.optInHints)}`,
+  );
+  assert(
+    res.headers.get("accept-ch") === "Sec-CH-UA-Arch",
+    `Accept-CH must carry the deduped hint: ${res.headers.get("accept-ch")}`,
+  );
+});
+
+Deno.test("ok — client-hints-echo ?hints=none omits Accept-CH entirely", async () => {
+  const res = await callUaChSidecar(UA_CH_SUB, "?hints=none");
+  assert(
+    res.headers.get("accept-ch") === null,
+    `Accept-CH must be omitted, got ${res.headers.get("accept-ch")}`,
+  );
+  const body = await res.json();
+  assert(body.optInHints.length === 0, "optInHints must be empty");
+  assert(
+    body.note.includes("deliberately omits Accept-CH"),
+    `unexpected note: ${body.note}`,
+  );
+});
+
+Deno.test("ok — client-hints-echo reports missingOptedInHints against the request headers", async () => {
+  const res = await callUaChSidecar(
+    UA_CH_SUB,
+    "?hint=Sec-CH-UA-Arch&hint=Sec-CH-UA-Model",
+    { "sec-ch-ua-arch": "arm" },
+  );
+  const body = await res.json();
+  assert(
+    JSON.stringify(body.missingOptedInHints) === JSON.stringify(["Sec-CH-UA-Model"]),
+    `expected only the unsent hint missing, got ${JSON.stringify(body.missingOptedInHints)}`,
+  );
+  assert(
+    body.requestHeaders["Sec-CH-UA-Arch"] === "arm",
+    "the received request header must be echoed back",
+  );
+});
+
+Deno.test("ok — the v145 sidecar returns null for every path but the echo route", async () => {
+  for (
+    const sub of [
+      "/reduced-user-agent-strings-by-default/ua-ch-migration",
+      "/reduced-user-agent-strings-by-default/ua-ch-migration/index.html",
+      "/reduced-user-agent-strings-by-default",
+      "/unrelated",
+    ]
+  ) {
+    const res = await callUaChSidecar(sub, "");
+    assert(
+      res === null,
+      `sidecar must not answer ${sub} (the asset/HTML pipeline owns it)`,
+    );
+  }
 });
