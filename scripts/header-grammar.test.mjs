@@ -460,6 +460,25 @@ Deno.test("ok — an unknown probe kind is a JSON 404, never a 500", async () =>
   );
 });
 
+Deno.test("ok — inherited Object.prototype keys are unknown kinds (9na)", async () => {
+  for (const kind of ["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"]) {
+    const res = await callContentTypeProbe(
+      "/content-type-in-resource-timing/mime-type-performance-analyzer/probe",
+      `?kind=${kind}`,
+    );
+    assert(res, `the sidecar must answer ?kind=${kind}`);
+    assert(
+      res.status === 404,
+      `?kind=${kind} must 404 like any unknown kind, got ${res.status} (inherited prototype key must not resolve to a probe)`,
+    );
+    const body = await res.json();
+    assert(
+      body.kind === kind && body.error === "Unknown content type timing probe",
+      `?kind=${kind}: the 404 must name the kind, got ${JSON.stringify(body)}`,
+    );
+  }
+});
+
 Deno.test("ok — the v148 sidecar returns null for every sibling/FedCM path", async () => {
   for (
     const sub of [

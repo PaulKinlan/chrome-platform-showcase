@@ -86,7 +86,13 @@ export function handleFeatureRequest(
 
   const url = new URL(req.url);
   const kind = url.searchParams.get("kind") ?? "";
-  const probe = CONTENT_TYPE_TIMING_PROBES[kind];
+  // Own-property lookup: a plain-record index would find Object.prototype
+  // members (`?kind=constructor`, `?kind=toString`, …) and answer 200 for a
+  // probe that does not exist (pre-existing legacy bug, fixed in the move —
+  // bead chrome_platform_showcase-9na).
+  const probe = Object.hasOwn(CONTENT_TYPE_TIMING_PROBES, kind)
+    ? CONTENT_TYPE_TIMING_PROBES[kind]
+    : undefined;
   if (!probe) {
     return jsonResponse({ error: "Unknown content type timing probe", kind }, { status: 404 });
   }
