@@ -48,6 +48,12 @@ export const GATE_STEPS = [
     what: "local gate vs CI parity + every suite is named by a task",
   },
   {
+    id: "test-gate-fixture-matrix",
+    task: "test-gate-fixture-matrix",
+    tier: "static",
+    what: "entrypoint/parity spoof fixtures run the real guard in temp copies",
+  },
+  {
     id: "test-run-gate-plan",
     task: "test-run-gate-plan",
     tier: "static",
