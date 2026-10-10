@@ -48,6 +48,12 @@ export const GATE_STEPS = [
     what: "local gate vs CI parity + every suite is named by a task",
   },
   {
+    id: "test-run-gate-plan",
+    task: "test-run-gate-plan",
+    tier: "static",
+    what: "the declared gate plan is the plan that is selected and executed (stub harness)",
+  },
+  {
     id: "test-affected-tests",
     task: "test-affected-tests",
     tier: "static",
