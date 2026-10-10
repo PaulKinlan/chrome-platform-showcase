@@ -31,6 +31,9 @@
 // Fixture cleanup lives in the case's finally and covers normal throws only;
 // the dty.23 scratch-clone isolation of the check-routes negative (it never
 // writes the real tracked responsive-support.json) is preserved unchanged.
+// Four in-memory pins appended after the thirty (bead chrome_platform_showcase-0kl)
+// lock the 1b3 cleanup ordering: removal is attempted even when the byte guard
+// throws, so a future reorder of that finally fails loudly here.
 //
 // Run: deno task test-support-ref-fail-closed
 
@@ -72,6 +75,60 @@ function assertThrows(fn, match) {
     `message did not match ${match}: ${threw.message}`,
   );
   return threw;
+}
+
+// The scratch-negative check's finally body, extracted so the
+// always-attempt-cleanup property can be pinned in memory (bead
+// chrome_platform_showcase-0kl). Semantics are exactly the landed 1b3 ones:
+// two independent failure paths, captured and re-thrown deliberately (targeted
+// catch + rethrow, NOT a blanket swallow) — the real tracked sidecar must be
+// byte-for-byte unchanged, and the scratch removal is ALWAYS attempted on
+// ordinary success AND when the byte detector throws, because a skipped
+// cleanup would leak the ~185MB clone on a normal-path failure (bead 1b3). If
+// BOTH fail, the original detector error wins the throw and the cleanup
+// failure is still reported with the path to remove. Dependencies default to
+// the real Deno calls and console.error; the in-memory pins inject fakes and
+// never touch the filesystem.
+function runScratchNegativeCleanup({
+  realSidecar,
+  realBefore,
+  scratch,
+  readBytes = Deno.readFileSync,
+  remove = Deno.removeSync,
+  reportCleanupError = (message) => console.error(message),
+}) {
+  let detectorError = null;
+  try {
+    const realAfter = readBytes(realSidecar);
+    assert(
+      realBefore.length === realAfter.length &&
+        realBefore.every((b, i) => b === realAfter[i]),
+      "REAL responsive-support.json changed during the isolated run",
+    );
+  } catch (err) {
+    detectorError = err;
+  }
+  let cleanupError = null;
+  try {
+    remove(scratch, { recursive: true });
+  } catch (err) {
+    cleanupError = err;
+  }
+  if (detectorError) {
+    if (cleanupError) {
+      reportCleanupError(
+        `scratch cleanup ALSO failed (${cleanupError.message}); ` +
+          `remove ${scratch} by hand`,
+      );
+    }
+    throw detectorError;
+  }
+  if (cleanupError) {
+    throw new Error(
+      `scratch cleanup failed (${cleanupError.message}); ` +
+        `remove ${scratch} by hand`,
+    );
+  }
 }
 
 Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
@@ -497,48 +554,12 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
           `Deno output missing regression notice: ${denoText}`,
         );
       } finally {
-        // Normal-path detectors, NOT kill safety (SIGKILL skips this block).
-        // Two independent failure paths, captured and re-thrown deliberately
-        // (targeted catch + rethrow, NOT a blanket swallow):
-        //   1. the real tracked sidecar must be byte-for-byte unchanged;
-        //   2. the scratch removal is ALWAYS attempted — on ordinary success
-        //      AND when the byte detector throws — because a skipped cleanup
-        //      would leak the ~185MB clone on a normal-path failure
-        //      (bead chrome_platform_showcase-1b3).
-        // If BOTH fail, the original detector error wins the throw and the
-        // cleanup failure is still visible on stderr with the path to remove.
-        let detectorError = null;
-        try {
-          const realAfter = Deno.readFileSync(realSidecar);
-          assert(
-            realBefore.length === realAfter.length &&
-              realBefore.every((b, i) => b === realAfter[i]),
-            "REAL responsive-support.json changed during the isolated run",
-          );
-        } catch (err) {
-          detectorError = err;
-        }
-        let cleanupError = null;
-        try {
-          Deno.removeSync(scratch, { recursive: true });
-        } catch (err) {
-          cleanupError = err;
-        }
-        if (detectorError) {
-          if (cleanupError) {
-            console.error(
-              `scratch cleanup ALSO failed (${cleanupError.message}); ` +
-                `remove ${scratch} by hand`,
-            );
-          }
-          throw detectorError;
-        }
-        if (cleanupError) {
-          throw new Error(
-            `scratch cleanup failed (${cleanupError.message}); ` +
-              `remove ${scratch} by hand`,
-          );
-        }
+        // Normal-path detectors, NOT kill safety (SIGKILL skips this block):
+        // the byte guard and the scratch removal are independent failure
+        // paths, so cleanup is attempted even when the guard throws (1b3).
+        // The body lives in runScratchNegativeCleanup so the property is
+        // pinned in memory by the four checks below (0kl).
+        runScratchNegativeCleanup({ realSidecar, realBefore, scratch });
       }
     });
 
@@ -554,6 +575,110 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
       assert(
         actual === SUPPORT_MAP_INTRODUCED_IN,
         `recorded ${SUPPORT_MAP_INTRODUCED_IN.slice(0, 12)} but git says ${actual.slice(0, 12)}`,
+      );
+    });
+
+    // ── cleanup-order pins (bead chrome_platform_showcase-0kl) ─────────────
+    // In-memory fakes only: no filesystem, no clone, no tracked writes. They
+    // pin the 1b3 property — a detector throw must NOT skip scratch removal —
+    // which the thirty checks above cannot see (they never force the guard to
+    // throw; the pre-1b3 shape passes them all while leaking the scratch).
+    check("cleanup is attempted when the real-sidecar read throws", () => {
+      const readError = new Error("injected read failure");
+      let removed = null;
+      let thrown = null;
+      try {
+        runScratchNegativeCleanup({
+          realSidecar: "/unused",
+          realBefore: new Uint8Array(0),
+          scratch: "/fake-scratch",
+          readBytes: () => {
+            throw readError;
+          },
+          remove: (path) => {
+            removed = path;
+          },
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      assert(removed === "/fake-scratch", "remove was not attempted");
+      assert(thrown === readError, `expected the read error, got ${thrown}`);
+    });
+
+    check("cleanup is attempted when the byte comparison mismatches", () => {
+      let removed = null;
+      let thrown = null;
+      try {
+        runScratchNegativeCleanup({
+          realSidecar: "/unused",
+          realBefore: new Uint8Array([1]),
+          scratch: "/fake-scratch",
+          readBytes: () => new Uint8Array([2]),
+          remove: (path) => {
+            removed = path;
+          },
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      assert(removed === "/fake-scratch", "remove was not attempted");
+      assert(
+        thrown && thrown.message.includes("REAL responsive-support.json changed"),
+        `expected the byte-mismatch error, got ${thrown}`,
+      );
+    });
+
+    check("a cleanup failure alone is a visible throw naming the path", () => {
+      let thrown = null;
+      try {
+        runScratchNegativeCleanup({
+          realSidecar: "/unused",
+          realBefore: new Uint8Array([7]),
+          scratch: "/fake-scratch",
+          readBytes: () => new Uint8Array([7]),
+          remove: () => {
+            throw new Error("injected remove failure");
+          },
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      assert(
+        thrown && thrown.message.includes("scratch cleanup failed") &&
+          thrown.message.includes("/fake-scratch"),
+        `expected a visible cleanup failure naming the path, got ${thrown}`,
+      );
+    });
+
+    check("when both fail the detector error wins and the cleanup failure is reported", () => {
+      const readError = new Error("injected read failure");
+      const reported = [];
+      let removed = null;
+      let thrown = null;
+      try {
+        runScratchNegativeCleanup({
+          realSidecar: "/unused",
+          realBefore: new Uint8Array(0),
+          scratch: "/fake-scratch",
+          readBytes: () => {
+            throw readError;
+          },
+          remove: (path) => {
+            removed = path;
+            throw new Error("injected remove failure");
+          },
+          reportCleanupError: (message) => reported.push(message),
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      assert(removed === "/fake-scratch", "remove was not attempted");
+      assert(thrown === readError, `expected the detector error to win, got ${thrown}`);
+      assert(
+        reported.length === 1 && reported[0].includes("scratch cleanup ALSO failed") &&
+          reported[0].includes("/fake-scratch"),
+        `cleanup failure not reported with path: ${JSON.stringify(reported)}`,
       );
     });
   } finally {
