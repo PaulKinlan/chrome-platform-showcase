@@ -10,9 +10,21 @@
 // dty.20): same file path, same task id `test-speech-transcript-dom`, the same ordered
 // gate step 23, the same four `assert` call sites and their messages, and the same
 // first-failure abort - ONE case covers BOTH demo files, deliberately, so that a
-// failure in the first file still stops the second from being checked. Because this
-// guard is source `String.includes` and a length floor, no browser is involved; the
-// browser evidence for the behaviour stays on bead 5c8 and is not restated here.
+// failure in the first file still stops the second from being checked. The denylist
+// names every string-to-markup operation relevant here, not just the literal
+// assignment the fix removed: a transcript 'must never be parsed as markup' also
+// rules out writes to `outerHTML`, `insertAdjacentHTML`, `document.write/writeln`
+// (including the `contentDocument.write` spelling), `Range.createContextualFragment`,
+// `DOMParser.parseFromString`, `Element.setHTML`, `Element.setHTMLUnsafe`,
+// `document.parseHTMLUnsafe`, `Sanitizer.sanitize` on a string and writes to iframe
+// `srcdoc`. The bans are scoped to string-to-markup signatures: a read of
+// `outerHTML`, an inert `srcdoc="..."` attribute and `Node.importNode` (a clone/adopt
+// step whose parse half is already in the list) stay green. This is a lexical
+// `String.includes` guard on these two files, not a proof about arbitrary JavaScript:
+// alias evasion (`const d = document; d.write(text)`) is out of scope by design.
+// Because this guard is source `String.includes` and a length floor, no browser is
+// involved; the browser evidence for the behaviour stays on bead 5c8 and is not
+// restated here.
 //
 // Permissions: the child is granted `--allow-read` alone, and that flag is genuinely
 // required - the guard reads the two demo files it guards - so it is forwarded rather
@@ -20,7 +32,7 @@
 // `--serial` and no `--dir`.
 //
 // Output: the case keeps the file's own count line, which is the evidence that the
-// guard actually executed its checks (19 assertions over 2 demos), and the task adds
+// guard actually executed its checks (43 assertions over 2 demos), and the task adds
 // the runner's `PASS — speech transcript DOM contract` line, matching the gate step's
 // own wording.
 
@@ -44,7 +56,36 @@ const files = {
   ],
 };
 
-const forbidden = [".innerHTML", "insertAdjacentHTML", "document.write("];
+const forbidden = [
+  // Literal HTML-string composition into the document. `innerHTML` is banned
+  // outright: in these two files any use of it is the bug this guard exists for.
+  ".innerHTML",
+  "insertAdjacentHTML",
+  "document.write(",
+  "document.writeln(",
+  // The `contentDocument.write` spelling (an iframe's Document), which the
+  // case-sensitive needles above do not subsume.
+  "Document.write(",
+  "Document.writeln(",
+  // Write-only forms: reading `outerHTML` or an inert `srcdoc="..."` attribute
+  // parses nothing, so only assignments are banned.
+  ".outerHTML =",
+  ".outerHTML +=",
+  "srcdoc =",
+  // Non-literal HTML-parsing sinks: each of these parses a string as markup,
+  // so feeding one a transcript re-opens the quote-breakout hole from bead 5c8.
+  // `setHTML`/`sanitize` parse-then-sanitize: the markup still becomes elements,
+  // and the contract is text nodes only. `Node.importNode` is deliberately NOT
+  // banned - it clones nodes and parses nothing; the parse half of the
+  // parse-then-adopt chain (`parseFromString`, `createContextualFragment`,
+  // `innerHTML`) is already covered.
+  "createContextualFragment(",
+  "parseFromString(",
+  ".setHTML(",
+  "setHTMLUnsafe(",
+  "parseHTMLUnsafe(",
+  ".sanitize(",
+];
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
