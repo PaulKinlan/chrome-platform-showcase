@@ -392,6 +392,48 @@ async function runSweep(opts, io, holder) {
   return report;
 }
 
+// A SIGKILL is a request, not a result: the server child is only reaped when its
+// exit is CONFIRMED. A refused signal (EPERM on a child that is not ours to
+// signal, or one the OS is already tearing down) is moot once the child has in
+// fact exited - but it is a named cleanup failure when the exit cannot be
+// confirmed, because a sweep whose own server outlived it must not report green.
+// The deadline is set BEFORE the first blocking wait, so a `status` that never
+// settles is bounded rather than awaited forever.
+const SERVER_REAP_BOUND_MS = 2000;
+
+async function reapServerChild(child, { boundMs = SERVER_REAP_BOUND_MS } = {}) {
+  if (!child) return null;
+  let killFailure = null;
+  try {
+    child.kill("SIGKILL");
+  } catch (err) {
+    killFailure = err;
+  }
+  let timer = null;
+  try {
+    await Promise.race([
+      Promise.resolve(child.status),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`server child exit was not confirmed within ${boundMs}ms`)),
+          boundMs,
+        );
+      }),
+    ]);
+    return null; // the exit is confirmed, so a refused signal is moot
+  } catch (err) {
+    const detail = err?.message ?? String(err);
+    if (killFailure) {
+      return new Error(
+        `server child could not be signalled (${killFailure.message}), and its exit was not confirmed: ${detail}`,
+      );
+    }
+    return new Error(`server child exit could not be confirmed: ${detail}`);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 // Stage 2 contract, in order: run the sweep; attempt BOTH artefact writes even
 // when one fails; clean up; then decide. A sweep failure rethrows the ORIGINAL
 // error with its identity intact after the other failures are reported. On
@@ -404,6 +446,7 @@ export async function main(deps = {}) {
     writeJson = Deno.writeTextFile,
     writeMd = Deno.writeTextFile,
     teardown = teardownChrome,
+    serverReapBoundMs = SERVER_REAP_BOUND_MS,
     exit = Deno.exit,
     log = console.log,
     error = console.error,
@@ -437,17 +480,14 @@ export async function main(deps = {}) {
     log(`wrote ${opts.outJson} and ${MD_PATH}`);
   }
 
-  let cleanupFailure = null;
+  const cleanupFailures = [];
   try {
     await teardown(holder.chrome);
   } catch (err) {
-    cleanupFailure = err;
+    cleanupFailures.push({ what: "Chrome", error: err });
   }
-  try {
-    holder.serverChild?.kill();
-  } catch {
-    // ignore: the child was already gone
-  }
+  const reapFailure = await reapServerChild(holder.serverChild, { boundMs: serverReapBoundMs });
+  if (reapFailure) cleanupFailures.push({ what: "the local server child", error: reapFailure });
 
   const describe = (err) => err?.message ?? String(err);
   if (primary) {
@@ -457,14 +497,18 @@ export async function main(deps = {}) {
     for (const { artefact, error: err } of writeFailures) {
       error(`conformance-sweep: ${artefact} could not be written: ${describe(err)}`);
     }
-    if (cleanupFailure) error(`conformance-sweep: ${describe(cleanupFailure)}`);
+    for (const { what, error: err } of cleanupFailures) {
+      error(`conformance-sweep: ${what} was not cleaned up: ${describe(err)}`);
+    }
     throw primary;
   }
-  if (writeFailures.length > 0 || cleanupFailure) {
+  if (writeFailures.length > 0 || cleanupFailures.length > 0) {
     for (const { artefact, error: err } of writeFailures) {
       error(`conformance-sweep: ${artefact} could not be written: ${describe(err)}`);
     }
-    if (cleanupFailure) error(`conformance-sweep: ${describe(cleanupFailure)}`);
+    for (const { what, error: err } of cleanupFailures) {
+      error(`conformance-sweep: ${what} was not cleaned up: ${describe(err)}`);
+    }
     error(
       "conformance-sweep: the sweep completed but report-writing or cleanup was not confirmed",
     );

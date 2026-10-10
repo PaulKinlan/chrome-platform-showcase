@@ -724,6 +724,48 @@ async function runDrive(opts, io, holder, selection) {
   };
 }
 
+// A SIGKILL is a request, not a result: the server child is only reaped when its
+// exit is CONFIRMED. A refused signal (EPERM on a child that is not ours to
+// signal, or one the OS is already tearing down) is moot once the child has in
+// fact exited - but it is a named cleanup failure when the exit cannot be
+// confirmed, because a run whose own server outlived it must not report green.
+// The deadline is set BEFORE the first blocking wait, so a `status` that never
+// settles is bounded rather than awaited forever.
+const SERVER_REAP_BOUND_MS = 2000;
+
+async function reapServerChild(child, { boundMs = SERVER_REAP_BOUND_MS } = {}) {
+  if (!child) return null;
+  let killFailure = null;
+  try {
+    child.kill("SIGKILL");
+  } catch (err) {
+    killFailure = err;
+  }
+  let timer = null;
+  try {
+    await Promise.race([
+      Promise.resolve(child.status),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`server child exit was not confirmed within ${boundMs}ms`)),
+          boundMs,
+        );
+      }),
+    ]);
+    return null; // the exit is confirmed, so a refused signal is moot
+  } catch (err) {
+    const detail = err?.message ?? String(err);
+    if (killFailure) {
+      return new Error(
+        `server child could not be signalled (${killFailure.message}), and its exit was not confirmed: ${detail}`,
+      );
+    }
+    return new Error(`server child exit could not be confirmed: ${detail}`);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 // Stage 2 contract, in order: validate targets before acquiring anything; run
 // the drive phase; clean up (connection, Chrome, server child) capturing every
 // failure instead of throwing it over the real error; then attempt BOTH report
@@ -738,6 +780,7 @@ export async function main(deps = {}) {
     writeJson = Deno.writeTextFile,
     writeMd = Deno.writeTextFile,
     teardown = teardownChrome,
+    serverReapBoundMs = SERVER_REAP_BOUND_MS,
     exit = Deno.exit,
     log = console.log,
     error = console.error,
@@ -774,14 +817,8 @@ export async function main(deps = {}) {
   } catch (err) {
     cleanupFailures.push({ what: "Chrome", error: err });
   }
-  try {
-    if (holder.serverChild) {
-      holder.serverChild.kill("SIGKILL");
-      await holder.serverChild.status;
-    }
-  } catch (err) {
-    cleanupFailures.push({ what: "the local server child", error: err });
-  }
+  const reapFailure = await reapServerChild(holder.serverChild, { boundMs: serverReapBoundMs });
+  if (reapFailure) cleanupFailures.push({ what: "the local server child", error: reapFailure });
 
   const writeFailures = [];
   let exitCode = 1;
