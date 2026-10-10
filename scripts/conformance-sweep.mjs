@@ -29,21 +29,40 @@
 //   deno run -A scripts/conformance-sweep.mjs --base http://localhost:3000 --no-server
 //   deno run -A scripts/conformance-sweep.mjs --skip-recheck  # pass 1 only (fast, losier)
 
-import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
+// ── Stage 2 of bead chrome_platform_showcase-3gt (bead pka) ──────────────────
+// This file is import-safe. Everything that touches a browser, a server, the
+// network or the filesystem lives inside `main(deps)` / `runSweep`; importing the
+// module registers and does nothing, so a Chrome-free test can drive the REAL
+// caller through `main` with injected phases. The command line is unchanged:
+// same flags, same report paths, same order of writes.
+//
+// Cleanup and reporting are now failure-visible. Every artefact that can be
+// written is attempted even if its sibling fails, a cleanup failure never runs in
+// a `finally` that could throw over the real error, and a cleanup or report-write
+// failure that leaves the run unconfirmed prints a NAMED line and exits NON-ZERO
+// only AFTER the writes. A failure in the sweep itself is rethrown with its
+// original identity intact, with the other failures reported separately.
 
-const args = [...Deno.args];
-function flag(name, fallback = null) {
-  const at = args.indexOf(name);
-  if (at < 0) return fallback;
-  const value = args[at + 1];
-  args.splice(at, value && !value.startsWith("--") ? 2 : 1);
-  return value && !value.startsWith("--") ? value : true;
+import { cdpConnection, launchChrome, teardownChrome } from "./lib/cdp.mjs";
+
+// Pure argv parsing: no IO, no exit, no module state, so importing this file
+// cannot behave differently because of how the importing process was invoked.
+export function parseArgs(argv) {
+  const args = [...argv];
+  function flag(name, fallback = null) {
+    const at = args.indexOf(name);
+    if (at < 0) return fallback;
+    const value = args[at + 1];
+    args.splice(at, value && !value.startsWith("--") ? 2 : 1);
+    return value && !value.startsWith("--") ? value : true;
+  }
+  const base = String(flag("--base", "http://localhost:3000")).replace(/\/+$/, "");
+  const noServer = Boolean(flag("--no-server"));
+  const skipRecheck = Boolean(flag("--skip-recheck"));
+  const outJson = String(flag("--out", "reports/conformance-sweep.json"));
+  const timeoutMin = Number(flag("--timeout-min", "60"));
+  return { base, noServer, skipRecheck, outJson, timeoutMin };
 }
-const base = String(flag("--base", "http://localhost:3000")).replace(/\/+$/, "");
-const noServer = Boolean(flag("--no-server"));
-const skipRecheck = Boolean(flag("--skip-recheck"));
-const outJson = String(flag("--out", "reports/conformance-sweep.json"));
-const timeoutMin = Number(flag("--timeout-min", "60"));
 
 async function reachable(url) {
   try {
@@ -55,43 +74,6 @@ async function reachable(url) {
   }
 }
 
-// Reuse a server that is already serving (other lanes run their own on 3000);
-// only boot one when the base is dead.
-let serverChild = null;
-if (!(await reachable(`${base}/`))) {
-  if (noServer) throw new Error(`${base} is not reachable and --no-server was given`);
-  const port = Number(new URL(base).port || 3000);
-  serverChild = new Deno.Command("deno", {
-    args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
-    env: { PORT: String(port) },
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
-  for (let i = 0; i < 40; i++) {
-    if (await reachable(`${base}/`)) break;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  if (!(await reachable(`${base}/`))) throw new Error("local server did not become ready");
-}
-
-// The assertion text itself lives on disk, not in either page's DOM. Read every
-// suite once so the report is self-contained for triage.
-const assertionMeta = new Map();
-for await (const entry of walk(".")) {
-  if (!entry.endsWith("/conformance.json")) continue;
-  try {
-    const suite = JSON.parse(await Deno.readTextFile(entry));
-    for (const assertion of suite.assertions ?? []) {
-      assertionMeta.set(assertion.id, {
-        test: String(assertion.test ?? "").slice(0, 300),
-        expect: assertion.expect ?? null,
-        specSection: assertion.specSection ?? null,
-      });
-    }
-  } catch {
-    // a malformed suite is the per-feature conformance page's problem to surface
-  }
-}
 async function* walk(dir) {
   for await (const entry of Deno.readDir(dir)) {
     if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
@@ -136,9 +118,95 @@ const SUITE_SCRAPE = `(() => {
   };
 })()`;
 
-const chrome = await launchChrome();
-let report = null;
-try {
+const MD_PATH = "reports/conformance-sweep.md";
+
+// The markdown body is a pure function of the report, so the caller can attempt
+// it independently of the JSON write.
+function buildMd(report) {
+  const md = [
+    "# Conformance sweep",
+    "",
+    `Generated: ${report.generatedAt}`,
+    `Browser: ${report.chrome}`,
+    `Method: ${report.method}`,
+    "",
+    "## Totals",
+    "",
+    `- Assertions run: **${report.totals.assertions}**`,
+    `- Pass: **${report.totals.pass}** · Fail: **${report.totals.fail}** · Blocked: **${report.totals.blocked}** · Future milestone (\`future\`, not a failure): **${report.totals.future}**`,
+    `- Executed pass rate: **${report.passRateExecuted ?? "—"}**`,
+    `- After re-checking every failure on its own suite page: **${report.totals.realFailures} real fail** · **${report.totals.realBlocked} real blocked** · **${report.totals.instrumentFalsePositives} instrument false positive**`,
+    `- Features with at least one real fail/blocked assertion: **${report.realFeaturesWithIssues}**`,
+    "",
+    "## Features with real failing or blocked assertions",
+    "",
+    "| feature | causes | assertions |",
+    "|---|---|---|",
+    ...report.issues.map((entry) =>
+      `| \`${entry.feature}\` | ${
+        Object.entries(entry.causes).map(([cause, n]) => `${cause}×${n}`).join(", ")
+      } | ${entry.rows.map((r) => `${r.verdict}:${r.id}`).join("<br>")} |`
+    ),
+    "",
+    report.instrumentFalsePositives.length
+      ? "## Instrument false positives (pass on their own suite page)\n\n" +
+        report.instrumentFalsePositives.map((e) =>
+          `- \`${e.feature}\`: ${e.rows.map((r) => r.id).join(", ")}`
+        ).join("\n") + "\n"
+      : "",
+    report.recheckErrors.length
+      ? "## Suites that could not be re-checked\n\n" +
+        report.recheckErrors.map((e) => `- \`${e.href}\`: ${e.reason}`).join("\n") + "\n"
+      : "",
+  ].join("\n");
+  return md;
+}
+
+// The browser/server phase: boot or reuse the local server, read every
+// conformance.json, launch Chrome, drive pass 1 and pass 2, build the report.
+// Its resource handles are published into `holder` the moment they exist, so
+// the caller can still clean up when this throws halfway through.
+async function runSweep(opts, io, holder) {
+  const { base, noServer, skipRecheck, timeoutMin } = opts;
+  const { log } = io;
+  holder.serverChild = null;
+  if (!(await reachable(`${base}/`))) {
+    if (noServer) throw new Error(`${base} is not reachable and --no-server was given`);
+    const port = Number(new URL(base).port || 3000);
+    holder.serverChild = new Deno.Command("deno", {
+      args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
+      env: { PORT: String(port) },
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+    for (let i = 0; i < 40; i++) {
+      if (await reachable(`${base}/`)) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (!(await reachable(`${base}/`))) throw new Error("local server did not become ready");
+  }
+
+  const assertionMeta = new Map();
+  for await (const entry of walk(".")) {
+    if (!entry.endsWith("/conformance.json")) continue;
+    try {
+      const suite = JSON.parse(await Deno.readTextFile(entry));
+      for (const assertion of suite.assertions ?? []) {
+        assertionMeta.set(assertion.id, {
+          test: String(assertion.test ?? "").slice(0, 300),
+          expect: assertion.expect ?? null,
+          specSection: assertion.specSection ?? null,
+        });
+      }
+    } catch {
+      // a malformed suite is the per-feature conformance page's problem to surface
+    }
+  }
+
+  holder.chrome = await launchChrome();
+  const chrome = holder.chrome;
+  let report = null;
+
   const conn = await cdpConnection(chrome.wsUrl);
   const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
@@ -168,7 +236,7 @@ try {
         // busy-loop probe, a GPU stall). That is a fact about the suite, not a
         // reason to lose the whole sweep: keep polling until the deadline.
         stalls++;
-        console.log(`  renderer stall on ${new URL(url).pathname}: ${err.message} (polling on)`);
+        log(`  renderer stall on ${new URL(url).pathname}: ${err.message} (polling on)`);
         if (stalls > 5) break;
         continue;
       }
@@ -177,7 +245,7 @@ try {
       if (settle) {
         // Progress heartbeat: a long run-all must be visible, not silent.
         if (polls % 60 === 0) {
-          console.log(
+          log(
             `  waiting on ${new URL(url).pathname} (${polls}s): pass ${value.pass ?? "?"} · fail ${
               value.fail ?? "?"
             } · rows ${value.rows?.length ?? 0}`,
@@ -204,7 +272,7 @@ try {
 
   const byVerdict = {};
   for (const row of pass1.rows) byVerdict[row.verdict] = (byVerdict[row.verdict] ?? 0) + 1;
-  console.log(
+  log(
     `pass 1: ${pass1.rows.length} assertions · pass ${pass1.pass} · fail ${pass1.fail} · blocked ${pass1.blocked} · future/na ${
       byVerdict.na ?? 0
     }`,
@@ -311,9 +379,8 @@ try {
       future: byVerdict.na ?? 0,
       byVerdict,
       realFailures: realIssues.filter((r) => (r.rechecked?.verdict ?? r.verdict) === "fail").length,
-      realBlocked: realIssues.filter((r) =>
-        (r.rechecked?.verdict ?? r.verdict) === "blocked"
-      ).length,
+      realBlocked:
+        realIssues.filter((r) => (r.rechecked?.verdict ?? r.verdict) === "blocked").length,
       instrumentFalsePositives: falsePositives.length,
     },
     passRateExecuted: pass1.pct,
@@ -322,56 +389,87 @@ try {
     issues: group(realIssues),
     instrumentFalsePositives: group(falsePositives),
   };
+  return report;
+}
 
-  await Deno.writeTextFile(outJson, JSON.stringify(report, null, 2) + "\n");
+// Stage 2 contract, in order: run the sweep; attempt BOTH artefact writes even
+// when one fails; clean up; then decide. A sweep failure rethrows the ORIGINAL
+// error with its identity intact after the other failures are reported. On
+// success the exit stays implicit 0, but an unconfirmed report write or cleanup
+// prints a named line and exits non-zero, always AFTER the writes.
+export async function main(deps = {}) {
+  const {
+    argv = Deno.args,
+    run = runSweep,
+    writeJson = Deno.writeTextFile,
+    writeMd = Deno.writeTextFile,
+    teardown = teardownChrome,
+    exit = Deno.exit,
+    log = console.log,
+    error = console.error,
+  } = deps;
+  const opts = parseArgs(argv);
+  const holder = { chrome: null, serverChild: null };
 
-  const md = [
-    "# Conformance sweep",
-    "",
-    `Generated: ${report.generatedAt}`,
-    `Browser: ${report.chrome}`,
-    `Method: ${report.method}`,
-    "",
-    "## Totals",
-    "",
-    `- Assertions run: **${report.totals.assertions}**`,
-    `- Pass: **${report.totals.pass}** · Fail: **${report.totals.fail}** · Blocked: **${report.totals.blocked}** · Future milestone (\`future\`, not a failure): **${report.totals.future}**`,
-    `- Executed pass rate: **${report.passRateExecuted ?? "—"}**`,
-    `- After re-checking every failure on its own suite page: **${report.totals.realFailures} real fail** · **${report.totals.realBlocked} real blocked** · **${report.totals.instrumentFalsePositives} instrument false positive**`,
-    `- Features with at least one real fail/blocked assertion: **${report.realFeaturesWithIssues}**`,
-    "",
-    "## Features with real failing or blocked assertions",
-    "",
-    "| feature | causes | assertions |",
-    "|---|---|---|",
-    ...report.issues.map((entry) =>
-      `| \`${entry.feature}\` | ${
-        Object.entries(entry.causes).map(([cause, n]) => `${cause}×${n}`).join(", ")
-      } | ${entry.rows.map((r) => `${r.verdict}:${r.id}`).join("<br>")} |`
-    ),
-    "",
-    report.instrumentFalsePositives.length
-      ? "## Instrument false positives (pass on their own suite page)\n\n" +
-        report.instrumentFalsePositives.map((e) =>
-          `- \`${e.feature}\`: ${e.rows.map((r) => r.id).join(", ")}`
-        ).join("\n") + "\n"
-      : "",
-    report.recheckErrors.length
-      ? "## Suites that could not be re-checked\n\n" +
-        report.recheckErrors.map((e) => `- \`${e.href}\`: ${e.reason}`).join("\n") + "\n"
-      : "",
-  ].join("\n");
-  await Deno.writeTextFile("reports/conformance-sweep.md", md);
-
-  console.log(
-    `conformance-sweep: ${report.totals.assertions} assertions · pass ${report.totals.pass} · fail ${report.totals.fail} · blocked ${report.totals.blocked} · future ${report.totals.future} → after re-check: ${report.totals.realFailures} real fail, ${report.totals.realBlocked} real blocked, ${report.totals.instrumentFalsePositives} instrument false positive · ${report.realFeaturesWithIssues} feature(s) with real issues`,
-  );
-  console.log(`wrote ${outJson} and reports/conformance-sweep.md`);
-} finally {
-  await cleanupChrome(chrome);
+  let report = null;
+  let primary = null;
   try {
-    serverChild?.kill();
+    report = await run(opts, { log, error }, holder);
+  } catch (err) {
+    primary = err;
+  }
+
+  const writeFailures = [];
+  if (report) {
+    try {
+      await writeJson(opts.outJson, JSON.stringify(report, null, 2) + "\n");
+    } catch (err) {
+      writeFailures.push({ artefact: opts.outJson, error: err });
+    }
+    try {
+      await writeMd(MD_PATH, buildMd(report));
+    } catch (err) {
+      writeFailures.push({ artefact: MD_PATH, error: err });
+    }
+    log(
+      `conformance-sweep: ${report.totals.assertions} assertions · pass ${report.totals.pass} · fail ${report.totals.fail} · blocked ${report.totals.blocked} · future ${report.totals.future} → after re-check: ${report.totals.realFailures} real fail, ${report.totals.realBlocked} real blocked, ${report.totals.instrumentFalsePositives} instrument false positive · ${report.realFeaturesWithIssues} feature(s) with real issues`,
+    );
+    log(`wrote ${opts.outJson} and ${MD_PATH}`);
+  }
+
+  let cleanupFailure = null;
+  try {
+    await teardown(holder.chrome);
+  } catch (err) {
+    cleanupFailure = err;
+  }
+  try {
+    holder.serverChild?.kill();
   } catch {
-    // ignore
+    // ignore: the child was already gone
+  }
+
+  const describe = (err) => err?.message ?? String(err);
+  if (primary) {
+    // The run's own error is reported FIRST and rethrown unchanged, so a
+    // cleanup or write failure can never take its place.
+    error(`conformance-sweep: ${describe(primary)}`);
+    for (const { artefact, error: err } of writeFailures) {
+      error(`conformance-sweep: ${artefact} could not be written: ${describe(err)}`);
+    }
+    if (cleanupFailure) error(`conformance-sweep: ${describe(cleanupFailure)}`);
+    throw primary;
+  }
+  if (writeFailures.length > 0 || cleanupFailure) {
+    for (const { artefact, error: err } of writeFailures) {
+      error(`conformance-sweep: ${artefact} could not be written: ${describe(err)}`);
+    }
+    if (cleanupFailure) error(`conformance-sweep: ${describe(cleanupFailure)}`);
+    error(
+      "conformance-sweep: the sweep completed but report-writing or cleanup was not confirmed",
+    );
+    exit(1);
   }
 }
+
+if (import.meta.main) await main();
