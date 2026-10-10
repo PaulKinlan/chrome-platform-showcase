@@ -20,50 +20,64 @@ export const CHROME_BIN = Deno.env.get("CHROME_BIN") ??
     }) ??
   "google-chrome-stable";
 
-export async function launchChrome() {
+// The options exist for two reasons and change nothing for the four harnesses
+// that call this with no arguments: `tries`/`intervalMs` let a test exercise the
+// endpoint-never-up path without waiting the real ten seconds, and `bin` lets a
+// test aim at a binary that cannot start. The defaults are the previous
+// behaviour exactly (40 tries, 250ms apart, the module's CHROME_BIN).
+export async function launchChrome({
+  bin = CHROME_BIN,
+  tries = 40,
+  intervalMs = 250,
+  boundMs = CDP_TEARDOWN_BOUND_MS,
+} = {}) {
   const userDataDir = await Deno.makeTempDir({ prefix: "cps-cdp-" });
-  const port = 9200 + Math.floor(Math.random() * 400);
-  const child = new Deno.Command(CHROME_BIN, {
-    args: [
-      "--headless=new",
-      "--disable-gpu",
-      "--no-sandbox",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--hide-scrollbars",
-      `--remote-debugging-port=${port}`,
-      `--user-data-dir=${userDataDir}`,
-      // Extra switches for flag-gated verification. A demo that claims a
-      // feature is available behind a flag has to be driven behind that flag,
-      // so CHROME_FLAGS carries them in rather than needing a second harness.
-      ...(Deno.env.get("CHROME_FLAGS") ?? "").split(" ").filter(Boolean),
-      "about:blank",
-    ],
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
-  let wsUrl = null;
-  for (let i = 0; i < 40; i++) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/json/version`, {
-        signal: AbortSignal.timeout(1000),
-      });
-      wsUrl = (await r.json()).webSocketDebuggerUrl;
-      if (wsUrl) break;
-    } catch {
-      // not up yet
+  let child = null;
+  try {
+    const port = 9200 + Math.floor(Math.random() * 400);
+    child = new Deno.Command(bin, {
+      args: [
+        "--headless=new",
+        "--disable-gpu",
+        "--no-sandbox",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--hide-scrollbars",
+        `--remote-debugging-port=${port}`,
+        `--user-data-dir=${userDataDir}`,
+        // Extra switches for flag-gated verification. A demo that claims a
+        // feature is available behind a flag has to be driven behind that flag,
+        // so CHROME_FLAGS carries them in rather than needing a second harness.
+        ...(Deno.env.get("CHROME_FLAGS") ?? "").split(" ").filter(Boolean),
+        "about:blank",
+      ],
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+    let wsUrl = null;
+    for (let i = 0; i < tries; i++) {
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/json/version`, {
+          signal: AbortSignal.timeout(1000),
+        });
+        wsUrl = (await r.json()).webSocketDebuggerUrl;
+        if (wsUrl) break;
+      } catch {
+        // not up yet
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
     }
-    await new Promise((r) => setTimeout(r, 250));
+    if (!wsUrl) throw new Error("chrome devtools endpoint never came up");
+    return { child, wsUrl, userDataDir };
+  } catch (err) {
+    // The temp profile this call created is ours to remove, whether the spawn
+    // threw or Chrome started and never answered. This used to leak on both
+    // paths (`makeTempDir` on line 1, then the kill-and-throw above without a
+    // removal). The error that caused the failure stays the error the caller
+    // sees: a cleanup failure is attached to it rather than replacing it.
+    await teardownChrome({ child, userDataDir }, { primaryError: err, boundMs });
+    throw err; // unreachable: teardownChrome rethrows the primary error
   }
-  if (!wsUrl) {
-    try {
-      child.kill();
-    } catch {
-      // ignore
-    }
-    throw new Error("chrome devtools endpoint never came up");
-  }
-  return { child, wsUrl, userDataDir };
 }
 
 export async function cleanupChrome(chrome) {
@@ -77,6 +91,174 @@ export async function cleanupChrome(chrome) {
   } catch {
     // ignore
   }
+}
+
+// ---------------------------------------------------------------------------
+// Strict teardown (bead chrome_platform_showcase-1w1, Stage 1 of 3gt).
+//
+// `cleanupChrome` above deliberately stays as it is for the four harnesses that
+// still call it: it swallows the kill AND the profile removal, so a profile that
+// survives is invisible, and a `finally` that swallowed more would start masking
+// the error that caused the teardown. Converting a caller changes its error
+// precedence, so it happens one caller at a time in later stages, not here.
+//
+// `teardownChrome` is the strict counterpart a converted caller uses instead. It
+// bounds every wait, escalates SIGTERM to SIGKILL, retries the removal, and
+// never reports a cleanup it could not confirm. When the caller passes the error
+// that caused the teardown, that error is rethrown unchanged with the cleanup
+// failure attached as context, never replaced.
+//
+// Limits that are stated rather than papered over:
+//   * `Deno.remove` cannot be cancelled. Racing it against a deadline reports a
+//     named failure and leaves the deletion UNCONFIRMED; it does not stop the IO.
+//   * A SIGKILL is a request, not a fact. If the child is still unresolved after
+//     the second bounded wait, that is reported and NOT claimed as cleaned up.
+//   * Nothing here runs after a hard parent SIGKILL, so a `finally` is not a
+//     guarantee that a crash leaves no profile behind.
+// ---------------------------------------------------------------------------
+export const CDP_TEARDOWN_BOUND_MS = 2000;
+const CDP_REMOVE_ATTEMPTS = 20;
+const CDP_REMOVE_RETRY_MS = 100;
+
+// Named so a caller can carry the failure into its own exit decision, and so a
+// log line says which layer failed without parsing prose.
+export class CdpTeardownError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CdpTeardownError";
+  }
+}
+
+// Killing an already-reaped child and removing an already-absent profile are the
+// normal success end of a race, not failures.
+function alreadyGone(err) {
+  return err instanceof Deno.errors.BadResource ||
+    err instanceof Deno.errors.NotFound;
+}
+
+// Bounded wait shared by the reap and the removal. The deadline is created
+// BEFORE the caller can await anything blocking, the timer is always cleared so
+// an early settle cannot park the process open, and fulfilment, rejection and
+// timeout stay DISTINCT: collapsing a rejection into "settled" here is how a
+// removal that fails gets reported as a removal that worked.
+async function boundedWait(promise, ms) {
+  let timer;
+  const timeout = new Promise((res) => {
+    timer = setTimeout(() => res({ status: "timeout" }), ms);
+  });
+  try {
+    return await Promise.race([
+      Promise.resolve(promise).then(
+        () => ({ status: "settled" }),
+        (error) => ({ status: "rejected", error }),
+      ),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// SIGTERM, one bounded wait, SIGKILL, a second bounded wait. Returns
+// `{ confirmable, failures }`; `confirmable` false means the child was still
+// running when the bound expired, which is reported rather than assumed away.
+async function reapChild(child, boundMs) {
+  if (!child) return { confirmable: true, failures: [] };
+  const failures = [];
+  try {
+    child.kill("SIGTERM");
+  } catch (err) {
+    if (!alreadyGone(err)) failures.push(`SIGTERM could not be delivered: ${err.message}`);
+  }
+  if ((await boundedWait(child.status, boundMs)).status === "timeout") {
+    try {
+      child.kill("SIGKILL");
+    } catch (err) {
+      if (!alreadyGone(err)) failures.push(`SIGKILL could not be delivered: ${err.message}`);
+    }
+    if ((await boundedWait(child.status, boundMs)).status === "timeout") {
+      failures.push(
+        `child was still running ${boundMs}ms after SIGKILL, so it is not confirmed reaped`,
+      );
+    }
+  }
+  return { confirmable: failures.length === 0, failures };
+}
+
+// Bounded, retried profile removal. `NotFound` is success (a concurrent cleanup
+// or an already-removed directory is the outcome we wanted). A deadlock that
+// exceeds the bound is reported as UNCONFIRMED, because the race reports and
+// cannot cancel the IO underneath it.
+//
+// `remove` is an injection seam: the four harnesses never pass it, and a test
+// uses it to drive the timeout path deterministically without needing real IO to
+// hang.
+async function removeProfile(dir, boundMs, remove) {
+  if (!dir) return { confirmable: true, failures: [] };
+  const failures = [];
+  const deadline = Date.now() + boundMs;
+  let lastError = null;
+  let attempts = 0;
+  for (let attempt = 1; attempt <= CDP_REMOVE_ATTEMPTS; attempt++) {
+    attempts = attempt;
+    const remaining = Math.max(1, deadline - Date.now());
+    let outcome;
+    try {
+      outcome = await boundedWait(remove(dir, { recursive: true }), Math.min(boundMs, remaining));
+    } catch (err) {
+      // A synchronous throw never reaches the race.
+      outcome = { status: "rejected", error: err };
+    }
+    if (outcome.status === "settled") return { confirmable: true, failures };
+    if (outcome.status === "timeout") {
+      failures.push(
+        `profile ${dir} was not confirmed removed within ${Math.min(boundMs, remaining)}ms ` +
+          `(Deno.remove cannot be cancelled, so its deletion is UNCONFIRMED)`,
+      );
+      return { confirmable: false, failures };
+    }
+    if (alreadyGone(outcome.error)) return { confirmable: true, failures };
+    lastError = outcome.error;
+    if (Date.now() >= deadline) break;
+    await new Promise((res) => setTimeout(res, CDP_REMOVE_RETRY_MS));
+  }
+  failures.push(
+    `profile ${dir} could not be removed after ${attempts} attempts: ` +
+      `${lastError?.message ?? "no error reported"}`,
+  );
+  return { confirmable: false, failures };
+}
+
+// Strict, fail-visible teardown. Resolves with
+// `{ childReaped, profileRemoved, failures }` when cleanup is confirmed, and
+// throws a `CdpTeardownError` when it is not — unless the caller supplied the
+// error that caused the teardown, in which case THAT error is rethrown with the
+// cleanup failure attached as `teardownFailure` (and as `cause` when the primary
+// has none of its own), so a cleanup problem can never hide the real one.
+export async function teardownChrome(
+  chrome,
+  { primaryError = null, boundMs = CDP_TEARDOWN_BOUND_MS, remove = Deno.remove } = {},
+) {
+  const target = chrome ?? {};
+  const reap = await reapChild(target.child ?? null, boundMs);
+  const removal = await removeProfile(target.userDataDir ?? null, boundMs, remove);
+  const failures = [...reap.failures, ...removal.failures];
+  const result = {
+    childReaped: reap.confirmable,
+    profileRemoved: removal.confirmable,
+    failures,
+  };
+  if (failures.length === 0) return result;
+  const failure = new CdpTeardownError(`chrome teardown failed: ${failures.join("; ")}`);
+  if (!primaryError) throw failure;
+  Object.defineProperty(primaryError, "teardownFailure", {
+    value: failure.message,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+  if (primaryError.cause === undefined) primaryError.cause = failure;
+  throw primaryError;
 }
 
 export async function cdpConnection(wsUrl) {
