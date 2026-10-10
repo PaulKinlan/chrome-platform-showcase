@@ -497,16 +497,48 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
           `Deno output missing regression notice: ${denoText}`,
         );
       } finally {
-        // Normal-path detectors, NOT kill safety (SIGKILL skips this block):
-        // the real tracked sidecar must be byte-for-byte unchanged...
-        const realAfter = Deno.readFileSync(realSidecar);
-        assert(
-          realBefore.length === realAfter.length &&
-            realBefore.every((b, i) => b === realAfter[i]),
-          "REAL responsive-support.json changed during the isolated run",
-        );
-        // ...and scratch cleanup failure is a visible failure, never swallowed.
-        Deno.removeSync(scratch, { recursive: true });
+        // Normal-path detectors, NOT kill safety (SIGKILL skips this block).
+        // Two independent failure paths, captured and re-thrown deliberately
+        // (targeted catch + rethrow, NOT a blanket swallow):
+        //   1. the real tracked sidecar must be byte-for-byte unchanged;
+        //   2. the scratch removal is ALWAYS attempted — on ordinary success
+        //      AND when the byte detector throws — because a skipped cleanup
+        //      would leak the ~185MB clone on a normal-path failure
+        //      (bead chrome_platform_showcase-1b3).
+        // If BOTH fail, the original detector error wins the throw and the
+        // cleanup failure is still visible on stderr with the path to remove.
+        let detectorError = null;
+        try {
+          const realAfter = Deno.readFileSync(realSidecar);
+          assert(
+            realBefore.length === realAfter.length &&
+              realBefore.every((b, i) => b === realAfter[i]),
+            "REAL responsive-support.json changed during the isolated run",
+          );
+        } catch (err) {
+          detectorError = err;
+        }
+        let cleanupError = null;
+        try {
+          Deno.removeSync(scratch, { recursive: true });
+        } catch (err) {
+          cleanupError = err;
+        }
+        if (detectorError) {
+          if (cleanupError) {
+            console.error(
+              `scratch cleanup ALSO failed (${cleanupError.message}); ` +
+                `remove ${scratch} by hand`,
+            );
+          }
+          throw detectorError;
+        }
+        if (cleanupError) {
+          throw new Error(
+            `scratch cleanup failed (${cleanupError.message}); ` +
+              `remove ${scratch} by hand`,
+          );
+        }
       }
     });
 
