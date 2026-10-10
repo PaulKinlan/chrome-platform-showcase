@@ -130,19 +130,36 @@ Deno.test("replay rejection survives an arbitrarily long nonce", async () => {
 Deno.test("two long nonces sharing a prefix are still distinct", async () => {
   // Guards the choice of fingerprinting over truncation: a truncated key would
   // collide here and reject a nonce that was never seen.
+  //
+  // BOTH tokens are minted before either is validated. /sample re-arms the marker
+  // for the nonce it mints (the case below), so sampling `second` after validating
+  // `first` would clear a key the two could be sharing and hide exactly the
+  // collision this case exists to catch.
   const base = "P".repeat(LONG_NONCE_CHARS);
   const first = `${base}-one`;
   const second = `${base}-two`;
   const firstToken = await sample(first);
+  const secondToken = await sample(second);
+
   assert(
     (await validate(firstToken, first)).valid === true,
     "the first of the pair should validate",
   );
-
-  const secondToken = await sample(second);
   assert(
     (await validate(secondToken, second)).valid === true,
     "a second nonce sharing a 64 KiB prefix must not be treated as a replay (fingerprint collision)",
+  );
+
+  // Both nonces were genuinely recorded, so each replay has to be rejected now.
+  // This is the half that fails when nothing is retained at all - a cache that
+  // refuses an over-long key would otherwise be accepted here.
+  assert(
+    (await validate(firstToken, first)).valid === false,
+    "the first of the pair must be rejected on replay",
+  );
+  assert(
+    (await validate(secondToken, second)).valid === false,
+    "the second of the pair must be rejected on replay too, not merely accepted once",
   );
 });
 
