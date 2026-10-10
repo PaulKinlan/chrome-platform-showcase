@@ -384,6 +384,8 @@ function callerHarness(
     resources = false,
     serverKill = "ok",
     serverStatus = "resolve",
+    connClose = "ok",
+    bootKillFailures = false,
   } = {},
 ) {
   const attempts = [];
@@ -400,7 +402,17 @@ function callerHarness(
     run: async (_opts, _io, holder) => {
       holder.chrome = chrome;
       if (resources) {
-        holder.conn = { close: () => connCloses.push("closed") };
+        if (bootKillFailures) {
+          // What a refused signal during boot recovery looks like to the caller.
+          holder.killFailures = [new Error("Operation not permitted (os error 1)")];
+        }
+        holder.conn = {
+          close: () => {
+            if (connClose === "throws") throw new Error("socket already gone (BadResource)");
+            if (connClose === "pending") return new Promise(() => {});
+            return connCloses.push("closed");
+          },
+        };
         holder.serverChild = {
           kill: (signal) => {
             if (serverKill === "refuse") {
@@ -872,6 +884,54 @@ Deno.test("drive-demos main: a status that cannot be read is a named failure", a
       "the unreadable status must be named",
     );
     assert.deepEqual(t.codes, [1]);
+  });
+});
+
+// ── connection close and boot-recovery signals (same class as 8ab) ───────────
+//
+// A self-audit found the same two shapes of false green in this caller that the
+// review found in the server child: a cleanup step that could hang forever, and
+// a refused signal that was swallowed while the handle was dropped. Closing a
+// socket is a request too, so a close that never settles is bounded and named,
+// and a signal refused during boot recovery is reported rather than forgotten.
+
+Deno.test("drive-demos main: a connection that cannot be closed is named non-zero", async () => {
+  await withScratchOut("conn-throw", async (out) => {
+    const t = driveHarness({ connClose: "throws" });
+    await driveDemosMain({ ...t.deps, argv: driveArgv(out) });
+    assert.ok(
+      reported(t.errors, "the connection could not be closed"),
+      "a close that failed must be named, not mistaken for a clean shutdown",
+    );
+    assert.deepEqual(t.codes, [1], "an unclosed connection must not be a green run");
+  });
+});
+
+Deno.test("drive-demos main: a connection that never closes is bounded and named non-zero", async () => {
+  await withScratchOut("conn-pending", async (out) => {
+    const t = driveHarness({ connClose: "pending" });
+    await driveDemosMain({ ...t.deps, connectionCloseBoundMs: 25, argv: driveArgv(out) });
+    assert.ok(
+      reported(t.errors, "did not close within"),
+      "the unclosed connection must be bounded",
+    );
+    assert.deepEqual(t.codes, [1], "a close that never settles must not hold the run open");
+  });
+});
+
+Deno.test("drive-demos main: a signal refused during boot recovery is reported, not forgotten", async () => {
+  await withScratchOut("boot-kill", async (out) => {
+    const t = driveHarness({ bootKillFailures: true });
+    await driveDemosMain({ ...t.deps, argv: driveArgv(out) });
+    assert.ok(
+      reported(t.errors, "a server child that could not be signalled"),
+      "the refused boot-recovery signal must be reported",
+    );
+    assert.deepEqual(
+      t.codes,
+      [1],
+      "a child that may have survived boot recovery is not a green run",
+    );
   });
 });
 
