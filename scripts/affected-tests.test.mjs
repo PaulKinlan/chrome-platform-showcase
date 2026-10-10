@@ -263,6 +263,12 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
       "v145/reduced-user-agent-strings-by-default/_server.ts",
     ]).steps.includes("test-header-grammar"),
   );
+  check(
+    "a referrer-echo sidecar change selects the header-grammar suite",
+    selectSteps([
+      "v150/css-url-request-modifiers/_server.ts",
+    ]).steps.includes("test-header-grammar"),
+  );
 
   const gc = selectSteps(["routes/release-endpoints.ts"]);
   check(

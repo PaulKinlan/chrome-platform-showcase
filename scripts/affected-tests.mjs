@@ -178,6 +178,11 @@ export const RULES = [
     steps: ["test-header-grammar", "check-routes"],
     note: "UA-CH migration client-hints-echo sidecar",
   },
+  {
+    pattern: "v150/css-url-request-modifiers/_server.ts",
+    steps: ["test-header-grammar", "check-routes"],
+    note: "CSS URL request modifiers referrer-echo sidecar",
+  },
   ...SPEECH_DEMOS.map((pattern) => ({
     pattern,
     steps: [

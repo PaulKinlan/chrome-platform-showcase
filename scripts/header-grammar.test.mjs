@@ -274,3 +274,93 @@ Deno.test("ok — the v145 sidecar returns null for every path but the echo rout
     );
   }
 });
+
+// mm5.4: the v150 css-url-request-modifiers referrer-echo route is served by
+// the feature sidecar (v150/css-url-request-modifiers/_server.ts), moved
+// verbatim from the legacy dispatcher. These tests exercise the sidecar
+// directly.
+
+async function callReferrerEcho(
+  sub,
+  query = "",
+  initHeaders = {},
+  method = "GET",
+) {
+  const { handleFeatureRequest } = await import(
+    "../v150/css-url-request-modifiers/_server.ts"
+  );
+  return handleFeatureRequest(
+    new Request(
+      `https://example.com/v150/css-url-request-modifiers${sub}${query}`,
+      { method, headers: initHeaders },
+    ),
+    sub,
+  );
+}
+
+Deno.test("ok — the referrer-echo route echoes policy, method, and fetch headers", async () => {
+  const res = await callReferrerEcho(
+    "/css-url-request-modifiers/referrer-echo",
+    "?policy=strict-origin-when-cross-origin&nonce=1730000000000",
+    {
+      referer: "https://example.com/v150/css-url-request-modifiers/referrer-policy-demo/",
+      origin: "https://example.com",
+      "sec-fetch-site": "same-origin",
+    },
+  );
+  assert(res, "the sidecar must answer the echo route");
+  assert(res.status === 200, `expected 200, got ${res.status}`);
+  assert(
+    res.headers.get("cache-control") === "no-store",
+    "the echo response must stay uncacheable",
+  );
+  const body = await res.json();
+  assert(
+    body.policy === "strict-origin-when-cross-origin",
+    `policy must come from the query, got ${body.policy}`,
+  );
+  assert(body.method === "GET", `method must echo, got ${body.method}`);
+  assert(
+    body.referer.endsWith("/referrer-policy-demo/"),
+    `referer must echo, got ${body.referer}`,
+  );
+  assert(body.origin === "https://example.com", `origin must echo, got ${body.origin}`);
+  assert(
+    body.secFetchSite === "same-origin",
+    `sec-fetch-site must echo, got ${body.secFetchSite}`,
+  );
+});
+
+Deno.test("ok — the referrer-echo route defaults policy and empty headers honestly", async () => {
+  const res = await callReferrerEcho(
+    "/css-url-request-modifiers/referrer-echo",
+    "",
+    {},
+    "HEAD",
+  );
+  assert(res, "the sidecar must answer the echo route");
+  const body = await res.json();
+  assert(body.policy === "default", `missing policy must default, got ${body.policy}`);
+  assert(body.method === "HEAD", `method must echo, got ${body.method}`);
+  assert(
+    body.referer === "" && body.origin === "" && body.secFetchSite === "",
+    "absent headers echo as empty strings, not fabricated values",
+  );
+});
+
+Deno.test("ok — the v150 sidecar returns null for every sibling/asset path", async () => {
+  for (
+    const sub of [
+      "/css-url-request-modifiers",
+      "/css-url-request-modifiers/referrer-policy-demo/",
+      "/css-url-request-modifiers/crossorigin-integrity-demo/clean.svg",
+      "/unrelated",
+    ]
+  ) {
+    const res = await callReferrerEcho(sub);
+    assert(
+      res === null,
+      `sidecar must not answer ${sub} (the legacy family/asset pipeline owns it)`,
+    );
+  }
+});
