@@ -8,33 +8,38 @@
 //
 // Migrated in place to a native Deno.test case (Stage 15 of the dty proposal, bead
 // dty.20): same file path, same task id `test-speech-transcript-dom`, the same ordered
-// gate step 23, the same four `assert` call sites and their messages, and the same
-// first-failure abort - ONE case covers BOTH demo files, deliberately, so that a
-// failure in the first file still stops the second from being checked. The denylist
-// names the string-to-markup operations relevant here, not just the literal
-// assignment the fix removed: a transcript 'must never be parsed as markup' also
-// rules out writes to `outerHTML`, `insertAdjacentHTML`, `document.write/writeln`
-// (including the `contentDocument.write` spelling), `Range.createContextualFragment`,
-// `DOMParser.parseFromString`, `Element.setHTML`/`setHTMLUnsafe`,
-// `document.parseHTMLUnsafe`, `Sanitizer.sanitize` on a string and writes to iframe
-// `srcdoc` (assignment or `setAttribute`), including the indirect `[[Set]]` routes
-// to the accessor setters: `Object.assign(el, { outerHTML: text })`,
-// `el["outerHTML"] = text` and quoted `setAttribute`/`defineProperty` keys (the
-// bare-key and quoted spellings of `innerHTML`, `outerHTML` and `srcdoc` are all
-// banned). The bans are scoped to string-to-markup signatures, and each is listed
-// in its spaced and unspaced spellings because `deno fmt` excludes these HTML
-// files, so nothing normalises hand-edited spacing: a read of `outerHTML` or
-// `srcdoc`, an inert `srcdoc="..."` attribute and `Node.importNode` (a clone/adopt
-// step whose parse half is already in the list) stay green. Known overreach,
-// accepted in the safe direction: the `outerHTML` write needles also trip on an
-// `==`/`===` comparison of `outerHTML`, and the key-form needles also trip an
-// inert object literal or string that merely mentions one of the three keys -
-// neither file does either today, and a future author who does gets a clear
-// message and restructures. This is a lexical `String.includes` guard on these
-// two files, not a proof about arbitrary JavaScript: alias evasion (`const d =
-// document; d.write(text)`) is out of scope by design. Because this guard is
-// source `String.includes` and a length floor, no browser is involved; the
-// browser evidence for the behaviour stays on bead 5c8 and is not restated here.
+// gate step 23, the same first-failure abort - ONE case covers BOTH demo files,
+// deliberately, so that a failure in the first file still stops the second from
+// being checked. The scanner itself was rebuilt (bead chrome_platform_showcase-vbp,
+// architect design pass) after four rounds of literal-needle bypasses: a transcript
+// 'must never be parsed as markup', and the guard now enforces that by
+//   1. extracting the inline <script> bodies - so inert markup (an
+//      `srcdoc="..."` attribute) never reaches the patterns - and
+//   2. matching a small set of whitespace-AND-comment-tolerant regexes against
+//      the extracted JavaScript only. `deno fmt` excludes these HTML files, so
+//      nothing normalises hand-edited spacing; the WS token below spans spaces,
+//      line and block comments, so `outerHTML /*x*/ = text` is the same write as
+//      `outerHTML=text`.
+// Covered: direct writes to `innerHTML`/`outerHTML`/`srcdoc` at any spacing,
+// their object-key forms (`Object.assign(el, { outerHTML : text })`, quoted or
+// not), computed-bracket assignment (`el["innerHTML"] = text`), the parse-family
+// calls (`createContextualFragment`, `parseFromString`, `setHTML`/`setHTMLUnsafe`,
+// `parseHTMLUnsafe`, `sanitize`, `insertAdjacentHTML`) at any spacing before the
+// paren, `setAttribute("srcdoc", ...)` and `document.write/writeln` in both
+// casings (`contentDocument.write`). Green by construction: reads of
+// `outerHTML`/`srcdoc`/`el["innerHTML"]`, inert markup, `Node.importNode` (a
+// clone/adopt step whose parse half is covered), `textContent`.
+// Accepted safe-direction overreach: these are lexical patterns on JS text, so a
+// string/comment containing e.g. `innerHTML =` trips the guard, as does an
+// `==`/`===` comparison of an accessor or a JS label spelled `innerHTML:` -
+// neither demo does any of that, and a future author who does gets a clear
+// message and restructures. Honest residual limits, NOT a universal static
+// proof: alias evasion (`const d = document; d.write(text)`) is out of scope, the
+// scan covers inline <script> bodies only (external <script src> would also
+// break the required-needle presence checks below, failing closed), and a sink
+// spelled across a line-comment newline boundary that changes the token stream
+// is the same alias class. The browser evidence for the behaviour stays on bead
+// 5c8 and is not restated here.
 //
 // Permissions: the child is granted `--allow-read` alone, and that flag is genuinely
 // required - the guard reads the two demo files it guards - so it is forwarded rather
@@ -42,7 +47,7 @@
 // `--serial` and no `--dir`.
 //
 // Output: the case keeps the file's own count line, which is the evidence that the
-// guard actually executed its checks (61 assertions over 2 demos), and the task adds
+// guard actually executed its checks (27 assertions over 2 demos), and the task adds
 // the runner's `PASS — speech transcript DOM contract` line, matching the gate step's
 // own wording.
 
@@ -66,57 +71,40 @@ const files = {
   ],
 };
 
+// JavaScript "whitespace" between tokens may include comments; treat both as
+// gap so a comment-separated spelling of a sink is the same sink.
+const WS = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*)*`;
+
 const forbidden = [
-  // Literal HTML-string composition into the document. `innerHTML` is banned
-  // outright: in these two files any use of it is the bug this guard exists for.
-  ".innerHTML",
-  "insertAdjacentHTML",
-  // `write` is a prefix of `writeln`, so one needle per casing covers both, at
-  // any spacing; the capital-D form covers `contentDocument.write`.
-  "document.write",
-  "Document.write",
-  // Write-only forms, each in spaced and unspaced spelling (deno fmt excludes
-  // these HTML files, so nothing normalises hand-edited spacing). A read of
-  // `outerHTML` stays green; an `==`/`===` comparison of it trips the guard -
-  // accepted, safe direction, noted in the header.
-  ".outerHTML =",
-  ".outerHTML=",
-  ".outerHTML +=",
-  ".outerHTML+=",
-  // iframe `srcdoc`: JS property assignment forms (the leading dot keeps an
-  // inert static `srcdoc="..."` attribute green) plus the
-  // `setAttribute("srcdoc", ...)` route.
-  ".srcdoc =",
-  ".srcdoc=",
-  '"srcdoc"',
-  "'srcdoc'",
-  // Indirect `[[Set]]` routes to the accessor setters: `Object.assign(el,
-  // { outerHTML: text })` performs the same parsing set as an assignment, and
-  // `el["outerHTML"] = text` / `Object.defineProperty(el, "outerHTML", ...)`
-  // spell the key as a string. Bare-key and quoted forms of all three
-  // accessors; an inert object literal or prose string mentioning a key also
-  // trips - accepted, safe direction, noted in the header.
-  "innerHTML:",
-  '"innerHTML"',
-  "'innerHTML'",
-  "outerHTML:",
-  '"outerHTML"',
-  "'outerHTML'",
-  "srcdoc:",
-  // Non-literal HTML-parsing sinks, listed without a trailing paren so a space
-  // before the call paren cannot slip past: each of these parses a string as
-  // markup, so feeding one a transcript re-opens the quote-breakout hole from
-  // bead 5c8. `.setHTML` also covers `setHTMLUnsafe` (it is a prefix), and
-  // `setHTML`/`sanitize` parse-then-sanitize: the markup still becomes
-  // elements, and the contract is text nodes only. `Node.importNode` is
-  // deliberately NOT banned - it clones nodes and parses nothing; the parse
-  // half of the parse-then-adopt chain (`parseFromString`,
-  // `createContextualFragment`, `innerHTML`) is already covered.
-  "createContextualFragment",
-  "parseFromString",
-  ".setHTML",
-  "parseHTMLUnsafe",
-  ".sanitize",
+  {
+    name: "innerHTML/outerHTML/srcdoc write or object key (any spacing)",
+    re: new RegExp(String.raw`\b(?:innerHTML|outerHTML|srcdoc)${WS}(?:[-+]?=|:)`),
+  },
+  {
+    name: "quoted innerHTML/outerHTML/srcdoc object key (any spacing)",
+    re: new RegExp(String.raw`['"](?:innerHTML|outerHTML|srcdoc)['"]${WS}:`),
+  },
+  {
+    name: 'computed-bracket write, e.g. el["innerHTML"] = text',
+    re: new RegExp(String.raw`\[\s*['"](?:innerHTML|outerHTML|srcdoc)['"]\s*\]${WS}[-+]?=`),
+  },
+  {
+    name:
+      "HTML-parsing call (createContextualFragment/parseFromString/setHTML/parseHTMLUnsafe/sanitize/insertAdjacentHTML)",
+    re: new RegExp(
+      String
+        .raw`\b(?:createContextualFragment|parseFromString|setHTML(?:Unsafe)?|parseHTMLUnsafe|sanitize|insertAdjacentHTML)${WS}\(`,
+    ),
+  },
+  {
+    name: 'setAttribute("srcdoc", ...)',
+    re: new RegExp(String.raw`\bsetAttribute${WS}\(${WS}['"]srcdoc['"]`),
+  },
+  {
+    name: "document.write/writeln (incl. contentDocument)",
+    // No leading \b: `contentDocument` has no word boundary before its `D`.
+    re: new RegExp(String.raw`[dD]ocument${WS}\.${WS}write(?:ln)?${WS}\(`),
+  },
 ];
 
 function assert(condition, message) {
@@ -132,15 +120,21 @@ Deno.test("the speech transcript now speaks in text nodes, in both demos", () =>
       src.includes("SpeechRecognition"),
       `${file}: no recognizer code - guard would be vacuous`,
     );
+    // Scan the executable JavaScript only: inert markup must never trip a
+    // pattern (architect design, bead chrome_platform_showcase-vbp).
+    const js = Array.from(src.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi))
+      .map((m) => m[1])
+      .join("\n");
+    assert(js.length > 500, `${file}: no inline script extracted - guard would be vacuous`);
     for (const bad of forbidden) {
-      assert(!src.includes(bad), `${file}: transcript path composes HTML via ${bad}`);
+      assert(!bad.re.test(js), `${file}: transcript path composes HTML via ${bad.name}`);
       assertions++;
     }
     for (const needle of required) {
       assert(src.includes(needle), `${file}: missing expected code: ${needle}`);
       assertions++;
     }
-    assertions += 2;
+    assertions += 3;
   }
 
   console.log(
