@@ -34,6 +34,118 @@ function assertStatus(actual, expected, label) {
   );
 }
 
+// Teardown is part of the contract, not a formality, and two of these helpers
+// are shaped by measured Deno 2.9.7 behaviour: `shutdown()` waits for in-flight
+// requests, and a request that never answers keeps it pending forever, so the
+// deadline below starts BEFORE the graceful close; and `abort()` AFTER
+// `shutdown()` has been called throws an uncaught `BadResource` out of Deno's
+// own signal listener, so there is deliberately no force-close fallback here and
+// no promise that a hard kill of this process cleans anything up. A teardown
+// that stalls or fails is reported as a named failure and counted with the
+// section failures, so it can never be a silent green.
+const TEARDOWN_BOUND_MS = 2000;
+let teardownFailures = 0;
+
+function teardownFailed(what) {
+  teardownFailures++;
+  const err = new Error(what);
+  failures.push({ label: what, err });
+  console.log(`FAIL ${what}`);
+}
+
+// Bounded, rejection-aware listener close: deadline first, graceful close
+// second. A rejected `shutdown()` or `finished` is a failed close, not a pass,
+// and the first genuine rejection message is preserved.
+async function closeListener(listener, what) {
+  let shutdownError = null;
+  let finishedError = null;
+  const graceful = Promise.all([
+    Promise.resolve()
+      .then(() => listener.shutdown())
+      .then(() => true, (err) => {
+        shutdownError = err;
+        return false;
+      }),
+    Promise.resolve()
+      .then(() => listener.finished)
+      .then(() => true, (err) => {
+        finishedError = err;
+        return false;
+      }),
+  ]).then(([closed, released]) => closed === true && released === true);
+  const stalled = Symbol("stalled");
+  const first = await Promise.race([
+    graceful,
+    new Promise((resolve) => setTimeout(() => resolve(stalled), TEARDOWN_BOUND_MS)),
+  ]);
+  if (first === true) return;
+  if (first === stalled) {
+    teardownFailed(
+      `${what} had not finished closing ${TEARDOWN_BOUND_MS}ms after it was asked to shut down ` +
+        "(a request is still in flight; the listening socket is already closed, and Deno 2.9.7 " +
+        "throws an uncaught BadResource if an abort fires after shutdown, so the listener is left " +
+        "to the runtime rather than force-closed)",
+    );
+    // Bounded second wait, so a close that lands late is still observed.
+    await Promise.race([
+      graceful,
+      new Promise((resolve) => setTimeout(resolve, TEARDOWN_BOUND_MS)),
+    ]);
+    return;
+  }
+  const context = [
+    shutdownError ? `shutdown() rejected with ${shutdownError.message ?? shutdownError}` : null,
+    finishedError ? `finished rejected with ${finishedError.message ?? finishedError}` : null,
+  ].filter(Boolean).join("; ");
+  teardownFailed(
+    `${what} failed to close cleanly: ${
+      context || "shutdown and finished did not both report success"
+    }`,
+  );
+}
+
+// Bounded SIGKILL reap. A rejected `status` is a failure, never a reap: reading
+// it as success is how a Chrome that refused to die passes as clean teardown.
+async function reapChild(child, what) {
+  if (!child) return;
+  try {
+    child.kill("SIGKILL");
+  } catch { /* already gone */ }
+  const stalled = Symbol("stalled");
+  const reaped = await Promise.race([
+    Promise.resolve()
+      .then(() => child.status)
+      .then(() => true, (err) => {
+        teardownFailed(`${what} status could not be read after SIGKILL: ${err?.message ?? err}`);
+        return true;
+      }),
+    new Promise((resolve) => setTimeout(() => resolve(stalled), TEARDOWN_BOUND_MS)),
+  ]);
+  if (reaped === stalled) {
+    teardownFailed(`${what} had not been reaped ${TEARDOWN_BOUND_MS}ms after SIGKILL`);
+  }
+}
+
+// The legacy 20x100ms profile removal retry, with a final failure named
+// instead of swallowed; an already-absent profile is still a success.
+async function removeProfile(profile, what) {
+  for (let i = 0; i < 20; i++) {
+    try {
+      await Deno.remove(profile, { recursive: true });
+      return;
+    } catch (err) {
+      if (err instanceof Deno.errors.NotFound) return;
+      if (i === 19) {
+        teardownFailed(
+          `${what} ${profile} could not be removed after 20 attempts: ${err?.message ?? err}`,
+        );
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+}
+
 const noAsset = async () => null;
 
 // A body stream that reports how many bytes were actually pulled from it, so
@@ -881,11 +993,8 @@ section("fedcm credentialed CORS browser verdict", async () => {
         const verdict = await waitForVerdict(caseName, 120000);
         return verdict;
       } finally {
-        try {
-          child?.kill("SIGKILL");
-        } catch { /* already gone */ }
-        await child?.status?.catch?.(() => {});
-        await Deno.remove(profile, { recursive: true }).catch(() => {});
+        await reapChild(child, `${label}: the ${caseName} Chrome child`);
+        await removeProfile(profile, `${label}: the ${caseName} Chrome profile`);
       }
     };
 
@@ -915,8 +1024,8 @@ section("fedcm credentialed CORS browser verdict", async () => {
     console.log(`     ${label}: own-origin-family -> ${own}`);
     console.log(`     ${label}: foreign-origin  -> ${foreign}`);
   } finally {
-    await site.shutdown();
-    await attacker.shutdown();
+    await closeListener(site, `${label}: the own-origin listener`);
+    await closeListener(attacker, `${label}: the foreign-origin listener`);
   }
 });
 
@@ -1310,19 +1419,12 @@ window.addEventListener('load', () => {
       `     ${label}: selector=.uc-card#uc-command computed outline="${verdict.outlineStyle} ${verdict.outlineWidth} ${verdict.outlineColor}" roving->#${verdict.activeAfter} aria-checked=${verdict.secondAriaChecked}`,
     );
   } finally {
-    try {
-      child?.kill("SIGKILL");
-    } catch { /* already gone */ }
-    await child?.status?.catch?.(() => {});
-    for (let i = 0; i < 20; i++) {
-      try {
-        await Deno.remove(profile, { recursive: true });
-        break;
-      } catch {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-    }
-    await server.shutdown();
+    // Independent steps: a listener that fails to close must never stop the
+    // Chrome reap or the profile removal, and none of the three can throw, so
+    // all three are always attempted and always reported.
+    await reapChild(child, `${label}: the Chrome child`);
+    await removeProfile(profile, `${label}: the Chrome profile`);
+    await closeListener(server, `${label}: the page listener`);
   }
 });
 
@@ -1498,36 +1600,36 @@ window.addEventListener('load', () => {
       `     ${label}: .table-scroll clientWidth=${verdict.tableClientWidth} scrollWidth=${verdict.tableScrollWidth} doc clientWidth=${verdict.docClientWidth} scrollWidth=${verdict.docScrollWidth}`,
     );
   } finally {
-    try {
-      child?.kill("SIGKILL");
-    } catch { /* already gone */ }
-    await child?.status?.catch?.(() => {});
-    for (let i = 0; i < 20; i++) {
-      try {
-        await Deno.remove(profile, { recursive: true });
-        break;
-      } catch {
-        await new Promise((r) => setTimeout(r, 100));
-      }
-    }
-    await server.shutdown();
+    await reapChild(child, `${label}: the Chrome child`);
+    await removeProfile(profile, `${label}: the Chrome profile`);
+    await closeListener(server, `${label}: the page listener`);
   }
 });
 
 // ---- end of sections ----
 
-for (const { label, fn } of sections) {
-  try {
-    await fn();
-    console.log(`ok   ${label}`);
-  } catch (err) {
-    failures.push({ label, err });
-    console.log(`FAIL ${label}: ${err?.message ?? err}`);
+// ONE aggregate case: the runner reports a single pass/fail for the suite, while
+// every section still runs even when an earlier one fails, so the failure
+// breadth the legacy footer printed survives inside the case.
+Deno.test("the server hardening contract holds across request caps, origin gates and a real headless browser", async () => {
+  for (const { label, fn } of sections) {
+    try {
+      await fn();
+      console.log(`ok   ${label}`);
+    } catch (err) {
+      failures.push({ label, err });
+      console.log(`FAIL ${label}: ${err?.message ?? err}`);
+    }
   }
-}
 
-if (failures.length > 0) {
-  console.error(`\nserver-hardening tests: ${failures.length} section(s) failed`);
-  Deno.exit(1);
-}
-console.log("\nserver-hardening tests: all sections passed");
+  if (failures.length > 0) {
+    if (teardownFailures > 0) {
+      console.error(
+        `server-hardening tests: ${teardownFailures} of those failures came from teardown; see the FAIL lines above`,
+      );
+    }
+    console.error(`\nserver-hardening tests: ${failures.length} section(s) failed`);
+    throw new Error(`${failures.length} server-hardening section(s) failed`);
+  }
+  console.log("\nserver-hardening tests: all sections passed");
+});
