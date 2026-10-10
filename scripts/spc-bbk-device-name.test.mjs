@@ -12,6 +12,24 @@
 // POST /enroll with two P-256 public JWKs is enough to create an entry and get
 // the stored name echoed back, which is also the reachability claim.
 //
+// Migrated in place to named Deno.test cases (Stage 5 of the dty proposal, bead
+// dty.5): same file path, same task id `test-spc-bbk-device-name`, same ordered
+// gate step, same five subjects and the same assertions — the custom `section()`
+// registry, its trailing loop and the legacy `Deno.exit(1)` branch are gone, so a
+// failure names the behaviour and Deno's runner owns the exit code.
+//
+// The child needs NO permission at all (probe: `deno run
+// scripts/spc-bbk-device-name.test.mjs` with no flags passes all five sections), so
+// the task deliberately passes no child flags and no `--` separator: kty/crv-style
+// filesystem access is not part of this suite, and the wrapper's `childArgs(file,
+// [])` path is now exercised by a real suite rather than only by unit tests.
+//
+// Output rebaseline (deliberate, documented): the legacy final line had no
+// `PASS — ` prefix, so the task now prints `PASS — spc-bbk device-name tests` /
+// `FAIL — spc-bbk device-name tests (1 file(s) failed)` — a neutral label,
+// truthfully prefixed in both directions. The old text `all sections passed` is
+// gone; a read-only audit found no consumer of it.
+//
 // Run: deno task test-spc-bbk-device-name
 
 import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
@@ -24,12 +42,6 @@ const STATE_SUB = "/secure-payment-confirmation-browser-bound-keys/state";
 const COOKIE = "showcase_spc_bbk";
 
 const noAsset = async () => null;
-
-const failures = [];
-const sections = [];
-function section(label, fn) {
-  sections.push({ label, fn });
-}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -73,7 +85,7 @@ async function storedState(enrollmentId) {
 
 // ---------------------------------------------------------------------------
 
-section("the fixture's own device names are stored and echoed unchanged", async () => {
+Deno.test("ok — the fixture's own device names are stored and echoed unchanged", async () => {
   // Every value the published demos send.
   const demoNames = [
     "Primary checkout browser",
@@ -105,7 +117,7 @@ section("the fixture's own device names are stored and echoed unchanged", async 
   );
 });
 
-section("the default device name is used when the body omits it", async () => {
+Deno.test("ok — the default device name is used when the body omits it", async () => {
   const { res, body } = await enroll(undefined);
   assert(res.status === 200, "enrolling without a deviceName should still succeed");
   assert(
@@ -114,7 +126,7 @@ section("the default device name is used when the body omits it", async () => {
   );
 });
 
-section("an oversized device name is not retained in full", async () => {
+Deno.test("ok — an oversized device name is not retained in full", async () => {
   // DEMO_BODY_LIMIT is 1 MiB for the whole JSON body, and the two P-256 JWKs
   // plus the JSON envelope take a few hundred bytes of it, so the largest name a
   // caller can actually park here is just under 1 MiB. A name of exactly 1 MiB
@@ -145,7 +157,7 @@ section("an oversized device name is not retained in full", async () => {
   );
 });
 
-section("the body ceiling is what caps the raw request, not the name itself", async () => {
+Deno.test("ok — the body ceiling is what caps the raw request, not the name itself", async () => {
   // Documents where the pre-existing 1 MiB DEMO_BODY_LIMIT bites: a name of
   // exactly 1 MiB pushes the envelope over the limit, so the request is refused
   // before the name is ever stored. This section is about the ceiling, not the
@@ -157,7 +169,7 @@ section("the body ceiling is what caps the raw request, not the name itself", as
   );
 });
 
-section("the retained device-name budget stays small across a full store", async () => {
+Deno.test("ok — the retained device-name budget stays small across a full store", async () => {
   // Eight oversized enrollments stand in for a caller filling the store: with
   // no bound this retains ~8 MiB of names alone, and the 512-entry cap (1e5)
   // multiplies it to ~0.5 GiB.
@@ -174,21 +186,3 @@ section("the retained device-name budget stays small across a full store", async
     `${SAMPLES} sessions retained ${retained} device-name characters; the bound allows at most ${budget}`,
   );
 });
-
-// ---------------------------------------------------------------------------
-
-for (const { label, fn } of sections) {
-  try {
-    await fn();
-    console.log(`ok   ${label}`);
-  } catch (err) {
-    failures.push({ label, err });
-    console.log(`FAIL ${label}: ${err?.message ?? err}`);
-  }
-}
-
-if (failures.length > 0) {
-  console.error(`\nspc-bbk device-name tests: ${failures.length} section(s) failed`);
-  Deno.exit(1);
-}
-console.log("\nspc-bbk device-name tests: all sections passed");
