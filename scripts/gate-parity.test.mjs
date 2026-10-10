@@ -19,8 +19,16 @@
 // ordered plan in scripts/gate-steps.mjs, executed by scripts/run-gate.mjs and
 // reported with per-step timings (bead 6r8, ADR 15c). This guard reads that
 // plan and expands each step through `deno task`, so the two rules above still
-// hold against the commands the gate actually runs — and it fails if a plan
+// hold against the commands the gate is DECLARED to run — and it fails if a plan
 // step names a task deno.json does not define.
+//
+// What this guard proves, and what it does not (finding 140, bead z4u). It proves
+// DECLARATION parity: that the entrypoints, the gate plan and CI declare the same
+// commands, and that every command it credits is a parsed, reachable invocation of
+// a declared program rather than text that merely looks like one. It does NOT
+// prove that scripts/run-gate.mjs executes every GATE_STEPS entry and tier at run
+// time. That dynamic edge is tracked separately in bead
+// chrome_platform_showcase-z4u and is not claimed here.
 //
 // CI inventory and gate grammar (bead chrome_platform_showcase-uzc). CI is read
 // with a pinned real YAML parser, jsr:@std/yaml@1.3.0, because a regex over
@@ -176,17 +184,33 @@ check(
   "deno.json defines the fast `check:affected` gate",
   typeof tasks["check:affected"] === "string",
 );
-check(
-  "the full gate runs the plan through scripts/run-gate.mjs",
-  (tasks.check ?? "").includes("scripts/run-gate.mjs"),
-  `check = ${JSON.stringify(tasks.check)}`,
-);
-check(
-  "the fast gate runs the plan through scripts/run-gate.mjs with --affected",
-  (tasks["check:affected"] ?? "").includes("scripts/run-gate.mjs") &&
-    (tasks["check:affected"] ?? "").includes("--affected"),
-  `check:affected = ${JSON.stringify(tasks["check:affected"])}`,
-);
+// ── Entrypoint binding (finding 140)
+//
+// The gate is reached through two deno.json tasks. Their commands are PARSED and
+// compared as EXACT argv: a task that merely mentions scripts/run-gate.mjs — an
+// `echo`, a `deno eval` that prints the path, a substring, a trailing comment, a
+// dry-run flag, an extra or missing flag, a recursive alias — does not bind the
+// entrypoint to the plan and fails here. Equality of the parsed argv is the whole
+// rule; there is no substring test.
+//
+// DECLARATION PARITY ONLY: this proves which command the entrypoint declares, not
+// that the runner executes it (bead chrome_platform_showcase-z4u).
+const ENTRYPOINT_ARGV = ["deno", "run", "--allow-read", "--allow-run", "scripts/run-gate.mjs"];
+const ENTRYPOINT_ARGV_AFFECTED = [...ENTRYPOINT_ARGV, "--affected"];
+const sameArgv = (a, b) => a.length === b.length && a.every((t, i) => t === b[i]);
+const checkEntrypoint = (label, text, expected) => {
+  const parts = String(text ?? "").trim().split("&&").map((p) => p.trim()).filter((p) => p !== "");
+  const argv = parts.length === 1 ? parts[0].split(/\s+/) : [];
+  check(
+    `${label} declares exactly the gate entrypoint`,
+    sameArgv(argv, expected),
+    `${label} = ${JSON.stringify(text)} — expected exactly \`${expected.join(" ")}\`; a task ` +
+      "that only mentions the path (echo, eval, substring, comment, dry-run, extra or " +
+      "missing flag, recursive alias) does not bind the entrypoint to the plan",
+  );
+};
+checkEntrypoint("`deno task check`", tasks.check, ENTRYPOINT_ARGV);
+checkEntrypoint("`deno task check:affected`", tasks["check:affected"], ENTRYPOINT_ARGV_AFFECTED);
 check(
   "the gate plan declares steps for both tiers",
   GATE_STEPS.length > 0 && GATE_STEPS.some((s) => s.tier === "static") &&
@@ -218,9 +242,10 @@ check("deno.json defines a formatter task", typeof tasks.fmt === "string");
 // A CI command that is not mirrored fails; there is no exemption list, because
 // the escape hatch is to mirror the step or to take a workflow out of scope on
 // purpose.
+const GATE_SUBCOMMANDS = new Set(["check", "fmt", "run", "test", "lint", "task"]);
 const GATE_PROGRAMS = new Map([
   // deno subcommands a gate step may use.
-  ["deno", (argv) => ["check", "fmt", "run", "test", "lint", "task"].includes(argv[1])],
+  ["deno", (argv) => GATE_SUBCOMMANDS.has(argv[1])],
   // the one non-deno invocation on the plan (audit-strict): a repo script by
   // path, never `-c` and never an arbitrary binary.
   [
@@ -265,10 +290,12 @@ const operandsOf = (argv) => argv.filter((a) => !a.startsWith("-")).slice(2);
 // Exact argv identity, with the one declared tolerance: the gate may check the
 // same files PLUS more (`deno check server.ts scripts/…` satisfies CI's
 // `deno check server.ts`). Identical flags, and every CI operand present.
-const sameInvocation = (ci, gate) =>
-  ci[0] === gate[0] && ci[1] === gate[1] &&
-  flagsOf(ci).join(" ") === flagsOf(gate).join(" ") &&
-  operandsOf(ci).every((f) => operandsOf(gate).includes(f));
+const sameInvocation = (ci, gate) => {
+  const gateOperands = new Set(operandsOf(gate));
+  return ci[0] === gate[0] && ci[1] === gate[1] &&
+    flagsOf(ci).join(" ") === flagsOf(gate).join(" ") &&
+    operandsOf(ci).every((f) => gateOperands.has(f));
+};
 
 // Every task the plan reaches, resolved through deno.json (nested `deno task`
 // references included), parsed into the commands it really runs.
