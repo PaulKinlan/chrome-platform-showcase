@@ -24,6 +24,22 @@
 // is ever written inside the repository.
 //
 // Run: deno task test-run-gate-plan
+//
+// Migrated in place to ONE native Deno.test case (Stage 28 of the dty proposal,
+// bead chrome_platform_showcase-dty.35), under the dty.19 policy for this class
+// of suite. The fixture phase - the two scratch trees, the copy-and-stub
+// bootstrap, every selection and execution fixture, the watchdog and cancel
+// proofs, the controls and the temp-root cleanup - now runs inside the case, in
+// its original order and with every label, detail and counter unchanged. The
+// two scratch roots are allocated INSIDE the guarded region, so a throw from the
+// second allocation can no longer leak the first. Child mode is no longer an
+// argv flag: the runner refuses forwarded flags by design, so the parent leaves a
+// freshly stamped marker in its own scratch root and passes its path and nonce in
+// a single scoped environment variable, and this file proves the evidence before
+// it may skip the self-exit proof. The trailing `Deno.exit(1)` became a named
+// throw carrying the same count, because exiting inside a case kills the test
+// process before Deno can report it, and the legacy success line still prints on
+// a clean run.
 
 import { ALL_STEP_IDS, GATE_STEPS } from "./gate-steps.mjs";
 
@@ -35,7 +51,122 @@ const STUB_COMMAND = `deno run --allow-read --allow-write ${STUB}`;
 const HARNESS_CANCEL = ".harness-cancel";
 // A child copy runs the selection and execution layers only. It exists so the
 // harness can prove that ITS OWN PROCESS EXITS, measured from outside itself.
-const CHILD_MODE = Deno.args.includes("--child");
+//
+// The child used to be selected by an argv flag, `--child`, appended to this
+// suite's own task line. Under the native runner that channel is closed on
+// purpose: `scripts/lib/native-test.mjs` refuses every non-permission argument
+// after the `--` separator, because a forwarded flag must never change WHICH
+// tests run. So the signal moved to one scoped environment variable that carries
+// PARENT-CREATED EVIDENCE rather than a bare flag, and a value that cannot be
+// proven to come from a parent running right now is not silently ignored: it is
+// reported as a named failing test, because quietly treating it as absent would
+// turn the self-exit proof into a no-op.
+const CHILD_ENV_VAR = "GATE_PLAN_HARNESS_CHILD";
+const CHILD_MARKER_NAME = ".harness-child-marker";
+const CHILD_MARKER_MAX_AGE_MS = 30_000;
+const HARNESS_ROOT_PREFIX = "gate-plan-harness-";
+
+/** Leave a marker in a scratch root for the child that is about to be spawned.
+ * `createdAt` is the parent's clock: the child checks it against the file's own
+ * mtime, so a marker that outlives a hard-killed parent fails rather than being
+ * reused. */
+async function writeChildMarker(root, nonce) {
+  const path = `${root}/${CHILD_MARKER_NAME}`;
+  await Deno.writeTextFile(path, `${JSON.stringify({ nonce, createdAt: Date.now() })}\n`);
+  return path;
+}
+
+/**
+ * Decide, at module scope and before any fixture runs, which of three modes this
+ * process is in: `null` for the ordinary parent run; `{ ok: true }` for a child
+ * whose marker a live parent created moments ago; and `{ ok: false, reason }` for
+ * anything else - a bare flag-like value, an unreadable or missing marker, a
+ * marker inside the repository, a wrong nonce, or a stamp outside the freshness
+ * window. Only the exact match may skip the self-spawn. Every other present value
+ * is reported rather than ignored, so an injected or replayed variable cannot
+ * silently downgrade the self-exit proof (finding 5v8) to a no-op.
+ *
+ * TWO STAMPS must both be fresh, and they cover different failure modes: the
+ * `createdAt` the parent wrote covers a marker JSON that was forged or copied, and
+ * the marker file's own `mtime` covers an ORPHAN left behind by a parent that was
+ * hard killed after writing it - an orphan keeps a valid nonce and a plausible
+ * `createdAt` forever, but its mtime stops advancing. An mtime that is missing,
+ * unparseable or in the future is a named failure rather than a pass.
+ *
+ * Residual limit, stated rather than hidden: this is a bounded window, not proof
+ * that replay is impossible. An actor who already holds the current marker path
+ * and nonce and can write inside that scratch root can still present both stamps
+ * fresh, and nothing here is a secret - the nonce is unguessable before the spawn
+ * but it is readable afterwards.
+ */
+function readChildEvidence() {
+  let value = null;
+  try {
+    value = Deno.env.get(CHILD_ENV_VAR) ?? null;
+  } catch {
+    // Only the scoped child run is granted `--allow-env`; an ordinary parent run
+    // cannot read this variable and must not treat that as an error.
+    return null;
+  }
+  if (value === null) return null;
+  const fail = (reason) => ({ ok: false, reason });
+  const separator = value.lastIndexOf(":");
+  if (separator <= 0) return fail(`value is not "<path>:<nonce>": ${JSON.stringify(value)}`);
+  const path = value.slice(0, separator);
+  const nonce = value.slice(separator + 1);
+  if (!path.startsWith("/") || nonce.length === 0) {
+    return fail(`value is not an absolute "<path>:<nonce>": ${JSON.stringify(value)}`);
+  }
+  let realPath;
+  try {
+    realPath = Deno.realPathSync(path);
+  } catch (error) {
+    return fail(`marker ${path} is unreadable: ${error.message}`);
+  }
+  const parentDir = realPath.slice(0, realPath.lastIndexOf("/")) || "/";
+  if (realPath.startsWith(REPO) || parentDir === REPO.replace(/\/+$/, "")) {
+    return fail(`marker ${realPath} is inside the repository`);
+  }
+  const parentName = parentDir.slice(parentDir.lastIndexOf("/") + 1);
+  if (!parentName.startsWith(HARNESS_ROOT_PREFIX)) {
+    return fail(`marker ${realPath} is not inside a ${HARNESS_ROOT_PREFIX}* scratch root`);
+  }
+  let stamp;
+  try {
+    stamp = JSON.parse(Deno.readTextFileSync(realPath));
+  } catch (error) {
+    return fail(`marker ${realPath} is not readable JSON: ${error.message}`);
+  }
+  if (stamp?.nonce !== nonce) {
+    return fail(`marker ${realPath} does not carry the offered nonce`);
+  }
+  const ageMs = Date.now() - Number(stamp?.createdAt);
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > CHILD_MARKER_MAX_AGE_MS) {
+    return fail(
+      `marker ${realPath} wrote ${ageMs}ms ago, outside 0..${CHILD_MARKER_MAX_AGE_MS}ms`,
+    );
+  }
+  // The file's own mtime, so a marker that outlived a hard-killed parent cannot
+  // be replayed later: its JSON stamp never changes, but its mtime does.
+  let mtimeMs;
+  try {
+    const info = Deno.statSync(realPath);
+    mtimeMs = info.mtime === null ? Number.NaN : info.mtime.getTime();
+  } catch (error) {
+    return fail(`marker ${realPath} cannot be stat'ed: ${error.message}`);
+  }
+  if (!Number.isFinite(mtimeMs)) {
+    return fail(`marker ${realPath} has no usable mtime`);
+  }
+  const mtimeAgeMs = Date.now() - mtimeMs;
+  if (mtimeAgeMs < 0 || mtimeAgeMs > CHILD_MARKER_MAX_AGE_MS) {
+    return fail(
+      `marker ${realPath} was last modified ${mtimeAgeMs}ms ago, outside ` +
+        `0..${CHILD_MARKER_MAX_AGE_MS}ms`,
+    );
+  }
+  return { ok: true, path: realPath, ageMs, mtimeAgeMs };
+}
 /** Thrown when a child outlives the deadline — named so the hung-stub fixture can
  * assert on the type, not on a message. */
 class HarnessTimeout extends Error {
@@ -48,12 +179,20 @@ class HarnessTimeout extends Error {
 /** Run a child under a real watchdog and report what happened, clearing EVERY timer.
  * `timedOut` means the watchdog fired and the child was killed; the caller decides
  * whether that is a failure. */
-async function runBoundedChild(args, { cwd, deadlineMs = 20_000 } = {}) {
+async function runBoundedChild(args, { cwd, deadlineMs = 20_000, env } = {}) {
   const started = performance.now();
   // stdout/stderr are discarded rather than piped. A pipe held by a child that will not
   // exit is a live file descriptor with a pending read, which keeps THIS process alive —
   // measured here after a kill that silently failed (see killError below).
-  const child = new Deno.Command("deno", { args, cwd, stdout: "null", stderr: "null" }).spawn();
+  const child = new Deno.Command("deno", {
+    args,
+    cwd,
+    stdout: "null",
+    stderr: "null",
+    // Markers are passed explicitly; omitting `env` entirely keeps every other
+    // spawn inheriting the ambient environment exactly as before.
+    ...(env ? { env } : {}),
+  }).spawn();
   const timers = [];
   const boundedRace = (promise, ms, fallback) => {
     let handle;
@@ -323,437 +462,482 @@ async function withMutation(root, relative, mutate, args = []) {
   }
 }
 
-const started = performance.now();
-const root = await Deno.makeTempDir({ prefix: "gate-plan-harness-" });
-const shrunk = await Deno.makeTempDir({ prefix: "gate-plan-shrunk-" });
-try {
-  // The property that matters is that nothing of ours is ever written inside the
-  // repository — asserted portably, without assuming a POSIX absolute-path shape,
-  // because this step also runs on a developer's machine (the gate itself is
-  // deliberately cross-platform). Cleanliness is asserted at the end of the run.
-  check(
-    "the scratch tree is outside the repository",
-    !root.startsWith(REPO) && Deno.realPathSync(root) !== REPO,
-    `scratch root ${root} vs repo ${REPO}`,
-  );
-
-  const base = await buildScratch(root);
-  const full = await runGate(root, ["--json"]);
-  const allIds = full.payload?.selection?.allIds ?? [];
-  const staticIds = full.payload?.selection?.staticIds ?? [];
-
-  // ── L1: selection, with nothing executed ────────────────────────────────────
-  check(
-    "the full tier selects every declared step, in plan order",
-    full.code === 0 &&
-      JSON.stringify(full.payload?.selection?.steps) === JSON.stringify(ALL_STEP_IDS),
-    `selection.steps vs the plan's ${ALL_STEP_IDS.length} ids (${allIds.length} reported)`,
-  );
-  check(
-    "the full tier's allIds is exactly the plan",
-    JSON.stringify(allIds) === JSON.stringify(ALL_STEP_IDS),
-    `allIds ${allIds.length} vs plan ${ALL_STEP_IDS.length}`,
-  );
-  const staticRun = await runGate(root, ["--affected", "--json"]);
-  check(
-    "with no change the affected tier selects exactly the static steps",
-    staticRun.payload?.selection?.tier === "static" &&
-      JSON.stringify(staticRun.payload?.selection?.steps) === JSON.stringify(STATIC_IDS),
-    `tier ${staticRun.payload?.selection?.tier} steps ${
-      JSON.stringify(staticRun.payload?.selection?.steps)
-    }`,
-  );
-  // The pin below is deliberate: it is the one place this suite asserts a literal
-  // selection set. If a selection rule changes, update it here AND cite the change
-  // on bead chrome_platform_showcase-z4u — do not loosen the assertion to survive it.
-  const explicit = await runGate(root, [
-    "--affected",
-    "--paths",
-    "routes/release-endpoints.ts",
-    "--json",
-  ]);
-  // The rule-side ids are the one literal selection pin in this suite. The static
-  // side is derived from the plan, so adding or removing a static step cannot break
-  // this — only a change to the `routes/release-endpoints.ts` rule can, and then the
-  // diff is named in the failure. If a rule changes, update this list AND cite the
-  // change on bead chrome_platform_showcase-z4u; do not loosen the assertion to
-  // survive it.
-  const RELEASE_ENDPOINT_RULE_IDS = [
-    "test-session-bounds",
-    "test-header-grammar",
-    "test-spc-bbk-device-name",
-    "test-spc-bbk-jwk-shape",
-    "test-dbsc-jwk-shape",
-    "test-evp-nonce-replay",
-    "test-speculation-probe-store",
-    "test-speculation-probe-docs",
-    "test-server-boot",
-    "test-hardening",
-  ];
-  const expectedAffected = [...STATIC_IDS, ...RELEASE_ENDPOINT_RULE_IDS];
-  const explicitSteps = explicit.payload?.selection?.steps ?? [];
-  check(
-    "the affected tier selects the static floor plus that path's rule and nothing else",
-    explicit.payload?.selection?.tier === "affected" &&
-      explicitSteps.length === expectedAffected.length &&
-      expectedAffected.every((id) => explicitSteps.includes(id)),
-    `tier ${explicit.payload?.selection?.tier}, ${explicitSteps.length} selected vs ${expectedAffected.length} expected (` +
-      `missing ${
-        expectedAffected.filter((id) => !explicitSteps.includes(id)).join(", ") || "none"
-      }, ` +
-      `extra ${explicitSteps.filter((id) => !expectedAffected.includes(id)).join(", ") || "none"})`,
-  );
-  const noChange = await runGate(root, ["--affected", "--base", base, "--json"]);
-  check(
-    "git: a clean tree against the base selects only the static floor",
-    noChange.code === 0 &&
-      JSON.stringify(noChange.payload?.selection?.steps) === JSON.stringify(STATIC_IDS),
-    `tier ${noChange.payload?.selection?.tier}, ${noChange.payload?.selection?.steps?.length} selected`,
-  );
-  await Deno.writeTextFile(`${root}/routes/release-endpoints.ts`, "export const x = 2;\n");
-  const changed = await runGate(root, ["--affected", "--base", base, "--json"]);
-  check(
-    "git: a changed path selects that path's rule on top of the static floor",
-    changed.payload?.selection?.tier === "affected" &&
-      changed.payload?.selection?.steps?.includes("test-session-bounds") &&
-      STATIC_IDS.every((id) => changed.payload.selection.steps.includes(id)),
-    `tier ${changed.payload?.selection?.tier}, ${changed.payload?.selection?.steps?.length} selected`,
-  );
-
-  // ── L1: fail-closed paths assert the reason, never a non-zero exit ──────────
-  const bogus = await runGate(root, [
-    "--affected",
-    "--base",
-    "refs/heads/does-not-exist",
-    "--json",
-  ]);
-  check(
-    "an unresolvable base fails CLOSED to the full gate, with rc 0 and a reason",
-    bogus.code === 0 && bogus.payload?.selection?.tier === "full" &&
-      String(bogus.payload?.source ?? "").startsWith("UNKNOWN change set") &&
-      bogus.text.includes("FAIL-CLOSED"),
-    `rc ${bogus.code}, tier ${bogus.payload?.selection?.tier}, source ${
-      JSON.stringify(bogus.payload?.source)?.slice(0, 60)
-    }`,
-  );
-  const index = `${root}/.git/index`;
-  const indexBackup = await Deno.readFile(index);
-  await Deno.writeFile(index, new Uint8Array(40).fill(0x7f));
-  const corrupt = await runGate(root, ["--affected", "--base", base, "--json"]);
-  await Deno.writeFile(index, indexBackup);
-  check(
-    "an unreadable change set fails CLOSED to the full gate, with rc 0 and a reason",
-    corrupt.code === 0 && corrupt.payload?.selection?.tier === "full" &&
-      String(corrupt.payload?.source ?? "").includes("index file corrupt"),
-    `rc ${corrupt.code}, tier ${corrupt.payload?.selection?.tier}, source ${
-      JSON.stringify(corrupt.payload?.source)?.slice(0, 80)
-    }`,
-  );
-  const restored = await runGate(root, ["--affected", "--base", base, "--json"]);
-  check(
-    "the harness restores the scratch repository after the corrupt-index case",
-    restored.code === 0 && restored.payload !== null,
-    `rc ${restored.code}`,
-  );
-
-  // ── L2: execution — exact task names, order, and rc propagation ─────────────
-  const green = await runGate(root, []);
-  const greenMarkers = markers(green.text);
-  check(
-    "every declared step executes, in plan order",
-    green.code === 0 && JSON.stringify(greenMarkers) === JSON.stringify(PLAN_TASKS),
-    `ran ${greenMarkers.length} of ${PLAN_TASKS.length}; first divergence at ${
-      greenMarkers.findIndex((m, i) => m !== PLAN_TASKS[i])
-    }, rc ${green.code}`,
-  );
-  const failAt = GATE_STEPS[Math.min(10, GATE_STEPS.length - 1)].task;
-  await Deno.writeTextFile(`${root}/${STUB}`, stubSource(failAt, 7));
-  const failing = await runGate(root, []);
-  const failMarkers = markers(failing.text);
-  await Deno.writeTextFile(`${root}/${STUB}`, stubSource());
-  check(
-    "a failing step stops the run and its exit code becomes the gate's",
-    failing.code === 7 && failMarkers.at(-1) === failAt,
-    `rc ${failing.code} (expected 7), last marker ${failMarkers.at(-1)} (expected ${failAt})`,
-  );
-  check(
-    "no step after the failure is executed",
-    failMarkers.length < PLAN_TASKS.length && !failMarkers.includes(PLAN_TASKS.at(-1)),
-    `ran ${failMarkers.length} of ${PLAN_TASKS.length} markers`,
-  );
-
-  // ── the process must exit on its own, measured from OUTSIDE this harness ────
-  //
-  // Finding 5v8 is not detectable from performance.now(): the harness printed green
-  // and then never exited. This spawns a real child copy through the registered task
-  // and bounds it externally, so a leaked timer or an unclosed pipe fails the gate
-  // instead of stalling it.
-  if (!CHILD_MODE) {
-    // Bounded from OUTSIDE, because performance.now() inside this process cannot see a
-    // failure to exit (finding 5v8). Spawn by NAME, not Deno.execPath(): the task's
-    // `--allow-run=deno` allowlist matches the literal path, and execPath is absolute.
-    const self = await runBoundedChild(["task", "test-run-gate-plan", "--child"], {
-      cwd: REPO,
-      deadlineMs: 20_000,
-    });
-    const verdict = childExitVerdict(self.exit, self.elapsedMs);
-    if (verdict.advisory) {
-      console.log(
-        `advisory — the child copy took ${self.elapsedMs}ms, past the ${12_000}ms design target; not a failure`,
-      );
-    }
+async function runHarness({ childMode }) {
+  const started = performance.now();
+  // Allocated INSIDE the guarded region on purpose: a throw from the second
+  // allocation used to leak the first root with nothing left to remove it.
+  let root = null;
+  let shrunk = null;
+  try {
+    root = await Deno.makeTempDir({ prefix: "gate-plan-harness-" });
+    shrunk = await Deno.makeTempDir({ prefix: "gate-plan-shrunk-" });
+    // The property that matters is that nothing of ours is ever written inside the
+    // repository — asserted portably, without assuming a POSIX absolute-path shape,
+    // because this step also runs on a developer's machine (the gate itself is
+    // deliberately cross-platform). Cleanliness is asserted at the end of the run.
     check(
-      "the harness process exits on its own (20s watchdog bounds a hang; elapsed is advisory)",
-      verdict.ok,
-      self.timedOut
-        ? `${self.error.name}: ${self.error.message}${
-          self.killError ? ` (kill failed: ${self.killError.message})` : ""
-        }`
-        : `child copy exited rc ${self.exit} after ${self.elapsedMs}ms`,
+      "the scratch tree is outside the repository",
+      !root.startsWith(REPO) && Deno.realPathSync(root) !== REPO,
+      `scratch root ${root} vs repo ${REPO}`,
     );
 
-    // Focused proofs of the two properties that check rests on, so neither is assumed:
-    // the watchdog really stops a hung child with a named failure, and a green child is
-    // not failed for being slow.
-    const hung = await runBoundedChild(["eval", "setInterval(() => {}, 1000);"], {
-      deadlineMs: 700,
-    });
-    // Note what does NOT hang: `deno eval "await new Promise(() => {})"` fails fast with
-    // "Top-level await promise never resolved" (rc 1 in ~40ms) — the first version of
-    // this proof used exactly that, and the check caught it.
-    // Printed, not just asserted: the mechanism (owned handle, real signal) should be
-    // visible in the log, since a success prints no detail line for the check below.
-    console.log(
-      `focused proof detail — uncooperative child stopped via the owned handle: kill=${
-        hung.killError?.name ?? "ok"
-      } signal=${hung.status?.signal ?? "n/a"} code=${
-        hung.status?.code ?? "n/a"
-      } after ${hung.elapsedMs}ms`,
+    const base = await buildScratch(root);
+    const full = await runGate(root, ["--json"]);
+    const allIds = full.payload?.selection?.allIds ?? [];
+    const staticIds = full.payload?.selection?.staticIds ?? [];
+
+    // ── L1: selection, with nothing executed ────────────────────────────────────
+    check(
+      "the full tier selects every declared step, in plan order",
+      full.code === 0 &&
+        JSON.stringify(full.payload?.selection?.steps) === JSON.stringify(ALL_STEP_IDS),
+      `selection.steps vs the plan's ${ALL_STEP_IDS.length} ids (${allIds.length} reported)`,
     );
     check(
-      "focused proof: the watchdog stops a hanging child and reports a named failure",
-      hung.timedOut && hung.exit === null && hung.error instanceof HarnessTimeout &&
-        hung.elapsedMs >= 700 && hung.elapsedMs < 5000 &&
-        // An uncooperative child (an idle interval that ignores the cancel file) must be
-        // stopped by the owned handle, and the reap must show the signal actually landed.
-        hung.killError === null &&
-        (hung.status?.signal === "SIGKILL" || hung.status?.code === 137),
-      `timedOut=${hung.timedOut} exit=${hung.exit} error=${hung.error?.name} after ${hung.elapsedMs}ms, kill=${
-        hung.killError?.name ?? "ok"
-      } signal=${hung.status?.signal ?? "n/a"} code=${hung.status?.code ?? "n/a"} (watchdog 700ms)`,
+      "the full tier's allIds is exactly the plan",
+      JSON.stringify(allIds) === JSON.stringify(ALL_STEP_IDS),
+      `allIds ${allIds.length} vs plan ${ALL_STEP_IDS.length}`,
     );
-    const green = childExitVerdict(0, 20_000);
-    const failed = childExitVerdict(1, 10);
-    const noExit = childExitVerdict(null, 20_000);
+    const staticRun = await runGate(root, ["--affected", "--json"]);
     check(
-      "focused proof: a green child is not failed merely for exceeding the 12s target",
-      green.ok && green.advisory && !failed.ok && !noExit.ok,
-      `green(exit 0, 20s) ok=${green.ok} advisory=${green.advisory}; rc 1 ok=${failed.ok}; no exit ok=${noExit.ok}`,
-    );
-
-    // ── Controls A and C: mutate the runner on a short plan ─────────────────────
-    // A 3-step plan exercises the loop completely, so these controls stay cheap
-    // without weakening what they prove.
-    const shortPlan = [
-      { id: "one", task: "one", tier: "static", what: "control step one" },
-      { id: "two", task: "two", tier: "static", what: "control step two" },
-      { id: "three", task: "three", tier: "affected", what: "control step three" },
-    ];
-    await Deno.mkdir(`${shrunk}/scripts`, { recursive: true });
-    for (const file of ["run-gate.mjs"]) {
-      await Deno.copyFile(`${REPO}scripts/${file}`, `${shrunk}/scripts/${file}`);
-    }
-    await Deno.writeTextFile(
-      `${shrunk}/scripts/gate-steps.mjs`,
-      `export const GATE_STEPS = ${JSON.stringify(shortPlan, null, 2)};\n` +
-        `export const ALL_STEP_IDS = GATE_STEPS.map((s) => s.id);\n` +
-        `export const STATIC_STEP_IDS = GATE_STEPS.filter((s) => s.tier === "static").map((s) => s.id);\n`,
-    );
-    await Deno.writeTextFile(
-      `${shrunk}/scripts/affected-tests.mjs`,
-      `const staticIds = ["one", "two"];\n` +
-        `export function selectSteps(paths) {\n` +
-        `  const all = ${JSON.stringify(shortPlan.map((s) => s.id))};\n` +
-        `  if (!paths || paths.length === 0) return { tier: "full", steps: all, staticIds, skipped: [], reasons: [], unmatched: [], allIds: all };\n` +
-        `  const extra = paths.includes("src/three.ts") ? ["three"] : [];\n` +
-        `  return { tier: "affected", steps: [...staticIds, ...extra], staticIds, skipped: all.filter((i) => !staticIds.includes(i) && !extra.includes(i)), reasons: [], unmatched: [], allIds: all };\n` +
-        `}\n` +
-        `export function changedPaths() { return { paths: [] }; }\n`,
-    );
-    await Deno.writeTextFile(
-      `${shrunk}/deno.json`,
-      JSON.stringify(
-        {
-          tasks: Object.fromEntries(
-            shortPlan.map((s) => [s.task, `deno run --allow-read ${STUB} ${s.task}`]),
-          ),
-        },
-        null,
-        2,
-      ),
-    );
-    await Deno.writeTextFile(`${shrunk}/${STUB}`, stubSource());
-    const shortTasks = shortPlan.map((s) => s.task);
-    const shortGreen = await runGate(shrunk, []);
-    check(
-      "control baseline: the short plan runs all three steps",
-      shortGreen.code === 0 &&
-        JSON.stringify(markers(shortGreen.text)) === JSON.stringify(shortTasks),
-      `markers ${JSON.stringify(markers(shortGreen.text))}, rc ${shortGreen.code}`,
-    );
-
-    // Control A — a step the loop skips entirely, before the spawn.
-    const skipped = await withMutation(shrunk, "scripts/run-gate.mjs", (source) =>
-      source.replace(
-        '  const child = new Deno.Command("deno", {',
-        '  if (step.id === "two") continue;\n  const child = new Deno.Command("deno", {',
-      ));
-    const skippedMarkers = skipped === null ? [] : markers(skipped.text);
-    check(
-      "control A applied (control A is only evidence if it could fail)",
-      skipped !== null && skippedMarkers.length === 2,
-      `mutation ${skipped === null ? "did not apply" : "applied"}, markers ${
-        JSON.stringify(skippedMarkers)
+      "with no change the affected tier selects exactly the static steps",
+      staticRun.payload?.selection?.tier === "static" &&
+        JSON.stringify(staticRun.payload?.selection?.steps) === JSON.stringify(STATIC_IDS),
+      `tier ${staticRun.payload?.selection?.tier} steps ${
+        JSON.stringify(staticRun.payload?.selection?.steps)
       }`,
     );
+    // The pin below is deliberate: it is the one place this suite asserts a literal
+    // selection set. If a selection rule changes, update it here AND cite the change
+    // on bead chrome_platform_showcase-z4u — do not loosen the assertion to survive it.
+    const explicit = await runGate(root, [
+      "--affected",
+      "--paths",
+      "routes/release-endpoints.ts",
+      "--json",
+    ]);
+    // The rule-side ids are the one literal selection pin in this suite. The static
+    // side is derived from the plan, so adding or removing a static step cannot break
+    // this — only a change to the `routes/release-endpoints.ts` rule can, and then the
+    // diff is named in the failure. If a rule changes, update this list AND cite the
+    // change on bead chrome_platform_showcase-z4u; do not loosen the assertion to
+    // survive it.
+    const RELEASE_ENDPOINT_RULE_IDS = [
+      "test-session-bounds",
+      "test-header-grammar",
+      "test-spc-bbk-device-name",
+      "test-spc-bbk-jwk-shape",
+      "test-dbsc-jwk-shape",
+      "test-evp-nonce-replay",
+      "test-speculation-probe-store",
+      "test-speculation-probe-docs",
+      "test-server-boot",
+      "test-hardening",
+    ];
+    const expectedAffected = [...STATIC_IDS, ...RELEASE_ENDPOINT_RULE_IDS];
+    const explicitSteps = explicit.payload?.selection?.steps ?? [];
     check(
-      "control A: the expected-set assertion detects a skipped step",
-      JSON.stringify(skippedMarkers) !== JSON.stringify(shortTasks) &&
-        !skippedMarkers.includes("two"),
-      `markers ${JSON.stringify(skippedMarkers)} would have passed an expected-set assertion`,
+      "the affected tier selects the static floor plus that path's rule and nothing else",
+      explicit.payload?.selection?.tier === "affected" &&
+        explicitSteps.length === expectedAffected.length &&
+        expectedAffected.every((id) => explicitSteps.includes(id)),
+      `tier ${explicit.payload?.selection?.tier}, ${explicitSteps.length} selected vs ${expectedAffected.length} expected (` +
+        `missing ${
+          expectedAffected.filter((id) => !explicitSteps.includes(id)).join(", ") || "none"
+        }, ` +
+        `extra ${
+          explicitSteps.filter((id) => !expectedAffected.includes(id)).join(", ") || "none"
+        })`,
+    );
+    const noChange = await runGate(root, ["--affected", "--base", base, "--json"]);
+    check(
+      "git: a clean tree against the base selects only the static floor",
+      noChange.code === 0 &&
+        JSON.stringify(noChange.payload?.selection?.steps) === JSON.stringify(STATIC_IDS),
+      `tier ${noChange.payload?.selection?.tier}, ${noChange.payload?.selection?.steps?.length} selected`,
+    );
+    await Deno.writeTextFile(`${root}/routes/release-endpoints.ts`, "export const x = 2;\n");
+    const changed = await runGate(root, ["--affected", "--base", base, "--json"]);
+    check(
+      "git: a changed path selects that path's rule on top of the static floor",
+      changed.payload?.selection?.tier === "affected" &&
+        changed.payload?.selection?.steps?.includes("test-session-bounds") &&
+        STATIC_IDS.every((id) => changed.payload.selection.steps.includes(id)),
+      `tier ${changed.payload?.selection?.tier}, ${changed.payload?.selection?.steps?.length} selected`,
     );
 
-    // Control C — a failing step whose status is never awaited, so the failure cannot
-    // reach the exit code. Markers alone would look fine: this is why the rc/ordering
-    // assertion exists as a control of its own.
-    await Deno.writeTextFile(`${shrunk}/${STUB}`, stubSource("two", 7));
-    const unawaited = await withMutation(shrunk, "scripts/run-gate.mjs", (source) =>
-      source.replace(
-        "  const status = await child.status;",
-        '  if (step.id === "two") continue;\n  const status = await child.status;',
-      ));
-    await Deno.writeTextFile(`${shrunk}/${STUB}`, stubSource());
+    // ── L1: fail-closed paths assert the reason, never a non-zero exit ──────────
+    const bogus = await runGate(root, [
+      "--affected",
+      "--base",
+      "refs/heads/does-not-exist",
+      "--json",
+    ]);
     check(
-      "control C applied (the unawaited failure must be a real mutation)",
-      unawaited !== null && unawaited.code === 0,
-      `mutation ${unawaited === null ? "did not apply" : "applied"}, rc ${unawaited?.code}`,
+      "an unresolvable base fails CLOSED to the full gate, with rc 0 and a reason",
+      bogus.code === 0 && bogus.payload?.selection?.tier === "full" &&
+        String(bogus.payload?.source ?? "").startsWith("UNKNOWN change set") &&
+        bogus.text.includes("FAIL-CLOSED"),
+      `rc ${bogus.code}, tier ${bogus.payload?.selection?.tier}, source ${
+        JSON.stringify(bogus.payload?.source)?.slice(0, 60)
+      }`,
     );
+    const index = `${root}/.git/index`;
+    const indexBackup = await Deno.readFile(index);
+    await Deno.writeFile(index, new Uint8Array(40).fill(0x7f));
+    const corrupt = await runGate(root, ["--affected", "--base", base, "--json"]);
+    await Deno.writeFile(index, indexBackup);
     check(
-      "control C: the rc assertion detects a failure the runner never awaited",
-      unawaited !== null && unawaited.code === 0 && markers(unawaited.text).includes("three"),
-      `rc ${unawaited?.code} while step \`two\` exited 7 — a markers-only harness would call this green`,
+      "an unreadable change set fails CLOSED to the full gate, with rc 0 and a reason",
+      corrupt.code === 0 && corrupt.payload?.selection?.tier === "full" &&
+        String(corrupt.payload?.source ?? "").includes("index file corrupt"),
+      `rc ${corrupt.code}, tier ${corrupt.payload?.selection?.tier}, source ${
+        JSON.stringify(corrupt.payload?.source)?.slice(0, 80)
+      }`,
+    );
+    const restored = await runGate(root, ["--affected", "--base", base, "--json"]);
+    check(
+      "the harness restores the scratch repository after the corrupt-index case",
+      restored.code === 0 && restored.payload !== null,
+      `rc ${restored.code}`,
     );
 
-    // ── the deadline is a real bound, and cancelling leaves nothing behind ──────
-    //
-    // With `output({ timeout })` this harness could hang the gate forever. The stub
-    // below never exits on its own; the only way this check passes is the deadline
-    // firing, the child being killed, and the stubbed tree observing cancellation
-    // and reporting its own exit. Note the honest limit: the exit proof shows the
-    // *stubbed* child stopped. A hostile uncooperative process is bounded by the
-    // SIGKILL of the child and by the harness never waiting on it again, and the
-    // review evidence additionally checks the process table.
-    const hangTask = PLAN_TASKS[Math.min(3, PLAN_TASKS.length - 1)];
-    const cancelFile = new URL(HARNESS_CANCEL, `file://${root}/`);
-    const exitProof = new URL(`${HARNESS_CANCEL}.exited`, `file://${root}/`);
-    for (const url of [cancelFile, exitProof]) {
-      try {
-        await Deno.remove(url);
-      } catch { /* not there */ }
-    }
-    await Deno.writeTextFile(`${root}/${STUB}`, stubSource(null, 7, hangTask));
-    const hangStart = performance.now();
-    let hangError = null;
-    try {
-      await runGate(root, [], 800);
-    } catch (error) {
-      hangError = error;
-    }
-    const hangMs = Math.round(performance.now() - hangStart);
+    // ── L2: execution — exact task names, order, and rc propagation ─────────────
+    const green = await runGate(root, []);
+    const greenMarkers = markers(green.text);
+    check(
+      "every declared step executes, in plan order",
+      green.code === 0 && JSON.stringify(greenMarkers) === JSON.stringify(PLAN_TASKS),
+      `ran ${greenMarkers.length} of ${PLAN_TASKS.length}; first divergence at ${
+        greenMarkers.findIndex((m, i) => m !== PLAN_TASKS[i])
+      }, rc ${green.code}`,
+    );
+    const failAt = GATE_STEPS[Math.min(10, GATE_STEPS.length - 1)].task;
+    await Deno.writeTextFile(`${root}/${STUB}`, stubSource(failAt, 7));
+    const failing = await runGate(root, []);
+    const failMarkers = markers(failing.text);
     await Deno.writeTextFile(`${root}/${STUB}`, stubSource());
     check(
-      "a child that never exits is stopped by the deadline, and reported as a named error",
-      hangError instanceof HarnessTimeout && hangMs >= 800 && hangMs < 5000,
-      `${
-        hangError
-          ? `${hangError.name}: ${hangError.message}`
-          : "no error — the child was NOT bounded"
-      } (deadline 800ms, elapsed ${hangMs}ms)`,
+      "a failing step stops the run and its exit code becomes the gate's",
+      failing.code === 7 && failMarkers.at(-1) === failAt,
+      `rc ${failing.code} (expected 7), last marker ${failMarkers.at(-1)} (expected ${failAt})`,
     );
-    let stopped = false;
-    for (let i = 0; i < 150 && !stopped; i++) {
-      try {
-        await Deno.stat(exitProof);
-        stopped = true;
-      } catch {
-        await new Promise((r) => setTimeout(r, 20));
+    check(
+      "no step after the failure is executed",
+      failMarkers.length < PLAN_TASKS.length && !failMarkers.includes(PLAN_TASKS.at(-1)),
+      `ran ${failMarkers.length} of ${PLAN_TASKS.length} markers`,
+    );
+
+    // ── the process must exit on its own, measured from OUTSIDE this harness ────
+    //
+    // Finding 5v8 is not detectable from performance.now(): the harness printed green
+    // and then never exited. This spawns a real child copy through the registered task
+    // and bounds it externally, so a leaked timer or an unclosed pipe fails the gate
+    // instead of stalling it.
+    if (!childMode) {
+      // Bounded from OUTSIDE, because performance.now() inside this process cannot see a
+      // failure to exit (finding 5v8). Spawn by NAME, not Deno.execPath(): the task's
+      // `--allow-run=deno` allowlist matches the literal path, and execPath is absolute.
+      // The child is signalled with parent-created evidence, not a flag: the
+      // marker is written moments before the spawn and its nonce travels only in
+      // the scoped environment variable below. `--allow-run=deno` matches the
+      // NAME, so the spawn must not use Deno.execPath().
+      const nonce = crypto.randomUUID();
+      const markerPath = await writeChildMarker(root, nonce);
+      const self = await runBoundedChild(["task", "test-run-gate-plan"], {
+        cwd: REPO,
+        deadlineMs: 20_000,
+        env: { [CHILD_ENV_VAR]: `${markerPath}:${nonce}` },
+      });
+      const verdict = childExitVerdict(self.exit, self.elapsedMs);
+      if (verdict.advisory) {
+        console.log(
+          `advisory — the child copy took ${self.elapsedMs}ms, past the ${12_000}ms design target; not a failure`,
+        );
       }
+      check(
+        "the harness process exits on its own (20s watchdog bounds a hang; elapsed is advisory)",
+        verdict.ok,
+        self.timedOut
+          ? `${self.error.name}: ${self.error.message}${
+            self.killError ? ` (kill failed: ${self.killError.message})` : ""
+          }`
+          : `child copy exited rc ${self.exit} after ${self.elapsedMs}ms`,
+      );
+
+      // Focused proofs of the two properties that check rests on, so neither is assumed:
+      // the watchdog really stops a hung child with a named failure, and a green child is
+      // not failed for being slow.
+      const hung = await runBoundedChild(["eval", "setInterval(() => {}, 1000);"], {
+        deadlineMs: 700,
+      });
+      // Note what does NOT hang: `deno eval "await new Promise(() => {})"` fails fast with
+      // "Top-level await promise never resolved" (rc 1 in ~40ms) — the first version of
+      // this proof used exactly that, and the check caught it.
+      // Printed, not just asserted: the mechanism (owned handle, real signal) should be
+      // visible in the log, since a success prints no detail line for the check below.
+      console.log(
+        `focused proof detail — uncooperative child stopped via the owned handle: kill=${
+          hung.killError?.name ?? "ok"
+        } signal=${hung.status?.signal ?? "n/a"} code=${
+          hung.status?.code ?? "n/a"
+        } after ${hung.elapsedMs}ms`,
+      );
+      check(
+        "focused proof: the watchdog stops a hanging child and reports a named failure",
+        hung.timedOut && hung.exit === null && hung.error instanceof HarnessTimeout &&
+          hung.elapsedMs >= 700 && hung.elapsedMs < 5000 &&
+          // An uncooperative child (an idle interval that ignores the cancel file) must be
+          // stopped by the owned handle, and the reap must show the signal actually landed.
+          hung.killError === null &&
+          (hung.status?.signal === "SIGKILL" || hung.status?.code === 137),
+        `timedOut=${hung.timedOut} exit=${hung.exit} error=${hung.error?.name} after ${hung.elapsedMs}ms, kill=${
+          hung.killError?.name ?? "ok"
+        } signal=${hung.status?.signal ?? "n/a"} code=${
+          hung.status?.code ?? "n/a"
+        } (watchdog 700ms)`,
+      );
+      const green = childExitVerdict(0, 20_000);
+      const failed = childExitVerdict(1, 10);
+      const noExit = childExitVerdict(null, 20_000);
+      check(
+        "focused proof: a green child is not failed merely for exceeding the 12s target",
+        green.ok && green.advisory && !failed.ok && !noExit.ok,
+        `green(exit 0, 20s) ok=${green.ok} advisory=${green.advisory}; rc 1 ok=${failed.ok}; no exit ok=${noExit.ok}`,
+      );
+
+      // ── Controls A and C: mutate the runner on a short plan ─────────────────────
+      // A 3-step plan exercises the loop completely, so these controls stay cheap
+      // without weakening what they prove.
+      const shortPlan = [
+        { id: "one", task: "one", tier: "static", what: "control step one" },
+        { id: "two", task: "two", tier: "static", what: "control step two" },
+        { id: "three", task: "three", tier: "affected", what: "control step three" },
+      ];
+      await Deno.mkdir(`${shrunk}/scripts`, { recursive: true });
+      for (const file of ["run-gate.mjs"]) {
+        await Deno.copyFile(`${REPO}scripts/${file}`, `${shrunk}/scripts/${file}`);
+      }
+      await Deno.writeTextFile(
+        `${shrunk}/scripts/gate-steps.mjs`,
+        `export const GATE_STEPS = ${JSON.stringify(shortPlan, null, 2)};\n` +
+          `export const ALL_STEP_IDS = GATE_STEPS.map((s) => s.id);\n` +
+          `export const STATIC_STEP_IDS = GATE_STEPS.filter((s) => s.tier === "static").map((s) => s.id);\n`,
+      );
+      await Deno.writeTextFile(
+        `${shrunk}/scripts/affected-tests.mjs`,
+        `const staticIds = ["one", "two"];\n` +
+          `export function selectSteps(paths) {\n` +
+          `  const all = ${JSON.stringify(shortPlan.map((s) => s.id))};\n` +
+          `  if (!paths || paths.length === 0) return { tier: "full", steps: all, staticIds, skipped: [], reasons: [], unmatched: [], allIds: all };\n` +
+          `  const extra = paths.includes("src/three.ts") ? ["three"] : [];\n` +
+          `  return { tier: "affected", steps: [...staticIds, ...extra], staticIds, skipped: all.filter((i) => !staticIds.includes(i) && !extra.includes(i)), reasons: [], unmatched: [], allIds: all };\n` +
+          `}\n` +
+          `export function changedPaths() { return { paths: [] }; }\n`,
+      );
+      await Deno.writeTextFile(
+        `${shrunk}/deno.json`,
+        JSON.stringify(
+          {
+            tasks: Object.fromEntries(
+              shortPlan.map((s) => [s.task, `deno run --allow-read ${STUB} ${s.task}`]),
+            ),
+          },
+          null,
+          2,
+        ),
+      );
+      await Deno.writeTextFile(`${shrunk}/${STUB}`, stubSource());
+      const shortTasks = shortPlan.map((s) => s.task);
+      const shortGreen = await runGate(shrunk, []);
+      check(
+        "control baseline: the short plan runs all three steps",
+        shortGreen.code === 0 &&
+          JSON.stringify(markers(shortGreen.text)) === JSON.stringify(shortTasks),
+        `markers ${JSON.stringify(markers(shortGreen.text))}, rc ${shortGreen.code}`,
+      );
+
+      // Control A — a step the loop skips entirely, before the spawn.
+      const skipped = await withMutation(shrunk, "scripts/run-gate.mjs", (source) =>
+        source.replace(
+          '  const child = new Deno.Command("deno", {',
+          '  if (step.id === "two") continue;\n  const child = new Deno.Command("deno", {',
+        ));
+      const skippedMarkers = skipped === null ? [] : markers(skipped.text);
+      check(
+        "control A applied (control A is only evidence if it could fail)",
+        skipped !== null && skippedMarkers.length === 2,
+        `mutation ${skipped === null ? "did not apply" : "applied"}, markers ${
+          JSON.stringify(skippedMarkers)
+        }`,
+      );
+      check(
+        "control A: the expected-set assertion detects a skipped step",
+        JSON.stringify(skippedMarkers) !== JSON.stringify(shortTasks) &&
+          !skippedMarkers.includes("two"),
+        `markers ${JSON.stringify(skippedMarkers)} would have passed an expected-set assertion`,
+      );
+
+      // Control C — a failing step whose status is never awaited, so the failure cannot
+      // reach the exit code. Markers alone would look fine: this is why the rc/ordering
+      // assertion exists as a control of its own.
+      await Deno.writeTextFile(`${shrunk}/${STUB}`, stubSource("two", 7));
+      const unawaited = await withMutation(
+        shrunk,
+        "scripts/run-gate.mjs",
+        (source) =>
+          source.replace(
+            "  const status = await child.status;",
+            '  if (step.id === "two") continue;\n  const status = await child.status;',
+          ),
+      );
+      await Deno.writeTextFile(`${shrunk}/${STUB}`, stubSource());
+      check(
+        "control C applied (the unawaited failure must be a real mutation)",
+        unawaited !== null && unawaited.code === 0,
+        `mutation ${unawaited === null ? "did not apply" : "applied"}, rc ${unawaited?.code}`,
+      );
+      check(
+        "control C: the rc assertion detects a failure the runner never awaited",
+        unawaited !== null && unawaited.code === 0 && markers(unawaited.text).includes("three"),
+        `rc ${unawaited?.code} while step \`two\` exited 7 — a markers-only harness would call this green`,
+      );
+
+      // ── the deadline is a real bound, and cancelling leaves nothing behind ──────
+      //
+      // With `output({ timeout })` this harness could hang the gate forever. The stub
+      // below never exits on its own; the only way this check passes is the deadline
+      // firing, the child being killed, and the stubbed tree observing cancellation
+      // and reporting its own exit. Note the honest limit: the exit proof shows the
+      // *stubbed* child stopped. A hostile uncooperative process is bounded by the
+      // SIGKILL of the child and by the harness never waiting on it again, and the
+      // review evidence additionally checks the process table.
+      const hangTask = PLAN_TASKS[Math.min(3, PLAN_TASKS.length - 1)];
+      const cancelFile = new URL(HARNESS_CANCEL, `file://${root}/`);
+      const exitProof = new URL(`${HARNESS_CANCEL}.exited`, `file://${root}/`);
+      for (const url of [cancelFile, exitProof]) {
+        try {
+          await Deno.remove(url);
+        } catch { /* not there */ }
+      }
+      await Deno.writeTextFile(`${root}/${STUB}`, stubSource(null, 7, hangTask));
+      const hangStart = performance.now();
+      let hangError = null;
+      try {
+        await runGate(root, [], 800);
+      } catch (error) {
+        hangError = error;
+      }
+      const hangMs = Math.round(performance.now() - hangStart);
+      await Deno.writeTextFile(`${root}/${STUB}`, stubSource());
+      check(
+        "a child that never exits is stopped by the deadline, and reported as a named error",
+        hangError instanceof HarnessTimeout && hangMs >= 800 && hangMs < 5000,
+        `${
+          hangError
+            ? `${hangError.name}: ${hangError.message}`
+            : "no error — the child was NOT bounded"
+        } (deadline 800ms, elapsed ${hangMs}ms)`,
+      );
+      let stopped = false;
+      for (let i = 0; i < 150 && !stopped; i++) {
+        try {
+          await Deno.stat(exitProof);
+          stopped = true;
+        } catch {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      }
+      check(
+        "cancelling the hung child leaves no orphan behind",
+        stopped,
+        "the hung stub never reported its own exit after cancellation — it may still be running",
+      );
+      try {
+        await Deno.remove(exitProof);
+      } catch { /* fine */ }
+
+      // Control B — a valid but WRONG selection. It runs on the explicit `--paths` seam:
+      // mutating a file inside the scratch repository would make that path itself a
+      // changed, unmatched path, and the runner would correctly fail closed to the full
+      // tier, so the control would appear to work for entirely the wrong reason.
+      const affectedArgs = ["--affected", "--paths", "routes/release-endpoints.ts", "--json"];
+      const beforeB = await runGate(root, affectedArgs);
+      const afterB = await withMutation(
+        root,
+        "scripts/affected-tests.mjs",
+        (source) => source.replace('"test-spc-bbk-device-name",', ""),
+        affectedArgs,
+      );
+      const beforeSteps = beforeB.payload?.selection?.steps ?? [];
+      const afterSteps = afterB?.payload?.selection?.steps ?? [];
+      check(
+        "control B applied on the affected tier, not by failing closed",
+        afterB?.payload?.selection?.tier === "affected" && afterSteps.length !== beforeSteps.length,
+        `tier ${afterB?.payload?.selection?.tier}, ${beforeSteps.length} -> ${afterSteps.length} selected`,
+      );
+      check(
+        "control B: the expected-set assertion detects a wrong exclusion",
+        beforeSteps.includes("test-spc-bbk-device-name") &&
+          !afterSteps.includes("test-spc-bbk-device-name"),
+        `${beforeSteps.length} -> ${afterSteps.length}; excluded id present before: ${
+          beforeSteps.includes("test-spc-bbk-device-name")
+        }`,
+      );
+      check(
+        "the scratch selector was restored after control B",
+        JSON.stringify(
+          (await runGate(root, ["--affected", "--paths", "routes/release-endpoints.ts", "--json"]))
+            .payload?.selection?.steps,
+        ) === JSON.stringify(beforeSteps),
+        "selection after restore differs from the baseline",
+      );
     }
-    check(
-      "cancelling the hung child leaves no orphan behind",
-      stopped,
-      "the hung stub never reported its own exit after cancellation — it may still be running",
-    );
-    try {
-      await Deno.remove(exitProof);
-    } catch { /* fine */ }
-
-    // Control B — a valid but WRONG selection. It runs on the explicit `--paths` seam:
-    // mutating a file inside the scratch repository would make that path itself a
-    // changed, unmatched path, and the runner would correctly fail closed to the full
-    // tier, so the control would appear to work for entirely the wrong reason.
-    const affectedArgs = ["--affected", "--paths", "routes/release-endpoints.ts", "--json"];
-    const beforeB = await runGate(root, affectedArgs);
-    const afterB = await withMutation(
-      root,
-      "scripts/affected-tests.mjs",
-      (source) => source.replace('"test-spc-bbk-device-name",', ""),
-      affectedArgs,
-    );
-    const beforeSteps = beforeB.payload?.selection?.steps ?? [];
-    const afterSteps = afterB?.payload?.selection?.steps ?? [];
-    check(
-      "control B applied on the affected tier, not by failing closed",
-      afterB?.payload?.selection?.tier === "affected" && afterSteps.length !== beforeSteps.length,
-      `tier ${afterB?.payload?.selection?.tier}, ${beforeSteps.length} -> ${afterSteps.length} selected`,
-    );
-    check(
-      "control B: the expected-set assertion detects a wrong exclusion",
-      beforeSteps.includes("test-spc-bbk-device-name") &&
-        !afterSteps.includes("test-spc-bbk-device-name"),
-      `${beforeSteps.length} -> ${afterSteps.length}; excluded id present before: ${
-        beforeSteps.includes("test-spc-bbk-device-name")
-      }`,
-    );
-    check(
-      "the scratch selector was restored after control B",
-      JSON.stringify(
-        (await runGate(root, ["--affected", "--paths", "routes/release-endpoints.ts", "--json"]))
-          .payload?.selection?.steps,
-      ) === JSON.stringify(beforeSteps),
-      "selection after restore differs from the baseline",
-    );
+  } finally {
+    // Covers normal throws. A SIGKILL, a fleet timeout or the reaper cannot run
+    // this block, and no stronger claim is made anywhere.
+    if (root) await Deno.remove(root, { recursive: true }).catch(() => {});
+    if (shrunk) await Deno.remove(shrunk, { recursive: true }).catch(() => {});
   }
-} finally {
-  await Deno.remove(root, { recursive: true }).catch(() => {});
-  await Deno.remove(shrunk, { recursive: true }).catch(() => {});
+  // Wall-clock: the design budget is ~1.5s with a 12s ceiling, measured in review.
+  // The primary bound is the per-child deadline in runGate, which actually fires;
+  // this end-of-run assertion is only a secondary pathology guard, deliberately
+  // loose (30s) because this runs on a shared VM where a heavy job can starve it.
+  // A wall-clock flake must never fail the gate; exceeding the 12s ceiling on a
+  // healthy machine means split this step, not raise the number.
+  const elapsed = Math.round(performance.now() - started);
+  console.log(`\ngate plan harness: ${elapsed}ms (design budget ~1500ms, ceiling 12000ms)`);
+  if (elapsed > 30_000) {
+    console.error(`FAIL — the harness took ${elapsed}ms, which is a pathology on any machine`);
+    failures++;
+  }
+
+  if (failures) {
+    console.error(`\n${failures} gate plan execution check(s) failed`);
+    throw new Error(`${failures} gate plan execution check(s) failed`);
+  }
+  console.log("gate plan execution: the declared plan is the plan that is selected and executed");
 }
 
-// Wall-clock: the design budget is ~1.5s with a 12s ceiling, measured in review.
-// The primary bound is the per-child deadline in runGate, which actually fires;
-// this end-of-run assertion is only a secondary pathology guard, deliberately
-// loose (30s) because this runs on a shared VM where a heavy job can starve it.
-// A wall-clock flake must never fail the gate; exceeding the 12s ceiling on a
-// healthy machine means split this step, not raise the number.
-const elapsed = Math.round(performance.now() - started);
-console.log(`\ngate plan harness: ${elapsed}ms (design budget ~1500ms, ceiling 12000ms)`);
-if (elapsed > 30_000) {
-  console.error(`FAIL — the harness took ${elapsed}ms, which is a pathology on any machine`);
-  failures++;
+// Registration, decided before anything runs. Exactly one case exists per
+// process: the parent suite, the child copy that must exit on its own, or - when
+// the environment variable is present but cannot be proven to come from a live
+// parent - one named failing test that spawns nothing.
+const childEvidence = readChildEvidence();
+if (childEvidence === null) {
+  Deno.test("the declared gate plan is the plan that is selected and executed", async () => {
+    await runHarness({ childMode: false });
+  });
+} else if (childEvidence.ok) {
+  Deno.test("the harness child copy runs its fixtures and exits on its own", async () => {
+    await runHarness({ childMode: true });
+  });
+} else {
+  Deno.test("the harness child marker is not evidence of a live parent", () => {
+    throw new Error(
+      `refusing to run as a harness child: ${childEvidence.reason}. This process was not ` +
+        `spawned by a parent harness in this run, so it must not skip the self-exit proof ` +
+        `(finding 5v8) and must not spawn a child of its own.`,
+    );
+  });
 }
-
-if (failures) {
-  console.error(`\n${failures} gate plan execution check(s) failed`);
-  Deno.exit(1);
-}
-console.log("gate plan execution: the declared plan is the plan that is selected and executed");
