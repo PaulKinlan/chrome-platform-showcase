@@ -1,6 +1,13 @@
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-
+// Corner-shape vocabulary and rendered gallery — migrated in place to native
+// Deno.test (Stage 2 of the dty proposal, bead dty.1).
+//
+// Same file path, same task id (`test-corner-shape-values`), same ordered gate
+// step, same subject and the same 37 assertions — the module-level `assert(...)`
+// calls became named cases so a failure says which behaviour broke, and the legacy
+// final PASS line is printed by the task through scripts/native-test.mjs --summary.
+// The child keeps exactly the original permission: `--allow-read` for the two file
+// reads below, nothing more (with no flag those reads fail NotCapable).
+//
 // Vocabulary from https://drafts.csswg.org/css-borders-4/#typedef-corner-shape-value.
 //
 // Two layers here, and bead chrome_platform_showcase-dxk is about the second:
@@ -16,30 +23,27 @@ import { readFileSync } from "node:fs";
 //      the DOM it built and the strings it wrote. Browser parsing/rendering of
 //      `corner-shape` itself is what the chrome-devtools-mcp run in the kz8
 //      evidence covers; this suite is deterministic and offline (two file reads).
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
 const feature = new URL("../v155/css-corner-shorthand-properties/", import.meta.url);
 const keywords = ["round", "bevel", "scoop", "notch", "squircle", "square"];
 
-const galleryHtml = readFileSync(new URL("shape-gallery/index.html", feature), "utf8");
-const builderHtml = readFileSync(new URL("corner-builder/index.html", feature), "utf8");
-
-const builderList = builderHtml.match(/const SHAPES = \[([^\]]+)\];/);
-assert.ok(builderList, "Builder must expose its shape vocabulary");
-const builderValues = [...builderList[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
-assert.deepEqual(
-  builderValues,
-  keywords,
-  "builder vocabulary must be the CSS Borders 4 keyword list",
-);
+let galleryHtmlCache = null;
+const galleryHtml =
+  () => (galleryHtmlCache ??= readFileSync(new URL("shape-gallery/index.html", feature), "utf8"));
+const builderHtml = () => readFileSync(new URL("corner-builder/index.html", feature), "utf8");
 
 // The page's own inline script — everything except the deferred telemetry <script src>.
-const galleryScript = [
-  ...galleryHtml.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi),
-]
-  .map((match) => match[1]).join("\n");
-assert.ok(
-  galleryScript.includes("const SHAPES = ["),
-  "gallery script did not parse out of the page",
-);
+function galleryScript() {
+  const script = [...galleryHtml().matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)]
+    .map((match) => match[1]).join("\n");
+  assert.ok(
+    script.includes("const SHAPES = ["),
+    "gallery script did not parse out of the page",
+  );
+  return script;
+}
 
 function makeStyle() {
   const props = {};
@@ -91,7 +95,7 @@ function runGallery({ supported, radius = "12" }) {
   };
   const window = { showcaseTelemetry: { assert: (...args) => telemetry.push(args) } };
 
-  new Function("document", "CSS", "window", "console", galleryScript)(
+  new Function("document", "CSS", "window", "console", galleryScript())(
     document,
     CSS,
     window,
@@ -123,214 +127,233 @@ function parseSupportCounts(text) {
   return match ? [Number(match[1]), Number(match[2])] : null;
 }
 
-// ── the rendered gallery ─────────────────────────────────────────────────────
-const allSupported = runGallery({ supported: () => true });
-const renderedShapes = allSupported.swatches.map((swatch) => swatch.shape);
+const allSupported = () => runGallery({ supported: () => true });
+const renderedCount = 7;
 
-// The vocabulary claim is now read off the RENDERED page, not off a regex over the
-// source: order and membership both have to match the spec list plus the functional
-// form the gallery exists to demonstrate.
-assert.deepEqual(
-  renderedShapes,
-  [...keywords, "superellipse(2)"],
-  `gallery rendered ${
-    JSON.stringify(renderedShapes)
-  }, expected the keyword list plus superellipse(2)`,
-);
+Deno.test("ok — builder exposes the CSS Borders 4 keyword vocabulary", () => {
+  const builderList = builderHtml().match(/const SHAPES = \[([^\]]+)\];/);
+  assert.ok(builderList, "Builder must expose its shape vocabulary");
+  const builderValues = [...builderList[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
+  assert.deepEqual(
+    builderValues,
+    keywords,
+    "builder vocabulary must be the CSS Borders 4 keyword list",
+  );
+});
 
-// Every value the page feature-detects must be corner-shape. This replaces the old
-// "not the newer <code>corner</code> shorthands" copy check: the page's own calls
-// are inspected, so probing the wrong property (or a `corner` shorthand) fails.
-assert.deepEqual(
-  allSupported.probes.map((probe) => probe.property),
-  renderedShapes.map(() => "corner-shape"),
-  `gallery probed ${
-    JSON.stringify(allSupported.probes.map((p) => p.property))
-  } instead of corner-shape`,
-);
-assert.deepEqual(
-  allSupported.probes.map((probe) => probe.value),
-  renderedShapes,
-  "probed the wrong values",
-);
+Deno.test("ok — gallery renders the keyword list plus the functional form", () => {
+  const renderedShapes = allSupported().swatches.map((swatch) => swatch.shape);
+  assert.deepEqual(
+    renderedShapes,
+    [...keywords, "superellipse(2)"],
+    `gallery rendered ${
+      JSON.stringify(renderedShapes)
+    }, expected the keyword list plus superellipse(2)`,
+  );
+});
 
-// Supported branch: the label, the class and the applied custom property all agree.
-assert.deepEqual(
-  allSupported.swatches.map((swatch) => swatch.label),
-  renderedShapes.map(() => "supported"),
-  "each supported example must be labelled 'supported'",
-);
-assert.deepEqual(
-  allSupported.swatches.map((swatch) => /\bunsupported\b/.test(swatch.className)),
-  renderedShapes.map(() => false),
-  "a supported example must not carry the unsupported class",
-);
-assert.deepEqual(
-  allSupported.swatches.map((swatch) => swatch.boxProps["corner-shape"]),
-  renderedShapes,
-  "each supported box must be given its own corner-shape value",
-);
-assert.deepEqual(
-  allSupported.swatches.map((swatch) => swatch.boxProps.borderRadius),
-  renderedShapes.map(() => "12px"),
-  "every box must take the radius from the control",
-);
+Deno.test("ok — gallery feature-detects corner-shape for every rendered example", () => {
+  const gallery = allSupported();
+  const renderedShapes = gallery.swatches.map((swatch) => swatch.shape);
+  // Every value the page feature-detects must be corner-shape. This replaces the old
+  // "not the newer <code>corner</code> shorthands" copy check: the page's own calls
+  // are inspected, so probing the wrong property (or a `corner` shorthand) fails.
+  assert.deepEqual(
+    gallery.probes.map((probe) => probe.property),
+    renderedShapes.map(() => "corner-shape"),
+    `gallery probed ${
+      JSON.stringify(gallery.probes.map((p) => p.property))
+    } instead of corner-shape`,
+  );
+  assert.deepEqual(
+    gallery.probes.map((probe) => probe.value),
+    renderedShapes,
+    "probed the wrong values",
+  );
+});
 
-// The count and support state in the page's summary must agree with what it rendered.
-// Parsed counts ([supported, total]) are compared against the rendered DOM rather
-// than pinning exact prose, so harmless rewordings stay green while hardcoded or
-// inaccurate counts fail.
-const renderedCount = allSupported.swatches.length;
-assert.equal(renderedCount, 7, `expected 7 examples rendered, got ${renderedCount}`);
+Deno.test("ok — supported branch labels, classes and applied properties agree with the DOM", () => {
+  const gallery = allSupported();
+  const renderedShapes = gallery.swatches.map((swatch) => swatch.shape);
+  // Supported branch: the label, the class and the applied custom property all agree.
+  assert.deepEqual(
+    gallery.swatches.map((swatch) => swatch.label),
+    renderedShapes.map(() => "supported"),
+    "each supported example must be labelled 'supported'",
+  );
+  assert.deepEqual(
+    gallery.swatches.map((swatch) => /\bunsupported\b/.test(swatch.className)),
+    renderedShapes.map(() => false),
+    "a supported example must not carry the unsupported class",
+  );
+  assert.deepEqual(
+    gallery.swatches.map((swatch) => swatch.boxProps["corner-shape"]),
+    renderedShapes,
+    "each supported box must be given its own corner-shape value",
+  );
+  assert.deepEqual(
+    gallery.swatches.map((swatch) => swatch.boxProps.borderRadius),
+    renderedShapes.map(() => "12px"),
+    "every box must take the radius from the control",
+  );
+});
 
-assert.ok(
-  /\byes\b/.test(allSupported.supportClass) && !/\bno\b/.test(allSupported.supportClass),
-  `summary element must indicate positive support class: ${allSupported.supportClass}`,
-);
-const [allSuppCount, allTotalCount] = parseSupportCounts(allSupported.support) ?? [];
-assert.deepEqual(
-  [allSuppCount, allTotalCount],
-  [renderedCount, renderedCount],
-  `summary count does not agree with the ${renderedCount} rendered examples: ${allSupported.support}`,
-);
-assert.match(
-  allSupported.support,
-  /\bcorner-shape\b/i,
-  `summary text must reference corner-shape: ${allSupported.support}`,
-);
+Deno.test("ok — supported branch summary, detail and telemetry agree with the render", () => {
+  const gallery = allSupported();
+  // The count and support state in the page's summary must agree with what it
+  // rendered. Parsed counts ([supported, total]) are compared against the rendered
+  // DOM rather than pinning exact prose, so harmless rewordings stay green while
+  // hardcoded or inaccurate counts fail.
+  const count = gallery.swatches.length;
+  assert.equal(count, renderedCount, `expected 7 examples rendered, got ${count}`);
+  assert.ok(
+    /\byes\b/.test(gallery.supportClass) && !/\bno\b/.test(gallery.supportClass),
+    `summary element must indicate positive support class: ${gallery.supportClass}`,
+  );
+  const [allSuppCount, allTotalCount] = parseSupportCounts(gallery.support) ?? [];
+  assert.deepEqual(
+    [allSuppCount, allTotalCount],
+    [count, count],
+    `summary count does not agree with the ${count} rendered examples: ${gallery.support}`,
+  );
+  assert.match(
+    gallery.support,
+    /\bcorner-shape\b/i,
+    `summary text must reference corner-shape: ${gallery.support}`,
+  );
 
-// Detail copy must reflect the control radius, the rendered count, and explain
-// fallback behavior without asserting verbatim prose.
-const detailRadiusMatch = allSupported.detail.match(/(\d+)\s*px/i) ??
-  allSupported.detail.match(/\bradius[^\d]*(\d+)\b/i);
-assert.equal(
-  detailRadiusMatch ? Number(detailRadiusMatch[1]) : null,
-  12,
-  `detail copy does not reflect the 12px control radius: ${allSupported.detail}`,
-);
-assert.match(
-  allSupported.detail,
-  new RegExp(`\\b${renderedCount}\\b`),
-  `detail copy does not agree with the ${renderedCount} rendered examples: ${allSupported.detail}`,
-);
-assert.match(
-  allSupported.detail,
-  /\bborder-radius\b/i,
-  `detail copy must explain border-radius fallback: ${allSupported.detail}`,
-);
-assert.equal(allSupported.radiusLabel, "12px", "the radius label must echo the control");
+  // Detail copy must reflect the control radius, the rendered count, and explain
+  // fallback behavior without asserting verbatim prose.
+  const detailRadiusMatch = gallery.detail.match(/(\d+)\s*px/i) ??
+    gallery.detail.match(/\bradius[^\d]*(\d+)\b/i);
+  assert.equal(
+    detailRadiusMatch ? Number(detailRadiusMatch[1]) : null,
+    12,
+    `detail copy does not reflect the 12px control radius: ${gallery.detail}`,
+  );
+  assert.match(
+    gallery.detail,
+    new RegExp(`\\b${count}\\b`),
+    `detail copy does not agree with the ${count} rendered examples: ${gallery.detail}`,
+  );
+  assert.match(
+    gallery.detail,
+    /\bborder-radius\b/i,
+    `detail copy must explain border-radius fallback: ${gallery.detail}`,
+  );
+  assert.equal(gallery.radiusLabel, "12px", "the radius label must echo the control");
 
-// The demo's own instrumentation has to describe the same render.
-assert.deepEqual(
-  allSupported.telemetry,
-  [["gallery-rendered", true, { radius: 12, supported: renderedCount, total: renderedCount }]],
-  `telemetry payload disagrees with the render: ${JSON.stringify(allSupported.telemetry)}`,
-);
+  // The demo's own instrumentation has to describe the same render.
+  assert.deepEqual(
+    gallery.telemetry,
+    [["gallery-rendered", true, { radius: 12, supported: count, total: count }]],
+    `telemetry payload disagrees with the render: ${JSON.stringify(gallery.telemetry)}`,
+  );
+});
 
-// ── the fallback branch, when nothing is supported ───────────────────────────
-const noneSupported = runGallery({ supported: () => false });
-assert.equal(
-  noneSupported.swatches.length,
-  renderedCount,
-  "the fallback must render the same examples",
-);
-assert.deepEqual(
-  noneSupported.swatches.map((swatch) => swatch.label),
-  noneSupported.swatches.map(() => "not supported here"),
-  "an unsupported example must say so",
-);
-assert.deepEqual(
-  noneSupported.swatches.map((swatch) => /\bunsupported\b/.test(swatch.className)),
-  noneSupported.swatches.map(() => true),
-  "an unsupported example must carry the unsupported class",
-);
-assert.deepEqual(
-  noneSupported.swatches.map((swatch) => swatch.boxProps["corner-shape"]),
-  noneSupported.swatches.map(() => undefined),
-  "no box may be given a corner-shape value when the feature is unsupported",
-);
-assert.deepEqual(
-  noneSupported.swatches.map((swatch) => swatch.boxProps.borderRadius),
-  noneSupported.swatches.map(() => "12px"),
-  "the border-radius fallback must still be applied to every box",
-);
-// Fallback branch summary: class must indicate negative support, parsed counts
-// must be 0 of renderedCount, and it must describe corner-shape and border-radius.
-assert.ok(
-  /\bno\b/.test(noneSupported.supportClass) && !/\byes\b/.test(noneSupported.supportClass),
-  `fallback summary element must indicate no-support class: ${noneSupported.supportClass}`,
-);
-const [noneSuppCount, noneTotalCount] = parseSupportCounts(noneSupported.support) ?? [];
-assert.deepEqual(
-  [noneSuppCount, noneTotalCount],
-  [0, renderedCount],
-  `fallback summary count does not agree with the render (expected [0, ${renderedCount}]): ${noneSupported.support}`,
-);
-assert.match(
-  noneSupported.support,
-  /\bcorner-shape\b/i,
-  `fallback summary must reference corner-shape: ${noneSupported.support}`,
-);
-assert.match(
-  noneSupported.support,
-  /\bborder-radius\b/i,
-  `fallback summary must mention border-radius fallback: ${noneSupported.support}`,
-);
+Deno.test("ok — fallback branch renders the same examples without applying corner-shape", () => {
+  const gallery = runGallery({ supported: () => false });
+  assert.equal(
+    gallery.swatches.length,
+    renderedCount,
+    "the fallback must render the same examples",
+  );
+  assert.deepEqual(
+    gallery.swatches.map((swatch) => swatch.label),
+    gallery.swatches.map(() => "not supported here"),
+    "an unsupported example must say so",
+  );
+  assert.deepEqual(
+    gallery.swatches.map((swatch) => /\bunsupported\b/.test(swatch.className)),
+    gallery.swatches.map(() => true),
+    "an unsupported example must carry the unsupported class",
+  );
+  assert.deepEqual(
+    gallery.swatches.map((swatch) => swatch.boxProps["corner-shape"]),
+    gallery.swatches.map(() => undefined),
+    "no box may be given a corner-shape value when the feature is unsupported",
+  );
+  assert.deepEqual(
+    gallery.swatches.map((swatch) => swatch.boxProps.borderRadius),
+    gallery.swatches.map(() => "12px"),
+    "the border-radius fallback must still be applied to every box",
+  );
+});
 
-// Fallback branch detail: must reflect control radius, rendered count, and explain
-// fallback behavior without pinning exact sentence wording.
-const fallbackDetailRadius = noneSupported.detail.match(/(\d+)\s*px/i) ??
-  noneSupported.detail.match(/\bradius[^\d]*(\d+)\b/i);
-assert.equal(
-  fallbackDetailRadius ? Number(fallbackDetailRadius[1]) : null,
-  12,
-  `fallback detail does not reflect the 12px control radius: ${noneSupported.detail}`,
-);
-assert.match(
-  noneSupported.detail,
-  new RegExp(`\\b${renderedCount}\\b`),
-  `fallback detail does not agree with the ${renderedCount} rendered examples: ${noneSupported.detail}`,
-);
-assert.match(
-  noneSupported.detail,
-  /\bborder-radius\b/i,
-  `fallback detail must mention border-radius fallback: ${noneSupported.detail}`,
-);
-assert.deepEqual(
-  noneSupported.telemetry,
-  [["gallery-rendered", true, { radius: 12, supported: 0, total: renderedCount }]],
-  `fallback telemetry disagrees with the render: ${JSON.stringify(noneSupported.telemetry)}`,
-);
+Deno.test("ok — fallback branch summary, detail and telemetry agree with the render", () => {
+  const gallery = runGallery({ supported: () => false });
+  // Fallback branch summary: class must indicate negative support, parsed counts
+  // must be 0 of renderedCount, and it must describe corner-shape and border-radius.
+  assert.ok(
+    /\bno\b/.test(gallery.supportClass) && !/\byes\b/.test(gallery.supportClass),
+    `fallback summary element must indicate no-support class: ${gallery.supportClass}`,
+  );
+  const [noneSuppCount, noneTotalCount] = parseSupportCounts(gallery.support) ?? [];
+  assert.deepEqual(
+    [noneSuppCount, noneTotalCount],
+    [0, renderedCount],
+    `fallback summary count does not agree with the render (expected [0, ${renderedCount}]): ${gallery.support}`,
+  );
+  assert.match(
+    gallery.support,
+    /\bcorner-shape\b/i,
+    `fallback summary must reference corner-shape: ${gallery.support}`,
+  );
+  assert.match(
+    gallery.support,
+    /\bborder-radius\b/i,
+    `fallback summary must mention border-radius fallback: ${gallery.support}`,
+  );
 
-// ── the radius-zero branch ───────────────────────────────────────────────────
-const zeroRadius = runGallery({ supported: () => true, radius: "0" });
+  // Fallback branch detail: must reflect control radius, rendered count, and explain
+  // fallback behavior without pinning exact sentence wording.
+  const fallbackDetailRadius = gallery.detail.match(/(\d+)\s*px/i) ??
+    gallery.detail.match(/\bradius[^\d]*(\d+)\b/i);
+  assert.equal(
+    fallbackDetailRadius ? Number(fallbackDetailRadius[1]) : null,
+    12,
+    `fallback detail does not reflect the 12px control radius: ${gallery.detail}`,
+  );
+  assert.match(
+    gallery.detail,
+    new RegExp(`\\b${renderedCount}\\b`),
+    `fallback detail does not agree with the ${renderedCount} rendered examples: ${gallery.detail}`,
+  );
+  assert.match(
+    gallery.detail,
+    /\bborder-radius\b/i,
+    `fallback detail must mention border-radius fallback: ${gallery.detail}`,
+  );
+  assert.deepEqual(
+    gallery.telemetry,
+    [["gallery-rendered", true, { radius: 12, supported: 0, total: renderedCount }]],
+    `fallback telemetry disagrees with the render: ${JSON.stringify(gallery.telemetry)}`,
+  );
+});
 
-// The radius-zero branch: must describe square corners at zero radius across
-// rendered examples without pinning the exact sentence.
-assert.match(
-  zeroRadius.detail,
-  /\b(?:zero|0(?:px)?)\b/i,
-  `radius-zero copy must mention zero radius: ${zeroRadius.detail}`,
-);
-assert.match(
-  zeroRadius.detail,
-  /\bsquare\b/i,
-  `radius-zero copy must describe square corners: ${zeroRadius.detail}`,
-);
-assert.match(
-  zeroRadius.detail,
-  new RegExp(`\\b${renderedCount}\\b`),
-  `radius-zero copy does not agree with the ${renderedCount} rendered examples: ${zeroRadius.detail}`,
-);
-assert.doesNotMatch(
-  zeroRadius.detail,
-  /\b12px\b/i,
-  `radius-zero copy must not retain the previous 12px radius: ${zeroRadius.detail}`,
-);
-assert.equal(zeroRadius.radiusLabel, "0px", "the radius label must follow the control to zero");
-
-console.log(
-  `PASS — corner-shape vocabulary and rendered gallery (${renderedCount} examples, supported and ` +
-    `fallback branches, radius 12 and 0: labels, applied corner-shape/border-radius, summary counts, ` +
-    `detail copy and telemetry all agree with the DOM the page built)`,
-);
+Deno.test("ok — radius-zero branch describes square corners and follows the control", () => {
+  const gallery = runGallery({ supported: () => true, radius: "0" });
+  // The radius-zero branch: must describe square corners at zero radius across
+  // rendered examples without pinning the exact sentence.
+  assert.match(
+    gallery.detail,
+    /\b(?:zero|0(?:px)?)\b/i,
+    `radius-zero copy must mention zero radius: ${gallery.detail}`,
+  );
+  assert.match(
+    gallery.detail,
+    /\bsquare\b/i,
+    `radius-zero copy must describe square corners: ${gallery.detail}`,
+  );
+  assert.match(
+    gallery.detail,
+    new RegExp(`\\b${renderedCount}\\b`),
+    `radius-zero copy does not agree with the ${renderedCount} rendered examples: ${gallery.detail}`,
+  );
+  assert.doesNotMatch(
+    gallery.detail,
+    /\b12px\b/i,
+    `radius-zero copy must not retain the previous 12px radius: ${gallery.detail}`,
+  );
+  assert.equal(gallery.radiusLabel, "0px", "the radius label must follow the control to zero");
+});
