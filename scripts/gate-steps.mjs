@@ -54,6 +54,12 @@ export const GATE_STEPS = [
     what: "entrypoint/parity spoof fixtures run the real guard in temp copies",
   },
   {
+    id: "test-cdp-cleanup",
+    task: "test-cdp-cleanup",
+    tier: "static",
+    what: "strict CDP teardown is bounded, fail-visible and never masks the primary error",
+  },
+  {
     id: "test-run-gate-plan",
     task: "test-run-gate-plan",
     tier: "static",
