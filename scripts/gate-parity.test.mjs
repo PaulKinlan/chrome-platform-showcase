@@ -22,8 +22,25 @@
 // hold against the commands the gate actually runs — and it fails if a plan
 // step names a task deno.json does not define.
 //
+// CI inventory and gate grammar (bead chrome_platform_showcase-uzc). CI is read
+// with a pinned real YAML parser, jsr:@std/yaml@1.3.0, because a regex over
+// `run:` saw only the styles it was written for: a flow-style step, a quoted
+// key, a block or folded scalar and a bare `run:` all slipped past it, and any
+// CI command outside the classes it happened to check was unmirrored and
+// invisible. The dependency needs no network after its first fetch — it is
+// pinned in the import specifier and recorded in deno.lock, so a COLD cache
+// costs one fetch on the first run after a checkout and works offline
+// afterwards (`--cached-only` fails loudly rather than skipping the check); CI
+// never runs this guard. Only .github/workflows/ci.yml is in scope;
+// showcase-worklist.yml is a scheduled work-list job, out of scope on purpose.
+// A CI step must be ONE declared invocation — shell operators are refused by
+// name, never interpreted — and gate or task text may chain with a flat `&&`
+// only. Every command CI runs must be mirrored by a gate plan step, matched BY
+// TASK NAME for `deno task …` steps and by expanded text for raw commands.
+//
 // Run: deno task test-gate-parity
 
+import { parse } from "jsr:@std/yaml@1.3.0";
 import { GATE_STEPS } from "./gate-steps.mjs";
 
 const REPO = new URL("..", import.meta.url).pathname;
@@ -43,17 +60,103 @@ function read(path) {
 
 const squash = (s) => s.replace(/\s+/g, " ").trim();
 
-const ci = read(".github/workflows/ci.yml");
+// ── CI inventory: a real YAML parse, not a regex (bead chrome_platform_showcase-uzc)
+//
+// The regex this replaces (`/^\s*-?\s*run:\s*(.+)$/gm`) saw only the styles it
+// was written for. A flow-style step, a quoted key, a block or folded scalar, a
+// bare `run:` and every CI command outside the three classes it happened to
+// check were all invisible — a plain block-style unmirrored `deno task` step
+// included. The inventory below is parsed, so the style of the YAML cannot
+// change what it sees.
+//
+// Scope is ONLY .github/workflows/ci.yml, the pre-merge gate.
+// .github/workflows/showcase-worklist.yml is OUT OF SCOPE by declaration: it is
+// a scheduled work-list job whose last step is a shell redirect into
+// $GITHUB_STEP_SUMMARY, which the CI grammar below deliberately refuses.
+// Widening the scope is a separate decision, not an accident of parsing.
+const CI_WORKFLOW = ".github/workflows/ci.yml";
+const CI_OUT_OF_SCOPE = ".github/workflows/showcase-worklist.yml";
+const ci = read(CI_WORKFLOW);
 const tasks = JSON.parse(read("deno.json")).tasks ?? {};
 
-// Every command CI runs, in order.
-const ciRuns = [...ci.matchAll(/^\s*-?\s*run:\s*(.+)$/gm)].map((m) => squash(m[1]));
+const ciRunSteps = [];
+for (const [jobName, job] of Object.entries(parse(ci)?.jobs ?? {})) {
+  for (const step of (Array.isArray(job?.steps) ? job.steps : [])) {
+    if (step && typeof step === "object" && "run" in step) {
+      ciRunSteps.push({ job: jobName, name: String(step?.name ?? ""), run: step.run });
+    }
+  }
+}
+// Totality detector: a permissive counter of `run` keys in ANY style (leading
+// `-`/`,`/`{`/whitespace, quoted or not) against the parsed inventory. It is
+// deliberately over-matching: a mismatch can only make this guard louder, never
+// quieter, so a YAML style the parser somehow normalises away still fails here.
+const runKeyCount = (ci.match(/(^|[{,\s]-?\s*)("|')?run\2\s*:/gm) ?? []).length;
+check(
+  "the CI inventory sees every `run` key in the workflow",
+  runKeyCount === ciRunSteps.length,
+  `${CI_WORKFLOW}: ${runKeyCount} \`run\` key(s) counted in the text but ` +
+    `${ciRunSteps.length} parsed as steps — the inventory is incomplete`,
+);
+
+// CI `run` values are NOT a shell language. A CI step must be ONE declared
+// invocation; anything that needs shell semantics to decide what it does is
+// refused by name rather than modelled, because the whole class of findings
+// here (mc6, 049) came from guessing what a shell would do.
+const CI_SHELL_OPERATORS = ["&&", "||", ";", "|", ">", "<", "&", "`", "$(", "${"];
+for (const step of ciRunSteps) {
+  const label = `CI step \`${step.name || "(unnamed)"}\` in job \`${step.job}\``;
+  const run = typeof step.run === "string" ? squash(step.run) : "";
+  if (run === "") {
+    check(`${label} declares one command`, false, "the step has no command (empty or bare `run:`)");
+    continue;
+  }
+  const op = CI_SHELL_OPERATORS.find((o) => run.includes(o));
+  check(
+    `${label} is a single command CI can run`,
+    op === undefined,
+    op === undefined ? "" : `unsupported syntax \`${op}\` in ${JSON.stringify(run)} — model the ` +
+      "step instead of the shell: a CI step is one declared invocation, and shell " +
+      "operators are refused rather than interpreted",
+  );
+}
+const ciRuns = ciRunSteps.map((s) => squash(typeof s.run === "string" ? s.run : ""));
 
 // Expand `deno task <name>` references inside a repo task so the returned text
 // is the commands that actually run. `seen` stops any task cycle.
+// Gate and task text may chain with a flat `&&` ONLY. `||`, `;`, a pipe, a
+// redirect, a subshell or any interpolation is refused by name: `a || b && c`
+// does not mean "the gate runs a", it means the text is outside the declared
+// grammar, so the guard fails instead of deciding which side wins (049). No
+// claim of arbitrary shell equivalence is made or needed. The check applies to
+// the task text the gate actually expands — not to every task in deno.json, so
+// an unrelated task cannot produce a false failure here.
+const GATE_TEXT_OPERATOR_RE = /(\|\||;|`|\$\(|\$\{|[<>]|\|(?!\|))/;
+function gateText(label, text) {
+  if (typeof text !== "string" || text.trim() === "") {
+    check(`${label} is a non-empty command`, false, "empty command text");
+    return;
+  }
+  const bad = text.match(GATE_TEXT_OPERATOR_RE);
+  if (bad) {
+    check(
+      `${label} uses only a flat && chain`,
+      false,
+      `unsupported syntax \`${bad[0]}\` in ${JSON.stringify(text)} — only a flat \`&&\` ` +
+        "chain is a supported gate command, and nothing is inferred about what a " +
+        "shell would do with this text",
+    );
+    return;
+  }
+  const parts = text.split("&&");
+  if (parts.some((p) => p.trim() === "")) {
+    check(`${label} has no empty && segment`, false, `empty segment in ${JSON.stringify(text)}`);
+  }
+}
 function expand(name, seen = new Set()) {
   const raw = tasks[name];
   if (raw == null || seen.has(name)) return raw ?? "";
+  gateText(`task \`${name}\``, raw);
   seen.add(name);
   return raw.replace(
     /deno task ([a-z0-9:-]+)/g,
@@ -96,25 +199,39 @@ for (const step of GATE_STEPS.filter((s) => tasks[s.task] == null)) {
 }
 check("deno.json defines a formatter task", typeof tasks.fmt === "string");
 
-// Formatter parity: each formatter command CI enforces must run in the gate.
-const ciFmt = ciRuns.filter((c) => /(^|\s)deno fmt(\s|$)/.test(c));
-check(
-  "CI declares at least one deno fmt gate",
-  ciFmt.length > 0,
-  `CI run steps: ${JSON.stringify(ciRuns)}`,
-);
-for (const cmd of ciFmt) {
+// ── The MIRRORED contract (bead uzc / dvf)
+//
+// Every command CI runs must be satisfied by the gate plan, and matched BY TASK
+// NAME for `deno task …` steps: the old checks compared CI's text against the
+// EXPANDED task text, so they could never match `deno task check-routes` and
+// dvf's two CI commands had no coverage at all — and a plain unmirrored step was
+// equally invisible. A CI command that is not mirrored fails; there is no
+// exemption list, because the escape hatch is to mirror the step or to take a
+// workflow out of scope on purpose.
+const planTasks = new Map(GATE_STEPS.map((s) => [s.task, s]));
+const mirrors = (cmd) => {
+  const task = cmd.match(/^deno task ([a-z0-9:-]+)(\s+(.*))?$/);
+  if (task) {
+    const step = planTasks.get(task[1]);
+    if (!step) return false;
+    const ciArgs = squash(task[3] ?? "");
+    const stepArgs = squash((step.args ?? []).join(" "));
+    return ciArgs === stepArgs;
+  }
+  // Raw commands (`deno check …`, `deno fmt …`) are matched on expanded text,
+  // which is where the one declared tolerance lives: an identical command with
+  // EXTRA files (`deno check server.ts scripts/…`) still satisfies CI's
+  // `deno check server.ts`. Differing flags do not.
+  return fullGate.includes(cmd);
+};
+for (const cmd of ciRuns.filter((c) => c !== "")) {
   check(
-    `full gate runs CI's formatter step (\`${cmd}\`)`,
-    fullGate.includes(cmd),
-    "deno task check does not cover this CI step, so an unformatted tree " +
-      "passes locally (fleet-check) and only fails in CI",
+    `the gate mirrors CI's \`${cmd}\``,
+    mirrors(cmd),
+    `CI runs \`${cmd}\` but no gate plan step satisfies it — add the step to ` +
+      "scripts/gate-steps.mjs (and a rule in scripts/affected-tests.mjs) or the " +
+      "command runs in CI and nowhere locally",
   );
-}
-
-// Type-check parity: CI's `deno check server.ts` must also be in the gate.
-for (const cmd of ciRuns.filter((c) => /(^|\s)deno check\b/.test(c))) {
-  check(`full gate runs CI's type check (\`${cmd}\`)`, fullGate.includes(cmd));
 }
 
 // Test-registration parity (bead chrome_platform_showcase-86v).
