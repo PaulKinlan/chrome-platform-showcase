@@ -53,6 +53,75 @@ function check(label, ok, detail = "") {
 }
 
 const read = (path) => Deno.readTextFileSync(`${REPO}${path}`);
+
+// String-aware comment stripper for the vo6 registry pin: a naive regex would
+// count a COMMENTED-OUT registry entry or import as live wiring (review
+// finding chrome_platform_showcase-188), while a naive "//" stripper would
+// corrupt string literals containing "https://...". Handles ', " and `
+// strings with escapes; template-literal ${} nesting is not needed for the
+// parsed blocks and is treated as plain string content.
+function stripJsComments(src) {
+  let out = "";
+  let i = 0;
+  let string = null;
+  while (i < src.length) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (string) {
+      out += c;
+      if (c === "\\") {
+        out += next ?? "";
+        i += 2;
+        continue;
+      }
+      if (c === string) string = null;
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      string = c;
+      out += c;
+      i++;
+      continue;
+    }
+    if (c === "/" && next === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+function parseSidecarWiring(source) {
+  const code = stripJsComments(source);
+  const imported = new Map();
+  for (
+    const match of code.matchAll(
+      /import\s*\{\s*handleFeatureRequest\s+as\s+(\w+)\s*\}\s*from\s*"\.\.\/([^"]+)\/_server\.ts"\s*;/g,
+    )
+  ) {
+    imported.set(match[2], match[1]);
+  }
+  const registryMarker = "const STATIC_FEATURE_SERVERS";
+  const registryStart = code.indexOf(registryMarker);
+  const registryEnd = registryStart >= 0 ? code.indexOf("};", registryStart) : -1;
+  const registered = new Map();
+  if (registryEnd > registryStart) {
+    const block = code.slice(registryStart, registryEnd);
+    for (const match of block.matchAll(/"([^"]+)"\s*:\s*(\w+)/g)) {
+      registered.set(match[1], match[2]);
+    }
+  }
+  return { imported, registered, registryFound: registryEnd > registryStart };
+}
 Deno.test("the affected-file map fails closed and never orphans a suite", async () => {
   const tasks = JSON.parse(read("deno.json")).tasks ?? {};
 
@@ -567,30 +636,59 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
   // named in the registry. Textual parsing (gate-parity precedent), robust to
   // comments and line wrapping, fails closed if the expected blocks vanish.
   {
+    // 188: the parser must count EFFECTIVE code, not commented-out text. Pin
+    // the comment handling with permanent synthetic negatives before trusting
+    // it on the real tree.
+    const synthetic = [
+      {
+        label: "a line-commented registry entry is not counted",
+        source: 'const STATIC_FEATURE_SERVERS = {\n// "v9/x": h,\n};',
+        imported: 0,
+        registered: 0,
+      },
+      {
+        label: "a block-commented registry entry is not counted",
+        source: 'const STATIC_FEATURE_SERVERS = {\n/* "v9/x": h, */\n};',
+        imported: 0,
+        registered: 0,
+      },
+      {
+        label: "a line-commented sidecar import is not counted",
+        source:
+          '// import { handleFeatureRequest as h } from "../v9/x/_server.ts";\nconst STATIC_FEATURE_SERVERS = {};',
+        imported: 0,
+        registered: 0,
+      },
+      {
+        label: "a block-commented sidecar import is not counted",
+        source:
+          '/* import { handleFeatureRequest as h } from "../v9/x/_server.ts"; */\nconst STATIC_FEATURE_SERVERS = {};',
+        imported: 0,
+        registered: 0,
+      },
+      {
+        label: "a live pair IS counted even next to an https:// string literal",
+        source:
+          'const u = "https://example.com/x"; // trailing note\nimport { handleFeatureRequest as h } from "../v9/x/_server.ts";\nconst STATIC_FEATURE_SERVERS = {\n  "v9/x": h,\n};',
+        imported: 1,
+        registered: 1,
+      },
+    ];
+    for (const { label, source, imported: ni, registered: nr } of synthetic) {
+      const parsed = parseSidecarWiring(source);
+      check(
+        `comment-aware wiring parse: ${label}`,
+        parsed.imported.size === ni && parsed.registered.size === nr,
+        `imported=${parsed.imported.size} registered=${parsed.registered.size} (wanted ${ni}/${nr})`,
+      );
+    }
+
     const releaseSource = read("routes/release.ts");
-    const imported = new Map();
-    for (
-      const match of releaseSource.matchAll(
-        /import\s*\{\s*handleFeatureRequest\s+as\s+(\w+)\s*\}\s*from\s*"\.\.\/([^"]+)\/_server\.ts"\s*;/g,
-      )
-    ) {
-      imported.set(match[2], match[1]);
-    }
-    const registryMarker = "const STATIC_FEATURE_SERVERS";
-    const registryStart = releaseSource.indexOf(registryMarker);
+    const { imported, registered, registryFound } = parseSidecarWiring(releaseSource);
     check(
-      "STATIC_FEATURE_SERVERS block exists in routes/release.ts",
-      registryStart >= 0,
+      "STATIC_FEATURE_SERVERS block exists and is terminated in routes/release.ts",
+      registryFound,
     );
-    const registryEnd = registryStart >= 0 ? releaseSource.indexOf("};", registryStart) : -1;
-    check("STATIC_FEATURE_SERVERS block is terminated", registryEnd > registryStart);
-    const registered = new Map();
-    if (registryEnd > registryStart) {
-      const block = releaseSource.slice(registryStart, registryEnd);
-      for (const match of block.matchAll(/"([^"]+)"\s*:\s*(\w+)/g)) {
-        registered.set(match[1], match[2]);
-      }
-    }
     const onDisk = new Set();
     for (const release of Deno.readDirSync(REPO)) {
       if (!release.isDirectory || !/^v\d+$/.test(release.name)) continue;
