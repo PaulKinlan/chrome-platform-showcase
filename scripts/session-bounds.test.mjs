@@ -15,6 +15,37 @@
 // untrusted key is never retained as a key at all.
 //
 // Run: deno task test-session-bounds
+//
+// Migrated in place to named Deno.test cases (Stage 9 of the dty proposal, bead
+// dty.9): same file path, same task id `test-session-bounds`, the same ordered
+// gate step 7, the same twelve subjects and the same assertions - the custom
+// `section()` registry, its trailing loop and the legacy `Deno.exit(1)` branch are
+// gone, so a failure names the case it broke and Deno's runner owns the exit code.
+//
+// ORDER IS LOAD-BEARING, but more mildly than Stage 8: the first nine cases drive
+// TWO module-level stores inside the route (the prefetch budget store and the
+// WebAuthn signal store), and case 4 registers into a session it creates after
+// case 3 has flooded that same store past its cap. Deno.test runs the tests of one
+// file serially in declaration order and scripts/native-test.mjs runs exactly one
+// file per process, so the ordering holds; do not add per-test concurrency or run
+// this file with --parallel. Cases 10-12 build their own stores, and cases 5-9
+// each start from a fresh session, so they are order-independent.
+//
+// The child needs NO permission (the imported modules are imported, not read), so
+// the task passes no child flags and no `--` separator, as Stages 5, 6 and 8 do.
+//
+// Output rebaseline (deliberate, documented): the legacy final line had no
+// `PASS — ` prefix, so the task now prints `PASS — session-bounds tests` /
+// `FAIL — session-bounds tests (1 file(s) failed)` - a neutral label, truthfully
+// prefixed in both directions. A per-suite audit found no consumer of the old text.
+//
+// Known blind spot, carried over unchanged and NOT fixed here: the three
+// `BoundedSessionStore` cases below pass explicit options, so they cannot see the
+// module defaults (SESSION_STORE_MAX_ENTRIES / SESSION_STORE_TTL_MS /
+// SESSION_KEY_MAX_LENGTH) at all, while the route cases that do use the
+// default-constructed stores only detect a cap made larger or unbounded, not one
+// made smaller. No case in this file pins the VALUES of those three defaults; a
+// dedicated bead covers that.
 
 import {
   handleLegacyReleaseEndpoints,
@@ -29,12 +60,6 @@ import { BoundedSessionStore } from "../lib/session-store.ts";
 const MANY = 2000;
 
 const noAsset = async () => null;
-
-const failures = [];
-const sections = [];
-function section(label, fn) {
-  sections.push({ label, fn });
-}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -137,7 +162,7 @@ async function revokeWebAuthnCredential(cookie, id) {
 
 // ---------------------------------------------------------------------------
 
-section("prefetch session count is bounded (oldest sessions stop being retained)", async () => {
+Deno.test("prefetch session count is bounded (oldest sessions stop being retained)", async () => {
   // Each distinct `session` value mints a server-side session with one entry.
   for (let i = 0; i < MANY; i++) {
     const res = await callPrefetch(`session=bounded-${i}&nonce=n${i}&resource=r${i}`);
@@ -152,7 +177,7 @@ section("prefetch session count is bounded (oldest sessions stop being retained)
   );
 });
 
-section("an over-long prefetch session key is never retained", async () => {
+Deno.test("an over-long prefetch session key is never retained", async () => {
   const longKey = "A".repeat(100_000);
   const res = await callPrefetch(
     `session=${encodeURIComponent(longKey)}&nonce=long-key-nonce&resource=long-key-resource`,
@@ -165,7 +190,7 @@ section("an over-long prefetch session key is never retained", async () => {
   );
 });
 
-section("webauthn cookie sessions are bounded (oldest cookies are re-minted)", async () => {
+Deno.test("webauthn cookie sessions are bounded (oldest cookies are re-minted)", async () => {
   // First contact mints a session; the server keys it by the random id it puts
   // in Set-Cookie, so the id to reuse later is the one from that header.
   const first = await callWebAuthnSession("showcase_webauthn_signal=unknown-0");
@@ -191,7 +216,7 @@ section("webauthn cookie sessions are bounded (oldest cookies are re-minted)", a
   );
 });
 
-section(
+Deno.test(
   "webauthn signal credential count is bounded per session (oldest credentials evicted past cap)",
   async () => {
     let cookie = "";
@@ -216,7 +241,7 @@ section(
   },
 );
 
-section(
+Deno.test(
   "webauthn signal preserves 300-byte credential ID on register and revoke round-trip",
   async () => {
     // 300 raw bytes produces 400 base64url characters.
@@ -255,7 +280,7 @@ section(
   },
 );
 
-section(
+Deno.test(
   "webauthn signal allows max spec-compliant 1023-byte credential ID exact",
   async () => {
     // W3C WebAuthn L3 (§5.1): credential IDs MUST NOT be longer than 1023 bytes.
@@ -278,7 +303,7 @@ section(
   },
 );
 
-section(
+Deno.test(
   "webauthn signal rejects >1023 byte and over-long credential IDs without retaining",
   async () => {
     // 1024 raw bytes encodes to 1366 base64url characters, exceeding the 1023-byte / 1364-char bound.
@@ -328,7 +353,7 @@ section(
   },
 );
 
-section(
+Deno.test(
   "webauthn signal preserves distinct credentials sharing 256-char prefix without collision",
   async () => {
     // Two distinct 301-byte raw credentials sharing the first 300 bytes (each 402 base64url chars).
@@ -370,7 +395,7 @@ section(
   },
 );
 
-section(
+Deno.test(
   "webauthn signal partitions active vs revoked credentials for signal API consumption",
   async () => {
     // Workbench passes active IDs to PublicKeyCredential.signalAllAcceptedCredentials
@@ -408,11 +433,11 @@ section(
 );
 
 // ---------------------------------------------------------------------------
-// Contract of the shared store itself: the route-level sections above prove the
+// Contract of the shared store itself: the route-level cases above prove the
 // fixtures use it, these pin the bounds it promises (TTL is not reachable from
 // a route test, so the clock is injected).
 
-section("store drops an entry once its ttl has passed", async () => {
+Deno.test("store drops an entry once its ttl has passed", async () => {
   let clock = 1_000;
   const store = new BoundedSessionStore({ ttlMs: 500, now: () => clock });
   store.set("session", "value");
@@ -425,7 +450,7 @@ section("store drops an entry once its ttl has passed", async () => {
   assert(store.size === 0, "an expired entry should not still count towards the store size");
 });
 
-section("store refuses a key longer than its maximum", async () => {
+Deno.test("store refuses a key longer than its maximum", async () => {
   const store = new BoundedSessionStore({ maxKeyLength: 8 });
   store.set("12345678", "kept");
   store.set("123456789", "refused");
@@ -436,7 +461,7 @@ section("store refuses a key longer than its maximum", async () => {
   assert(store.size === 1, "an over-long key must not occupy an entry");
 });
 
-section("store evicts the oldest written entry past its cap", async () => {
+Deno.test("store evicts the oldest written entry past its cap", async () => {
   const store = new BoundedSessionStore({ maxEntries: 3 });
   store.set("a", 1);
   store.set("b", 2);
@@ -449,21 +474,3 @@ section("store evicts the oldest written entry past its cap", async () => {
   assert(store.get("a") === 10, "the most recently written entry should survive");
   assert(store.get("c") === 3 && store.get("d") === 4, "other live entries should survive");
 });
-
-// ---------------------------------------------------------------------------
-
-for (const { label, fn } of sections) {
-  try {
-    await fn();
-    console.log(`ok   ${label}`);
-  } catch (err) {
-    failures.push({ label, err });
-    console.log(`FAIL ${label}: ${err?.message ?? err}`);
-  }
-}
-
-if (failures.length > 0) {
-  console.error(`\nsession-bounds tests: ${failures.length} section(s) failed`);
-  Deno.exit(1);
-}
-console.log("\nsession-bounds tests: all sections passed");
