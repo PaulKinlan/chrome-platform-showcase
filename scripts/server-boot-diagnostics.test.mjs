@@ -97,11 +97,22 @@ async function reapChild(child, what) {
   } catch {
     // already gone
   }
+  let statusError = null;
   const reaped = await Promise.race([
-    child.status.then(() => true),
+    child.status.then(() => true, (error) => {
+      // A status that rejects is not a reap: keep the first real error instead of
+      // letting the race turn it into a silent success (finding 4v4).
+      if (statusError === null) statusError = error;
+      return false;
+    }),
     new Promise((resolve) => setTimeout(() => resolve(false), TEARDOWN_BOUND_MS)),
   ]);
-  if (!reaped) teardownFailed(`${what} was still running ${TEARDOWN_BOUND_MS}ms after SIGKILL`);
+  if (reaped) return;
+  if (statusError) {
+    teardownFailed(`${what} status could not be read after SIGKILL: ${statusError.message}`);
+  } else {
+    teardownFailed(`${what} was still running ${TEARDOWN_BOUND_MS}ms after SIGKILL`);
+  }
 }
 
 async function closeListener(listener, what) {
@@ -127,18 +138,38 @@ async function closeListener(listener, what) {
   // A stall is therefore reported rather than waited on or force-aborted: the port
   // is already free by the time this reports, and a child that could own it is
   // force-killed and reaped by `reapChild`.
-  const graceful = listener.shutdown().then(() => true, () => false);
-  const settled = listener.finished.then(() => true, () => true);
+  // A rejection is a failure, not a variant of success: mapping `finished` to
+  // `true` when it rejected let `Promise.all` resolve and this helper return as if
+  // the listener had closed, which was a silent false-green (finding 4v4).
+  let shutdownError = null;
+  let finishedError = null;
+  const graceful = listener.shutdown().then(() => true, (error) => {
+    if (shutdownError === null) shutdownError = error;
+    return false;
+  });
+  const settled = listener.finished.then(() => true, (error) => {
+    if (finishedError === null) finishedError = error;
+    return false;
+  });
   const closedInTime = await Promise.race([
-    Promise.all([graceful, settled]).then(() => true),
+    Promise.all([graceful, settled]).then(([closed, released]) =>
+      closed === true && released === true
+    ),
     new Promise((resolve) => setTimeout(() => resolve(false), TEARDOWN_BOUND_MS)),
   ]);
   if (closedInTime) return;
-  teardownFailed(
-    `${what} had not finished closing ${TEARDOWN_BOUND_MS}ms after it was asked to shut ` +
-      `down (a request is still in flight; the listening socket is already closed, and ` +
-      `Deno 2.9.7 throws an uncaught BadResource if the owned aborter fires after shutdown)`,
-  );
+  const rejected = [];
+  if (shutdownError) rejected.push(`shutdown() rejected with ${shutdownError.message}`);
+  if (finishedError) rejected.push(`finished rejected with ${finishedError.message}`);
+  if (rejected.length > 0) {
+    teardownFailed(`${what} failed to close cleanly: ${rejected.join("; ")}`);
+  } else {
+    teardownFailed(
+      `${what} had not finished closing ${TEARDOWN_BOUND_MS}ms after it was asked to ` +
+        `shut down (a request is still in flight; the listening socket is already closed, and ` +
+        `Deno 2.9.7 throws an uncaught BadResource if the owned aborter fires after shutdown)`,
+    );
+  }
   await Promise.race([
     settled,
     new Promise((resolve) => setTimeout(resolve, TEARDOWN_BOUND_MS)),
