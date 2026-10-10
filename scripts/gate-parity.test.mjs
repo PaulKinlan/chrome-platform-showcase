@@ -380,8 +380,9 @@ Deno.test("the local gate and CI declare the same commands, and every suite is n
   // What this proves: the suite's path appears in a task command and that task is
   // on the chain. What it cannot prove: that the command actually executes the file
   // (a task that merely echoed the path would satisfy it), and it does not scan
-  // subdirectories of scripts/. Running the gate is what proves execution; this is
-  // the guard against a suite that nothing names at all.
+  // subdirectories of scripts/. The f0f section below closes the routing half for
+  // Deno.test-registered suites (the task must invoke scripts/native-test.mjs with
+  // the file as its target); running the gate remains the proof of execution.
   const scriptTests = [...Deno.readDirSync(`${REPO}scripts`)]
     .filter((entry) => entry.isFile && entry.name.endsWith(".test.mjs"))
     .map((entry) => entry.name)
@@ -424,6 +425,100 @@ Deno.test("the local gate and CI declare the same commands, and every suite is n
     unreachable.length === 0,
     `suites whose tasks are off the check chain: ${
       unreachable.map((file) => `${file} (${tasksRunning(file).join(", ")})`).join("; ")
+    }`,
+  );
+
+  // Task-ROUTING parity (bead chrome_platform_showcase-f0f). The 86v section
+  // proves a task NAMES the suite file; it cannot prove the command executes
+  // it. A suite that registers Deno.test cases but whose task is a plain
+  // `deno run <file>` PASSES VACUOUSLY — deno run does not execute registered
+  // cases, so the gate step exits 0 with zero checks run (measured by
+  // rev-dty32: exit 0, zero output, versus 30 ok lines via the runner). So a
+  // registered suite's task must ROUTE the file through the native runner:
+  // one &&-segment of the shape
+  //   deno run <run-flags> scripts/native-test.mjs [runner opts] <file> [-- flags]
+  // where the file is an exact token AFTER the runner path and BEFORE any `--`
+  // child-flags separator. An inert mention — an echo segment, a substring, a
+  // `--summary` text, a comment — fails this, because none of those is a
+  // `deno run` segment whose program is the runner.
+  //
+  // Registration is detected by a statement-position match on the raw source.
+  // That is exact for this tree (measured at introduction: every registered
+  // suite matched, the direct-run legacy suites carry no `Deno.test` mention
+  // at all). The residual false-positive class is a FUTURE file whose BLOCK
+  // comment or template literal contains a line beginning with `Deno.test(` —
+  // a // line comment cannot, because the line then starts with //. If that
+  // ever fires, the failure is loud and names the file: reword the mention so
+  // no line begins with `Deno.test(`, or route the task through the runner.
+  // Deliberately NO homegrown comment/string-stripping parser: a mini state
+  // machine over strings and templates is its own correctness risk in a guard
+  // whose whole purpose is exactness.
+  const REGISTERED = /^\s*Deno\.test\s*\(/m;
+  const SUITE_FILE = /^(?:scripts|tests)\/[\w./-]*\.test\.mjs$/;
+  // Does one &&-segment of `cmd` actually invoke the runner with `path` as its
+  // target (exact token, after the runner path, before any `--`)?
+  const segmentRoutes = (segment, path) => {
+    const tokens = squash(segment).split(/\s+/);
+    if (tokens[0] !== "deno" || tokens[1] !== "run") return false;
+    const runnerIdx = tokens.indexOf("scripts/native-test.mjs");
+    if (runnerIdx < 2) return false;
+    // Between `run` and the runner path only deno-run flags may appear; a
+    // bare token there means the runner path is an argument of something else.
+    if (tokens.slice(2, runnerIdx).some((t) => !t.startsWith("-"))) return false;
+    const sep = tokens.indexOf("--", runnerIdx);
+    const zone = tokens.slice(runnerIdx + 1, sep === -1 ? undefined : sep);
+    return zone.includes(path);
+  };
+  const taskRoutes = (name, path) =>
+    String(tasks[name]).split("&&").some((seg) => segmentRoutes(seg, path));
+
+  const registeredSuites = scriptTests.filter((file) => REGISTERED.test(read(`scripts/${file}`)));
+  check(
+    "the routing guard sees at least one Deno.test-registered suite",
+    registeredSuites.length > 0,
+    "statement-position scan found no registrations — the detector is broken, " +
+      "not the tasks; do not let an empty match set vacuously green this section",
+  );
+  const misrouted = registeredSuites.filter((file) => {
+    const naming = tasksRunning(file);
+    return naming.length === 0 ||
+      !naming.every((name) => taskRoutes(name, `scripts/${file}`));
+  });
+  check(
+    "every Deno.test-registered suite's task routes it through scripts/native-test.mjs",
+    misrouted.length === 0,
+    `registered suites not routed through the native runner: ${misrouted.join(", ")} — ` +
+      "a plain `deno run <file>` of a registered suite exits 0 running ZERO tests " +
+      "(measured, bead f0f); route the task through scripts/native-test.mjs with the " +
+      "same file as its target, or remove the registration",
+  );
+  // Reverse direction: a task that invokes the runner must point at a file that
+  // actually registers cases. (The runner's own at-least-one-test rule is the
+  // runtime backstop; this catches the drift statically, by name.)
+  const runnerTargets = [];
+  for (const [name, cmd] of Object.entries(tasks)) {
+    if (typeof cmd !== "string") continue;
+    for (const seg of String(cmd).split("&&")) {
+      const tokens = squash(seg).split(/\s+/);
+      const runnerIdx = tokens.indexOf("scripts/native-test.mjs");
+      if (tokens[0] !== "deno" || tokens[1] !== "run" || runnerIdx < 2) continue;
+      const sep = tokens.indexOf("--", runnerIdx);
+      const zone = tokens.slice(runnerIdx + 1, sep === -1 ? undefined : sep);
+      for (const t of zone) if (SUITE_FILE.test(t)) runnerTargets.push([name, t]);
+    }
+  }
+  const staleRunnerTargets = runnerTargets.filter(([, target]) => {
+    try {
+      return !REGISTERED.test(read(target));
+    } catch {
+      return true; // a runner task naming a missing file is stale by definition
+    }
+  });
+  check(
+    "every scripts/native-test.mjs task targets a suite that registers Deno.test",
+    staleRunnerTargets.length === 0,
+    `runner tasks targeting non-registering or missing files: ${
+      staleRunnerTargets.map(([n, t]) => `${n} -> ${t}`).join("; ")
     }`,
   );
 
