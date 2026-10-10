@@ -33,10 +33,15 @@
 // port is only free once the child has actually been reaped, and a listener is
 // only closed once its `finished` promise settles. Both are now awaited with a
 // bound before the next section proceeds, and a teardown that does not complete
-// is reported as a failure instead of passing silently. This makes no claim
-// about a hard kill - a fleet timeout, the reaper or a SIGKILL of this process
-// cannot run a `finally` - and the bounded waits live well inside the suite's
-// own 20s child deadlines.
+// is reported as a failure instead of passing silently. The deadline for a
+// listener close starts BEFORE the graceful shutdown is awaited, because Deno's
+// `shutdown()` waits for in-flight requests: a request that never answers used to
+// hold that await open forever, with the bound applied only afterwards (review
+// finding smw), and in the taken-port section that stalled the teardown before
+// the killed child had been reaped - the child reap is now guaranteed by its own
+// guarded step in that `finally`. This makes no claim about a hard kill - a fleet
+// timeout, the reaper or a SIGKILL of this process cannot run a `finally` - and
+// every bounded wait lives well inside the suite's own 20s child deadlines.
 
 import {
   appendTail,
@@ -78,8 +83,11 @@ function assert(condition, message) {
 // bound is counted as a failure rather than ignored.
 const TEARDOWN_BOUND_MS = 2000;
 
+let teardownFailures = 0;
+
 function teardownFailed(what) {
   failures++;
+  teardownFailures++;
   console.error(`FAIL ${what}`);
 }
 
@@ -97,12 +105,44 @@ async function reapChild(child, what) {
 }
 
 async function closeListener(listener, what) {
-  await listener.shutdown();
-  const closed = await Promise.race([
-    listener.finished.then(() => true),
+  // The deadline starts BEFORE the graceful close. The first version of this helper
+  // awaited `listener.shutdown()` and only then applied its bound, so a request
+  // that never answered held that await open and the deadline never started at all
+  // (review finding smw); in the taken-port section that also stalled the `finally`
+  // before the killed child had been reaped.
+  //
+  // Measured on Deno 2.9.7, so this is not assumed:
+  //   - `shutdown()` with a held-open request never settles, and `finished` does not
+  //     settle either; the listening socket is already closed by then (a rebind on
+  //     the same port succeeds immediately), so what is pending is the client;
+  //   - `controller.abort()` with no prior shutdown returns instantly, settles
+  //     `finished`, fails the in-flight request and frees the port;
+  //   - `controller.abort()` AFTER `shutdown()` has been called throws an UNCAUGHT
+  //     `BadResource` out of Deno's own signal listener, whether or not `shutdown()`
+  //     had settled, so a graceful-then-force sequence is not available and calling
+  //     it would trade a bounded stall for an unhandled error;
+  //   - the value `Deno.serve` returns exposes `addr`, `finished`, `shutdown`, `ref`,
+  //     `unref` and `Symbol.asyncDispose` (enumerated at runtime) - there is no
+  //     other force-close to use instead.
+  // A stall is therefore reported rather than waited on or force-aborted: the port
+  // is already free by the time this reports, and a child that could own it is
+  // force-killed and reaped by `reapChild`.
+  const graceful = listener.shutdown().then(() => true, () => false);
+  const settled = listener.finished.then(() => true, () => true);
+  const closedInTime = await Promise.race([
+    Promise.all([graceful, settled]).then(() => true),
     new Promise((resolve) => setTimeout(() => resolve(false), TEARDOWN_BOUND_MS)),
   ]);
-  if (!closed) teardownFailed(`${what} was still serving ${TEARDOWN_BOUND_MS}ms after shutdown`);
+  if (closedInTime) return;
+  teardownFailed(
+    `${what} had not finished closing ${TEARDOWN_BOUND_MS}ms after it was asked to shut ` +
+      `down (a request is still in flight; the listening socket is already closed, and ` +
+      `Deno 2.9.7 throws an uncaught BadResource if the owned aborter fires after shutdown)`,
+  );
+  await Promise.race([
+    settled,
+    new Promise((resolve) => setTimeout(resolve, TEARDOWN_BOUND_MS)),
+  ]);
 }
 
 // ONE aggregate case, by the dty.19 policy for this class of suite. The
@@ -284,8 +324,19 @@ Deno.test(
             "the real child must never claim it is listening on a port it could not bind",
           );
         } finally {
-          await closeListener(occupier, "the occupier listener");
-          if (child) await reapChild(child, "the real server on a taken port");
+          // Both teardowns are attempted even if one of them throws or stalls: a
+          // listener that will not close must never stop the killed child from
+          // being reaped, and each failure is reported rather than swallowed.
+          try {
+            await closeListener(occupier, "the occupier listener");
+          } catch (error) {
+            teardownFailed(`closing the occupier listener threw: ${error.message}`);
+          }
+          try {
+            if (child) await reapChild(child, "the real server on a taken port");
+          } catch (error) {
+            teardownFailed(`reaping the real server on a taken port threw: ${error.message}`);
+          }
         }
       },
     );
@@ -408,13 +459,24 @@ Deno.test(
             "the real child's own report satisfies readiness",
           );
         } finally {
-          await reapChild(child, "the real server on a free port");
+          try {
+            await reapChild(child, "the real server on a free port");
+          } catch (error) {
+            teardownFailed(`reaping the real server on a free port threw: ${error.message}`);
+          }
         }
       },
     );
 
     if (failures > 0) {
       console.error(`\nserver boot tests: ${failures} section(s) failed`);
+      if (teardownFailures > 0) {
+        // The counter keeps its legacy wording, so say separately when part of it
+        // came from a teardown rather than from a section's own assertion.
+        console.error(
+          `server boot tests: ${teardownFailures} of those failures came from teardown; see the FAIL lines above`,
+        );
+      }
       throw new Error(`${failures} server boot section(s) failed`);
     }
     console.log("\nserver boot tests: all sections passed");
