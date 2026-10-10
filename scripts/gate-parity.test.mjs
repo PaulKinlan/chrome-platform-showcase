@@ -442,18 +442,27 @@ Deno.test("the local gate and CI declare the same commands, and every suite is n
   // `--summary` text, a comment — fails this, because none of those is a
   // `deno run` segment whose program is the runner.
   //
-  // Registration is detected by a statement-position match on the raw source.
-  // That is exact for this tree (measured at introduction: every registered
-  // suite matched, the direct-run legacy suites carry no `Deno.test` mention
-  // at all). The residual false-positive class is a FUTURE file whose BLOCK
-  // comment or template literal contains a line beginning with `Deno.test(` —
-  // a // line comment cannot, because the line then starts with //. If that
-  // ever fires, the failure is loud and names the file: reword the mention so
-  // no line begins with `Deno.test(`, or route the task through the runner.
-  // Deliberately NO homegrown comment/string-stripping parser: a mini state
-  // machine over strings and templates is its own correctness risk in a guard
-  // whose whole purpose is exactness.
-  const REGISTERED = /^\s*Deno\.test\s*\(/m;
+  // Registration is detected by a TEXTUAL TRACE match on the raw source (bead
+  // chrome_platform_showcase-813 broadened the original line-anchored form: a
+  // suite registering via an alias, a single-line loop or bracket access is
+  // invisible to `^\s*Deno\.test` and could sit on a plain `deno run` task
+  // running zero tests). Any trace — a `Deno.test(` call at ANY position, a
+  // `Deno["test"]` bracket access, a `const { test } = Deno` destructure, an
+  // alias assignment `const t = Deno.test`, or `Deno.test.call/apply/bind` —
+  // makes the file REGISTERED, and C1 then demands runner routing. The false-
+  // positive class is prose: a comment or template literal containing one of
+  // those shapes (measured at introduction: exactly three, all in already-
+  // routed suites, so the tree stays green). If a mention in an UNROUTED file
+  // ever fires, the failure is loud and names the file: reword the mention or
+  // route the task. Deliberately NO homegrown comment/string-stripping parser:
+  // a mini state machine over strings and templates is its own correctness
+  // risk in a guard whose whole purpose is exactness. Honest residual: a
+  // registration with NO textual trace (computed/encoded member access, e.g.
+  // Deno["te"+"st"]) is not statically provable in JS; the backstops are code
+  // review, the runner's at-least-one-test rule once routed, and the C3
+  // allow-list below, which forces every unrouted suite onto a reviewed list.
+  const REGISTERED =
+    /Deno\.test\s*\(|Deno\s*\[\s*["'`]test["'`]\s*\]|\{\s*test(?:\s*:\s*\w+)?\s*\}\s*=\s*Deno\b|(?:const|let|var)\s+\w+\s*=\s*Deno\.test\b|Deno\.test\s*\.\s*(?:call|apply|bind)\b/;
   const SUITE_FILE = /^(?:scripts|tests)\/[\w./-]*\.test\.mjs$/;
   // Does one &&-segment of `cmd` actually invoke the runner with `path` as its
   // target (exact token, after the runner path, before any `--`)?
@@ -476,7 +485,7 @@ Deno.test("the local gate and CI declare the same commands, and every suite is n
   check(
     "the routing guard sees at least one Deno.test-registered suite",
     registeredSuites.length > 0,
-    "statement-position scan found no registrations — the detector is broken, " +
+    "trace scan found no registrations — the detector is broken, " +
       "not the tasks; do not let an empty match set vacuously green this section",
   );
   const misrouted = registeredSuites.filter((file) => {
@@ -492,6 +501,31 @@ Deno.test("the local gate and CI declare the same commands, and every suite is n
       "(measured, bead f0f); route the task through scripts/native-test.mjs with the " +
       "same file as its target, or remove the registration",
   );
+  // C3 (bead chrome_platform_showcase-813): fail-closed default for
+  // unregistered suites. A suite named by a task that does NOT route through
+  // the runner must be on this explicit legacy direct-run list, and every list
+  // entry must be a currently unrouted suite — the list must EQUAL the
+  // unrouted set, in both directions. A brand-new suite on a plain `deno run`
+  // task goes RED until a reviewed edit adds it here; a migration that moves a
+  // legacy suite onto the runner (dty.37: server-hardening) MUST remove its
+  // entry in the same reviewed diff, or the stale entry goes RED. C1 always
+  // wins: a listed suite that gains a registration trace while staying
+  // direct-run is RED under C1 regardless of this list.
+  const LEGACY_DIRECT_RUN = ["server-hardening.test.mjs"];
+  const unroutedSuites = scriptTests.filter((file) =>
+    !tasksRunning(file).some((name) => taskRoutes(name, `scripts/${file}`))
+  );
+  const sameNames = (a, b) =>
+    a.length === b.length && [...a].sort().every((x, i) => x === [...b].sort()[i]);
+  check(
+    "the legacy direct-run allow-list is exactly the set of unrouted suites",
+    sameNames(unroutedSuites, LEGACY_DIRECT_RUN),
+    `unrouted suites: [${unroutedSuites.join(", ")}] vs allow-list: [${
+      LEGACY_DIRECT_RUN.join(", ")
+    }] — add a NEW unlisted direct-run suite here deliberately (reviewed edit), ` +
+      "and remove an entry in the same diff that migrates its suite to the runner",
+  );
+
   // Reverse direction: a task that invokes the runner must point at a file that
   // actually registers cases. (The runner's own at-least-one-test rule is the
   // runtime backstop; this catches the drift statically, by name.)
