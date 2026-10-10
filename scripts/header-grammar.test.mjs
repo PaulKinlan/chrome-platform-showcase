@@ -29,17 +29,16 @@
 // `FAIL — header-grammar tests (1 file(s) failed)` — a neutral label, truthfully
 // prefixed in both directions. A read-only audit found no consumer of the old text.
 //
-// The legacy `call()` helper and its handleLegacyReleaseEndpoints import are kept
-// verbatim even though no case uses them: removing them would change the module
-// graph this suite loads, so that cleanup belongs in its own bead.
+// Stage 7 (bead dty.7): the legacy `call()` helper, its `noAsset` stub and the
+// `handleLegacyReleaseEndpoints` import were kept verbatim through the Stage 6
+// migration and are removed here now that all seven cases drive the two sidecar
+// modules directly. Only the module graph this suite loads shrinks; the subjects,
+// assertions, task id, gate step and sidecar mappings are unchanged.
 //
 // Run: deno task test-header-grammar
 
-import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
 import { handleFeatureRequest as handlePolicyEchoFeatureRequest } from "../v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/_server.ts";
 import { handleFeatureRequest as handleDelayedEchoFeatureRequest } from "../v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields/_server.ts";
-
-const noAsset = async () => null;
 
 const DELAY_SUB =
   "/resource-timing-add-spec-compliant-service-worker-router-timing-fields/delayed-echo";
@@ -48,17 +47,6 @@ const POLICY_SUB =
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
-}
-
-// A route that throws while building its headers is what a 500 looks like from
-// the caller's side; model it as one so the assertions read true to life.
-async function call(release, sub, query) {
-  const req = new Request(`http://localhost:3000/${release}${sub}${query ?? ""}`);
-  try {
-    return await handleLegacyReleaseEndpoints(req, release, sub, noAsset);
-  } catch (err) {
-    return new Response(JSON.stringify({ thrown: String(err) }), { status: 500 });
-  }
 }
 
 async function callPolicyEchoSidecar(sub, query) {
