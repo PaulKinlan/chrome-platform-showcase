@@ -33,9 +33,15 @@
 // prefixed in both directions. The old text `all sections passed` is gone; a
 // read-only audit found no consumer of it.
 //
+// Added in bead dty.3: the fifth case pins the storage projection's field set
+// directly (extra and private JWK fields cannot survive it), because the heap case
+// is the only other guard and it cannot see a small-field leak. Same file, task,
+// flags and gate step — no task/permission/plan change.
+//
 // Run: deno task test-dbsc-jwk-shape   (needs --v8-flags=--expose-gc)
 
 import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
+import { P256_PUBLIC_JWK_FIELDS, p256PublicJwkForStorage } from "../lib/jwk.ts";
 
 const PREFIX = "/device-bound-session-credentials";
 const RELEASE = "v147";
@@ -176,6 +182,50 @@ Deno.test("ok — a padded registration still verifies through its stored key", 
     refreshed.res.status === 200 && refreshed.body.proofVerified === true,
     `the stored key of a padded registration must verify (status ${refreshed.res.status})`,
   );
+});
+
+// The storage projection contract, asserted directly rather than through a
+// response. The DBSC register handler stores
+// `p256PublicJwkForStorage(verified.publicKeyJwk)` (routes/release-endpoints.ts
+// :2862-2863), so this pins the helper that call site depends on — the field set
+// comes from the module's own P256_PUBLIC_JWK_FIELDS so the assertion cannot drift
+// from the contract. What this case deliberately does NOT claim: it does not read
+// the stored session record (dbscSessions is module-private, with no test seam, and
+// the DBSC state echo exposes only `registered: Boolean(...)`, `registeredAt` and
+// `events`), so a call-site bypass is covered by the heap case, not by this one.
+Deno.test("ok — the storage projection keeps only the contracted public JWK fields", () => {
+  // A caller-supplied key as it can arrive in a proof header: the private scalar, a
+  // large padded extra, the WebCrypto bookkeeping fields, and a nested object.
+  const source = {
+    kty: "EC",
+    crv: "P-256",
+    x: "AAAA",
+    y: "BBBB",
+    d: "PRIVATE-KEY-MATERIAL",
+    junk: "J".repeat(1024),
+    kid: "caller-supplied",
+    alg: "ES256",
+    use: "sig",
+    ext: true,
+    key_ops: ["verify"],
+    nested: { deep: [1, 2] },
+  };
+  const projected = p256PublicJwkForStorage(source);
+  assert(
+    JSON.stringify(Object.keys(projected).sort()) ===
+      JSON.stringify([...P256_PUBLIC_JWK_FIELDS].sort()),
+    `only the contracted fields may survive, got ${JSON.stringify(Object.keys(projected))}`,
+  );
+  // Own-property negatives, by name. `Object.hasOwn` rather than `in`, which is true
+  // for anything inherited from Object.prototype; and not a JSON round-trip, which
+  // collapses undefined-valued keys.
+  for (const field of ["d", "junk", "kid", "alg", "use", "ext", "key_ops", "nested"]) {
+    assert(
+      !Object.hasOwn(projected, field),
+      `the storage projection must not keep an own property named ${field}`,
+    );
+  }
+  assert(projected !== source, "the projection must hand back a new object, not the caller's");
 });
 
 Deno.test("ok — the JWK padding is not retained across many registrations", async () => {
