@@ -26,9 +26,16 @@
 // calls (`createContextualFragment`, `parseFromString`, `setHTML`/`setHTMLUnsafe`,
 // `parseHTMLUnsafe`, `sanitize`, `insertAdjacentHTML`) at any spacing before the
 // paren, `setAttribute("srcdoc", ...)` and `document.write/writeln` in both
-// casings (`contentDocument.write`). Green by construction: reads of
-// `outerHTML`/`srcdoc`/`el["innerHTML"]`, inert markup, `Node.importNode` (a
-// clone/adopt step whose parse half is covered), `textContent`.
+// casings (`contentDocument.write`). ONE gap primitive (WS below: whitespace,
+// line and block comments) is applied at EVERY token boundary the patterns
+// contain - before/after `[`, the key string and `]`, around the property dot,
+// before the operator or colon, and before the call paren - so a comment dropped
+// into any syntactic gap of a sink is the same sink (`el[/*x*/"innerHTML"] = t`,
+// `outerHTML /*x*/ = t`, `document /*x*/ . /*x*/ write /*x*/ (t)`).
+// Green by construction: reads of `outerHTML`/`srcdoc`/`el["innerHTML"]`, inert
+// markup, a quoted string that merely names an accessor (`const s =
+// "innerHTML"`), `Node.importNode` (a clone/adopt step whose parse half is
+// covered), `textContent`.
 // Accepted safe-direction overreach: these are lexical patterns on JS text, so a
 // string/comment containing e.g. `innerHTML =` trips the guard, as does an
 // `==`/`===` comparison of an accessor or a JS label spelled `innerHTML:` -
@@ -86,7 +93,7 @@ const forbidden = [
   },
   {
     name: 'computed-bracket write, e.g. el["innerHTML"] = text',
-    re: new RegExp(String.raw`\[\s*['"](?:innerHTML|outerHTML|srcdoc)['"]\s*\]${WS}[-+]?=`),
+    re: new RegExp(String.raw`\[${WS}['"](?:innerHTML|outerHTML|srcdoc)['"]${WS}\]${WS}[-+]?=`),
   },
   {
     name:
