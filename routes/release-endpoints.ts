@@ -26,25 +26,6 @@ const TELEMETRY_BODY_LIMIT = 128 * 1024;
 
 export type AssetReader = (release: string, sub: string) => Promise<Response | null>;
 
-function renderReferrerEcho(req: Request): Response {
-  const url = new URL(req.url);
-  const payload = {
-    policy: url.searchParams.get("policy") ?? "default",
-    method: req.method,
-    referer: req.headers.get("referer") ?? "",
-    origin: req.headers.get("origin") ?? "",
-    secFetchSite: req.headers.get("sec-fetch-site") ?? "",
-    note:
-      "This endpoint echoes request metadata so CSS URL request modifier demos can compare per-request referrer behavior.",
-  };
-  return new Response(JSON.stringify(payload, null, 2), {
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-    },
-  });
-}
-
 const CSS_URL_MODIFIER_DEMO_PREFIX = "/css-url-request-modifiers/crossorigin-integrity-demo";
 
 const CSS_URL_MODIFIER_CLEAN_SVG =
@@ -4625,9 +4606,6 @@ export async function handleLegacyReleaseEndpoints(
   if (release === "v150") {
     const cssUrlModifierDemoResponse = await renderCssUrlModifierDemoRoute(req, sub);
     if (cssUrlModifierDemoResponse) return cssUrlModifierDemoResponse;
-    if (sub === "/css-url-request-modifiers/referrer-echo") {
-      return renderReferrerEcho(req);
-    }
     const processingInstructionStreamResponse = renderProcessingInstructionStreamingUseCaseRoute(
       req,
       sub,
