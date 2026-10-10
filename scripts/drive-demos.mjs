@@ -343,17 +343,17 @@ async function runDrive(opts, io, holder, selection) {
     return trackBootChild(holder.serverChild);
   }
 
-  function killServerChild() {
-    if (!holder.serverChild) return;
-    try {
-      holder.serverChild.kill("SIGKILL");
-    } catch (err) {
-      // A refused signal on a child we own must not be dropped on the floor with
-      // the handle: record it so the caller reports a named cleanup failure
-      // instead of continuing as if the child were gone.
-      holder.killFailures.push(err);
-    }
+  // Boot recovery and the final cleanup retire a server child the same way: it is
+  // only retired when its exit is CONFIRMED. A child whose exit could not be
+  // confirmed keeps its HANDLE here, so the caller re-attempts it and reports it -
+  // dropping the handle along with a refused signal is what made a live child
+  // unreapable and invisible.
+  async function retireServerChild() {
+    const child = holder.serverChild;
+    if (!child) return;
     holder.serverChild = null;
+    const failure = await reapServerChild(child, { boundMs: holder.reapBoundMs });
+    if (failure) holder.retiredChildren.push(child);
   }
 
   // Poll until the CHILD reports it is listening and answers, or the bound elapses.
@@ -425,7 +425,7 @@ async function runDrive(opts, io, holder, selection) {
       base = `http://localhost:${port}`;
       const outcome = await awaitServerReady(port);
       if (outcome.ok) return;
-      killServerChild();
+      await retireServerChild();
       const message = describeBootFailure({ port, ...outcome });
       failures.push(message);
       // A crash or a 10-second silent boot is not going to be fixed by another
@@ -736,7 +736,7 @@ async function runDrive(opts, io, holder, selection) {
 // settles is bounded rather than awaited forever.
 const SERVER_REAP_BOUND_MS = 2000;
 
-async function reapServerChild(child, { boundMs = SERVER_REAP_BOUND_MS } = {}) {
+export async function reapServerChild(child, { boundMs = SERVER_REAP_BOUND_MS } = {}) {
   if (!child) return null;
   let killFailure = null;
   try {
@@ -775,7 +775,7 @@ async function reapServerChild(child, { boundMs = SERVER_REAP_BOUND_MS } = {}) {
 // happening, and a close that fails is never mistaken for a clean shutdown.
 const CONNECTION_CLOSE_BOUND_MS = 2000;
 
-async function closeConnection(conn, { boundMs = CONNECTION_CLOSE_BOUND_MS } = {}) {
+export async function closeConnection(conn, { boundMs = CONNECTION_CLOSE_BOUND_MS } = {}) {
   if (!conn?.close) return null;
   let timer = null;
   try {
@@ -826,7 +826,13 @@ export async function main(deps = {}) {
     return;
   }
 
-  const holder = { chrome: null, conn: null, serverChild: null, killFailures: [] };
+  const holder = {
+    chrome: null,
+    conn: null,
+    serverChild: null,
+    retiredChildren: [],
+    reapBoundMs: serverReapBoundMs,
+  };
   let runResult = null;
   let primary = null;
   try {
@@ -838,11 +844,6 @@ export async function main(deps = {}) {
   // Same cleanup sequence as the old run-level finally, captured per step so a
   // cleanup failure can never replace the run's own error or skip the report.
   const cleanupFailures = [];
-  // A refused signal during boot recovery is a cleanup failure that already
-  // happened: it must be reported rather than forgotten.
-  for (const err of holder.killFailures ?? []) {
-    cleanupFailures.push({ what: "a server child that could not be signalled", error: err });
-  }
   const closeFailure = await closeConnection(holder.conn, { boundMs: connectionCloseBoundMs });
   if (closeFailure) cleanupFailures.push({ what: "the CDP connection", error: closeFailure });
   try {
@@ -852,6 +853,19 @@ export async function main(deps = {}) {
   }
   const reapFailure = await reapServerChild(holder.serverChild, { boundMs: serverReapBoundMs });
   if (reapFailure) cleanupFailures.push({ what: "the local server child", error: reapFailure });
+  // Every child boot recovery could not retire gets one authoritative bounded
+  // re-attempt here, so a live child is never dropped just because its first
+  // retirement failed, and an already-exited one is confirmed rather than
+  // reported as a failure it is not.
+  for (const child of holder.retiredChildren ?? []) {
+    const stillRunning = await reapServerChild(child, { boundMs: serverReapBoundMs });
+    if (stillRunning) {
+      cleanupFailures.push({
+        what: "a server child that boot recovery could not retire",
+        error: stillRunning,
+      });
+    }
+  }
 
   const writeFailures = [];
   let exitCode = 1;

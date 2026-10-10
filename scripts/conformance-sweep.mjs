@@ -401,7 +401,7 @@ async function runSweep(opts, io, holder) {
 // settles is bounded rather than awaited forever.
 const SERVER_REAP_BOUND_MS = 2000;
 
-async function reapServerChild(child, { boundMs = SERVER_REAP_BOUND_MS } = {}) {
+export async function reapServerChild(child, { boundMs = SERVER_REAP_BOUND_MS } = {}) {
   if (!child) return null;
   let killFailure = null;
   try {
