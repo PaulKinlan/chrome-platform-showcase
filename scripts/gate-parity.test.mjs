@@ -657,6 +657,17 @@ Deno.test("the local gate and CI declare the same commands, and every suite is n
   // target is taken from the task's own text (its last .mjs operand), so a
   // repointed task is judged on what it really runs, not on the pinned
   // constant — the exact-command check below is what fixes the constant.
+  // The fourth check pins the other direction of the opt-out: the task must
+  // stay UNREACHABLE from the gate plan, because a test:harness step (direct
+  // or nested) would hand every gate run the harness's --allow-write and
+  // unrestricted --allow-run — a permission change nobody reviewed.
+  //
+  // Rationale of record: bead chrome_platform_showcase-0a0 and the harness
+  // paragraph in AGENTS.md. This pin names exactly ONE deliberate opt-out and
+  // is not a licence: a future suite left off the plan is drift this guard's
+  // own rules fail on (or, for a non-*.test.mjs, an unpinned hole) — a new
+  // opt-out needs its own reviewed pin and rationale, never an inference
+  // from this one that omission is okay by default.
   const HARNESS_FILE = "tests/integration/native-test-harness.mjs";
   const HARNESS_CMD =
     "deno run --allow-read --allow-write --allow-run tests/integration/native-test-harness.mjs";
@@ -694,6 +705,15 @@ Deno.test("the local gate and CI declare the same commands, and every suite is n
         "rule and be forced onto the gate plan; the harness is a plain assert-and-exit " +
         "script on purpose (bead 0a0), so keep it off the suite path instead of wiring it " +
         "into scripts/gate-steps.mjs",
+  );
+  check(
+    "the off-plan harness regression task is not reachable from the gate plan",
+    !gateTasks.has("test:harness"),
+    "a gate plan step (directly or through a nested `deno task`) reaches " +
+      "test:harness — the harness is opt-in precisely because its children need " +
+      "--allow-write and an unrestricted --allow-run; wiring it into " +
+      "scripts/gate-steps.mjs hands those permissions to every gate run, which the " +
+      "reviewed opt-out (bead 0a0) says not to do",
   );
 
   // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
