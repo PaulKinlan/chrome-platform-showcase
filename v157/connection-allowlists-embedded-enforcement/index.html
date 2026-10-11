@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connection Allowlists - Embedded Enforcement — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v157/">&larr; Chrome 157</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v157 · security · origin trial</p>
+    <h1>Connection Allowlists - Embedded Enforcement</h1>
+    <p class="lede">Connection Allowlists let a document restrict which external endpoints its code may contact. Embedded enforcement extends that control <em>across the frame boundary</em>: a parent sets a <code>connectionallowlist</code> attribute on an <code>&lt;iframe&gt;</code>, the browser carries the requirement to the framed server as the <code>Sec-Required-Connection-Allowlist</code> request header, and the framed document must opt in — with a <code>Connection-Allowlist</code> response header at least as strict, or an <code>Allow-Connection-Allowlist-From</code> delegation — or the frame does not load at all. The design deliberately mirrors CSP Embedded Enforcement.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./required-header-echo/">The requirement on the wire</a></h3>
+      <p>Frame a live echo endpoint with and without the <code>connectionallowlist</code> attribute and read back exactly what arrived: did the browser send <code>Sec-Required-Connection-Allowlist</code>, and with which allowlist value? Plus honest feature detection of the attribute surface itself — on a build without the origin trial, the echo proves the header was never sent.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./optin-handshake/">The opt-in handshake, three ways</a></h3>
+      <p>One enforcing iframe, three real server responses: a frame that answers <code>Connection-Allowlist: (response-origin)</code> (strict-enough opt-in), one that answers <code>Allow-Connection-Allowlist-From: *</code> (delegate to the embedder), and one with no headers at all — the frame an enforcing browser must refuse to load. Live load/blocked outcomes from real navigations, with each frame's same-origin fetch probe reported via postMessage.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./srcdoc-inheritance/">Local schemes inherit implicitly</a></h3>
+      <p>An <code>about:srcdoc</code> frame has no server to send headers, so the spec opts it in implicitly: it inherits the embedder's policy container, requirement and all. This page builds a srcdoc frame under a requirement and runs connection probes inside it — and contrasts the "at least as strict" rule for nested frames.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>The base Connection Allowlists feature (Chrome 148 origin trial) answers "which endpoints may <em>my</em> document contact" — valuable for limiting exfiltration after an injection. But pages are rarely alone: ad slots, payment widgets, chat bubbles and analytics all arrive in iframes, and a parent that has carefully constrained its own connections had no way to demand the same discipline from what it embeds. Embedded enforcement is that missing half, borrowing the proven shape of <a href="https://w3c.github.io/webappsec-cspee/" target="_blank" rel="noopener">CSP Embedded Enforcement</a>: requirement attribute on the frame, <code>Sec-Required-*</code> request header on the navigation, explicit opt-in from the framed response, hard block otherwise. Because the accepted requirement joins the framed document's policy container, it propagates to the frame's own descendants and workers, and <code>response-origin</code> re-resolves against each inheritor's origin.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>&lt;!-- the embedder requires an allowlist of the widget --&gt;
+&lt;iframe connectionallowlist='(response-origin "https://api.widget.example")'
+        src="https://widget.example/"&gt;&lt;/iframe&gt;
+
+&lt;!-- the navigation carries the requirement --&gt;
+GET / HTTP/1.1
+Host: widget.example
+Sec-Required-Connection-Allowlist: (response-origin "https://api.widget.example")
+
+&lt;!-- the widget opts in (at least as strict), or is blocked --&gt;
+HTTP/1.1 200 OK
+Connection-Allowlist: (response-origin)
+
+&lt;!-- …or delegates the decision to specific embedders --&gt;
+Allow-Connection-Allowlist-From: https://embedder.example</code></pre>
+    <p>There is no JavaScript API: the contract is HTML markup plus HTTP headers, which is why every concept here talks to real server routes under this feature's folder.</p>
+  </section>
+
+  <!-- research notes (weekly-hardening, 2026-10-11)
+    Use-case portfolio: (1) basic/canonical = required-header-echo (real
+    navigation, real request-header echo from a live route, honest attribute
+    feature detection); (2) practical product = optin-handshake (three live
+    framed endpoints covering both opt-in paths and the must-block path,
+    outcomes from real load/postMessage evidence); (3) edge = srcdoc-inheritance
+    (implicit local-scheme opt-in + descendant propagation + at-least-as-strict
+    nesting). Not applicable: a JS API angle — the explainer defines none
+    (recorded above); cross-origin embedder/embeddee split is impossible from a
+    single-origin showcase and is stated honestly on the pages rather than
+    simulated with fake origins.
+    Exact contract (iframe-embedded-enforcement-explainer.md, fetched
+    2026-10-11): iframe attribute connectionallowlist (grammar = the
+    Connection-Allowlist structured-field inner list, e.g.
+    '(response-origin "https://api.example")'); request header
+    Sec-Required-Connection-Allowlist on the frame navigation; opt-in via
+    Connection-Allowlist at least as strict, Allow-Connection-Allowlist-From
+    (byte-compare origin or *), or implicit for about:srcdoc / data: which
+    inherit the embedder's policy container; accepted requirement joins the
+    framed document's policy container, inherited by descendants/workers,
+    response-origin resolving per-inheritor; blocked frame fails to load with
+    a console message.
+    Flag findings (runtime_enabled_features.json5, fetched 2026-10-11):
+      name: ConnectionAllowlistEmbeddedEnforcement, status experimental,
+      origin_trial_feature_name: ConnectionAllowlistEmbeddedEnforcement,
+      base_feature_status enabled (Finch kill switch). Banner steps:
+      chrome://flags/#enable-experimental-web-platform-features, or
+      --enable-blink-features=ConnectionAllowlistEmbeddedEnforcement, or the
+      origin trial of the same name. ChromeStatus lists no shipped desktop
+      milestone (origin trial in 157).
+    Server routes: co-located _server.ts (echo-required, framed/optin,
+    framed/optin-from, framed/noheader, framed/ping), registered in
+    routes/release.ts STATIC_FEATURE_SERVERS.
+    Verified in this environment on headless Chromium 141 (also behind
+    --enable-experimental-web-platform-features): the attribute is inert, no
+    Sec-Required-Connection-Allowlist is sent (echo shows "(absent)"), all
+    three handshake frames load — the honest pre-trial baseline each page
+    reports. The enforcing path is an open question for an OT-enabled build. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5657801797009408" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/WICG/connection-allowlists/blob/main/iframe-embedded-enforcement-explainer.md" target="_blank" rel="noopener">Explainer: iframe embedded enforcement</a></li>
+    <li><a href="https://wicg.github.io/connection-allowlists/#issue-d96e905e" target="_blank" rel="noopener">Spec draft: connection allowlists</a></li>
+    <li><a href="https://w3c.github.io/webappsec-cspee/" target="_blank" rel="noopener">CSP Embedded Enforcement (the design this mirrors)</a></li>
+    <li><a href="/v148/connection-allowlists/">Sibling feature: Connection Allowlists (Chrome 148)</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

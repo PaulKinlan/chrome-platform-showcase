@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local schemes inherit implicitly — Connection Allowlists Embedded Enforcement — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    iframe { inline-size: 100%; block-size: 170px; border: 2px solid var(--border-black); background: var(--bg-ivory); }
+    .readout dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); }
+    .readout dt { font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700; overflow-wrap: anywhere; }
+    .readout dd { margin: 0; font-family: var(--font-mono); font-size: 0.8rem; overflow-wrap: anywhere; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+    @media (max-width: 480px) { .readout dl { grid-template-columns: 1fr; } .readout dt { margin-top: var(--space-2); } }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Connection Allowlists - Embedded Enforcement</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v157 · security · edge cases</p>
+    <h1>Local schemes inherit implicitly</h1>
+    <p class="lede">A server-backed frame must opt in with a response header — but an <code>about:srcdoc</code> frame has no server and no headers. The spec's answer: local-scheme documents inherit the embedder's policy container, so they are opted in <em>implicitly</em>, requirement included. This page navigates a srcdoc frame under a <code>connectionallowlist</code> requirement and runs real fetch probes inside it, reporting what actually connected.</p>
+  </header>
+
+  <p class="note">On a build without the origin trial, the requirement attribute is inert: both probes succeed and the page says the policy was not enforced. On an enforcing build, the srcdoc frame inherits <code>(response-origin)</code> — which re-resolves to <em>this</em> origin inside the frame — so the same-origin probe still succeeds while the cross-origin probe is refused. Flag/OT steps are on the <a href="../">feature overview</a> banner.</p>
+
+  <section class="stage" aria-labelledby="sd-title">
+    <h2 id="sd-title">A srcdoc frame under a requirement</h2>
+    <div class="readout">
+      <dl>
+        <dt>requirement on the parent iframe</dt><dd><code>(response-origin)</code></dd>
+        <dt>same-origin probe (inside srcdoc)</dt><dd id="r-same">not run yet</dd>
+        <dt>cross-origin probe (inside srcdoc)</dt><dd id="r-cross">not run yet</dd>
+      </dl>
+    </div>
+    <button type="button" id="run">Rebuild the srcdoc frame and run its probes</button>
+    <iframe id="sd-frame" title="srcdoc frame inheriting the embedder's connection allowlist requirement"></iframe>
+    <output id="verdict" aria-live="polite"></output>
+  </section>
+
+  <section><h2>why this matters</h2>
+    <p>Widget markup is often inlined into a srcdoc sandbox precisely so the embedder controls it. If local schemes did not inherit the requirement, srcdoc would be a trivial bypass: wrap any code in <code>&lt;iframe srcdoc&gt;</code> and connect anywhere. Inheritance closes that hole, and the same propagation carries the accepted allowlist into the frame's own descendants and dedicated workers. One subtlety worth knowing: an inherited <code>response-origin</code> token is stored unresolved and re-resolves against each inheriting document's own origin — for a srcdoc frame that is the embedder's origin, so same-origin traffic keeps working.</p>
+    <p>For nested <em>server-backed</em> frames the rule is different and stricter: a descendant's own <code>connectionallowlist</code> attribute is honored only if it is at least as strict as what it inherited — a child cannot loosen what a parent required.</p>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const frame = document.createElement("iframe");
+frame.setAttribute("connectionallowlist", "(response-origin)");
+frame.srcdoc = `&lt;script&gt;
+  fetch("/v157/.../framed/ping")          // same-origin: allowed by response-origin
+  fetch("https://chromestatus.com/…")     // cross-origin: refused when enforcing
+&lt;/script&gt;`;   // no server, no headers — the policy container is inherited</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5657801797009408" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/WICG/connection-allowlists/blob/main/iframe-embedded-enforcement-explainer.md" target="_blank" rel="noopener">Explainer: local schemes and inheritance</a></li>
+    <li><a href="/v148/connection-allowlists/worker-propagation-demo/">Chrome 148 sibling: worker propagation</a></li>
+    <li><a href="../optin-handshake/">The opt-in handshake, three ways</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[caee:srcdoc]';
+  const frame = document.getElementById('sd-frame');
+  const rSame = document.getElementById('r-same');
+  const rCross = document.getElementById('r-cross');
+  const verdict = document.getElementById('verdict');
+  const runBtn = document.getElementById('run');
+  const SAME_ORIGIN_PING = new URL('../framed/ping', location.href).pathname;
+  // A real cross-origin endpoint; no-cors so only connection-level blocking matters.
+  const CROSS_ORIGIN_URL = 'https://chromestatus.com/api/v0/channels';
+  let reported = false;
+
+  window.addEventListener('message', (event) => {
+    if (event.origin !== location.origin && event.origin !== 'null') return;
+    const data = event.data;
+    if (!data || data.type !== 'caee-srcdoc-report') return;
+    rSame.textContent = data.same;
+    rCross.textContent = data.cross;
+    if (data.cross.startsWith('skipped')) {
+      verdict.textContent = data.same.startsWith('ok')
+        ? 'The srcdoc frame loaded and its same-origin probe connected (' + data.same + '). Press the button to also run the cross-origin probe — that is where enforcement becomes visible on an origin-trial build.'
+        : 'The srcdoc frame loaded but its same-origin probe failed (' + data.same + ') — that points at a network problem, not allowlist enforcement.';
+      console.log(LOG, 'load-report', JSON.stringify(data));
+      return;
+    }
+    const enforced = data.same.startsWith('ok') && !data.cross.startsWith('ok');
+    if (data.same.startsWith('ok') && data.cross.startsWith('ok')) {
+      verdict.textContent = 'Both probes connected: the inherited requirement was not enforced on this build (the attribute is inert without the origin trial). The srcdoc frame itself always loads — local schemes are never blocked, they inherit.';
+    } else if (enforced) {
+      verdict.textContent = 'Enforcement visible: same-origin fetch allowed (response-origin re-resolved to this origin inside the srcdoc frame) while the cross-origin fetch was refused — the inherited allowlist at work.';
+    } else {
+      verdict.textContent = 'Unusual pattern — same-origin: ' + data.same + ', cross-origin: ' + data.cross + '. A failing same-origin probe suggests a network problem rather than allowlist enforcement; results shown verbatim.';
+    }
+    if (!reported) {
+      reported = true;
+      globalThis.showcaseTelemetry?.assert('caee-srcdoc-probes-ran', true, { same: data.same, cross: data.cross });
+    }
+    console.log(LOG, 'report', JSON.stringify(data));
+  });
+
+  function build(withCrossProbe) {
+    rSame.textContent = 'running…';
+    rCross.textContent = withCrossProbe
+      ? 'running…'
+      : 'not run on page load — press the button (the probe intentionally contacts chromestatus.com)';
+    verdict.textContent = 'srcdoc frame rebuilding…';
+    frame.setAttribute('connectionallowlist', '(response-origin)');
+    const probe = [
+      '<!doctype html><meta charset="utf-8">',
+      '<body style="font-family:system-ui;font-size:13px;background:#faf8f2;color:#1c1c1c;margin:10px">',
+      '<p>srcdoc frame — inherits the embedder policy container (no headers of its own).</p>',
+      '<p id="s">probing…</p>',
+      '<scr' + 'ipt>',
+      'const WITH_CROSS = ' + JSON.stringify(Boolean(withCrossProbe)) + ';',
+      'const report = { type: "caee-srcdoc-report", same: "pending", cross: WITH_CROSS ? "pending" : "skipped on load (button runs it)" };',
+      'const done = () => {',
+      '  if (report.same === "pending" || report.cross === "pending") return;',
+      '  document.getElementById("s").textContent = "same-origin: " + report.same + " | cross-origin: " + report.cross;',
+      '  window.parent.postMessage(report, "*");',
+      '};',
+      'fetch(' + JSON.stringify(SAME_ORIGIN_PING) + ').then((r) => { report.same = "ok (HTTP " + r.status + ")"; }).catch((e) => { report.same = "refused: " + e.name; }).finally(done);',
+      'if (WITH_CROSS) fetch(' + JSON.stringify(CROSS_ORIGIN_URL) + ', { mode: "no-cors" }).then(() => { report.cross = "ok (opaque response arrived)"; }).catch((e) => { report.cross = "refused: " + e.name; }).finally(done);',
+      '</scr' + 'ipt>',
+    ].join('\n');
+    frame.srcdoc = probe;
+  }
+
+  runBtn.addEventListener('click', () => build(true));
+  build(false);
+})();
+</script>
+</body>
+</html>
