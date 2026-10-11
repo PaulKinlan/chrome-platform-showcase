@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A mixdown exporter with real progress — OfflineAudioContext incremental rendering — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    a.download { display: inline-block; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2) var(--space-3); font-weight: 700; min-height: 28px; text-decoration: none; }
+    progress { inline-size: 100%; block-size: 18px; }
+    canvas { inline-size: 100%; block-size: 110px; border: 2px solid var(--border-black); background: var(--bg-ivory); }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-2); }
+    .stats p { margin: 0; border: 2px solid var(--border-black); padding: var(--space-2); text-align: center; background: var(--bg-stone); color: var(--text-charcoal); font-size: 0.8rem; }
+    .stats strong { display: block; font-size: 1.15rem; font-family: var(--font-mono); }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; OfflineAudioContext incremental rendering</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v158 · webaudio · product use case</p>
+    <h1>A mixdown exporter with real progress</h1>
+    <p class="lede">This is what incremental rendering is for: a bounce-to-file flow that shows honest progress and never holds the whole mix in memory. A three-second arrangement (three detuned oscillators under an amplitude envelope) renders in 8192-frame chunks; each chunk advances the progress bar, extends the waveform, and is immediately converted to 16-bit PCM and appended to the growing WAV — the float chunk is then garbage. On a pre-158 build the same page falls back to one labelled one-shot render, so the exporter stays useful everywhere.</p>
+  </header>
+
+  <p class="note">The downloadable WAV is produced either way; what changes is the memory shape. Chunked: largest live audio allocation ≈ 8192 frames (32 KB of floats). One-shot: the full 132 300-frame buffer (~529 KB here — and ~1.27 GB for an hour of stereo at 44.1 kHz, which is the point). Flag for pre-158 builds: <code>--enable-blink-features=OfflineAudioContextIncrementalRendering</code>.</p>
+
+  <section class="stage" aria-labelledby="export-title">
+    <h2 id="export-title">Bounce the arrangement</h2>
+    <button type="button" id="run">Render &amp; export (44.1 kHz · 3 s · mono)</button>
+    <label for="prog">Render progress</label>
+    <progress id="prog" max="100" value="0"></progress>
+    <canvas id="wave" width="900" height="110" role="img" aria-label="Mixdown waveform, extended as each chunk lands"></canvas>
+    <div class="stats">
+      <p>mode<strong id="s-mode">–</strong></p>
+      <p>chunks<strong id="s-chunks">–</strong></p>
+      <p>frames rendered<strong id="s-frames">–</strong></p>
+      <p>largest float buffer<strong id="s-peak">–</strong></p>
+      <p>WAV bytes<strong id="s-bytes">–</strong></p>
+    </div>
+    <output id="status" aria-live="polite">Not run yet.</output>
+    <p id="dl-slot"></p>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const ctx = new OfflineAudioContext({ numberOfChannels: 1, sampleRate: 44100, length: 44100 * 3 });
+buildArrangement(ctx);
+
+const pcmParts = [];                       // Int16 chunks, not floats
+let rendered = 0;
+while (rendered &lt; ctx.length) {
+  const chunk = await ctx.startRendering(8192);
+  pcmParts.push(toInt16(chunk.getChannelData(0)));   // 8192 frames live at a time
+  rendered += chunk.length;
+  progress.value = (rendered / ctx.length) * 100;    // real progress, no suspend() hacks
+}
+const wav = new Blob([wavHeader(rendered), ...pcmParts], { type: "audio/wav" });</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5109900936085504" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/OfflineAudioContext/explainer.md" target="_blank" rel="noopener">Explainer: memory motivation</a></li>
+    <li><a href="../chunked-render-timeline/">The chunk loop, timed and trimmed</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[oac-incremental:exporter]';
+  const runBtn = document.getElementById('run');
+  const prog = document.getElementById('prog');
+  const canvas = document.getElementById('wave');
+  const cx = canvas.getContext('2d');
+  const sMode = document.getElementById('s-mode');
+  const sChunks = document.getElementById('s-chunks');
+  const sFrames = document.getElementById('s-frames');
+  const sPeak = document.getElementById('s-peak');
+  const sBytes = document.getElementById('s-bytes');
+  const status = document.getElementById('status');
+  const dlSlot = document.getElementById('dl-slot');
+
+  const RATE = 44100, SECONDS = 3, LENGTH = RATE * SECONDS, CHUNK = 8192;
+  let lastUrl = null;
+
+  function buildArrangement(ctx) {
+    const master = new GainNode(ctx, { gain: 0.5 });
+    master.connect(ctx.destination);
+    const env = new GainNode(ctx, { gain: 0 });
+    env.gain.setValueAtTime(0, 0);
+    env.gain.linearRampToValueAtTime(1, 0.15);
+    env.gain.setTargetAtTime(0.4, 1.8, 0.5);
+    env.connect(master);
+    for (const [freq, detune, type] of [[110, 0, 'sawtooth'], [220, 7, 'square'], [331, -5, 'sine']]) {
+      const osc = new OscillatorNode(ctx, { frequency: freq, detune, type });
+      const g = new GainNode(ctx, { gain: 0.3 });
+      osc.connect(g).connect(env);
+      osc.start(0);
+      osc.frequency.exponentialRampToValueAtTime(freq * 1.5, SECONDS);
+    }
+  }
+
+  function toInt16(f32) {
+    const out = new Int16Array(f32.length);
+    for (let i = 0; i < f32.length; i++) {
+      const v = Math.max(-1, Math.min(1, f32[i]));
+      out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+    }
+    return out;
+  }
+
+  function wavHeader(frames) {
+    const bytes = frames * 2;
+    const b = new ArrayBuffer(44);
+    const d = new DataView(b);
+    const w = (off, str) => { for (let i = 0; i < str.length; i++) d.setUint8(off + i, str.charCodeAt(i)); };
+    w(0, 'RIFF'); d.setUint32(4, 36 + bytes, true); w(8, 'WAVE');
+    w(12, 'fmt '); d.setUint32(16, 16, true); d.setUint16(20, 1, true); d.setUint16(22, 1, true);
+    d.setUint32(24, RATE, true); d.setUint32(28, RATE * 2, true); d.setUint16(32, 2, true); d.setUint16(34, 16, true);
+    w(36, 'data'); d.setUint32(40, bytes, true);
+    return b;
+  }
+
+  function drawChunk(data, startFrame) {
+    cx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-charcoal').trim() || '#333';
+    cx.beginPath();
+    const xScale = canvas.width / LENGTH;
+    const mid = canvas.height / 2;
+    for (let i = 0; i < data.length; i += 16) {
+      const x = (startFrame + i) * xScale;
+      const y = mid - data[i] * (mid - 6);
+      if (i === 0) cx.moveTo(x, y); else cx.lineTo(x, y);
+    }
+    cx.stroke();
+  }
+
+  async function run() {
+    runBtn.disabled = true;
+    prog.value = 0;
+    cx.clearRect(0, 0, canvas.width, canvas.height);
+    dlSlot.textContent = '';
+    if (lastUrl) { URL.revokeObjectURL(lastUrl); lastUrl = null; }
+    status.textContent = 'Rendering…';
+    try {
+      const ctx = new OfflineAudioContext({ numberOfChannels: 1, sampleRate: RATE, length: LENGTH });
+      buildArrangement(ctx);
+      const pcmParts = [];
+      let rendered = 0, calls = 0, peak = 0;
+      const t0 = performance.now();
+      while (rendered < LENGTH && calls < 64) {
+        const chunk = await ctx.startRendering(CHUNK);
+        calls++;
+        peak = Math.max(peak, chunk.length);
+        const data = chunk.getChannelData(0);
+        drawChunk(data, rendered);
+        pcmParts.push(toInt16(data));
+        rendered += chunk.length;
+        prog.value = Math.round((rendered / LENGTH) * 100);
+        sChunks.textContent = String(calls);
+        sFrames.textContent = rendered.toLocaleString('en-GB');
+        if (calls === 1 && chunk.length === LENGTH) break;
+      }
+      const ms = Math.round(performance.now() - t0);
+      const chunked = !(calls === 1 && peak === LENGTH);
+      sMode.textContent = chunked ? 'chunked (158+)' : 'one-shot (legacy)';
+      sPeak.textContent = peak.toLocaleString('en-GB') + ' frames (' + Math.round(peak * 4 / 1024) + ' KB f32)';
+      const wavBytes = 44 + rendered * 2;
+      sBytes.textContent = wavBytes.toLocaleString('en-GB');
+      const blob = new Blob([wavHeader(rendered), ...pcmParts], { type: 'audio/wav' });
+      lastUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = lastUrl;
+      a.download = 'showcase-mixdown.wav';
+      a.className = 'download';
+      a.textContent = 'Download showcase-mixdown.wav (' + Math.round(blob.size / 1024) + ' KB)';
+      dlSlot.append(a);
+      status.textContent = chunked
+        ? 'Chunked export: ' + calls + ' startRendering(8192) calls in ' + ms + ' ms, progress was real per-chunk state, and the largest float allocation was ' + peak + ' frames instead of ' + LENGTH + '.'
+        : 'This build ignored the chunkSize argument and rendered all ' + LENGTH + ' frames in one buffer (legacy pre-158 path, labelled honestly). The WAV is still produced — but progress had exactly two states and the full float buffer lived in memory at once. See the banner for the enabling flag.';
+      globalThis.showcaseTelemetry?.assert('oac-exporter-wav-complete', rendered === LENGTH && blob.size === wavBytes, { rendered, calls, chunked, size: blob.size });
+      console.log(LOG, 'mode=' + sMode.textContent, 'calls=' + calls, 'peak=' + peak, 'ms=' + ms);
+    } catch (error) {
+      sMode.textContent = 'error';
+      status.textContent = 'Export failed with ' + error.name + ': ' + error.message + ' — shown verbatim.';
+      console.log(LOG, 'error', error.name, error.message);
+    } finally {
+      runBtn.disabled = false;
+    }
+  }
+
+  runBtn.addEventListener('click', run);
+  console.log(LOG, 'ready');
+})();
+</script>
+</body>
+</html>

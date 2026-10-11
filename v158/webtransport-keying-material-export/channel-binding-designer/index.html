@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Session-bound secrets in practice — WebTransport keying material export — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    label { font-weight: 700; }
+    .field { display: grid; gap: var(--space-1); }
+    .field input { font: inherit; font-family: var(--font-mono); font-size: 0.85rem; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); inline-size: 100%; box-sizing: border-box; min-height: 44px; }
+    .hint { font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .call-preview { font-family: var(--font-mono); font-size: 0.78rem; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-3); overflow-x: auto; white-space: pre; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport keying material export</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v158 · webtransport · product use case</p>
+    <h1>Session-bound secrets in practice</h1>
+    <p class="lede">Both TLS endpoints can run the same exporter with the same inputs and arrive at the same bytes, so the derived value works as proof of "I am this session" without ever crossing the wire. Fill in the three inputs, and the page performs the genuine <code>exportKeyingMaterial()</code> call on a freshly constructed session and prints whatever really happened. The companion panel shows what the server does with its matching copy.</p>
+  </header>
+
+  <p class="note">This showcase cannot reach an HTTP/3 server, so on Chrome 158+ the live call finishes with the spec's <code>InvalidStateError</code> after the dead-endpoint session fails; argument handling still runs for real. Builds before 158 lack the method and the result panel reports that plainly. Enable on older builds via <code>--enable-blink-features=WebTransportExportKeyingMaterial</code> or <code>chrome://flags/#enable-experimental-web-platform-features</code>.</p>
+
+  <section class="stage" aria-labelledby="compose-title">
+    <h2 id="compose-title">Compose and fire the export</h2>
+    <div class="field">
+      <label for="f-label">Exporter label (UTF-8, max 255 bytes)</label>
+      <input type="text" id="f-label" value="EXPORTER-showcase-auth" aria-describedby="label-hint">
+      <p class="hint" id="label-hint">Namespace your label; IETF convention prefixes application labels with EXPORTER-.</p>
+    </div>
+    <div class="field">
+      <label for="f-context">Context (UTF-8, max 255 bytes)</label>
+      <input type="text" id="f-context" value="account:12345" aria-describedby="ctx-hint">
+      <p class="hint" id="ctx-hint">Extra input mixed into the derivation; both ends must supply identical bytes.</p>
+    </div>
+    <div class="field">
+      <label for="f-length">Output length (bytes, 1 to 4096 in Chromium)</label>
+      <input type="number" id="f-length" value="32" min="0" max="8192" aria-describedby="len-hint">
+      <p class="hint" id="len-hint">32 is plenty for an HMAC key. Values of 0 or beyond the ceiling should reject with RangeError.</p>
+    </div>
+    <p class="call-preview" id="preview"></p>
+    <button type="button" id="fire">Construct a session and run the export</button>
+    <output id="result" aria-live="polite">Not run yet.</output>
+  </section>
+
+  <section class="stage" aria-labelledby="server-title">
+    <h2 id="server-title">The server half of the handshake</h2>
+    <pre tabindex="0"><code># server pseudocode (any QUIC stack exposing the TLS exporter)
+material = tls.export_keying_material(
+    label   = b"EXPORTER-showcase-auth",
+    context = b"account:12345" + connect_stream_id,  # see below
+    length  = 32)
+assert hmac(material, challenge) == value_from_client  # same bytes, both ends</code></pre>
+    <p>Chromium folds the WebTransport CONNECT stream ID into the HTTP/3 export context. Several WebTransport sessions pooled on one HTTP/3 connection therefore derive <em>different</em> material per session — a server must account for that stream ID when computing its copy. The client never sends the material itself; it sends an HMAC over a server challenge, keyed by the material.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/4860330806214656" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc5705" target="_blank" rel="noopener">RFC 5705: exporters for TLS</a></li>
+    <li><a href="../validation-ladder/">The validation ladder, in spec order</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wt-ekm:designer]';
+  const fLabel = document.getElementById('f-label');
+  const fContext = document.getElementById('f-context');
+  const fLength = document.getElementById('f-length');
+  const preview = document.getElementById('preview');
+  const fire = document.getElementById('fire');
+  const result = document.getElementById('result');
+  const DEAD = 'https://127.0.0.1:44443/never';
+  const enc = new TextEncoder();
+  const hasWT = typeof WebTransport === 'function';
+  const hasMethod = hasWT && typeof WebTransport.prototype.exportKeyingMaterial === 'function';
+
+  function refreshPreview() {
+    const labelBytes = enc.encode(fLabel.value).length;
+    const ctxBytes = enc.encode(fContext.value).length;
+    preview.textContent =
+      'await transport.exportKeyingMaterial(\n' +
+      '  utf8(' + JSON.stringify(fLabel.value) + '),   // ' + labelBytes + ' byte(s)\n' +
+      '  utf8(' + JSON.stringify(fContext.value) + '),   // ' + ctxBytes + ' byte(s)\n' +
+      '  ' + Number(fLength.value || 0) + ',\n' +
+      ');';
+  }
+
+  async function run() {
+    fire.disabled = true;
+    result.textContent = 'Running…';
+    try {
+      if (!hasWT) {
+        result.textContent = 'This browser has no WebTransport constructor, so there is no session to export from.';
+        globalThis.showcaseTelemetry?.assert('wt-ekm-designer-no-wt', true, {});
+        return;
+      }
+      if (!hasMethod) {
+        result.textContent = 'exportKeyingMaterial is not on WebTransport.prototype in this build. The inputs above were validated locally (' +
+          enc.encode(fLabel.value).length + ' + ' + enc.encode(fContext.value).length + ' bytes), but no export can run; see the banner for the enabling flag. This is the honest pre-158 state.';
+        globalThis.showcaseTelemetry?.assert('wt-ekm-designer-method-missing', true, {});
+        return;
+      }
+      const t = new WebTransport(DEAD);
+      t.ready.catch(() => {});
+      t.closed.catch(() => {});
+      let outcomeText;
+      try {
+        const material = await t.exportKeyingMaterial(enc.encode(fLabel.value), enc.encode(fContext.value), Number(fLength.value));
+        const hex = [...material.slice(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        outcomeText = 'Resolved: Uint8Array(' + material.length + '), first bytes ' + hex + '… — a live endpoint answered, so both ends now share these bytes.';
+      } catch (error) {
+        if (error.name === 'RangeError') {
+          outcomeText = 'RangeError: ' + error.message + ' — argument validation fired before any network consideration.';
+        } else if (error.name === 'InvalidStateError') {
+          outcomeText = 'InvalidStateError: the session against the dead endpoint failed before material could be derived. With a reachable HTTP/3 server the identical call resolves with your ' + Number(fLength.value) + ' bytes.';
+        } else {
+          outcomeText = error.name + ': ' + error.message + ' — reported verbatim.';
+        }
+      }
+      try { t.close(); } catch { /* failed session */ }
+      result.textContent = outcomeText;
+      globalThis.showcaseTelemetry?.assert('wt-ekm-designer-ran', true, { outcome: outcomeText.slice(0, 60) });
+      console.log(LOG, outcomeText);
+    } finally {
+      fire.disabled = false;
+    }
+  }
+
+  fLabel.addEventListener('input', refreshPreview);
+  fContext.addEventListener('input', refreshPreview);
+  fLength.addEventListener('input', refreshPreview);
+  fire.addEventListener('click', run);
+  refreshPreview();
+  console.log(LOG, 'ready', 'hasWT=' + hasWT, 'hasMethod=' + hasMethod);
+})();
+</script>
+</body>
+</html>

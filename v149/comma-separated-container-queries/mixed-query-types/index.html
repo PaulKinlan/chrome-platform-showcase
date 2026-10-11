@@ -13,7 +13,11 @@
 
     /* ─── Demo container ─── */
     .demo-container {
-      container-type: inline-size style;
+      /* css-contain-3 grammar: normal | [ size | inline-size ] || scroll-state.
+         `style` is NOT a container-type value — every element is a style
+         container automatically. The old `inline-size style` value was
+         invalid, got dropped by the parser, and killed the size axis. */
+      container-type: inline-size;
       container-name: demo-card;
       border: 2px solid var(--border-black);
       padding: var(--space-3);
@@ -99,6 +103,10 @@
     .matrix-cell.active { background: var(--accent-emerald); color: var(--text-black); font-weight: 700; border-width: 3px; }
     .matrix-cell .cell-label { color: var(--text-muted); font-size: 0.65rem; display: block; margin-bottom: 2px; }
 
+    .observed { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin: var(--space-3) 0; }
+    .observed .pill { font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700; border: 2px solid var(--border-black); padding: 0.25em 0.6em; background: var(--bg-stone); color: var(--text-muted); }
+    .observed .pill.firing { background: var(--text-black); color: var(--bg-ivory); }
+    .support-note { font-family: var(--font-mono); font-size: 0.75rem; border: 2px solid var(--accent-amber); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-2) var(--space-3); margin: var(--space-2) 0; }
     .rule-ref { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.78rem; margin: var(--space-3) 0; }
     .rule-ref th, .rule-ref td { border: 1px solid var(--border-black); padding: var(--space-2) var(--space-3); text-align: left; }
     .rule-ref th { background: var(--bg-stone); }
@@ -156,6 +164,15 @@
         </div>
       </div>
     </div>
+
+    <div class="observed" aria-label="Observed rule state">
+      <span class="ctrl-label">observed from computed styles:</span>
+      <span class="pill" id="pill-a">A size</span>
+      <span class="pill" id="pill-b">B style()</span>
+      <span class="pill" id="pill-c">C comma OR</span>
+      <span class="width-readout" id="observed-width" aria-live="polite"></span>
+    </div>
+    <p class="support-note" id="support-note" hidden></p>
 
     <div class="matrix-grid" id="matrix">
       <div class="matrix-cell" id="cell-narrow-off">
@@ -229,9 +246,11 @@
   .badge-both { display: inline-block; }
 }
 
-/* Container needs both container-type values for mixed queries */
+/* Size queries need a size container-type; style() needs nothing —
+   every element is a style query container automatically.
+   (`container-type: inline-size style` is INVALID and gets dropped.) */
 .demo-container {
-  container-type: inline-size style;
+  container-type: inline-size;
   container-name: demo-card;
 }
 
@@ -252,21 +271,68 @@
 </main>
 <script>
 (function () {
+  'use strict';
   const container = document.getElementById('demo-container');
+  const cardBody = document.querySelector('.card-body');
+  const badgeStyle = document.querySelector('.badge-style');
+  const badgeBoth = document.querySelector('.badge-both');
+  const pillA = document.getElementById('pill-a');
+  const pillB = document.getElementById('pill-b');
+  const pillC = document.getElementById('pill-c');
+  const observedWidth = document.getElementById('observed-width');
+  const supportNote = document.getElementById('support-note');
   let isFeatured = false;
-  let isWide = false;
 
-  function updateMatrix() {
+  // Direct CSSOM probe: is the comma-separated @container rule (Rule C)
+  // actually in this browser's object model, or did the parser drop it?
+  function commaRuleParsed() {
+    try {
+      for (const sheet of document.styleSheets) {
+        let rules;
+        try { rules = sheet.cssRules; } catch { continue; }
+        for (const rule of rules) {
+          if (rule.constructor && rule.constructor.name === 'CSSContainerRule' &&
+              typeof rule.conditionText === 'string' && rule.conditionText.includes(',')) {
+            return true;
+          }
+        }
+      }
+    } catch { /* fall through */ }
+    return false;
+  }
+  const hasCommaRule = commaRuleParsed();
+  if (!hasCommaRule) {
+    supportNote.hidden = false;
+    supportNote.textContent = 'This browser dropped the comma-separated @container rule from the stylesheet (CSSOM probe found no container rule with a comma in its conditionText) — Rule C needs Chrome 150+. Rules A and B below still show the real single-condition behaviour; the C pill reports what this browser actually renders, not the spec expectation.';
+  }
+
+  // The truth source: computed styles of the elements the three rules target.
+  function updateFromRenderedStyles() {
+    const aFires = getComputedStyle(cardBody).display !== 'none';
+    const bFires = getComputedStyle(badgeStyle).display !== 'none';
+    const cFires = getComputedStyle(badgeBoth).display !== 'none';
+    pillA.classList.toggle('firing', aFires);
+    pillB.classList.toggle('firing', bFires);
+    pillC.classList.toggle('firing', cFires);
+    pillA.textContent = 'A size ' + (aFires ? '✓ firing' : '✗');
+    pillB.textContent = 'B style() ' + (bFires ? '✓ firing' : '✗');
+    pillC.textContent = 'C comma OR ' + (cFires ? '✓ firing' : (hasCommaRule ? '✗' : '✗ (rule not parsed)'));
+
+    // Matrix cell = the real observed scenario: measured content-box width + flag.
+    const wide = container.getBoundingClientRect().width > 320;
     const cells = {
-      'narrow-off': !isWide && !isFeatured,
-      'wide-off':    isWide && !isFeatured,
-      'narrow-on':  !isWide &&  isFeatured,
-      'wide-on':     isWide &&  isFeatured,
+      'narrow-off': !wide && !isFeatured,
+      'wide-off': wide && !isFeatured,
+      'narrow-on': !wide && isFeatured,
+      'wide-on': wide && isFeatured,
     };
     Object.entries(cells).forEach(([key, active]) => {
       const el = document.getElementById('cell-' + key);
       if (el) el.classList.toggle('active', active);
     });
+    globalThis.showcaseTelemetry?.assert('mixed-query-size-axis-alive',
+      !wide || aFires,
+      { wide, aFires, hasCommaRule });
   }
 
   // Featured toggle
@@ -280,7 +346,7 @@
       } else {
         container.style.removeProperty('--featured');
       }
-      updateMatrix();
+      requestAnimationFrame(updateFromRenderedStyles);
     });
   });
 
@@ -291,14 +357,21 @@
     const w = parseInt(slider.value);
     container.style.width = w + 'px';
     readout.textContent = w + 'px';
-    isWide = w > 320;
-    updateMatrix();
   });
 
+  // ResizeObserver: drag-resize and the slider both land here, so the matrix
+  // and pills can never go stale however the width changed.
+  const ro = new ResizeObserver(() => {
+    observedWidth.textContent = Math.round(container.getBoundingClientRect().width) + 'px measured';
+    updateFromRenderedStyles();
+  });
+  ro.observe(container);
+
   // Init
-  isWide = parseInt(slider.value) > 320;
-  updateMatrix();
+  container.style.width = slider.value + 'px';
+  requestAnimationFrame(updateFromRenderedStyles);
 })();
 </script>
+<script src="/public/demo-telemetry.js" defer></script>
 </body>
 </html>

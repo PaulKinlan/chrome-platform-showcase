@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OfflineAudioContext incremental rendering — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v158/">&larr; Chrome 158</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v158 · webaudio</p>
+    <h1>OfflineAudioContext incremental rendering</h1>
+    <p class="lede"><code>OfflineAudioContext.startRendering()</code> used to be all-or-nothing: one call, one giant <code>AudioBuffer</code> allocated up front — an hour of stereo at 44.1 kHz is over a gigabyte of floats. Chrome 158 makes rendering incremental: <code>startRendering(chunkSize)</code> now returns the <em>next chunk</em> as its own small buffer and may be called again and again, and the context can even be constructed with no <code>length</code> at all for indefinite rendering. Faster-than-real-time audio processing stops being memory-bound.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./chunked-render-timeline/">The chunk loop, timed and trimmed</a></h3>
+      <p>Render a one-second graph in 2048-frame chunks and watch the loop that the new contract makes legal: every call returns its own buffer, <code>currentTime</code> advances chunk by chunk, requested sizes round up to the render quantum, and the final chunk is trimmed to exactly the remaining frames. A real behavioral probe first — the returned buffer's length, not wishful feature detection — decides whether your browser chunks or one-shots.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./indefinite-length-session/">No length, no limits (and the error ladder)</a></h3>
+      <p>Chrome 158 makes <code>OfflineAudioContextOptions.length</code> optional: omit it and you get an indefinite context whose <code>length</code> attribute reads <code>null</code>, rendering for as long as you keep asking. This page drives that constructor change — a TypeError on every older build, honestly shown — plus the full error ladder: <code>chunkSize: 0</code>, a chunk larger than the implementation allows, and the InvalidStateError once a finite context has rendered every frame.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./streaming-mixdown-exporter/">A mixdown exporter with real progress</a></h3>
+      <p>The product this unlocks: an offline mixdown that reports progress and streams its output. A three-second multi-oscillator arrangement renders in chunks behind a live progress bar and an incrementally-drawn waveform, accumulating WAV bytes as it goes — and the finished file is downloadable either way, with the legacy one-shot path clearly labelled when chunking isn't available.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Offline rendering is how the web does faster-than-real-time audio work: bounce a DAW project, pre-render game stingers, batch-process podcast audio, run analysis over a long recording. The old contract allocated the entire output <code>AudioBuffer</code> before the first sample was computed, which put long renders out of reach of exactly the constrained devices that benefit most from offline processing — and made progress reporting a hack (suspend/resume at timed offsets). The Microsoft Edge team's explainer proposed incremental delivery; the shipped shape keeps <code>startRendering()</code> itself as the chunk pump: pass a <code>chunkSize</code>, get a promise for that many frames (rounded up to a render quantum boundary, trimmed at the end), call again for the next chunk. Omit <code>length</code> at construction for an indefinite session — the attribute then reads <code>null</code> — and each chunk defaults to one render quantum.</p>
+    <p>The memory math is the whole story: a one-hour stereo render at 44.1 kHz is ~1.27 GB as a single buffer, but a 16384-frame chunk is 128 KB — the application decides how much to keep, convert, or stream to disk between chunks.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>// Finite render, chunk by chunk (Chrome 158):
+const ctx = new OfflineAudioContext({ numberOfChannels: 2, sampleRate: 44100, length: 44100 * 60 });
+buildGraph(ctx);
+let rendered = 0;
+while (rendered &lt; ctx.length) {
+  const chunk = await ctx.startRendering(16384);   // ≤ 16384 frames, quantum-aligned
+  rendered += chunk.length;
+  report(rendered / ctx.length);                   // real progress, small buffers
+}
+
+// Indefinite render — length is now optional:
+const live = new OfflineAudioContext({ numberOfChannels: 1, sampleRate: 44100 });
+live.length;                                       // null
+const next = await live.startRendering();          // one render quantum per call</code></pre>
+    <p>Legacy behavior is preserved: with no argument on a finite context, <code>startRendering()</code> still renders all remaining frames in one buffer, and pre-158 rules (single call only) apply where the feature is absent.</p>
+  </section>
+
+  <!-- research notes (weekly-hardening, 2026-10-11)
+    Use-case portfolio: (1) basic/canonical = chunked-render-timeline (loop,
+    quantum rounding, final-chunk trim, currentTime advance, behavioral
+    detection via returned buffer length); (2) edge/config =
+    indefinite-length-session (optional length / null attribute, TypeError on
+    pre-158 builds, chunkSize 0 NotSupportedError, too-large RangeError-class
+    NotSupportedError, rendered-all-frames InvalidStateError); (3) practical =
+    streaming-mixdown-exporter (progress + incremental WAV accumulation with
+    honest legacy one-shot fallback). Not applicable: the explainer's
+    startRenderingStream()/format options and close() — the shipped Chromium
+    IDL has none of them (verified in offline_audio_context.idl 2026-10-11);
+    recorded here instead of demoing proposal-only surfaces.
+    Exact shipped surface (offline_audio_context{.idl,.cc}, fetched 2026-10-11):
+      constructor(OfflineAudioContextOptions) with options.length now
+        `unsigned long? = null`; omitting length without the feature throws
+        TypeError "Failed to get 'length'... Required member is undefined";
+      readonly attribute unsigned long? length  (null for indefinite);
+      Promise<AudioBuffer> startRendering(unsigned long? chunkSize) behind
+        RuntimeEnabled=OfflineAudioContextIncrementalRendering;
+      chunkSize 0 -> NotSupportedError "The requested chunk size cannot be
+        zero."; too large -> NotSupportedError "The requested chunk size is
+        too large."; chunks round UP to a render quantum boundary; the final
+        finite chunk is trimmed to the exact remaining frame count; finite
+        render without chunkSize renders all remaining frames; indefinite
+        render defaults to one render quantum; a context whose
+        committed frames >= length rejects further startRendering with
+        InvalidStateError "...already rendered all frames.".
+      Spec anchor: webaudio.github.io/web-audio-api
+        #dom-offlineaudiocontext-startrendering (chromestatus standards link).
+    Flag findings (runtime_enabled_features.json5, fetched 2026-10-11):
+      OfflineAudioContextIncrementalRendering, status "test" on main ->
+      banner gives --enable-blink-features=OfflineAudioContextIncrementalRendering
+      first, then --enable-experimental-web-platform-features; ChromeStatus
+      lists the feature as enabled-by-default in 158 (flag: false), so stable
+      158 users need nothing.
+    Verified in this environment on headless Chromium 141 (flag name unknown
+    to that build, so forced-enable is a no-op): pre-158 behavior confirmed —
+    constructor without length throws TypeError, startRendering(2048)
+    ignores the argument and returns the full-length buffer, a second call
+    rejects InvalidStateError "more than once" — every page shows the honest
+    legacy branch. The chunked path is an open question for a 158+ build. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5109900936085504" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://webaudio.github.io/web-audio-api/#dom-offlineaudiocontext-startrendering" target="_blank" rel="noopener">Web Audio spec: startRendering()</a></li>
+    <li><a href="https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/OfflineAudioContext/explainer.md" target="_blank" rel="noopener">Explainer: OfflineAudioContext incremental rendering</a></li>
+    <li><a href="https://gabrielsanbrito.github.io/demo_pages/oac-incremental-rendering" target="_blank" rel="noopener">ChromeStatus sample page</a></li>
+    <li><a href="/v145/webaudio-configurable-render-quantum/">Related: configurable render quantum (Chrome 145)</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

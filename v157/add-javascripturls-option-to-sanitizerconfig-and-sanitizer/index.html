@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Add javascriptURLs option to SanitizerConfig and Sanitizer — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v157/">&larr; Chrome 157</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v157 · security · sanitizer api</p>
+    <h1>Add javascriptURLs option to SanitizerConfig and Sanitizer</h1>
+    <p class="lede">The Sanitizer API has always stripped <code>javascript:</code> URLs from navigating attributes — but only as a hidden side effect of using a "safe" method like <code>setHTML()</code>. The HTML standard regularised that into an explicit, developer-selectable switch: the <code>javascriptURLs</code> boolean in <code>SanitizerConfig</code>, with a matching <code>setJavascriptURLs()</code> mutator on <code>Sanitizer</code>. Chrome 157 ships it, making the javascript:-URL policy a first-class, inspectable part of the configuration instead of folklore about which method you called.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./config-readback-probe/">Canonicalization, read back with get()</a></h3>
+      <p>Construct sanitizers four ways — the <code>"default"</code> preset, an empty config, and explicit <code>javascriptURLs: true / false</code> — and read each canonicalized configuration back with <code>get()</code>. Shows the spec's two defaulting rules (permissive for bare dictionaries, strict for the safe preset), the <code>setJavascriptURLs()</code> changed/no-op return-value contract, and an honest probe that never mistakes an ignored unknown dictionary member for support.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./sanitization-lab/">The javascript:-URL sanitization lab</a></h3>
+      <p>Paste or edit markup full of <code>javascript:</code> hrefs, formactions and iframe srcs, then run it through <code>setHTML()</code> or <code>setHTMLUnsafe()</code> with <code>javascriptURLs</code> on or off and diff what survives. The output is shown serialized — the lab never mounts a live <code>javascript:</code> link — with each stripped attribute called out.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./navigating-attributes-matrix/">The navigating-attributes matrix</a></h3>
+      <p>The option only governs the spec's built-in <em>navigating URL attributes list</em>: <code>a/area/base href</code>, SVG <code>a href / xlink:href</code>, MathML <code>href</code>, <code>button/input formaction</code>, <code>form action</code>, <code>iframe src</code>, and SVG animations targeting <code>href</code>. This page runs every entry — plus a non-navigating counter-example — through both settings and renders the kept/stripped matrix your browser actually produced.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Before this change, whether a <code>javascript:</code> href survived sanitization depended on which method you called: <code>setHTML()</code> ("safe") removed them unconditionally, <code>setHTMLUnsafe()</code> kept them, and nothing in the configuration said so. That made configurations non-portable — the same <code>SanitizerConfig</code> meant different things in different call sites — and made it impossible to opt out in either direction: a safe-method caller could not keep <code>javascript:</code> URLs (say, for a CMS that post-processes them), and an unsafe-method caller could not strip them without also taking the full safe baseline. <a href="https://github.com/whatwg/html/pull/12898" target="_blank" rel="noopener">whatwg/html#12898</a> moved the policy into the config itself: <code>javascriptURLs: true</code> keeps them, <code>false</code> strips them from navigating attributes, and each canonicalized configuration now states its answer explicitly.</p>
+    <p>Defaults preserve the old behavior exactly: canonicalizing a bare dictionary for an unsafe method fills in <code>true</code> (keep), the built-in safe default configuration says <code>false</code> (strip), so code that never mentions the option behaves as before.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>// Explicit, portable policy in the config:
+el.setHTML(untrusted, { sanitizer: { javascriptURLs: false } }); // strip (default for safe)
+el.setHTMLUnsafe(untrusted, { sanitizer: { javascriptURLs: false } }); // strip, even unsafely
+
+// Or mutate an existing Sanitizer:
+const s = new Sanitizer();        // "default" preset → javascriptURLs: false
+s.setJavascriptURLs(true);        // → true  (returns true: it changed)
+s.setJavascriptURLs(true);        // → false (no-op: already true)
+
+s.get().javascriptURLs;           // the canonicalized answer, inspectable</code></pre>
+    <p>When <code>javascriptURLs</code> is not <code>true</code>, the sanitizer removes any attribute on the built-in navigating URL attributes list whose value is a <code>javascript:</code> URL. Non-navigating attributes are untouched by this option.</p>
+  </section>
+
+  <!-- research notes (weekly-hardening, 2026-10-11)
+    Use-case portfolio: (1) basic/canonical + inspection = config-readback-probe
+    (four construction paths, get() canonicalization readback, setJavascriptURLs
+    changed/no-op return contract, honest unknown-member-safe detection);
+    (2) practical product = sanitization-lab (real setHTML/setHTMLUnsafe runs
+    over editable markup, serialized diff of survivors); (3) edge/failure =
+    navigating-attributes-matrix (every entry of the spec's built-in navigating
+    URL attributes list both ways + img src counter-example showing the option
+    does NOT govern non-navigating attributes). Not applicable: an origin-trial/
+    flag enable path for the option itself — ChromeStatus lists 157 as enabled
+    by default with no dedicated runtime flag; the Sanitizer API as a whole is
+    RuntimeEnabled=SanitizerAPI (stable in current main, pre-146 builds need
+    --enable-blink-features=SanitizerAPI), which the banners state.
+    Exact spec contract (html.spec.whatwg.org, PR 12898, fetched 2026-10-11):
+      dictionary SanitizerConfig { ... boolean javascriptURLs; };
+      boolean setJavascriptURLs(boolean allow);  // false when already equal
+      canonicalize: if javascriptURLs does not exist, set it to
+        permissiveDefaults (true for new Sanitizer(dict) / unsafe methods,
+        false comes from the built-in safe default configuration);
+      sanitize: "If configuration['javascriptURLs'] is not true: if the pair
+        (elementName, attrName) matches an entry in the built-in navigating
+        URL attributes list, and if attribute contains a javascript: URL,
+        then remove attribute" + MathML href + SVG animate attributeName=href.
+    Verified in this environment on headless Chromium 141 with
+    --enable-blink-features=SanitizerAPI: Sanitizer/setHTML present, the 157
+    javascriptURLs member and setJavascriptURLs are absent (honest-missing
+    branch: get() omits the member, prototype lacks the mutator), and safe
+    methods strip javascript: hrefs unconditionally — the exact legacy
+    behavior the pages report. The 157 supported path is an open question. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5169798320357376" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/whatwg/html/pull/12898" target="_blank" rel="noopener">whatwg/html#12898: Add javascriptURLs to the Sanitizer API</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/#sanitizer-api" target="_blank" rel="noopener">HTML standard: Sanitizer API</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/HTML_Sanitizer_API" target="_blank" rel="noopener">MDN: HTML Sanitizer API</a></li>
+    <li><a href="/v146/sanitizer-api/">Sibling feature: the Sanitizer API itself (Chrome 146)</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

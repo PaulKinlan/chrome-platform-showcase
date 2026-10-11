@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pick the profile for the workload — WebTransport congestion control — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    .workloads { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space-2); }
+    .workload { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-3); display: grid; gap: var(--space-2); align-content: start; cursor: pointer; text-align: left; font: inherit; color: var(--text-charcoal); min-height: 44px; }
+    .workload[aria-pressed="true"] { background: var(--text-black); color: var(--bg-ivory); }
+    .workload h3 { margin: 0; font-size: 0.9rem; color: inherit; }
+    .workload p { margin: 0; font-size: 0.78rem; color: inherit; }
+    .workload .pill { justify-self: start; font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700; border: 1px solid currentColor; padding: 2px 8px; }
+    .reason { border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); }
+    .reason h3 { margin-top: 0; }
+    .readout { font-family: var(--font-mono); font-size: 0.85rem; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); overflow-wrap: anywhere; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport congestion control</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v158 · webtransport · product use case</p>
+    <h1>Pick the profile for the workload</h1>
+    <p class="lede">The enum is small because the decision is: <em>when the network gets tight, would you rather wait or shrink?</em> Choose a workload below — the page explains which profile fits and why, shows the exact constructor line, and then actually constructs a session with that preference so you can see what this browser reports honoring.</p>
+  </header>
+
+  <p class="note">The mapping is engineering judgment grounded in RFC 9002 §7 (a sender may use any compliant controller) and the explainer's use cases — it is advice, not spec. What <em>is</em> spec: the preference is only a hint, and <code>transport.congestionControl</code> is the readback that tells you whether it stuck (Chrome 158+; earlier builds need the flag on the <a href="../">feature overview</a>).</p>
+
+  <section class="stage" aria-labelledby="pick-title">
+    <h2 id="pick-title">Six workloads</h2>
+    <div class="workloads" id="workloads" role="group" aria-label="Choose a workload"></div>
+    <div class="reason" id="reason" aria-live="polite">
+      <h3>Pick a workload</h3>
+      <p>Each card explains its profile choice here, with the constructor line and the live readback below.</p>
+    </div>
+    <p class="readout" id="code-line">// constructor line appears here</p>
+    <button type="button" id="construct" disabled>Construct a real session with this preference</button>
+    <output id="result"></output>
+  </section>
+
+  <section><h2>the cheat sheet</h2>
+    <pre tabindex="0"><code>"low-latency"  → queue depth beats goodput
+  cloud-gaming input · voice · interactive video · multiplayer state
+  (one stale update is worthless; backing off early keeps the queue short)
+
+"throughput"   → goodput beats queue depth
+  file sync · bulk upload/download · log shipping · prefetching
+  (nobody is waiting on any single packet; fill the pipe)
+
+"default"      → mixed or unknown traffic
+  the platform default is tuned for exactly this case — and it is what
+  you silently get anyway when the UA can't optimize for your request</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5180947573112832" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc9002#section-7" target="_blank" rel="noopener">RFC 9002 §7</a></li>
+    <li><a href="../preference-readback/">Ask, then read back what you got</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wt-cc:picker]';
+  const WORKLOADS = [
+    { id: 'gaming', name: 'Cloud-gaming input', pref: 'low-latency', detail: 'Controller state 60×/s over datagrams. A stale input is garbage; 30 ms of queueing is a lost fight.', why: 'Every packet has a deadline measured in frame times. A controller that backs off before queues build keeps input-to-display latency flat even when the path is congested — sacrificing bandwidth you were not going to use anyway.' },
+    { id: 'voice', name: 'Voice chat', pref: 'low-latency', detail: '20 ms opus frames; jitter buffer hides ~60 ms at most.', why: 'Audio conceals loss far better than delay. Short queues keep the jitter buffer shallow; a throughput-probing controller would periodically inflate it into audible lag.' },
+    { id: 'camera', name: 'Live camera feed', pref: 'low-latency', detail: 'Encoder tracks the rate the transport reports; viewers want now, not perfect.', why: 'The encoder can adapt bitrate, so bandwidth lost to early back-off is recoverable quality — but queueing delay goes straight into glass-to-glass latency.' },
+    { id: 'sync', name: 'File sync client', pref: 'throughput', detail: 'Background upload of changed files; completion time is the only metric.', why: 'No human is waiting on any single packet. A controller that probes aggressively for bandwidth finishes the batch sooner; queueing delay inside this session is irrelevant.' },
+    { id: 'logs', name: 'Log shipping', pref: 'throughput', detail: 'Buffered telemetry pushed in bursts, seconds of latency are fine.', why: 'Logs tolerate seconds of delay but volumes are huge — goodput per connection is what controls the fleet’s egress backlog.' },
+    { id: 'vod', name: 'Media VOD delivery', pref: 'default', detail: 'Buffered playback: a 10 s client buffer absorbs transport jitter.', why: 'With deep client buffers neither extreme wins: default platform tuning balances startup time, rebuffer risk and fairness — and this is literally the workload those defaults are tuned on.' },
+  ];
+  const container = document.getElementById('workloads');
+  const reason = document.getElementById('reason');
+  const codeLine = document.getElementById('code-line');
+  const constructBtn = document.getElementById('construct');
+  const result = document.getElementById('result');
+  const DEAD = 'https://127.0.0.1:44443/never';
+  const hasWT = typeof WebTransport === 'function';
+  const hasAttr = hasWT && 'congestionControl' in WebTransport.prototype;
+  let chosen = null;
+
+  for (const w of WORKLOADS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'workload';
+    btn.setAttribute('aria-pressed', 'false');
+    const h = document.createElement('h3'); h.textContent = w.name;
+    const p = document.createElement('p'); p.textContent = w.detail;
+    const pill = document.createElement('span'); pill.className = 'pill'; pill.textContent = w.pref;
+    btn.append(h, p, pill);
+    btn.addEventListener('click', () => {
+      chosen = w;
+      for (const other of container.children) other.setAttribute('aria-pressed', 'false');
+      btn.setAttribute('aria-pressed', 'true');
+      reason.innerHTML = '';
+      const rh = document.createElement('h3'); rh.textContent = w.name + ' → "' + w.pref + '"';
+      const rp = document.createElement('p'); rp.textContent = w.why;
+      reason.append(rh, rp);
+      codeLine.textContent = 'new WebTransport(url, { congestionControl: ' + JSON.stringify(w.pref) + ' })';
+      constructBtn.disabled = false;
+      result.textContent = '';
+    });
+    container.append(btn);
+  }
+
+  constructBtn.addEventListener('click', () => {
+    if (!chosen) return;
+    if (!hasWT) {
+      result.textContent = 'No WebTransport constructor in this browser — nothing to construct.';
+      return;
+    }
+    try {
+      const t = new WebTransport(DEAD, { congestionControl: chosen.pref });
+      t.ready.catch(() => {});
+      t.closed.catch(() => {});
+      const got = hasAttr ? t.congestionControl : undefined;
+      t.close();
+      if (!hasAttr) {
+        result.textContent = 'Session constructed, but this build has no congestionControl attribute — the option was an ignored unknown dictionary member (pre-158), so there is no readback to show. Honest answer, not support.';
+      } else if (got === chosen.pref) {
+        result.textContent = 'Readback: transport.congestionControl === ' + JSON.stringify(got) + ' — this browser honors the preference for ' + chosen.name + '.';
+      } else {
+        result.textContent = 'Readback: transport.congestionControl === ' + JSON.stringify(got) + ' — the UA downgraded your ' + JSON.stringify(chosen.pref) + ' request at construction (no optimizing algorithm available here). Your code should treat this as the spec-sanctioned answer, not an error.';
+      }
+      globalThis.showcaseTelemetry?.assert('wt-cc-picker-constructed', true, { pref: chosen.pref, got: got ?? null, hasAttr });
+      console.log(LOG, chosen.id, chosen.pref, '->', String(got));
+    } catch (error) {
+      result.textContent = 'Constructor threw ' + error.name + ': ' + error.message;
+      console.log(LOG, 'error', error.name, error.message);
+    }
+  });
+
+  console.log(LOG, 'ready', 'hasWT=' + hasWT, 'hasAttr=' + hasAttr);
+})();
+</script>
+</body>
+</html>
