@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransport congestion control — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v158/">&larr; Chrome 158</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v158 · network · webtransport</p>
+    <h1>WebTransport congestion control</h1>
+    <p class="lede">A game sending position datagrams and a backup tool pushing gigabytes want opposite things from the same congestion controller: the game wants the shortest queues, the backup wants the fullest pipe. Chrome 158 adds the <code>congestionControl</code> constructor option — <code>"default"</code>, <code>"throughput"</code>, or <code>"low-latency"</code> — plus a readonly attribute of the same name that reports which preference the user agent actually honored for the session. RFC 9002 explicitly permits a sender to choose its congestion controller; this is that choice, surfaced to the web.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./preference-readback/">Ask, then read back what you got</a></h3>
+      <p>Construct three real sessions — one per enum value — and read <code>transport.congestionControl</code> straight off each object. The spec sets the internal slot at construction (before any connection exists), with one twist worth seeing live: a preference the user agent cannot optimize for is <em>silently downgraded to <code>"default"</code> at construction time</em>, and the attribute is how you find out.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./workload-strategy-picker/">Pick the profile for the workload</a></h3>
+      <p>The product decision the enum encodes: match six real workloads — cloud gaming input, voice, live camera, file sync, log shipping, media VOD — to a profile, see why queue depth or goodput wins in each, and construct a real session with your chosen option to read back what this browser honors. The mapping table is the take-home.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./option-and-attribute-edges/">Dictionary edges and the readonly attribute</a></h3>
+      <p>The contract's sharp corners, each probed for real: an invalid enum string must throw a TypeError at construction; the attribute is a readonly accessor on the prototype (a strict-mode write must throw); and on a pre-158 build the option is an ignored unknown dictionary member while the attribute is absent — this page refuses to call that support.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Congestion control is the algorithm that decides how much unacknowledged data may be in flight. Loss-based algorithms in the Reno/CUBIC family probe for bandwidth until queues overflow — great for throughput, terrible for the latency of whatever shares the queue. Delay-sensitive algorithms (BBR-family, and the GoogCC-style controllers WebRTC uses) back off before queues build. A QUIC implementation ships several; before this feature a WebTransport session simply got the platform default, and a cloud-gaming service had no way to say "I would rather lose bandwidth than add 50 ms of queueing". The option is a <em>hint</em> by design: the spec requires the UA to fall back to <code>"default"</code> when it has no optimizing algorithm for the request, and the readonly attribute makes that negotiation observable instead of silent.</p>
+    <p>Chromium wires the two non-default preferences to its QUIC stack's algorithm choices (BBR-family for throughput-leaning, BBRv2/delay-aware tuning for low-latency), subject to platform and Finch configuration — which is exactly why reading the attribute back matters more than remembering a mapping table.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>const transport = new WebTransport("https://game.example:4433/session", {
+  congestionControl: "low-latency",   // "default" | "throughput" | "low-latency"
+});
+
+transport.congestionControl;
+// → "low-latency"  if the UA honored the preference (slot set at construction)
+// → "default"      if it had no algorithm optimizing for the request
+
+new WebTransport(url, { congestionControl: "fastest" });
+// → TypeError: not a valid WebTransportCongestionControl enum value</code></pre>
+    <p>The attribute is readable immediately — unlike <code>reliability</code>, it never waits for establishment, because the algorithm choice is made when the session object is created.</p>
+  </section>
+
+  <!-- research notes (weekly-hardening, 2026-10-11)
+    Use-case portfolio: (1) basic/canonical = preference-readback (three real
+    constructions, attribute read at construction, downgrade rule); (2)
+    practical product = workload-strategy-picker (workload→profile mapping +
+    real construction of the choice); (3) edge/failure =
+    option-and-attribute-edges (invalid enum TypeError, readonly accessor
+    strict-write TypeError, prototype placement, honest pre-158 detection —
+    ignored dictionary member is never read as support). Not applicable
+    without a reachable HTTP/3 endpoint (recorded honestly, not simulated):
+    observing actual pacing/queueing differences between profiles on a live
+    connection; the demos therefore read the negotiated preference, never
+    fabricate throughput graphs.
+    Exact spec contract (w3c.github.io/webtransport, fetched 2026-10-11):
+      WebTransportOptions.congestionControl: WebTransportCongestionControl
+        = "default";
+      enum WebTransportCongestionControl { "default", "throughput",
+        "low-latency" };
+      constructor step: "If congestionControl is not 'default', and the user
+        agent does not support any congestion control algorithms that
+        optimize for congestionControl, as allowed by [RFC9002] Section 7,
+        then set congestionControl to 'default'." — then
+        [[CongestionControl]] = congestionControl at construction;
+      readonly attribute WebTransportCongestionControl congestionControl —
+        getter returns [[CongestionControl]]; prose: "The application's
+        preference, if requested in the constructor, and satisfied by the
+        user agent… If a preference was requested but not satisfied," the
+        attribute reports "default".
+    Flag findings (runtime_enabled_features.json5, fetched 2026-10-11):
+      WebTransportCongestionControl, status "experimental", base_feature
+      "none" -> --enable-blink-features=WebTransportCongestionControl or
+      chrome://flags/#enable-experimental-web-platform-features; ChromeStatus
+      lists 158 enabled-by-default (listing also shows the v150 dev-trial
+      entry; this folder is the feature's single demo folder).
+    Verified in this environment on headless Chromium 141 (including behind
+    --enable-experimental-web-platform-features): option accepted-but-ignored,
+    attribute absent from WebTransport.prototype — every page exercises the
+    honest absent branch; the 158 readback path is an open question. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5180947573112832" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#dom-webtransportoptions-congestioncontrol" target="_blank" rel="noopener">Spec: congestionControl option</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransport-congestioncontrol" target="_blank" rel="noopener">Spec: congestionControl attribute</a></li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc9002#section-7" target="_blank" rel="noopener">RFC 9002 §7: congestion control</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md" target="_blank" rel="noopener">WebTransport explainer</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
