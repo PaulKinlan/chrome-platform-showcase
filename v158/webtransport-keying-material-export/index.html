@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransport keying material export — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v158/">&larr; Chrome 158</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v158 · network · webtransport · security</p>
+    <h1>WebTransport keying material export</h1>
+    <p class="lede">TLS has long had a side door for applications that need a shared secret: the <em>keying material exporter</em> (RFC 5705 / RFC 8446 §7.5), which derives bytes from the session's master secret so both endpoints can compute the same value without ever sending it. Chrome 158 exposes it to WebTransport as <code>transport.exportKeyingMaterial(label, context, outputLength)</code> — a <code>Promise&lt;Uint8Array&gt;</code> of key material cryptographically bound to <em>this</em> session, ideal for channel binding, token binding and application-layer authentication.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./validation-ladder/">The validation ladder, in spec order</a></h3>
+      <p>The method validates before it looks at connection state: a label over 255 bytes rejects with <code>RangeError</code>, so does an oversized context, and so do <code>outputLength</code> of 0 or above the implementation ceiling (at least 4096 — exactly 4096 in Chromium); only then does a closed or failed session earn its <code>InvalidStateError</code>. Every rung probed with real calls on real session objects, including the ordering proof: oversized label on a failed session is a RangeError, not an InvalidStateError.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./channel-binding-designer/">Design a channel binding</a></h3>
+      <p>The use case the exporter exists for: prove to your server that the client speaking the application protocol is the same one that holds the TLS session. Compose a real call — label, context, output length — fire it against a live session attempt, and read the honest outcome; alongside it, the server-side recipe (the matching export plus Chromium's CONNECT-stream-ID binding) that makes the two ends meet.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./exporter-surface-probe/">The surface, precisely</a></h3>
+      <p>What exactly shipped: a 3-argument method on <code>WebTransport.prototype</code> returning a fresh promise per call (<code>[NewObject]</code>), absent entirely on pre-158 builds. Probes the prototype placement, arity, BufferSource acceptance (ArrayBuffer and views both), and the state race the spec writes out — a still-connecting session's export settles only when the connection does.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Applications running over WebTransport routinely need to authenticate the channel, not just the user: a bearer token stolen from one connection should be useless on another. The TLS exporter is the standard answer — both sides derive <code>Exporter(label, context, length)</code> from the session secrets, so possession of the derived bytes proves you are the TLS peer, not a replaying middlebox. Native QUIC applications have always had this; the browser did not expose it, so web apps fell back to replayable tokens. <code>exportKeyingMaterial()</code> closes that gap with the exact IETF primitive, asynchronously (key schedules may live in another process), and with Chromium adding the WebTransport CONNECT stream ID to the export context so that multiple WebTransport sessions pooled over one HTTP/3 connection still derive <em>distinct</em> material per session.</p>
+    <p>The limits are part of the contract: labels and contexts up to 255 bytes (the RFC 5705 wire format carries them as 8-bit lengths), output from 1 byte up to an implementation ceiling that must be at least 4096. Chromium supports exactly 255/255/4096.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>const transport = new WebTransport("https://app.example:4433/session");
+await transport.ready;
+
+const enc = new TextEncoder();
+const material = await transport.exportKeyingMaterial(
+  enc.encode("EXPORTER-my-app-auth"),   // label — namespaced, ≤255 bytes
+  enc.encode(accountId),                // context — binds the derivation, ≤255 bytes
+  32,                                   // outputLength — 1..4096 in Chromium
+);
+// material: Uint8Array(32), identical on the server side —
+// send HMAC(material, challenge), never the material itself.</code></pre>
+    <p>Rejections: <code>RangeError</code> for oversized label/context or an out-of-range length (checked first), <code>InvalidStateError</code> for a closed/failed session — including a session that closes while the export is in flight.</p>
+  </section>
+
+  <!-- research notes (weekly-hardening, 2026-10-11)
+    Use-case portfolio: (1) edge/failure = validation-ladder (every rejection
+    rung in spec order + the ordering proof on a failed session); (2)
+    practical product = channel-binding-designer (compose a real call, live
+    outcome, matching server-side recipe); (3) basic/canonical+inspection =
+    exporter-surface-probe (prototype placement, arity 3, BufferSource
+    acceptance, NewObject per-call promises, connecting-state race). Not
+    applicable without a reachable HTTP/3 endpoint (recorded honestly): the
+    resolved-Uint8Array success path and the server-equality check; pages
+    show the attempted call and real rejection instead of fabricating bytes.
+    Exact spec contract (w3c.github.io/webtransport
+    #dom-webtransport-exportkeyingmaterial, fetched 2026-10-11):
+      [NewObject] Promise<Uint8Array> exportKeyingMaterial(BufferSource label,
+        BufferSource context, unsigned long outputLength);
+      steps: label.byteLength > 255 -> reject RangeError; context.byteLength
+        > 255 -> reject RangeError; outputLength 0 or > implementation-defined
+        value (must be >= 4096) -> reject RangeError; [[State]] closed/failed
+        -> reject InvalidStateError; else in parallel invoke the TLS key
+        exporter ([WEB-TRANSPORT-OVERVIEW] §4.1), abort with InvalidStateError
+        if the session closes/fails meanwhile.
+      ChromeStatus summary: Chromium supports label/context up to 255 bytes
+      and output lengths 1 through 4096; for HTTP/3, Chromium includes the
+      WebTransport CONNECT stream ID in the TLS export context.
+    Flag findings (runtime_enabled_features.json5, fetched 2026-10-11):
+      WebTransportExportKeyingMaterial, status "experimental" ->
+      --enable-blink-features=WebTransportExportKeyingMaterial or
+      chrome://flags/#enable-experimental-web-platform-features; ChromeStatus
+      lists 158 enabled-by-default.
+    Verified in this environment on headless Chromium 141 (including behind
+    --enable-experimental-web-platform-features): method absent from
+    WebTransport.prototype; all pages exercise the honest method-missing
+    branch with real constructed sessions. The 158 paths (validation
+    rejections, success bytes) are open questions for a 158+ build. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/4860330806214656" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#dom-webtransport-exportkeyingmaterial" target="_blank" rel="noopener">Spec: exportKeyingMaterial()</a></li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc5705" target="_blank" rel="noopener">RFC 5705: Keying Material Exporters for TLS</a></li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc8446#section-7.5" target="_blank" rel="noopener">RFC 8446 §7.5: TLS 1.3 exporters</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md" target="_blank" rel="noopener">WebTransport explainer</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
