@@ -636,6 +636,86 @@ Deno.test("the local gate and CI declare the same commands, and every suite is n
     `test:unit = ${JSON.stringify(tasks["test:unit"])} — expected ${JSON.stringify(UNIT_RUNNER)}`,
   );
 
+  // The OTHER deliberate off-plan suite: the harness regression (bead
+  // chrome_platform_showcase-0a0). tests/integration/native-test-harness.mjs is
+  // the end-to-end regression net for scripts/native-test.mjs itself — it pins
+  // the runner's relay, child-flag and timeout rules (findings i43, 2yh) by
+  // spawning real child processes and writing temp fixtures, which is also why
+  // it is opt-in and OFF the gate plan on purpose: it needs --allow-write and
+  // an unrestricted --allow-run for its children, permissions a gate step does
+  // not hand out. Unlike tests/unit (pinned just above), nothing else fails if
+  // this opt-out drifts: the harness is not a *.test.mjs, so the
+  // every-*.test.mjs reachability rule deliberately ignores it, and until this
+  // pin its opt-out lived only in prose — the file's own header comment and
+  // AGENTS.md. Prose cannot fail a gate: deleting the file, renaming it or
+  // repurposing the task would have been silent, taking the runner's
+  // regression net with it. So the opt-out is enforced, not documented: the
+  // task must exist with exactly the invocation below, the file it names must
+  // exist, and whatever the task actually targets must NOT be a *.test.mjs — a
+  // suite there would fall under the reachability rule above and be forced
+  // onto the gate plan, which is precisely what the opt-out forbids. The
+  // target is taken from the task's own text (its last .mjs operand), so a
+  // repointed task is judged on what it really runs, not on the pinned
+  // constant — the exact-command check below is what fixes the constant.
+  // The fourth check pins the other direction of the opt-out: the task must
+  // stay UNREACHABLE from the gate plan, because a test:harness step (direct
+  // or nested) would hand every gate run the harness's --allow-write and
+  // unrestricted --allow-run — a permission change nobody reviewed.
+  //
+  // Rationale of record: bead chrome_platform_showcase-0a0 and the harness
+  // paragraph in AGENTS.md. This pin names exactly ONE deliberate opt-out and
+  // is not a licence: a future suite left off the plan is drift this guard's
+  // own rules fail on (or, for a non-*.test.mjs, an unpinned hole) — a new
+  // opt-out needs its own reviewed pin and rationale, never an inference
+  // from this one that omission is okay by default.
+  const HARNESS_FILE = "tests/integration/native-test-harness.mjs";
+  const HARNESS_CMD =
+    "deno run --allow-read --allow-write --allow-run tests/integration/native-test-harness.mjs";
+  const harnessTarget = String(tasks["test:harness"] ?? "")
+    .split(/\s+/)
+    .filter((t) => t.endsWith(".mjs"))
+    .pop();
+  let harnessOnDisk = false;
+  try {
+    read(HARNESS_FILE);
+    harnessOnDisk = true;
+  } catch {
+    // Reported by the check below with a readable message.
+  }
+  check(
+    "the off-plan harness regression task is exactly its invocation",
+    tasks["test:harness"] === HARNESS_CMD,
+    `test:harness = ${JSON.stringify(tasks["test:harness"])} — expected ${
+      JSON.stringify(HARNESS_CMD)
+    }`,
+  );
+  check(
+    "the off-plan harness regression file exists",
+    harnessOnDisk,
+    `${HARNESS_FILE} not found — the runner's own regression net (bead 0a0, findings ` +
+      "i43/2yh) was deleted or moved; delete this guard only together with the harness, " +
+      "never before",
+  );
+  check(
+    "the harness regression target is not a *.test.mjs suite",
+    harnessTarget !== undefined && !harnessTarget.endsWith(".test.mjs"),
+    harnessTarget === undefined
+      ? "the test:harness task names no .mjs target at all"
+      : `${harnessTarget} — a *.test.mjs would fall under the every-*.test.mjs reachability ` +
+        "rule and be forced onto the gate plan; the harness is a plain assert-and-exit " +
+        "script on purpose (bead 0a0), so keep it off the suite path instead of wiring it " +
+        "into scripts/gate-steps.mjs",
+  );
+  check(
+    "the off-plan harness regression task is not reachable from the gate plan",
+    !gateTasks.has("test:harness"),
+    "a gate plan step (directly or through a nested `deno task`) reaches " +
+      "test:harness — the harness is opt-in precisely because its children need " +
+      "--allow-write and an unrestricted --allow-run; wiring it into " +
+      "scripts/gate-steps.mjs hands those permissions to every gate run, which the " +
+      "reviewed opt-out (bead 0a0) says not to do",
+  );
+
   // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
   // live inside a case - it kills the test process before Deno can report the case -
   // so the counter is carried into the failure message instead: every failing label
