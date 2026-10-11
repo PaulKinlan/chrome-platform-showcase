@@ -17,6 +17,9 @@
       box-shadow: var(--thin-shadow);
       background: var(--bg-paper);
       padding: var(--space-3);
+      /* Fixed-width frame bodies (540/720) scroll inside their card instead
+         of forcing page overflow on narrow viewports. */
+      overflow-x: auto;
     }
     .frame-label {
       font-family: var(--font-mono);
@@ -31,6 +34,11 @@
       border: 1px dashed var(--text-muted);
       padding: var(--space-3);
       min-height: 90px;
+      /* content-box: the labelled width IS the container's queried
+         inline-size. Under the global border-box sizing, width:360px minus
+         padding and the dashed border measured ≈334px, so the frame labelled
+         "trigger" could never reach (min-width: 360px). */
+      box-sizing: content-box;
     }
     .tile {
       background: var(--bg-stone);
@@ -49,20 +57,30 @@
       color: var(--text-muted);
     }
 
-    /* The comma-separated rule under test.
-       Match if container is roomy (>= 360px) OR if the user has reduced motion preferences
-       (a single rule that combines container AND user-pref signals). */
-    @container tile (min-width: 360px), (prefers-reduced-motion: reduce) {
+    /* Single-condition baseline rules first: these parse everywhere, so no
+       frame ever shows a silent blank verdict even where the comma rule
+       below is dropped (Chromium ≤149). */
+    @container tile (min-width: 360px) {
+      .tile .verdict::before { content: "roomy · single size rule"; }
+    }
+    @container tile (max-width: 359px) {
+      .tile .verdict::before { content: "no match · cramped"; }
+    }
+
+    /* The comma-separated rule under test: a SIZE branch or a STYLE() branch
+       in one rule. Both are real container query features — an unknown
+       condition like a media feature would always evaluate false inside
+       @container, so the second axis here is the --boost custom property
+       flag instead. Cascade order lets this rule's verdict override the
+       baseline above when it matches. */
+    @container tile (min-width: 360px), style(--boost: on) {
       .tile {
         background: color-mix(in srgb, var(--accent-emerald) 22%, var(--bg-paper));
         font-family: var(--font-display);
         font-size: 1.4rem;
         color: var(--text-black);
       }
-      .tile .verdict::before { content: "match · roomy or reduced-motion"; }
-    }
-    @container tile (max-width: 359px) {
-      .tile .verdict::before { content: "no match · cramped"; }
+      .tile .verdict::before { content: "match · roomy or boosted"; }
     }
 
     .ctl-row { display: flex; gap: var(--space-3); margin-bottom: var(--space-3); flex-wrap: wrap; }
@@ -89,14 +107,16 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v149</p>
     <h1>Breakpoint Matrix</h1>
-    <p class="lede">Five frames at fixed widths — 220, 280, 360, 540, 720 — each running the same comma-separated <code>@container</code> rule. The rule mixes a container-size branch and a user-preference branch, so a single declaration handles both axes.</p>
+    <p class="lede">Five frames at fixed widths — 220, 280, 360, 540, 720 — each running the same comma-separated <code>@container</code> rule. The rule mixes a container-size branch and a <code>style()</code> branch, so one declaration reacts to two completely different axes: how roomy the container is, or a <code>--boost</code> flag you set on it.</p>
   </header>
 
   <div class="ctl-row">
     <button class="ctl on" id="all">Show all widths</button>
     <button class="ctl" id="cramped">Hide ≥ 360</button>
+    <button class="ctl" id="boost" aria-pressed="false">Toggle --boost flag</button>
     <button class="ctl" id="enum">Read rule.conditionText</button>
   </div>
+  <p class="note" id="support-note" hidden style="font-family: var(--font-mono); font-size: 0.78rem;"></p>
 
   <div class="matrix" id="matrix">
     <div class="frame w-220">
@@ -123,14 +143,14 @@
 
   <section>
     <h2>the rule</h2>
-<pre><code>@container tile (min-width: 360px), (prefers-reduced-motion: reduce) {
+<pre><code>@container tile (min-width: 360px), style(--boost: on) {
   .tile {
     background: emerald-tinted;
     font-family: display;
     font-size: 1.4rem;
   }
 }</code></pre>
-    <p>The second branch isn't a container query at all — it's a media-style condition. Same comma, same fall-through semantics; only one of the two needs to match.</p>
+    <p>Both branches are container query features — a size condition and a <code>style()</code> condition — and only one of the two needs to match. (A media feature like <code>prefers-reduced-motion</code> would be an <em>unknown</em> query inside <code>@container</code>: the comma list tolerates it, but that branch always evaluates false — pair <code>@container</code> with <code>@media</code> instead when you need user preferences.)</p>
   </section>
 
   <section>
@@ -138,7 +158,8 @@
 <pre><code>const rule = [...document.styleSheets[0].cssRules]
   .find(r =&gt; r.constructor.name === 'CSSContainerRule');
 console.log(rule.conditionText);
-// "tile (min-width: 360px), (prefers-reduced-motion: reduce)"</code></pre>
+// "tile (min-width: 360px), style(--boost: on)"  (Chrome 150+)
+// — on an older browser the comma rule is absent from cssRules entirely.</code></pre>
     <p id="cssom-out" class="note"></p>
   </section>
 
@@ -156,6 +177,41 @@ console.log(rule.conditionText);
 </main>
 <script>
   const matrix = document.getElementById('matrix');
+
+  // Capability detection: did this browser keep the comma-separated
+  // @container rule in its CSSOM, or drop it at parse time (Chromium ≤149)?
+  (function detectCommaSupport() {
+    let found = false;
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try { rules = sheet.cssRules; } catch (e) { continue; }
+      for (const r of rules) {
+        if (r.constructor && r.constructor.name === 'CSSContainerRule' &&
+            typeof r.conditionText === 'string' && r.conditionText.includes(',')) {
+          found = true; break;
+        }
+      }
+      if (found) break;
+    }
+    if (!found) {
+      const note = document.getElementById('support-note');
+      note.hidden = false;
+      note.textContent = 'Comma-separated @container rules need Chrome 150+ — this browser dropped the rule at parse time (CSSOM probe found no container rule with a comma in its conditionText). The single-condition baseline rules still label every frame, so what you see below is this browser’s real rendering, and the --boost toggle will have no visible effect here.';
+    }
+  })();
+
+  // --boost flag: the style() axis of the comma rule, settable per frame body.
+  const boostBtn = document.getElementById('boost');
+  boostBtn.addEventListener('click', () => {
+    const on = boostBtn.getAttribute('aria-pressed') !== 'true';
+    boostBtn.setAttribute('aria-pressed', String(on));
+    boostBtn.classList.toggle('on', on);
+    document.querySelectorAll('.frame-body').forEach((el) => {
+      if (on) el.style.setProperty('--boost', 'on');
+      else el.style.removeProperty('--boost');
+    });
+  });
+
   document.getElementById('all').addEventListener('click', () => {
     matrix.classList.remove('matrix-cramped');
     document.getElementById('all').classList.add('on');
@@ -170,18 +226,24 @@ console.log(rule.conditionText);
     const out = document.getElementById('cssom-out');
     try {
       // find @container rule within page styles
-      let found = null;
+      let comma = null, single = null;
       for (const sheet of document.styleSheets) {
         try {
           for (const r of sheet.cssRules) {
-            if (r.constructor && r.constructor.name === 'CSSContainerRule' && r.conditionText && r.conditionText.includes('tile')) {
-              found = r; break;
+            if (r.constructor && r.constructor.name === 'CSSContainerRule' && r.conditionText) {
+              if (r.conditionText.includes(',')) { comma = r; }
+              else if (!single) { single = r; }
             }
           }
         } catch (e) { /* cross-origin */ }
-        if (found) break;
       }
-      out.textContent = found ? 'conditionText → ' + found.conditionText : 'CSSContainerRule not found in this document.';
+      if (comma) {
+        out.textContent = 'comma rule conditionText → ' + comma.conditionText;
+      } else if (single) {
+        out.textContent = 'No comma-separated container rule survived parsing in this browser (needs Chrome 150+). First single-condition rule found instead: ' + single.conditionText;
+      } else {
+        out.textContent = 'No CSSContainerRule found in this document at all.';
+      }
     } catch (e) { out.textContent = 'error: ' + e.message; }
   });
 </script>
