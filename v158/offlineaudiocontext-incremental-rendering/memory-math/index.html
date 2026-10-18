@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The memory math — OfflineAudioContext incremental rendering — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .controls { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); align-items: end; }
+    .field { display: grid; gap: var(--space-1); }
+    .field label { font-weight: 700; font-size: 0.9rem; }
+    .field input, .field select { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font: inherit; min-height: 44px; width: 100%; box-sizing: border-box; }
+    .compare { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+    .panel { border: 2px solid var(--border-black); padding: var(--space-3); display: grid; gap: var(--space-2); background: var(--bg-paper); }
+    .panel h3 { margin: 0; font-size: 1rem; }
+    .big { font-family: var(--font-mono); font-weight: 700; font-size: 1.5rem; overflow-wrap: anywhere; }
+    .big.classic { color: var(--accent-rose); }
+    .big.chunked { color: var(--accent-emerald-dark); }
+    .bar-wrap { display: grid; gap: var(--space-1); }
+    .bar { height: 22px; border: 2px solid var(--border-black); background: var(--bg-stone); position: relative; overflow: hidden; }
+    .bar > span { position: absolute; inset: 0 auto 0 0; display: block; }
+    .bar.classic > span { background: var(--accent-rose); }
+    .bar.chunked > span { background: var(--accent-emerald); }
+    .ratio { font-weight: 700; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; OfflineAudioContext incremental rendering</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v158 · web audio · offline rendering</p>
+    <h1>The memory math</h1>
+    <p class="lede">The motivating bug report is arithmetic: <code>frames × channels × 4 bytes</code>, allocated before the first sample renders. Dial in a project below and compare the classic up-front allocation against the bounded peak of a chunked pull loop — then run a real, deliberately small render in this browser and measure what actually came back.</p>
+  </header>
+
+  <p class="note">Chrome targets incremental rendering for <strong>Chrome 158</strong> behind the <code>OfflineAudioContextIncrementalRendering</code> runtime flag (<code>--enable-blink-features=OfflineAudioContextIncrementalRendering</code>, or <code>chrome://flags/#enable-experimental-web-platform-features</code>). The calculator is pure arithmetic from the spec's float32 sample format; the measured render below is real on every build.</p>
+
+  <section class="stage" aria-labelledby="calc-title">
+    <h2 id="calc-title">The calculator</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="minutes">project length (minutes)</label>
+        <input type="number" id="minutes" value="120" min="1" max="600" step="1">
+      </div>
+      <div class="field">
+        <label for="rate">sample rate</label>
+        <select id="rate">
+          <option value="44100">44100 Hz</option>
+          <option value="48000" selected>48000 Hz</option>
+          <option value="96000">96000 Hz</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="channels">channels</label>
+        <select id="channels">
+          <option value="1">1 (mono)</option>
+          <option value="2" selected>2 (stereo)</option>
+          <option value="4">4</option>
+          <option value="6">6 (5.1)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="chunksize">chunkSize (frames)</label>
+        <input type="number" id="chunksize" value="4096" min="128" max="1048576" step="128">
+      </div>
+    </div>
+    <div class="compare">
+      <div class="panel">
+        <h3>Classic: one <code>AudioBuffer</code> up front</h3>
+        <p class="big classic" id="classic-bytes" aria-live="polite">…</p>
+        <p id="classic-note">Allocated before rendering begins, held until you drop the buffer.</p>
+      </div>
+      <div class="panel">
+        <h3>Chunked: peak of one chunk</h3>
+        <p class="big chunked" id="chunked-bytes" aria-live="polite">…</p>
+        <p id="chunked-note">One chunk in flight; encode it, release it, pull the next.</p>
+      </div>
+    </div>
+    <div class="bar-wrap" role="img" aria-labelledby="ratio-text">
+      <div class="bar classic"><span id="classic-bar"></span></div>
+      <div class="bar chunked"><span id="chunked-bar"></span></div>
+    </div>
+    <p class="ratio" id="ratio-text" aria-live="polite">…</p>
+  </section>
+
+  <section class="stage" aria-labelledby="measure-title">
+    <h2 id="measure-title">Measure a real (small) render in this browser</h2>
+    <p>Ten seconds of stereo 48&nbsp;kHz — small enough to be safe anywhere. The page renders it for real, times it, and reports the bytes the resulting buffer(s) actually hold. On a Chrome 158 build it pulls 4096-frame chunks and reports the peak chunk size; on an older build it reports the single full-size buffer the classic path allocated. Nothing here fakes a measurement of a two-hour project — allocating gigabytes to prove a point about allocating gigabytes would take the tab down.</p>
+    <button type="button" id="measure">Render 10 s of stereo 48 kHz and measure</button>
+    <output id="measure-out" aria-live="polite"></output>
+  </section>
+
+  <section><h2>the arithmetic, spelled out</h2>
+    <pre tabindex="0"><code>// float32 samples, planar per channel:
+bytes = frames × channels × 4
+
+// 2 h stereo @ 48 kHz, classic:
+7200 s × 48000 × 2 × 4  =  2 764 800 000 B  ≈ 2.76 GB   // before rendering starts
+
+// same project, chunked @ 4096 frames:
+4096 × 2 × 4            =  32 768 B  =  32 KB            // peak, per pull</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5109900936085504" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/OfflineAudioContext/explainer.md" target="_blank" rel="noopener">Explainer: the memory problem</a></li>
+    <li><a href="../chunked-render-console/">Chunked render console</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[oac-inc:memory]';
+  const hasOAC = typeof OfflineAudioContext === 'function';
+  const hasClose = hasOAC && typeof OfflineAudioContext.prototype.close === 'function';
+
+  const minutes = document.getElementById('minutes');
+  const rate = document.getElementById('rate');
+  const channels = document.getElementById('channels');
+  const chunksize = document.getElementById('chunksize');
+  const classicBytes = document.getElementById('classic-bytes');
+  const chunkedBytes = document.getElementById('chunked-bytes');
+  const classicBar = document.getElementById('classic-bar');
+  const chunkedBar = document.getElementById('chunked-bar');
+  const ratioText = document.getElementById('ratio-text');
+
+  function fmtBytes(n) {
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + ' MB';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + ' KB';
+    return n + ' B';
+  }
+
+  function recalc() {
+    const mins = Math.max(1, Number(minutes.value) || 120);
+    const r = Number(rate.value);
+    const ch = Number(channels.value);
+    const cs = Math.max(128, Number(chunksize.value) || 4096);
+    const frames = mins * 60 * r;
+    const classic = frames * ch * 4;
+    const chunked = cs * ch * 4;
+    classicBytes.textContent = fmtBytes(classic);
+    chunkedBytes.textContent = fmtBytes(chunked);
+    classicBar.style.width = '100%';
+    chunkedBar.style.width = Math.max(0.5, (chunked / classic) * 100) + '%';
+    const ratio = classic / chunked;
+    ratioText.textContent = 'The classic up-front allocation is ' + Math.round(ratio).toLocaleString() + '× the chunked peak (' + fmtBytes(classic) + ' vs ' + fmtBytes(chunked) + ' for ' + frames.toLocaleString() + ' frames × ' + ch + ' channel' + (ch === 1 ? '' : 's') + ').';
+  }
+  for (const el of [minutes, rate, channels, chunksize]) el.addEventListener('input', recalc);
+  recalc();
+
+  const measureBtn = document.getElementById('measure');
+  const measureOut = document.getElementById('measure-out');
+  measureBtn.addEventListener('click', async () => {
+    if (!hasOAC) {
+      measureOut.textContent = 'No OfflineAudioContext in this browser — nothing to measure.';
+      globalThis.showcaseTelemetry?.assert('oac-inc-memory-fallback', true, { hasOAC });
+      return;
+    }
+    measureBtn.disabled = true;
+    measureOut.textContent = 'Rendering…';
+    const FRAMES = 480000; // 10 s @ 48 kHz
+    const CHUNK = 4096;
+    try {
+      const ctx = new OfflineAudioContext({ numberOfChannels: 2, length: FRAMES, sampleRate: 48000 });
+      const osc = new OscillatorNode(ctx, { type: 'sawtooth', frequency: 110 });
+      const gain = new GainNode(ctx, { gain: 0.3 });
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      const t0 = performance.now();
+      let totalFrames = 0;
+      let peakChunkFrames = 0;
+      let pulls = 0;
+      while (ctx.state !== 'closed' && pulls < 1000) {
+        const buffer = await ctx.startRendering(CHUNK);
+        pulls += 1;
+        totalFrames += buffer.length;
+        if (buffer.length > peakChunkFrames) peakChunkFrames = buffer.length;
+        if (totalFrames >= FRAMES) break;
+      }
+      const ms = Math.round(performance.now() - t0);
+      const peakBytes = peakChunkFrames * 2 * 4;
+      const classicBytesReal = FRAMES * 2 * 4;
+      const incremental = hasClose && peakChunkFrames <= CHUNK && pulls > 1;
+      measureOut.textContent = incremental
+        ? 'Measured on this build: ' + pulls + ' pulls of ≤' + CHUNK + ' frames rendered ' + totalFrames.toLocaleString() + ' frames in ' + ms + ' ms. Peak resident audio data: ' + fmtBytes(peakBytes) + ' — versus the ' + fmtBytes(classicBytesReal) + ' the classic path would have allocated up front.'
+        : 'Measured on this build: ' + pulls + ' call' + (pulls === 1 ? '' : 's') + ' returned ' + totalFrames.toLocaleString() + ' frames in ' + ms + ' ms; the largest single buffer held ' + fmtBytes(peakBytes) + '. This is the classic path — the chunkSize argument was ignored (close() ' + (hasClose ? 'exists, yet chunking did not engage — worth reporting' : 'is undefined on this build') + '), so the full allocation happened up front, exactly the behaviour Chrome 158 removes the need for.';
+      globalThis.showcaseTelemetry?.assert('oac-inc-memory-measured', totalFrames >= FRAMES, { pulls, totalFrames, peakChunkFrames, ms, hasClose });
+      console.log(LOG, 'measured', { pulls, totalFrames, peakChunkFrames, ms });
+    } catch (error) {
+      measureOut.textContent = 'The render failed for real: ' + error.name + ' — ' + error.message;
+      globalThis.showcaseTelemetry?.assert('oac-inc-memory-measured', false, { name: error.name });
+    }
+    measureBtn.disabled = false;
+  });
+
+  console.log(LOG, 'ready', 'hasOAC=' + hasOAC, 'hasClose=' + hasClose);
+})();
+</script>
+</body>
+</html>

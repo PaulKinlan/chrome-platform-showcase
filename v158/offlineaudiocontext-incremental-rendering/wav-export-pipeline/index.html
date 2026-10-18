@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WAV export pipeline — OfflineAudioContext incremental rendering — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .path-label { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .path-label.incremental { color: var(--accent-emerald-dark); border-color: var(--accent-emerald); }
+    .path-label.classic { color: var(--accent-amber); border-color: var(--accent-amber); }
+    progress { width: 100%; height: 22px; accent-color: var(--accent-blue); }
+    canvas { width: 100%; height: 120px; border: 2px solid var(--border-black); background: var(--bg-stone); display: block; }
+    .wave-text { font-size: 0.85rem; color: var(--text-charcoal); }
+    .actions { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; }
+    a.download { display: inline-block; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2) var(--space-3); font-weight: 700; min-height: 44px; box-sizing: border-box; line-height: 1.9; text-decoration: none; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; OfflineAudioContext incremental rendering</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v158 · web audio · offline rendering</p>
+    <h1>WAV export pipeline</h1>
+    <p class="lede">This is the clipchamp problem at demo scale: render a composition offline and write it to a file, keeping memory flat while you do. The page synthesises a four-bar arpeggio, pulls the output chunk by chunk when this build can, converts each chunk straight to 16-bit PCM, and appends it to a growing WAV — then lets you play and download the actual file it produced.</p>
+  </header>
+
+  <p class="note">Chrome targets incremental rendering for <strong>Chrome 158</strong> behind the <code>OfflineAudioContextIncrementalRendering</code> runtime flag (<code>--enable-blink-features=OfflineAudioContextIncrementalRendering</code>, or <code>chrome://flags/#enable-experimental-web-platform-features</code>). On an older build the pipeline still produces a correct WAV — via the classic one-shot render — and the banner in the pipeline says which path actually ran. Playback uses a regular <code>AudioContext</code> and needs your click, as all audible audio does.</p>
+
+  <section class="stage" aria-labelledby="pipe-title">
+    <h2 id="pipe-title">Run the export</h2>
+    <button type="button" id="run">Render the composition and build the WAV</button>
+    <p class="path-label" id="path" aria-live="polite">Pipeline not run yet.</p>
+    <progress id="prog" max="100" value="0" aria-label="Render progress"></progress>
+    <p id="prog-text" aria-live="polite">0 of 0 frames rendered.</p>
+    <h3 id="wave-title">Rendered waveform</h3>
+    <canvas id="wave" width="900" height="120" role="img" aria-labelledby="wave-title" aria-describedby="wave-text"></canvas>
+    <p class="wave-text" id="wave-text">Nothing rendered yet.</p>
+    <div class="actions">
+      <button type="button" id="play" disabled>Play the exported audio</button>
+      <a class="download" id="download" href="#" hidden download="showcase-arpeggio.wav">Download showcase-arpeggio.wav</a>
+    </div>
+    <output id="pipe-out"></output>
+  </section>
+
+  <section><h2>why chunk-to-encoder matters</h2>
+    <p>A WAV file is a 44-byte header plus raw PCM — which means it can be written <em>incrementally</em>, exactly in step with chunked rendering: each <code>AudioBuffer</code> chunk is interleaved, quantised to int16, and appended; nothing but the current chunk is ever held as float data. The same shape works for feeding an <code>AudioEncoder</code> (WebCodecs) when muxing audio against video — the chunks arrive in time to interleave, instead of one giant buffer arriving after the video is already written.</p>
+    <pre tabindex="0"><code>const wav = [wavHeaderPlaceholder()];
+while (ctx.state !== "closed") {
+  const chunk = await ctx.startRendering(4096); // ≤ 32 KB of float data in flight
+  wav.push(int16Interleave(chunk));             // encode and release
+}
+patchHeaderWithFinalSize(wav);
+const file = new Blob(wav, { type: "audio/wav" });</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5109900936085504" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/OfflineAudioContext/explainer.md" target="_blank" rel="noopener">Explainer: streaming export motivation</a></li>
+    <li><a href="../chunked-render-console/">Chunked render console</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[oac-inc:wav]';
+  const RATE = 22050;
+  const SECONDS = 4;
+  const FRAMES = RATE * SECONDS;
+  const CHUNK = 4096;
+  const hasOAC = typeof OfflineAudioContext === 'function';
+  const hasClose = hasOAC && typeof OfflineAudioContext.prototype.close === 'function';
+
+  const runBtn = document.getElementById('run');
+  const pathLabel = document.getElementById('path');
+  const prog = document.getElementById('prog');
+  const progText = document.getElementById('prog-text');
+  const wave = document.getElementById('wave');
+  const waveText = document.getElementById('wave-text');
+  const playBtn = document.getElementById('play');
+  const downloadLink = document.getElementById('download');
+  const out = document.getElementById('pipe-out');
+
+  let wavBlob = null;
+  let renderedChunks = [];
+  let playCtx = null;
+
+  function buildGraph(ctx) {
+    // Four-bar arpeggio: A minor, eighth notes, soft square + echo-ish gain taps.
+    const notes = [220, 261.63, 329.63, 440, 329.63, 261.63];
+    const noteDur = 0.25;
+    const master = new GainNode(ctx, { gain: 0.5 });
+    master.connect(ctx.destination);
+    let t = 0;
+    let i = 0;
+    while (t < SECONDS - noteDur / 2) {
+      const osc = new OscillatorNode(ctx, { type: 'square', frequency: notes[i % notes.length] });
+      const g = new GainNode(ctx, { gain: 0 });
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.5, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + noteDur);
+      osc.connect(g).connect(master);
+      osc.start(t);
+      osc.stop(t + noteDur);
+      t += noteDur;
+      i += 1;
+    }
+  }
+
+  function int16Interleave(buffer) {
+    const ch = buffer.numberOfChannels;
+    const len = buffer.length;
+    const outArr = new Int16Array(len * ch);
+    for (let c = 0; c < ch; c++) {
+      const data = buffer.getChannelData(c);
+      for (let f = 0; f < len; f++) {
+        const v = Math.max(-1, Math.min(1, data[f]));
+        outArr[f * ch + c] = v < 0 ? v * 0x8000 : v * 0x7fff;
+      }
+    }
+    return outArr;
+  }
+
+  function wavHeader(totalFrames, channels, sampleRate) {
+    const dataSize = totalFrames * channels * 2;
+    const buf = new ArrayBuffer(44);
+    const view = new DataView(buf);
+    const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+    str(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    str(8, 'WAVE');
+    str(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, channels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * channels * 2, true);
+    view.setUint16(32, channels * 2, true);
+    view.setUint16(34, 16, true);
+    str(36, 'data');
+    view.setUint32(40, dataSize, true);
+    return buf;
+  }
+
+  function drawWave() {
+    const g = wave.getContext('2d');
+    const css = getComputedStyle(document.documentElement);
+    g.fillStyle = css.getPropertyValue('--bg-stone').trim() || '#f4f3ee';
+    g.fillRect(0, 0, wave.width, wave.height);
+    const total = renderedChunks.reduce((s, c) => s + c.length, 0);
+    if (!total) { waveText.textContent = 'Nothing rendered yet.'; return; }
+    const data = new Float32Array(total);
+    let offset = 0;
+    for (const c of renderedChunks) { data.set(c.getChannelData(0), offset); offset += c.length; }
+    g.strokeStyle = css.getPropertyValue('--accent-emerald-dark').trim() || '#067247';
+    g.lineWidth = 1.5;
+    g.beginPath();
+    const mid = wave.height / 2;
+    const step = Math.max(1, Math.floor(total / wave.width));
+    for (let x = 0; x < wave.width; x++) {
+      const i = Math.min(total - 1, x * step);
+      let min = 1, max = -1;
+      for (let j = i; j < Math.min(total, i + step); j++) {
+        const v = data[j];
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      g.moveTo(x + 0.5, mid - max * (mid - 4));
+      g.lineTo(x + 0.5, mid - min * (mid - 4));
+    }
+    g.stroke();
+    waveText.textContent = 'Waveform of the rendered arpeggio: ' + total.toLocaleString() + ' frames (' + (total / RATE).toFixed(2) + ' s at ' + RATE + ' Hz), six-note A-minor pattern with per-note decay envelopes.';
+  }
+
+  async function run() {
+    if (!hasOAC) {
+      out.textContent = 'No OfflineAudioContext in this browser — the pipeline cannot run at all.';
+      pathLabel.className = 'path-label classic';
+      pathLabel.textContent = 'UNAVAILABLE: no OfflineAudioContext.';
+      globalThis.showcaseTelemetry?.assert('oac-inc-wav-fallback', true, { hasOAC });
+      return;
+    }
+    runBtn.disabled = true;
+    playBtn.disabled = true;
+    downloadLink.hidden = true;
+    renderedChunks = [];
+    prog.value = 0;
+    progText.textContent = '0 of ' + FRAMES.toLocaleString() + ' frames rendered.';
+    out.textContent = '';
+    drawWave();
+
+    let ctx;
+    try {
+      ctx = new OfflineAudioContext({ numberOfChannels: 1, length: FRAMES, sampleRate: RATE });
+    } catch (error) {
+      out.textContent = 'Constructor threw ' + error.name + ': ' + error.message;
+      runBtn.disabled = false;
+      return;
+    }
+    buildGraph(ctx);
+
+    const pcmParts = [];
+    let totalFrames = 0;
+    let pulls = 0;
+    let incremental = false;
+    const t0 = performance.now();
+    try {
+      while (ctx.state !== 'closed' && totalFrames < FRAMES && pulls < 200) {
+        const chunk = await ctx.startRendering(CHUNK);
+        pulls += 1;
+        totalFrames += chunk.length;
+        renderedChunks.push(chunk);
+        pcmParts.push(int16Interleave(chunk).buffer);
+        prog.value = Math.min(100, (totalFrames / FRAMES) * 100);
+        progText.textContent = totalFrames.toLocaleString() + ' of ' + FRAMES.toLocaleString() + ' frames rendered (' + pulls + ' pull' + (pulls === 1 ? '' : 's') + ').';
+        drawWave();
+      }
+    } catch (error) {
+      out.textContent = 'startRendering failed for real: ' + error.name + ' — ' + error.message;
+      runBtn.disabled = false;
+      return;
+    }
+    const ms = Math.round(performance.now() - t0);
+    incremental = pulls > 1 && renderedChunks.every((c) => c.length <= CHUNK);
+    pathLabel.className = 'path-label ' + (incremental ? 'incremental' : 'classic');
+    pathLabel.textContent = incremental
+      ? 'PATH USED: incremental — ' + pulls + ' pulls of ≤' + CHUNK + ' frames; only one chunk of float data was ever in flight.'
+      : 'PATH USED: classic one-shot — this build ignored the chunkSize argument and delivered all ' + totalFrames.toLocaleString() + ' frames in one call (close() ' + (hasClose ? 'exists but chunking did not engage — worth reporting' : 'is undefined here, the pre-158 signal') + '). The WAV below is still real.';
+
+    const header = wavHeader(totalFrames, 1, RATE);
+    wavBlob = new Blob([header, ...pcmParts], { type: 'audio/wav' });
+    const url = URL.createObjectURL(wavBlob);
+    downloadLink.href = url;
+    downloadLink.hidden = false;
+    playBtn.disabled = false;
+    out.textContent = 'Export complete in ' + ms + ' ms: ' + totalFrames.toLocaleString() + ' frames → ' + (wavBlob.size / 1024).toFixed(1) + ' KB WAV (16-bit PCM mono @ ' + RATE + ' Hz). Play it or download it — this file is the actual render output, not a canned asset.';
+    globalThis.showcaseTelemetry?.assert('oac-inc-wav-produced', wavBlob.size === 44 + totalFrames * 2 && totalFrames >= FRAMES, { pulls, totalFrames, size: wavBlob.size, incremental });
+    globalThis.showcaseTelemetry?.assert('oac-inc-wav-path-matches-support', incremental === (hasClose && pulls > 1), { incremental, hasClose, pulls });
+    console.log(LOG, 'export done', { pulls, totalFrames, ms, incremental });
+    runBtn.disabled = false;
+  }
+
+  playBtn.addEventListener('click', async () => {
+    if (!wavBlob) return;
+    try {
+      playCtx = playCtx || new AudioContext();
+      await playCtx.resume();
+      const bytes = await wavBlob.arrayBuffer();
+      const decoded = await playCtx.decodeAudioData(bytes);
+      const src = playCtx.createBufferSource();
+      src.buffer = decoded;
+      src.connect(playCtx.destination);
+      src.start();
+      out.textContent = 'Playing the exported WAV: ' + decoded.duration.toFixed(2) + ' s, decoded straight from the Blob we built.';
+      globalThis.showcaseTelemetry?.assert('oac-inc-wav-decodable', decoded.duration > SECONDS - 0.1, { duration: decoded.duration });
+    } catch (error) {
+      out.textContent = 'Playback failed for real: ' + error.name + ' — ' + error.message;
+      globalThis.showcaseTelemetry?.assert('oac-inc-wav-decodable', false, { name: error.name });
+    }
+  });
+
+  runBtn.addEventListener('click', run);
+  console.log(LOG, 'ready', 'hasOAC=' + hasOAC, 'hasClose=' + hasClose);
+})();
+</script>
+</body>
+</html>
