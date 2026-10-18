@@ -79,7 +79,9 @@ function renderEchoRequired(req: Request): Response {
   body { font-family: ui-monospace, monospace; font-size: 0.78rem; margin: 0.5rem; color: var(--text-charcoal); background: var(--bg-ivory); }
   strong.yes { color: var(--accent-emerald-dark); } strong.no { color: var(--accent-rose); }
 </style></head><body>
-<p>framed navigation request · <strong class="${required !== null ? "yes" : "no"}">Sec-Required-Connection-Allowlist ${
+<p>framed navigation request · <strong class="${
+    required !== null ? "yes" : "no"
+  }">Sec-Required-Connection-Allowlist ${
     required !== null ? "RECEIVED: " + escapeHTML(required) : "NOT received"
   }</strong></p>
 <p>${escapeHTML(payload.note)}</p>
@@ -106,7 +108,9 @@ function renderWidget(req: Request): Response {
   const sent: Record<string, string> = {};
   try {
     if (optin === "satisfy") {
-      const name = variant === "report-only" ? "Connection-Allowlist-Report-Only" : "Connection-Allowlist";
+      const name = variant === "report-only"
+        ? "Connection-Allowlist-Report-Only"
+        : "Connection-Allowlist";
       headers.set(name, allowlist);
       sent[name] = allowlist;
     } else if (optin === "allow-from") {
@@ -128,10 +132,13 @@ function renderWidget(req: Request): Response {
   p { margin: 0.25rem 0; overflow-wrap: anywhere; }
   .yes { color: var(--accent-emerald-dark); font-weight: 700; } .no { color: var(--accent-rose); font-weight: 700; }
 </style></head><body>
-<p><strong>widget</strong> · opt-in mode: ${escapeHTML(optin)}${variant ? " · " + escapeHTML(variant) : ""}</p>
+<p><strong>widget</strong> · opt-in mode: ${escapeHTML(optin)}${
+    variant ? " · " + escapeHTML(variant) : ""
+  }</p>
 <p>response headers actually sent with this document: ${
     Object.keys(sent).length
-      ? Object.entries(sent).map(([k, v]) => `<br>&nbsp;&nbsp;${escapeHTML(k)}: ${escapeHTML(v)}`).join("")
+      ? Object.entries(sent).map(([k, v]) => `<br>&nbsp;&nbsp;${escapeHTML(k)}: ${escapeHTML(v)}`)
+        .join("")
       : "(none of the opt-in headers)"
   }</p>
 <p>Sec-Required-Connection-Allowlist on my navigation request: <span class="${
@@ -170,7 +177,12 @@ export function handleFeatureRequest(req: Request, sub: string): Response | null
   if (rest === "/echo-required") return renderEchoRequired(req);
   if (rest === "/widget") return renderWidget(req);
   if (rest === "/allowed/ping" || rest === "/blocked/ping") {
-    return jsonResponse({ ok: true, path: rest, note: "Real same-origin fetch target. A path-scoped Connection-Allowlist pattern can distinguish these two in an enforcing browser." });
+    return jsonResponse({
+      ok: true,
+      path: rest,
+      note:
+        "Real same-origin fetch target. A path-scoped Connection-Allowlist pattern can distinguish these two in an enforcing browser.",
+    });
   }
   return null;
 }
