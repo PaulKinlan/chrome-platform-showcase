@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransport congestion control — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v158/">&larr; Chrome 158</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v158 · network · webtransport</p>
+    <h1>WebTransport congestion control</h1>
+    <p class="lede">A cloud-gaming client and a bulk uploader want opposite things from the same congestion controller: one wants packets out <em>now</em>, the other wants the pipe <em>full</em>. Chrome 158 adds the <code>congestionControl</code> option to the <code>WebTransport</code> constructor — <code>"default"</code>, <code>"throughput"</code>, or <code>"low-latency"</code> — plus a read-only attribute of the same name that reports which preference the user agent actually satisfied.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./preference-readback/">Preference readback, straight off the instance</a></h3>
+      <p>Probe the exact new surface — <code>'congestionControl' in WebTransport.prototype</code> — dump its property descriptor, then construct three real sessions, one per enum value, and read the attribute back the moment each object exists. The spec resolves the hint in the constructor, so the answer never waits for a connection.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./session-builder/">Session builder: compose the real options object</a></h3>
+      <p>Assemble a real <code>WebTransportOptions</code> dictionary interactively — congestion-control preference, <code>requireUnreliable</code>, <code>allowPooling</code>, your own endpoint URL — then run the actual constructor and watch <code>ready</code>/<code>closed</code> settle, with the attribute sampled at every step and the equivalent code generated for copy-paste.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./hint-not-guarantee/">A hint, not a guarantee</a></h3>
+      <p>The two edges the spec pins down: an enum value the parser does not know must throw a <code>TypeError</code> at the constructor, and a preference the user agent cannot satisfy silently becomes <code>"default"</code>. Both run for real — and on a pre-158 build the invalid value <em>not</em> throwing is itself the proof that the option is being ignored.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./workload-advisor/">Which hint does your workload want?</a></h3>
+      <p>Answer two questions about your traffic — what hurts more, a late packet or a slow transfer, and what you mostly send — and get the enum value the spec intends for it, the real constructor line, and a live readback of what this browser would actually grant that request.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Congestion control decides how fast a sender ramps up and how it reacts to loss. Algorithms tuned for throughput (BBR-family) keep the pipe full at the cost of queueing delay; loss-based or latency-aware behaviour keeps queues short at the cost of peak bandwidth. Before this feature a WebTransport application had no way to say which trade-off it wanted — every session got whatever the browser's QUIC stack defaulted to. The <code>congestionControl</code> option lets the application state its preference without naming (or being promised) a specific algorithm, which RFC 9002 explicitly allows endpoints to choose freely.</p>
+    <p>The read-only attribute closes the loop: the constructor resolves the request immediately, so <code>transport.congestionControl</code> reports <code>"throughput"</code> or <code>"low-latency"</code> only when the user agent actually has an algorithm optimised for it, and <code>"default"</code> otherwise. The spec marks the option itself a feature at risk, because at the time of writing no browser ships an algorithm genuinely optimised for low latency — which makes honest readback, rather than blind trust in the request, the whole point of the attribute.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>const transport = new WebTransport("https://example.com:4433/game", {
+  congestionControl: "low-latency",   // "default" | "throughput" | "low-latency"
+});
+
+// Resolved in the constructor — no need to await ready:
+transport.congestionControl;
+// "low-latency"  → the user agent satisfied the preference
+// "default"      → requested but not satisfied (or never requested)</code></pre>
+    <p>The option is a member of <code>WebTransportOptions</code> with default <code>"default"</code>; the attribute is a readonly accessor on <code>WebTransport.prototype</code> returning the <code>WebTransportCongestionControl</code> enum. An unknown string in the option position is a WebIDL enum violation and throws <code>TypeError</code> before any connection is attempted.</p>
+  </section>
+
+  <!-- research notes (agentB, 2026-10-18)
+    Use-case portfolio: (1) basic/canonical + inspection = preference-readback
+    (exact-member probe, descriptor dump, per-enum-value instance readback at
+    construction time); (2) practical/config = session-builder (real options
+    object composition + real connection attempt to a user-suppliable URL with
+    honest error surfacing); (3) edge/failure = hint-not-guarantee (invalid
+    enum TypeError, satisfied-or-default fallback, unknown-value-safe reader);
+    (4) product decision = workload-advisor (traffic traits -> enum choice +
+    live grant readback). Not applicable without a reachable HTTP/3 endpoint,
+    recorded honestly instead of simulated: measuring the real wire effect of
+    each algorithm (e.g. estimatedSendRate deltas via getStats() on a loaded
+    link) — that needs a live server and competing traffic.
+    Exact surface (spec IDL, w3c.github.io/webtransport, fetched 2026-10-18):
+      dictionary member: WebTransportCongestionControl congestionControl = "default";
+      readonly attribute WebTransportCongestionControl congestionControl;  // prototype accessor
+      enum WebTransportCongestionControl { "default", "throughput", "low-latency" };
+    Constructor step mirrored by demos + conformance: "If congestionControl is
+    not 'default', and the user agent does not support any congestion control
+    algorithms that optimize for congestionControl, as allowed by RFC 9002
+    Section 7, then set congestionControl to 'default'" — i.e. [[CongestionControl]]
+    is resolved synchronously at construction, before establishment.
+    Flag findings (runtime_enabled_features.json5, fetched 2026-10-18):
+      WebTransportCongestionControl, status "experimental" -> enable with
+      --enable-blink-features=WebTransportCongestionControl or
+      chrome://flags/#enable-experimental-web-platform-features. A json5
+      comment on WebTransportStats notes Chromium maps the preference onto
+      BBR-family congestion controllers.
+    Verified in this environment on headless Chromium 141 (predates Chrome
+    158; feature also absent behind --enable-experimental-web-platform-features
+    on this build): 'congestionControl' in WebTransport.prototype === false,
+    and { congestionControl: "bogus" } does NOT throw (unknown dictionary
+    member ignored) — every page exercises and labels the honest-absent branch. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5180947573112832" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#dom-webtransportoptions-congestioncontrol" target="_blank" rel="noopener">WebTransport spec: congestionControl option</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransport-congestioncontrol" target="_blank" rel="noopener">WebTransport spec: congestionControl attribute</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md" target="_blank" rel="noopener">WebTransport explainer</a></li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc9002#section-7" target="_blank" rel="noopener">RFC 9002 §7: congestion control</a></li>
+    <li><a href="https://issues.chromium.org/issues/501268547" target="_blank" rel="noopener">Chromium implementation bug</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
