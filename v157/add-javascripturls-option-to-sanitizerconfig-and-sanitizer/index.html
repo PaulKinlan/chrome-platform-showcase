@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Add javascriptURLs option to SanitizerConfig and Sanitizer — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v157/">&larr; Chrome 157</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v157 · miscellaneous · sanitizer api</p>
+    <h1>Add javascriptURLs option to SanitizerConfig and Sanitizer</h1>
+    <p class="lede">The Sanitizer API has always removed <code>javascript:</code> URLs from navigation attributes — but only as a hidden side effect of which method you called: <code>setHTML()</code> stripped them, <code>setHTMLUnsafe()</code> kept them, and no configuration could say otherwise. <a href="https://github.com/whatwg/html/pull/12898" target="_blank" rel="noopener">HTML PR&nbsp;12898</a> regularises this into an explicit, developer-selectable knob: a <code>javascriptURLs</code> boolean on <code>SanitizerConfig</code> and a <code>setJavascriptURLs(allow)</code> method on <code>Sanitizer</code>. Defaults are unchanged — safe methods still always strip (<code>removeUnsafe()</code> forces the option off), unsafe methods still default to keeping — but an unsafe-path sanitization can now opt <em>in</em> to stripping <code>javascript:</code> URLs.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./javascript-url-playground/">javascript: URL playground</a></h3>
+      <p>Paste markup with <code>javascript:</code> hrefs and run it through the four real call shapes — <code>setHTML()</code>, <code>setHTML()</code> with <code>javascriptURLs:&nbsp;true</code> (spoiler: <code>removeUnsafe()</code> wins), <code>setHTMLUnsafe()</code> with the new <code>javascriptURLs:&nbsp;false</code>, and the permissive unsafe default. Serialized output, a per-attribute kept/removed diff, and a navigation-disabled rendered preview, all from genuine API calls.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./config-inspector/">Config inspector</a></h3>
+      <p>The option's lifecycle, probed step by step: what <code>new Sanitizer().get()</code> canonicalises <code>javascriptURLs</code> to, the exact boolean <code>setJavascriptURLs()</code> returns (true = changed, false = no-op — twice in a row proves it), and <code>removeUnsafe()</code> forcing the option back to <code>false</code>. Every step prints the real return value or the real exception.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./escape-artists/">Escape artists</a></h3>
+      <p>Edge-case matrix: obfuscated spellings (<code>JaVaScRiPt:</code>, leading whitespace, HTML-entity-encoded, tab-split scheme) crossed with every navigation attribute the spec names — <code>a</code>/<code>area</code> <code>href</code>, <code>form action</code>, <code>input</code>/<code>button</code> <code>formaction</code>, SVG and MathML <code>href</code>. Which cells the sanitizer actually strips, computed live, including the ones it deliberately leaves alone.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./untrusted-comment-feed/">Untrusted comment feed</a></h3>
+      <p>The product use case: a comment thread that <em>wants</em> links, so <code>href</code> is on the allowlist — and <code>javascript:</code> hrefs still must not survive. Render hostile comments through safe <code>setHTML()</code>, then through <code>setHTMLUnsafe()</code> + <code>javascriptURLs:&nbsp;false</code> (the new unsafe-but-no-script-URLs middle ground), and inspect every link that comes out.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Before this change, whether <code>javascript:</code> URLs were sanitized was a side effect of the method: any "safe" method stripped them, any "unsafe" method did not, and the <code>SanitizerConfig</code> had no say. That made one real configuration impossible to express — an unsafe-path sanitization (needed when you must keep comments, <code>data-*</code> attributes, or other XSS-irrelevant markup the safe path removes) that <em>still</em> strips <code>javascript:</code> navigation URLs. The HTML Standard regularised the behaviour into the config itself: <code>javascriptURLs</code> defaults to the old behaviour (canonicalised to <code>false</code> for safe calls — and <code>removeUnsafe()</code> always forces it to <code>false</code> — and to <code>true</code> for unsafe calls), so nothing breaks, but the knob is now yours. Behaviour when the option is not used remains exactly the same.</p>
+  </section>
+
+  <section><h2>the shipped surface</h2>
+    <pre tabindex="0"><code>dictionary SanitizerConfig {
+  // ...
+  boolean comments;
+  boolean dataAttributes;
+  boolean javascriptURLs;   // NEW — preserve attributes containing javascript: URLs?
+};
+
+partial interface Sanitizer {
+  boolean setJavascriptURLs(boolean allow);  // NEW — returns true if the config changed
+};
+
+// The new expressible configuration: unsafe path, javascript: URLs still stripped.
+el.setHTMLUnsafe(untrusted, { sanitizer: { javascriptURLs: false } });</code></pre>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id: 5169798320357376 — listing name "Add javascriptURLs option to SanitizerConfig
+    and Sanitizer", v157. chrome desktop/android milestone 157. Spec: whatwg/html PR 12898
+    (read in full as a diff via patch-diff.githubusercontent.com — 12.5 KB). Exact surface from
+    the diff: SanitizerConfig gains `boolean javascriptURLs`; Sanitizer gains
+    `boolean setJavascriptURLs(boolean allow)` (returns false when the stored value already
+    equals `allow`, true when changed). Canonicalisation: if javascriptURLs is absent it is set
+    to `permissiveDefaults` (the renamed allowCommentsPIsAndDataAttributes boolean: true for
+    unsafe methods, false for safe). "remove unsafe" gained a step that forces javascriptURLs to
+    false (returning changed=true when it was true) — so safe methods ALWAYS strip javascript:
+    URLs regardless of config; the real new capability is the unsafe path opting IN to
+    stripping. The removal itself (inner sanitize steps) checks `configuration["javascriptURLs"]
+    is not true`, then removes: (elementName, attrName) pairs in the built-in navigating URL
+    attributes list whose value contains a javascript: URL; MathML href (null/XLink ns); and
+    built-in animating URL attributes. The default safe config lists javascriptURLs: false.
+    Doc link: html.spec.whatwg.org/#dom-sanitizer-setjavascripturls. Finch name
+    SanitizerJavascriptURLs; no runtime_enabled_features.json5 entry of its own (parent
+    SanitizerAPI is status:stable; checked main on 2026-10-18); no chrome://flags entry — the
+    option ships with 157 directly (implementation is a single CL per the chromestatus notes).
+    Reality on the verification browser (Chromium 141, probed headless 2026-10-18):
+    Sanitizer=undefined, Element.prototype.setHTML absent, setHTMLUnsafe PRESENT,
+    Document.parseHTMLUnsafe present — Sanitizer API itself ships in Chrome 146 per
+    modern-web-guidance browser-support data, so all four concepts feature-detect the exact
+    members ('setHTML' in Element.prototype, typeof Sanitizer, 'setJavascriptURLs' in
+    Sanitizer.prototype) and degrade honestly; behavioural probes additionally verify the
+    sanitizer RAN (an allowlisted-elements side effect) before attributing javascript:-URL
+    outcomes to the new option, so an ignored unknown dictionary member can never read as
+    support (anti-regression rule 10).
+    Use-case portfolio: basic/canonical = javascript-url-playground (the four real call
+    shapes); configuration/inspection = config-inspector (canonicalisation, return-value
+    contract, removeUnsafe override); edge/failure = escape-artists (obfuscated URL spellings ×
+    the navigating-attribute matrix, incl. what is deliberately NOT stripped); practical
+    product = untrusted-comment-feed (links allowed, javascript: still stripped, on both safe
+    and the newly-expressible unsafe path). Novel/advanced composition is recorded as not
+    separately built: the feature is a single boolean knob on an existing API; its only
+    composition of note (Trusted Types' require-trusted-types-for interplay) is documented
+    prose in the comment-feed concept rather than a distinct interactive surface, because no
+    additional API surface would be exercised (source: PR 12898 diff — the option touches only
+    the inner sanitize steps).
+    modern-web-guidance consulted: sanitize-untrusted-html (retrieved in full; applied: setHTML
+    as the primary insertion path, 'in'-based feature detection, parseHTML/replaceChildren over
+    serialize-and-reparse, no permissive safe-path configs), trusted-types, security,
+    accessibility, responsive-design. Recorded per concept in guidanceConsulted.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5169798320357376" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/whatwg/html/pull/12898" target="_blank" rel="noopener">Spec: whatwg/html PR 12898 (merged into the HTML Standard)</a></li>
+    <li><a href="https://html.spec.whatwg.org/#dom-sanitizer-setjavascripturls" target="_blank" rel="noopener">HTML Standard: Sanitizer.setJavascriptURLs()</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/HTML_Sanitizer_API" target="_blank" rel="noopener">MDN: HTML Sanitizer API</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
