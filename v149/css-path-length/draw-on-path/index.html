@@ -96,6 +96,24 @@
       padding: var(--space-2) var(--space-3);
       margin-bottom: var(--space-4);
     }
+    .support-note {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-charcoal);
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      border-left: 6px solid var(--accent-rose);
+      padding: var(--space-2) var(--space-3);
+      margin-bottom: var(--space-4);
+    }
+    .support-note.supported { border-left-color: var(--accent-emerald); }
+    .shape-btn:focus-visible, .btn:focus-visible {
+      outline: 2px solid var(--accent-blue); outline-offset: 2px;
+    }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+    }
   </style>
 </head>
 <body>
@@ -108,13 +126,15 @@
     <p class="lede">The <code>path-length</code> property normalises the coordinate space for <code>stroke-dasharray</code> animations. Set <code>path-length: 100</code> and your dash offsets work in <em>percentages of the path</em> — no geometry math, no JavaScript <code>getTotalLength()</code> calls.</p>
   </header>
 
+  <div class="support-note" id="support-note" role="status">Probing <code>CSS.supports('path-length', '100')</code>…</div>
+
   <h2>choose a shape</h2>
   <div class="shape-selector" id="shape-selector">
-    <button class="shape-btn active" data-shape="heart">Heart</button>
-    <button class="shape-btn" data-shape="star">Star</button>
-    <button class="shape-btn" data-shape="wave">Wave</button>
-    <button class="shape-btn" data-shape="zigzag">Zigzag</button>
-    <button class="shape-btn" data-shape="spiral">Spiral</button>
+    <button class="shape-btn active" data-shape="heart" aria-pressed="true">Heart</button>
+    <button class="shape-btn" data-shape="star" aria-pressed="false">Star</button>
+    <button class="shape-btn" data-shape="wave" aria-pressed="false">Wave</button>
+    <button class="shape-btn" data-shape="zigzag" aria-pressed="false">Zigzag</button>
+    <button class="shape-btn" data-shape="spiral" aria-pressed="false">Spiral</button>
   </div>
 
   <div class="stage">
@@ -138,6 +158,7 @@
   <div class="controls">
     <button class="btn btn-primary" id="btn-animate">Animate draw</button>
     <button class="btn" id="btn-reset-anim">Reset</button>
+    <span class="sr-only" id="draw-status" role="status"></span>
   </div>
 
   <div class="css-output" id="css-output">/* select a shape and drag the slider */</div>
@@ -180,6 +201,19 @@ let currentShape = 'heart';
 let animating = false;
 let animRaf = null;
 
+// Exact-surface probe: the feature IS the CSS path-length property (invariant 7 / rule 10).
+const supportsPathLength = typeof CSS !== 'undefined' && CSS.supports && CSS.supports('path-length', '100');
+const supportNote = document.getElementById('support-note');
+const drawStatus = document.getElementById('draw-status');
+const prefersReducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (supportsPathLength) {
+  supportNote.classList.add('supported');
+  supportNote.innerHTML = '<strong>Supported:</strong> <code>CSS.supports(\'path-length\', \'100\')</code> is true — the stage below uses the real CSS <code>path-length</code> property.';
+} else {
+  supportNote.innerHTML = '<strong>Not supported here:</strong> <code>CSS.supports(\'path-length\', \'100\')</code> is false in this browser (the property ships in Chrome 149). The stage below falls back to the classic JavaScript <code>path.getTotalLength()</code> technique — the exact boilerplate <code>path-length</code> removes — so the draw still renders correctly. The CSS shown is what a Chrome 149+ browser would use.';
+}
+window.showcaseTelemetry?.assert('path-length-supports-probe-ran', typeof supportsPathLength === 'boolean', { supported: supportsPathLength });
+
 function updateViewBox() {
   // Shapes designed for 500x300, some need more height
   if (currentShape === 'star') svgStage.setAttribute('viewBox', '0 0 500 400');
@@ -200,14 +234,22 @@ function update() {
   const p = parseInt(progressInput.value);
   const sw = parseFloat(strokeW.value);
   const gap = 100 - p;
-  // path-length: 100 means dasharray uses "out of 100" units
-  drawPath.style.pathLength = '100';
-  drawPath.style.strokeDasharray = `${p} ${gap + 1}`;
+  if (supportsPathLength) {
+    // path-length: 100 means dasharray uses "out of 100" units
+    drawPath.style.pathLength = '100';
+    drawPath.style.strokeDasharray = `${p} ${gap + 1}`;
+  } else {
+    // Honest fallback: compute real geometry the way pre-149 code has to.
+    const total = drawPath.getTotalLength();
+    const drawn = (p / 100) * total;
+    drawPath.style.strokeDasharray = `${drawn} ${total - drawn + 1}`;
+  }
   drawPath.style.strokeDashoffset = '0';
   drawPath.style.strokeWidth = `${sw}`;
 
   progressVal.textContent = `${p}%`;
   strokeWVal.textContent = `${sw}px`;
+  svgStage.setAttribute('aria-label', `${currentShape} path, ${p}% drawn`);
 
   cssOutput.textContent = `/* CSS path-length: 100 normalises the dash coordinates */
 path {
@@ -223,7 +265,12 @@ path {
   from { stroke-dasharray: 0 100; }
   to   { stroke-dasharray: 100 0; }
 }
-path { animation: draw 1.5s ease forwards; }`;
+path { animation: draw 1.5s ease forwards; }${supportsPathLength ? '' : `
+
+/* This browser lacks path-length — the stage above is driven by the
+   legacy JS fallback instead:
+   const L = path.getTotalLength();
+   path.style.strokeDasharray = \`\${p / 100 * L} \${L - p / 100 * L + 1}\`; */`}`;
 }
 
 progressInput.addEventListener('input', update);
@@ -231,13 +278,27 @@ strokeW.addEventListener('input', update);
 
 document.getElementById('shape-selector').addEventListener('click', e => {
   if (!e.target.dataset.shape) return;
-  document.querySelectorAll('.shape-btn').forEach(b => b.classList.remove('active'));
-  e.target.classList.add('active');
+  document.querySelectorAll('.shape-btn').forEach(b => {
+    const on = b === e.target;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
   setShape(e.target.dataset.shape);
+});
+
+progressInput.addEventListener('change', () => {
+  drawStatus.textContent = `${currentShape} path ${progressInput.value}% drawn`;
 });
 
 document.getElementById('btn-animate').addEventListener('click', () => {
   if (animating) { animating = false; cancelAnimationFrame(animRaf); return; }
+  if (prefersReducedMotion) {
+    // Honour prefers-reduced-motion: jump straight to the drawn state.
+    progressInput.value = 100;
+    update();
+    drawStatus.textContent = `${currentShape} path fully drawn (animation skipped: reduced motion)`;
+    return;
+  }
   animating = true;
   progressInput.value = 0;
   const start = performance.now();
@@ -248,7 +309,7 @@ document.getElementById('btn-animate').addEventListener('click', () => {
     progressInput.value = Math.round(ease * 100);
     update();
     if (t < 1 && animating) { animRaf = requestAnimationFrame(frame); }
-    else { animating = false; }
+    else { animating = false; drawStatus.textContent = `${currentShape} path fully drawn`; }
   }
   animRaf = requestAnimationFrame(frame);
 });
@@ -258,6 +319,7 @@ document.getElementById('btn-reset-anim').addEventListener('click', () => {
   cancelAnimationFrame(animRaf);
   progressInput.value = 0;
   update();
+  drawStatus.textContent = `${currentShape} path reset to 0%`;
 });
 
 setShape('heart');

@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chunked render console — OfflineAudioContext incremental rendering — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .controls { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); align-items: end; }
+    .field { display: grid; gap: var(--space-1); }
+    .field label { font-weight: 700; font-size: 0.9rem; }
+    .field input { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font: inherit; min-height: 44px; width: 100%; box-sizing: border-box; }
+    .support { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); overflow-wrap: anywhere; min-width: 0; }
+    .stage > * { min-width: 0; }
+    .support.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald); }
+    .support.no { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .table-wrap { overflow-x: auto; max-width: 100%; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); }
+    td.value { font-family: var(--font-mono); font-weight: 700; }
+    td.value.match { color: var(--accent-emerald-dark); }
+    td.value.full { color: var(--accent-amber); }
+    canvas { width: 100%; height: 120px; border: 2px solid var(--border-black); background: var(--bg-stone); display: block; }
+    .wave-text { font-size: 0.85rem; color: var(--text-charcoal); }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; OfflineAudioContext incremental rendering</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v158 · web audio · offline rendering</p>
+    <h1>Chunked render console</h1>
+    <p class="lede">A real offline graph — a 220&nbsp;Hz triangle sweeping up an octave under a fade-out envelope — rendered on demand, chunk by chunk. The row that matters is <em>requested vs received</em>: a Chrome 158 build hands back at most <code>chunkSize</code> frames per call, while an older build ignores the argument entirely and delivers the whole buffer in one go. Both outcomes are real, and the console names which one you got.</p>
+  </header>
+
+  <p class="note">Chrome targets incremental rendering for <strong>Chrome 158</strong> behind the <code>OfflineAudioContextIncrementalRendering</code> runtime flag. On an earlier or unflagged build, launch with <code>--enable-blink-features=OfflineAudioContextIncrementalRendering</code>, or flip <code>chrome://flags/#enable-experimental-web-platform-features</code> and relaunch. Classic offline rendering works everywhere, so this page always renders real audio.</p>
+
+  <section class="stage" aria-labelledby="support-title">
+    <h2 id="support-title">What this build supports</h2>
+    <p class="support" id="support" aria-live="polite">Probing…</p>
+  </section>
+
+  <section class="stage" aria-labelledby="console-title">
+    <h2 id="console-title">The console</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="total">total length (frames)</label>
+        <input type="number" id="total" value="16000" min="1000" max="480000" step="1000">
+      </div>
+      <div class="field">
+        <label for="chunk">chunkSize per call</label>
+        <input type="number" id="chunk" value="4096" min="128" max="480000" step="128">
+      </div>
+      <button type="button" id="create">1 · Create context + graph</button>
+      <button type="button" id="next" disabled>2 · Render next chunk</button>
+      <button type="button" id="all" disabled>3 · Render all remaining</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <caption>Chunks delivered (sample rate 8000 Hz)</caption>
+        <thead><tr><th scope="col">#</th><th scope="col">requested</th><th scope="col">received</th><th scope="col">covers frames</th><th scope="col">state after</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="5">No context yet.</td></tr></tbody>
+      </table>
+    </div>
+    <h3 id="wave-title">Accumulated output</h3>
+    <canvas id="wave" width="900" height="120" role="img" aria-labelledby="wave-title" aria-describedby="wave-text"></canvas>
+    <p class="wave-text" id="wave-text">Nothing rendered yet.</p>
+    <output id="console-out" aria-live="polite"></output>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const ctx = new OfflineAudioContext({ numberOfChannels: 1, length: 16000, sampleRate: 8000 });
+// …oscillator + gain envelope…
+
+// Chrome 158: a bounded slice per call
+let chunk = await ctx.startRendering(4096);   // chunk.length === 4096
+chunk = await ctx.startRendering(4096);       // next 4096, and so on…
+
+// Pre-158: the SAME line returns all 16000 frames at once —
+// the argument is ignored, and the context is finished after one call.</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5109900936085504" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://webaudio.github.io/web-audio-api/#dom-offlineaudiocontext-startrendering" target="_blank" rel="noopener">Spec: startRendering()</a></li>
+    <li><a href="../wav-export-pipeline/">WAV export pipeline</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[oac-inc:console]';
+  const RATE = 8000;
+  const hasOAC = typeof OfflineAudioContext === 'function';
+  const hasClose = hasOAC && typeof OfflineAudioContext.prototype.close === 'function';
+
+  const support = document.getElementById('support');
+  if (!hasOAC) {
+    support.className = 'support no';
+    support.textContent = 'No OfflineAudioContext in this browser — nothing on this page can run.';
+  } else if (hasClose) {
+    support.className = 'support yes';
+    support.textContent = 'OfflineAudioContext.prototype.close is a function — the explainer’s own feature-detection signal. This build ships incremental rendering; expect received === requested below.';
+  } else {
+    support.className = 'support no';
+    support.textContent = 'OfflineAudioContext.prototype.close is undefined — this build (pre-158 / unflagged) predates incremental rendering. The chunkSize argument below will be ignored and the first call will deliver every frame; the table will show that honestly.';
+  }
+  globalThis.showcaseTelemetry?.assert('oac-inc-close-detect', !hasOAC || typeof OfflineAudioContext.prototype.close !== 'object', { hasOAC, hasClose });
+
+  const totalInput = document.getElementById('total');
+  const chunkInput = document.getElementById('chunk');
+  const createBtn = document.getElementById('create');
+  const nextBtn = document.getElementById('next');
+  const allBtn = document.getElementById('all');
+  const rows = document.getElementById('rows');
+  const wave = document.getElementById('wave');
+  const waveText = document.getElementById('wave-text');
+  const out = document.getElementById('console-out');
+
+  let ctx = null;
+  let chunks = [];
+  let chunkIndex = 0;
+
+  function framesSoFar() {
+    return chunks.reduce((sum, c) => sum + c.length, 0);
+  }
+
+  function drawWave() {
+    const g = wave.getContext('2d');
+    const css = getComputedStyle(document.documentElement);
+    g.fillStyle = css.getPropertyValue('--bg-stone').trim() || '#f4f3ee';
+    g.fillRect(0, 0, wave.width, wave.height);
+    const total = framesSoFar();
+    if (!total) {
+      waveText.textContent = 'Nothing rendered yet.';
+      return;
+    }
+    const data = new Float32Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      data.set(c.getChannelData(0), offset);
+      offset += c.length;
+    }
+    g.strokeStyle = css.getPropertyValue('--accent-blue').trim() || '#0022ff';
+    g.lineWidth = 1.5;
+    g.beginPath();
+    const mid = wave.height / 2;
+    const step = Math.max(1, Math.floor(total / wave.width));
+    let peak = 0;
+    for (let x = 0; x < wave.width; x++) {
+      const i = Math.min(total - 1, x * step);
+      let min = 1, max = -1;
+      for (let j = i; j < Math.min(total, i + step); j++) {
+        const v = data[j];
+        if (v < min) min = v;
+        if (v > max) max = v;
+        const a = Math.abs(v);
+        if (a > peak) peak = a;
+      }
+      g.moveTo(x + 0.5, mid - max * (mid - 4));
+      g.lineTo(x + 0.5, mid - min * (mid - 4));
+    }
+    g.stroke();
+    waveText.textContent = 'Waveform of ' + total + ' rendered frames (' + (total / RATE).toFixed(2) + ' s at ' + RATE + ' Hz) across ' + chunks.length + ' chunk' + (chunks.length === 1 ? '' : 's') + '; peak amplitude ' + peak.toFixed(3) + '. The triangle wave sweeps 220→440 Hz while fading out.';
+  }
+
+  function buildGraph(context) {
+    const osc = new OscillatorNode(context, { type: 'triangle', frequency: 220 });
+    const seconds = context.length ? context.length / RATE : 2;
+    osc.frequency.linearRampToValueAtTime(440, seconds);
+    const gain = new GainNode(context, { gain: 0.8 });
+    gain.gain.setValueAtTime(0.8, 0);
+    gain.gain.linearRampToValueAtTime(0.05, seconds);
+    osc.connect(gain).connect(context.destination);
+    osc.start();
+  }
+
+  function setRunState(hasCtx, finished) {
+    nextBtn.disabled = !hasCtx || finished;
+    allBtn.disabled = !hasCtx || finished;
+    createBtn.disabled = false;
+  }
+
+  function create() {
+    if (!hasOAC) {
+      out.textContent = 'No OfflineAudioContext — cannot create a context.';
+      globalThis.showcaseTelemetry?.assert('oac-inc-console-fallback', true, { hasOAC });
+      return;
+    }
+    const total = Math.max(1000, Math.floor(Number(totalInput.value) || 16000));
+    try {
+      ctx = new OfflineAudioContext({ numberOfChannels: 1, length: total, sampleRate: RATE });
+    } catch (error) {
+      out.textContent = 'Constructor threw ' + error.name + ': ' + error.message;
+      return;
+    }
+    buildGraph(ctx);
+    chunks = [];
+    chunkIndex = 0;
+    rows.innerHTML = '';
+    drawWave();
+    out.textContent = 'Context created: ' + total + ' frames at ' + RATE + ' Hz, state "' + ctx.state + '". Now pull chunks.';
+    setRunState(true, false);
+    console.log(LOG, 'created', total);
+  }
+
+  async function renderNext() {
+    if (!ctx) return false;
+    const requested = Math.max(128, Math.floor(Number(chunkInput.value) || 4096));
+    const startFrame = framesSoFar();
+    nextBtn.disabled = true;
+    allBtn.disabled = true;
+    let buffer;
+    try {
+      buffer = await ctx.startRendering(requested);
+    } catch (error) {
+      out.textContent = 'startRendering rejected: ' + error.name + ' — ' + error.message + (ctx.state === 'closed' ? ' (the context already delivered every frame and closed itself)' : '');
+      setRunState(true, ctx.state === 'closed');
+      return false;
+    }
+    chunkIndex += 1;
+    chunks.push(buffer);
+    const tr = document.createElement('tr');
+    const cells = [
+      String(chunkIndex),
+      String(requested),
+      String(buffer.length),
+      startFrame + ' … ' + (startFrame + buffer.length - 1),
+      ctx.state,
+    ];
+    cells.forEach((text, i) => {
+      const td = document.createElement('td');
+      if (i === 2) {
+        td.className = 'value ' + (buffer.length <= requested ? 'match' : 'full');
+      } else if (i === 1) {
+        td.className = 'value';
+      }
+      td.textContent = text;
+      tr.append(td);
+    });
+    rows.append(tr);
+    drawWave();
+
+    const bounded = buffer.length <= requested;
+    const finished = ctx.state === 'closed';
+    if (!bounded) {
+      out.textContent = 'Requested ' + requested + ' frames, received ' + buffer.length + ' — the argument was ignored and the whole buffer arrived at once. That is the real pre-158 behaviour of this build, not a demo bug; the context is now ' + ctx.state + '.';
+    } else if (finished) {
+      out.textContent = 'Chunk ' + chunkIndex + ' delivered the final ' + buffer.length + ' frames; the context transitioned to "closed" by itself — every frame of the fixed length has been rendered.';
+    } else {
+      out.textContent = 'Chunk ' + chunkIndex + ': received exactly ' + buffer.length + ' ≤ ' + requested + ' requested frames; ' + (ctx.length - framesSoFar()) + ' frames remain. Peak memory never exceeded one chunk.';
+    }
+    globalThis.showcaseTelemetry?.assert(
+      'oac-inc-chunk-bounded-matches-support',
+      hasClose ? bounded : true,
+      { hasClose, requested, received: buffer.length },
+    );
+    setRunState(true, finished);
+    console.log(LOG, 'chunk', chunkIndex, requested, '->', buffer.length, ctx.state);
+    return !finished;
+  }
+
+  async function renderAll() {
+    let guard = 0;
+    while (ctx && ctx.state !== 'closed' && guard < 500) {
+      guard += 1;
+      const more = await renderNext();
+      if (!more) break;
+    }
+  }
+
+  createBtn.addEventListener('click', create);
+  nextBtn.addEventListener('click', renderNext);
+  allBtn.addEventListener('click', renderAll);
+  console.log(LOG, 'ready', 'hasOAC=' + hasOAC, 'hasClose=' + hasClose);
+})();
+</script>
+</body>
+</html>

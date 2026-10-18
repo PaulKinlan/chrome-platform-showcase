@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransport keying material export — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v158/">&larr; Chrome 158</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v158 · network · webtransport</p>
+    <h1>WebTransport keying material export</h1>
+    <p class="lede">A TLS session already holds a secret both ends agree on — so why run a second key exchange just to bind your application protocol to the connection? Chrome 158 adds <code>WebTransport.exportKeyingMaterial(label, context, outputLength)</code>, exposing the TLS keying material exporter (RFC 8446 §7.5, via RFC 9001 for QUIC) as a <code>Promise&lt;Uint8Array&gt;</code> of secret bytes derived from, and unique to, the established session.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./exporter-surface-probe/">The exporter surface, probed exactly</a></h3>
+      <p>Probe <code>typeof WebTransport.prototype.exportKeyingMaterial</code>, its three-argument arity, and its descriptor — then make a real call on a real (unestablished) session and watch the returned promise reject with the genuine <code>InvalidStateError</code> the spec requires when the session fails instead of establishing.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./argument-gates/">Three RangeError gates, tested before the network</a></h3>
+      <p>Label over 255 bytes, context over 255 bytes, output length of 0 or above the implementation ceiling — each must reject with <code>RangeError</code> <em>before</em> the session's state is even consulted. Dial the sizes yourself and fire real calls; the argument checks run even on a session that never connected.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./session-key-binding/">Bind a key to a real session</a></h3>
+      <p>The product flow end to end: your endpoint URL, your exporter label and context, a real connection attempt, a real export call, and a hex dump of whatever genuinely comes back — secret bytes on an established session, or the exact error when establishment fails. Nothing simulated.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./derived-key-pipeline/">From exported bytes to a working MAC</a></h3>
+      <p>What the bytes are <em>for</em>: feed keying material into WebCrypto — <code>importKey</code>, HMAC-sign a challenge, verify it — the channel-binding pattern RFC 9266 formalised. The pipeline runs for real in any browser; the page is explicit about whether its input bytes came from a live TLS exporter or a clearly-labelled stand-in.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Applications keep needing a secret that proves "this message belongs to <em>this</em> connection": binding an authentication token so it cannot be replayed over another channel, deriving an application-layer encryption key without a second handshake, or implementing channel binding for a protocol tunnelled over WebTransport. TLS has had the answer since RFC 5705 — the keying material exporter derives application-specific secrets from the session's master secret without ever exposing the traffic keys — but the web platform offered no way to reach it.</p>
+    <p><code>exportKeyingMaterial()</code> closes that gap with deliberate limits: label and context are capped at 255 bytes each, output length runs from 1 byte up to an implementation ceiling that must be at least 4096 (Chromium: exactly 1–4096), and the call only resolves once the session is established — a session that fails or closes rejects with <code>InvalidStateError</code>. Chromium additionally mixes the WebTransport CONNECT stream ID into the exporter context, so two WebTransport sessions pooled onto one HTTP/3 connection still derive different keys even with identical label and context arguments.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>const transport = new WebTransport("https://example.com:4433/app");
+await transport.ready;
+
+const enc = new TextEncoder();
+const key = await transport.exportKeyingMaterial(
+  enc.encode("EXPORTER-my-app v1"),   // label, ≤ 255 bytes
+  enc.encode(sessionNonce),           // context, ≤ 255 bytes
+  32,                                 // outputLength: 1 … ≥4096 (impl-defined)
+);
+// key: Uint8Array(32) — secret, session-bound, same on both ends</code></pre>
+    <p>Both ends of the connection can derive the same bytes by invoking their TLS stack's exporter with the same label, context, and length — that is the whole point. Argument validation (the three <code>RangeError</code> gates) happens before the state check, and a <code>"closed"</code>/<code>"failed"</code> session — or one that fails while the call is pending — rejects with <code>InvalidStateError</code>.</p>
+  </section>
+
+  <!-- research notes (agentB, 2026-10-18)
+    Use-case portfolio: (1) basic/canonical = exporter-surface-probe (exact
+    member probe, arity, descriptor, real call on an unestablished session ->
+    real InvalidStateError); (2) edge/failure + limits inspection =
+    argument-gates (the three RangeError gates run before the state check,
+    adjustable sizes, real rejections); (3) practical product =
+    session-key-binding (user endpoint + label/context, real connect + export,
+    hex dump of real bytes or the real error); (4) advanced composition =
+    derived-key-pipeline (Uint8Array -> WebCrypto HMAC channel-binding
+    pattern, honest labelling of byte provenance). Not demonstrable without a
+    reachable HTTP/3 endpoint, recorded honestly instead of simulated: a
+    resolved export with real TLS-derived bytes, and the pooled-sessions-
+    derive-different-keys behaviour (Chromium mixes the CONNECT stream ID
+    into the exporter context; needs two live pooled sessions).
+    Exact surface (spec IDL, w3c.github.io/webtransport, fetched 2026-10-18):
+      [NewObject] Promise<Uint8Array> exportKeyingMaterial(
+        BufferSource label, BufferSource context, unsigned long outputLength);
+    Spec algorithm mirrored by demos + conformance suite: label.byteLength>255
+    -> reject RangeError; context.byteLength>255 -> reject RangeError;
+    outputLength 0 or > implementation-defined ceiling (>=4096) -> reject
+    RangeError; THEN if [[State]] is "closed"/"failed" -> reject
+    InvalidStateError; otherwise run in parallel, aborting to InvalidStateError
+    if the state becomes "closed"/"failed" (so a failed connection attempt
+    rejects a pending export). Chromium limits: label/context <=255 bytes,
+    outputLength 1..4096 (chromestatus summary, issues.chromium.org/556304550).
+    Flag findings (runtime_enabled_features.json5, fetched 2026-10-18):
+      WebTransportExportKeyingMaterial, status "experimental" -> enable with
+      --enable-blink-features=WebTransportExportKeyingMaterial or
+      chrome://flags/#enable-experimental-web-platform-features.
+    Verified in this environment on headless Chromium 141 (predates Chrome 158;
+    also absent behind --enable-experimental-web-platform-features on this
+    build): 'exportKeyingMaterial' in WebTransport.prototype === false — every
+    page exercises and labels the honest-absent branch. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/4860330806214656" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#dom-webtransport-exportkeyingmaterial" target="_blank" rel="noopener">WebTransport spec: exportKeyingMaterial</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md" target="_blank" rel="noopener">WebTransport explainer</a></li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc8446#section-7.5" target="_blank" rel="noopener">RFC 8446 §7.5: TLS 1.3 exporters</a></li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc9001" target="_blank" rel="noopener">RFC 9001: Using TLS to secure QUIC</a></li>
+    <li><a href="https://issues.chromium.org/issues/556304550" target="_blank" rel="noopener">Chromium implementation bug</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

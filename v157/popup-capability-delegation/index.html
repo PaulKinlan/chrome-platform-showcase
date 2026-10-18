@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Popup Capability Delegation — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v157/">&larr; Chrome 157</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v157 · capabilities (fugu) · experimental</p>
+    <h1>Popup Capability Delegation</h1>
+    <p class="lede">Clicking a service-worker notification runs in a context with no DOM — so today it cannot lead to an existing tab opening a connected popup (<code>window.open()</code> gets popup-blocked: no transient activation). This proposal lets the <code>notificationclick</code> handler delegate its one transient <code>"popup"</code> capability to a same-origin client window with <code>client.postMessage(msg,&nbsp;{delegate:&nbsp;'popup'})</code>; the tab's <code>message</code> handler then has one second to call <code>window.open()</code> — restoring parity with the legacy document-bound Notification API, with a strict 1-click-1-popup invariant.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./activation-playground/">Transient activation playground</a></h3>
+      <p>The ground truth the proposal builds on, fully real in today's browsers: <code>window.open()</code> on a click succeeds, after a 6-second delay the expired activation gets it popup-blocked, and a second open from the same click finds the activation consumed. Live <code>navigator.userActivation</code> readout throughout — this is the gate the delegated token bypasses.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./delegation-probe/">Delegation probe</a></h3>
+      <p>The exact proposed surface, probed behaviourally: this page's service worker calls <code>client.postMessage(msg, {delegate: 'popup'})</code> <em>outside</em> a notification click. A supporting browser must throw <code>NotAllowedError</code>; a browser without the feature silently ignores the unknown option and the message arrives. Either way you see the verbatim outcome — a probe that can genuinely return false. Plus the window-side <code>postMessage({delegate: 'payment'})</code> contrast showing the Capability Delegation framework this extends.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./notification-delegation-lab/">Notification → popup lab</a></h3>
+      <p>The full flow, end to end and real: register the worker, grant notification permission, fire a notification, click it — the worker focuses this tab and delegates <code>"popup"</code>; the page synchronously calls <code>window.open()</code> on a connected preview window that talks back over <code>window.opener</code>. On browsers without the feature the same click honestly hits the popup blocker — the exact gap this proposal closes. Edge toggles: a no-delegation control arm, a deliberate 1.5&nbsp;s delay (token expiry), and a double-open (single-use invariant).</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it is proposed</h2>
+    <p>Webmail, chat and productivity apps open compose/preview popups from an existing tab so the popup can share in-memory state via <code>window.opener</code>. With service-worker notifications (<code>registration.showNotification()</code>), the click lands in the worker: it may <code>focus()</code> a client or <code>Clients.openWindow()</code> a cold new tab, but the focused tab cannot then <code>window.open()</code> — it never received the user's activation. The explainer chose <em>explicit</em> delegation over ambient worker activation so that an intervening analytics <code>postMessage()</code> cannot accidentally consume the capability, and over a hypothetical <code>clients.openAuxiliaryWindow()</code> because only the tab itself can hold a synchronous <code>WindowProxy</code>, parse window features against real screen geometry, and reuse existing popup-management code. Lifespans are double-bounded (≤5&nbsp;s in the worker event, 1&nbsp;s in the receiving tab) and one click yields at most one focus plus one popup.</p>
+  </section>
+
+  <section><h2>the proposed surface</h2>
+    <pre tabindex="0"><code>// Service Workers spec addition (from the explainer):
+dictionary ClientPostMessageOptions : StructuredSerializeOptions {
+  DOMString? delegate;
+};
+partial interface Client {
+  undefined postMessage(any message, optional ClientPostMessageOptions options = {});
+};
+
+// sw.js — inside a trusted notificationclick only:
+await client.focus();                               // visibility is still required
+client.postMessage(payload, { delegate: 'popup' }); // consumes the event's token
+
+// page — synchronously in the 'message' handler (1-second token):
+const popup = window.open('/preview', 'preview', 'width=600,height=500,popup');</code></pre>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id: 5091965583622144 — listing name "Popup Capability Delegation", v157 listing.
+    chromestatus: browsers.chrome.desktop = None (status "Proposed"); category Capabilities
+    (Fugu); blink component UI>Notifications; finch_name CapabilityDelegationPopup;
+    flag_name enable-experimental-web-platform-features. Explainer read IN FULL:
+    WICG/capability-delegation explainers/popup-delegation.md (author dmurph@chromium.org).
+    Exact surface: ClientPostMessageOptions : StructuredSerializeOptions { DOMString? delegate }
+    on Client.postMessage; capability identifier "popup"; token granted to the
+    NotificationEvent context on trusted notificationclick (expires at waitUntil settlement
+    or 5s); delegation consumes it; receiving Window gets
+    DELEGATED_CAPABILITY_TIMESTAMPS["popup"] with a 1-SECOND lifespan; window.open permitted
+    if transient activation OR unexpired delegated token, consuming both (1:1 invariant);
+    NotSupportedError for non-WindowClient targets/other channels; NotAllowedError when no
+    active token (i.e. outside notificationclick) — the delegation-probe concept turns that
+    exact contract into a behavioural feature-detect that CAN return false (an unsupporting
+    browser ignores the unknown dictionary member and delivers the message instead).
+    Related spec: wicg.github.io/capability-delegation/spec.html (window-to-window
+    postMessage(message, {delegate}) — payment/fullscreen/display-capture; initiation is
+    activation-consuming, which the probe's window-side contrast demonstrates). Chromium:
+    runtime_enabled_features.json5 has CapabilityDelegationPopup (status: experimental → the
+    exact enable step is --enable-experimental-web-platform-features, confirmed by
+    content_switch_dependent_feature_overrides.cc mapping that switch to
+    blink::features::kCapabilityDelegationPopup); browser-side gating in
+    content/browser/service_worker/service_worker_container_host.cc (DelegatedCapability::
+    kPopup requires HasPendingWindowInteractionEvent + a window client). Tracking bug
+    crbug.com/542314185; sample googlechrome.github.io/samples/service-worker/
+    capability-delegation-popup/. No dedicated chrome://flags id found for it.
+    Verification browser Chromium 141 headless: navigator.userActivation present (activation
+    playground is fully real); serviceWorker present on localhost; the delegate option is
+    expected to be IGNORED (probe reports that honestly); notification CLICKS cannot happen
+    headlessly, so the lab's post-click stages are verified to report their waiting state
+    honestly rather than claimed complete.
+    Use-case portfolio: basic/canonical (of the underlying gate, fully real today) =
+    activation-playground (activation-gated window.open, expiry, consumption,
+    navigator.userActivation live readout); configuration/inspection + exact-surface probe =
+    delegation-probe (the NotAllowedError-outside-notificationclick contract + the
+    capability-delegation framework contrast on Window.postMessage); practical product +
+    edge/failure = notification-delegation-lab (full notification→focus→delegate→open flow
+    with control arm, 1.5s expiry toggle and double-open toggle, opener-connected popup
+    page, honest popup-blocked outcome on unsupporting browsers, openWindow fallback).
+    Novel/advanced composition (Web Share Target FetchEvent delegation) recorded as not
+    built: the explainer itself defers it as a future extension requiring new spec work on
+    identifying share-target FetchEvents — source: explainer "Future Consideration: Web
+    Share Target Integration".
+    modern-web-guidance consulted: accessibility (focus transitions + live status),
+    responsive-design/css-layout (panel layout), security (activation-gated capabilities,
+    no popup amplification), persistent-toast-notifications (status surfaces considered;
+    plain live regions chosen: statuses are in-flow logs, not transient overlays). Recorded
+    per concept in guidanceConsulted.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5091965583622144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/WICG/capability-delegation/blob/main/explainers/popup-delegation.md" target="_blank" rel="noopener">Explainer: Service Worker Capability Delegation for Pop-ups</a></li>
+    <li><a href="https://wicg.github.io/capability-delegation/spec.html" target="_blank" rel="noopener">Capability Delegation spec (the framework this extends)</a></li>
+    <li><a href="https://googlechrome.github.io/samples/service-worker/capability-delegation-popup/index.html" target="_blank" rel="noopener">Chrome sample</a></li>
+    <li><a href="https://issues.chromium.org/issues/542314185" target="_blank" rel="noopener">Tracking bug 542314185</a></li>
+    <li><a href="https://github.com/WICG/capability-delegation/issues/42" target="_blank" rel="noopener">Public design issue (capability-delegation#42)</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

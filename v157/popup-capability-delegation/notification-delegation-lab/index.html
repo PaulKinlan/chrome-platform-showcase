@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Notification → popup lab — Popup Capability Delegation — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    [hidden] { display: none !important; }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; min-width: 0; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; text-align: left; }
+    button:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    fieldset { border: 2px solid var(--border-black); padding: var(--space-3); margin: 0; display: grid; gap: var(--space-2); }
+    legend { font-weight: 700; padding: 0 var(--space-2); }
+    .opt { display: grid; grid-template-columns: auto 1fr; gap: var(--space-2); align-items: start; }
+    .opt input { width: 1.4rem; height: 1.4rem; margin-top: 0.2rem; accent-color: var(--text-black); }
+    .steps { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-2); }
+    .steps li { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-2) var(--space-3); display: grid; grid-template-columns: auto 1fr; gap: var(--space-2); font-size: 0.85rem; }
+    .steps .state { font-family: var(--font-mono); font-weight: 700; min-width: 5.5rem; }
+    .steps .state.done { color: var(--accent-emerald-dark); }
+    .steps .state.fail { color: var(--accent-rose); }
+    .steps .state.wait { color: var(--text-muted); }
+    .steps .detail { overflow-wrap: anywhere; }
+    .log { border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.8rem; font-family: var(--font-mono); display: grid; gap: var(--space-1); max-height: 18rem; overflow: auto; }
+    .log p { margin: 0; overflow-wrap: anywhere; }
+    .log .ok { color: var(--accent-emerald-dark); font-weight: 700; }
+    .log .blocked { color: var(--accent-rose); font-weight: 700; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Popup Capability Delegation</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v157 · capabilities · the full flow, for real</p>
+    <h1>Notification → popup lab</h1>
+    <p class="lede">The explainer's webmail scenario, live: a service-worker notification whose click makes <em>this already-open tab</em> open a connected preview popup. Every stage below is the real API — real registration, real permission prompt, real notification, real <code>client.postMessage(…, {delegate: 'popup'})</code> in the worker, and a real synchronous <code>window.open()</code> in this page's message handler. On a browser without the feature, that last call hits the popup blocker — which is precisely the gap being closed, and this lab shows it honestly.</p>
+  </header>
+
+  <p class="note"><strong>To see the delegated success path</strong> you need a Chromium build with the <code>CapabilityDelegationPopup</code> flag — launch with <code>--enable-experimental-web-platform-features</code> (no released Chrome ships it; ChromeStatus milestone: none yet). Everywhere else, stages 1–5 still run for real and stage 6 reports the genuine popup-blocker outcome. Notifications also require this page to stay visible/focused when you click the notification.</p>
+
+  <section class="stage" aria-labelledby="flow-title">
+    <h2 id="flow-title">The flow</h2>
+    <ol class="steps">
+      <li><span class="state wait" id="st-sw">waiting</span><span class="detail" id="sd-sw">1 · Register the service worker (../sw.js, feature scope)</span></li>
+      <li><span class="state wait" id="st-perm">waiting</span><span class="detail" id="sd-perm">2 · Notification permission</span></li>
+      <li><span class="state wait" id="st-shown">waiting</span><span class="detail" id="sd-shown">3 · Show the notification (then click it!)</span></li>
+      <li><span class="state wait" id="st-click">waiting</span><span class="detail" id="sd-click">4 · Worker receives notificationclick, focuses this tab, posts the message</span></li>
+      <li><span class="state wait" id="st-msg">waiting</span><span class="detail" id="sd-msg">5 · This page receives the message</span></li>
+      <li><span class="state wait" id="st-open">waiting</span><span class="detail" id="sd-open">6 · window.open() from the message handler</span></li>
+    </ol>
+    <fieldset>
+      <legend>Experiment arms (edge cases from the explainer)</legend>
+      <label class="opt"><input type="radio" name="arm" value="delegate" checked>
+        <span><strong>Delegate</strong> — worker posts with <code>{delegate: 'popup'}</code>; page opens synchronously (the intended flow)</span></label>
+      <label class="opt"><input type="radio" name="arm" value="plain">
+        <span><strong>Control: no delegation</strong> — ordinary postMessage; shows today's baseline failure even on supporting builds</span></label>
+      <label class="opt"><input type="radio" name="arm" value="delay">
+        <span><strong>Token expiry</strong> — page waits 1.5 s before <code>window.open()</code> (the 1-second receiver token must be gone)</span></label>
+      <label class="opt"><input type="radio" name="arm" value="double">
+        <span><strong>Single-use invariant</strong> — page calls <code>window.open()</code> twice; one click must never yield two popups</span></label>
+    </fieldset>
+    <button type="button" id="ask-perm">Request notification permission</button>
+    <button type="button" id="notify">Show the notification (then click it)</button>
+    <div class="log" id="log" role="log" aria-live="polite" aria-label="Lab log"><p>Nothing yet.</p></div>
+  </section>
+
+  <section><h2>what the popup proves</h2>
+    <p>The popup this lab opens is <a href="./popup-target.html">popup-target.html</a>. It checks <code>window.opener</code>, synchronously reads a value this tab holds in memory (<code>LAB_SHARED_STATE</code>) and messages back — the state-sharing that <code>Clients.openWindow()</code>'s cold new context cannot give you, and the reason the explainer routes the open through the client tab instead of the worker.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5091965583622144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/WICG/capability-delegation/blob/main/explainers/popup-delegation.md" target="_blank" rel="noopener">Explainer: developer usage example</a></li>
+    <li><a href="https://googlechrome.github.io/samples/service-worker/capability-delegation-popup/index.html" target="_blank" rel="noopener">Chrome sample</a></li>
+    <li><a href="../activation-playground/">Transient activation playground</a></li>
+    <li><a href="../delegation-probe/">Delegation probe</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[popup-capdel:lab]';
+  const $ = (id) => document.getElementById(id);
+  const logEl = $('log');
+  let firstLog = true;
+  const popups = [];
+
+  // The in-memory state the popup reads synchronously through window.opener.
+  window.LAB_SHARED_STATE = { inbox: 'demo', unread: 3, sharedAt: new Date().toISOString() };
+
+  function log(text, cls) {
+    if (firstLog) { logEl.textContent = ''; firstLog = false; }
+    const p = document.createElement('p');
+    if (cls) {
+      const s = document.createElement('span');
+      s.className = cls;
+      s.textContent = cls === 'ok' ? 'OK ' : 'BLOCKED ';
+      p.append(s);
+    }
+    p.append(document.createTextNode(`${new Date().toLocaleTimeString()} ${text}`));
+    logEl.append(p);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function setStep(id, state, detail) {
+    const el = $(`st-${id}`);
+    el.textContent = state;
+    el.className = `state ${state === 'done' ? 'done' : state === 'failed' ? 'fail' : 'wait'}`;
+    if (state === 'failed') el.textContent = 'failed';
+    if (detail) $(`sd-${id}`).textContent = detail;
+  }
+
+  function arm() { return document.querySelector('input[name="arm"]:checked').value; }
+
+  // 1 · register
+  let regPromise = null;
+  if ('serviceWorker' in navigator) {
+    regPromise = navigator.serviceWorker.register('../sw.js', { scope: '../' })
+      .then(async (reg) => {
+        await navigator.serviceWorker.ready;
+        setStep('sw', 'done', `1 · Worker registered, scope ${reg.scope}`);
+        globalThis.showcaseTelemetry?.assert('capdel-lab-sw-registered', true, {});
+        return reg;
+      })
+      .catch((error) => {
+        setStep('sw', 'failed', `1 · Registration threw ${error.name}: ${error.message}`);
+        globalThis.showcaseTelemetry?.assert('capdel-lab-sw-failed', false, { error: error.name });
+        return null;
+      });
+  } else {
+    setStep('sw', 'failed', '1 · navigator.serviceWorker missing (insecure context?)');
+  }
+
+  // 2 · permission
+  function reflectPermission() {
+    if (!('Notification' in window)) {
+      setStep('perm', 'failed', '2 · The Notification API is missing in this browser');
+      return;
+    }
+    const p = Notification.permission;
+    if (p === 'granted') setStep('perm', 'done', '2 · Notification permission: granted');
+    else if (p === 'denied') setStep('perm', 'failed', '2 · Notification permission: DENIED — the lab cannot proceed; re-allow notifications for this site in the browser settings (an honest dead end, not a simulated one)');
+    else setStep('perm', 'waiting', '2 · Notification permission: default — use the request button');
+  }
+  $('ask-perm').addEventListener('click', async () => {
+    if (!('Notification' in window)) return;
+    const r = await Notification.requestPermission();
+    log(`Notification.requestPermission() → ${r}`);
+    reflectPermission();
+    globalThis.showcaseTelemetry?.assert('capdel-lab-permission', r !== 'denied', { result: r });
+  });
+  reflectPermission();
+
+  // 3 · notify
+  $('notify').addEventListener('click', async () => {
+    const reg = await regPromise;
+    if (!reg) { log('No service worker registration — see step 1.', 'blocked'); return; }
+    if (Notification.permission !== 'granted') {
+      log('Permission is not granted — step 2 first. (showNotification would reject; not attempting a fake.)', 'blocked');
+      return;
+    }
+    const mode = arm() === 'plain' ? 'plain' : 'delegate';
+    try {
+      await reg.showNotification('Popup delegation demo', {
+        body: `Click me. Arm: ${arm()} — the worker will ${mode === 'plain' ? 'post WITHOUT delegation (control)' : "focus this tab and delegate 'popup'"}.`,
+        tag: 'popup-capdel-demo',
+        data: { mode },
+      });
+      setStep('shown', 'done', `3 · Notification shown (arm: ${arm()}) — now click the notification itself`);
+      setStep('click', 'waiting', '4 · Waiting for you to click the notification…');
+      log('showNotification() resolved — the notification is up. Click it to continue the flow.');
+      globalThis.showcaseTelemetry?.assert('capdel-lab-notification-shown', true, { arm: arm() });
+    } catch (error) {
+      setStep('shown', 'failed', `3 · showNotification threw ${error.name}: ${error.message}`);
+      globalThis.showcaseTelemetry?.assert('capdel-lab-notification-failed', false, { error: error.name });
+    }
+  });
+
+  function tryOpen(label) {
+    const w = window.open('./popup-target.html', 'capdel-preview', 'popup,width=460,height=380');
+    if (w) {
+      popups.push(w);
+      log(`${label}: window.open returned a WindowProxy — popup opened (it will message back through window.opener).`, 'ok');
+    } else {
+      log(`${label}: window.open returned null — POPUP BLOCKED. No transient activation and no usable delegated token in this browser/arm. On a flag-enabled build the delegate arm succeeds here.`, 'blocked');
+    }
+    return w;
+  }
+
+  // 4/5/6 · the message from the worker
+  navigator.serviceWorker?.addEventListener('message', (e) => {
+    const d = e.data || {};
+    if (d.type === 'probe-delivery' || d.type === 'probe-result' || d.type === 'pong') return;
+    if (d.type !== 'notification-open') return;
+    setStep('click', 'done', `4 · Worker handled the click${d.focusError ? ` (client.focus() threw ${d.focusError})` : ' and focused this tab'}${d.delegateError ? ` — delegate call threw ${d.delegateError}` : ''}`);
+    setStep('msg', 'done', `5 · Message received (worker ${d.delegated ? "called postMessage with {delegate:'popup'} without an exception — whether a real token arrived is decided by step 6" : 'posted WITHOUT delegation' }${d.delegateError ? '; the worker fell back to a plain message after the real error' : ''})`);
+    const a = arm();
+    const finish = (w1, w2, label) => {
+      const anyOpen = w1 !== null || (w2 ?? null) !== null;
+      setStep('open', anyOpen ? 'done' : 'failed', `6 · ${label}`);
+    };
+    if (a === 'delay') {
+      log('arm: token expiry — waiting 1.5s before window.open (the receiver token lives 1s)…');
+      setTimeout(() => {
+        const w = tryOpen('delayed open (1.5s after the message)');
+        globalThis.showcaseTelemetry?.assert('capdel-lab-delayed-open', true, { opened: w !== null, note: 'expected blocked everywhere: activation absent, token (if any) expired' });
+        finish(w, null, w === null ? 'Blocked, as specified: the 1-second delegated token was gone before window.open ran.' : 'Opened — unexpected unless popups are allowlisted for this site.');
+      }, 1500);
+      return;
+    }
+    if (a === 'double') {
+      const w1 = tryOpen('double-open, first call');
+      const w2 = tryOpen('double-open, second call');
+      globalThis.showcaseTelemetry?.assert('capdel-lab-double-open', true, { first: w1 !== null, second: w2 !== null, note: 'spec invariant: never two popups from one click' });
+      finish(w1, w2, w2 === null ? (w1 === null ? 'Both blocked here (no token in this browser); on a flag-enabled build: first opens, second blocked — the single-use invariant.' : 'First opened, second blocked — the single-use invariant held.') : 'Both opened — would violate the 1:1 invariant; check popup allowlisting.');
+      return;
+    }
+    const w = tryOpen(a === 'plain' ? 'control arm (no delegation), synchronous open' : 'synchronous open in the message handler');
+    globalThis.showcaseTelemetry?.assert('capdel-lab-open-attempted', true, { arm: a, opened: w !== null, delegated: !!d.delegated });
+    finish(w, null, w !== null
+      ? (a === 'plain' ? 'Opened WITHOUT delegation — only possible if popups are allowlisted for this site; the popup is still opener-connected.' : 'Opened! On a flag-enabled build this is the delegated token at work (on others, a popup allowlist).')
+      : (a === 'plain' ? 'Blocked — the honest baseline: an ordinary message grants nothing.' : 'Blocked — this browser attached no delegated token (feature not implemented/enabled here). This is today’s real gap; the flag-enabled build opens it.'));
+  });
+
+  addEventListener('message', (e) => {
+    if (e.origin !== location.origin || !e.data || e.data.type !== 'popup-hello') return;
+    log('popup-target reported back through window.opener and read LAB_SHARED_STATE synchronously — the state-sharing payoff.', 'ok');
+    globalThis.showcaseTelemetry?.assert('capdel-lab-popup-connected', true, {});
+  });
+
+  console.log(`${LOG} ready sw=${'serviceWorker' in navigator} notification=${'Notification' in window ? Notification.permission : 'missing'}`);
+})();
+</script>
+</body>
+</html>
