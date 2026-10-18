@@ -59,10 +59,18 @@ self.addEventListener("notificationclick", (event) => {
   const mode = (event.notification.data && event.notification.data.mode) || "delegate";
   event.waitUntil((async () => {
     const clientList = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-    const target = clientList.find((c) => c.url.includes("/notification-delegation-lab/")) ||
-      clientList[0];
+    // Match the lab DOCUMENT exactly: a loose includes() also matched the
+    // lab's own popup (popup-target.html), which has no notification-open
+    // handler, and falling back to clientList[0] messaged unrelated
+    // same-origin tabs.
+    const isLabDocument = (c) => {
+      const path = new URL(c.url).pathname;
+      return path.endsWith("/notification-delegation-lab/") ||
+        path.endsWith("/notification-delegation-lab/index.html");
+    };
+    const target = clientList.find(isLabDocument);
     if (!target) {
-      // Fallback path the explainer names: no client window — open a fresh
+      // Fallback path the explainer names: no lab window — open a fresh
       // top-level context instead (no shared state, which is the limitation
       // the delegation exists to avoid).
       await self.clients.openWindow("./notification-delegation-lab/?from=openWindow");

@@ -33,6 +33,18 @@ function escapeHTML(s: string): string {
     .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 
+// JSON destined for an inline <script>. Bare JSON.stringify is NOT safe there:
+// a literal "</script>" inside a string value terminates the script element and
+// whatever follows parses as attacker-controlled markup. Escape the characters
+// that can change HTML or JS parsing; the result is still valid JSON.
+function scriptJSON(value: unknown): string {
+  return JSON.stringify(value)
+    .replaceAll("<", "\\u003c")
+    .replaceAll(">", "\\u003e")
+    .replaceAll(" ", "\\u2028")
+    .replaceAll(" ", "\\u2029");
+}
+
 // Spec §4.4: a valid connectionAllowlist attribute value is ≤ 4096 chars.
 // We additionally refuse header-breaking characters outright.
 function sanitizeAllowlist(raw: string | null): string {
@@ -86,8 +98,8 @@ function renderEchoRequired(req: Request): Response {
   }</strong></p>
 <p>${escapeHTML(payload.note)}</p>
 <script>parent.postMessage({ type: "ca-echo-report", requiredHeaderPresent: ${
-    JSON.stringify(required !== null)
-  }, requiredHeader: ${JSON.stringify(required)} }, location.origin);</script>
+    scriptJSON(required !== null)
+  }, requiredHeader: ${scriptJSON(required)} }, location.origin);</script>
 </body></html>`;
   return new Response(body, {
     headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
@@ -96,7 +108,9 @@ function renderEchoRequired(req: Request): Response {
 
 function renderWidget(req: Request): Response {
   const url = new URL(req.url);
-  const optin = url.searchParams.get("optin") ?? "none";
+  const rawOptin = url.searchParams.get("optin") ?? "none";
+  // The mode is a closed enum; anything else behaves (and is reported) as "none".
+  const optin = ["satisfy", "allow-from", "none"].includes(rawOptin) ? rawOptin : "none";
   const variant = url.searchParams.get("variant");
   const allowlist = sanitizeAllowlist(url.searchParams.get("allowlist"));
   const required = req.headers.get("sec-required-connection-allowlist");
@@ -162,8 +176,8 @@ function renderWidget(req: Request): Response {
     (r.ok ? '<span class="yes">succeeded (' + r.status + ')</span>'
           : '<span class="no">' + (r.error ? 'threw ' + r.error : 'failed (' + r.status + ')') + '</span>')
   ).join("<br>");
-  parent.postMessage({ type: "ca-widget-report", optin: ${JSON.stringify(optin)},
-    sentHeaders: ${JSON.stringify(sent)}, requiredHeader: ${JSON.stringify(required)},
+  parent.postMessage({ type: "ca-widget-report", optin: ${scriptJSON(optin)},
+    sentHeaders: ${scriptJSON(sent)}, requiredHeader: ${scriptJSON(required)},
     fetches: results }, location.origin);
 })();
 </script>

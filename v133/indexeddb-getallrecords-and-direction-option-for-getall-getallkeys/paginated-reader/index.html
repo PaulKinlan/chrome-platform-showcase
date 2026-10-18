@@ -253,6 +253,23 @@ records.forEach(({ key, primaryKey, value }) => {
   let totalRows  = 0;
   let hasGetAllRecords = false;
 
+  // A versionchange (another tab reseeding) closes this connection; a closed
+  // connection must not stay referenced as `db` or loadPage() throws
+  // InvalidStateError on its next transaction. Drop it and park the controls.
+  let reseeding = false;
+  function yieldConnection(conn) {
+    conn.close();
+    if (db === conn) {
+      db = null;
+      if (!reseeding) {
+        document.getElementById('loadBtn').disabled = true;
+        document.getElementById('prevBtn').disabled = true;
+        document.getElementById('nextBtn').disabled = true;
+        log('Database was reseeded in another tab — click "Seed DB" to reconnect.', 'log-warn');
+      }
+    }
+  }
+
   // Probe
   async function probeAPI() {
     // Probe the exact IDL surface; a store transaction would falsely report
@@ -290,7 +307,7 @@ records.forEach(({ key, primaryKey, value }) => {
       };
       req.onsuccess = e => {
         // Yield to a future versioned open (reseed) instead of blocking it.
-        e.target.result.onversionchange = () => e.target.result.close();
+        e.target.result.onversionchange = () => yieldConnection(e.target.result);
         resolve(e.target.result);
       };
       req.onerror   = e => reject(e.target.error);
@@ -302,7 +319,9 @@ records.forEach(({ key, primaryKey, value }) => {
     const total = parseInt(document.getElementById('totalRecords').value) || 200;
     log('Seeding ' + total + ' records…', 'log-info');
     try {
+      reseeding = true;
       db = await openDB(total);
+      reseeding = false;
       totalRows = total;
       pageOffset = 0;
       document.getElementById('loadBtn').disabled = false;
@@ -310,6 +329,7 @@ records.forEach(({ key, primaryKey, value }) => {
       log('Seeded ' + total + ' records ✓', 'log-ok');
       await probeAPI();
     } catch(e) {
+      reseeding = false;
       log('Seed failed: ' + e, 'log-err');
     }
   });
@@ -438,7 +458,7 @@ records.forEach(({ key, primaryKey, value }) => {
         req.onsuccess = e => {
           // Without this, the connection blocks every later versioned open
           // (seeding) for the lifetime of the page.
-          e.target.result.onversionchange = () => e.target.result.close();
+          e.target.result.onversionchange = () => yieldConnection(e.target.result);
           resolve(e.target.result);
         };
         req.onerror   = e => reject(e.target.error);
