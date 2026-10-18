@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Argument gates — WebTransport keying material export — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .controls { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); align-items: start; }
+    .field { display: grid; gap: var(--space-1); }
+    .field label { font-weight: 700; font-size: 0.9rem; }
+    .field input[type="number"] { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font: inherit; min-height: 44px; width: 100%; box-sizing: border-box; }
+    .field .expect { font-size: 0.82rem; color: var(--text-muted); }
+    .table-wrap { overflow-x: auto; max-width: 100%; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); }
+    td.value { font-family: var(--font-mono); font-weight: 700; }
+    td.value.match { color: var(--accent-emerald-dark); }
+    td.value.mismatch { color: var(--accent-rose); }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport keying material export</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v158 · webtransport · keying material</p>
+    <h1>Three RangeError gates, tested before the network</h1>
+    <p class="lede">The spec's algorithm order matters: label length, context length, and output length are validated <em>before</em> the session's state is consulted. So a label of 256 bytes must reject with <code>RangeError</code> even on a session that is still connecting — or already dead. Dial the three sizes below and fire real calls on a real session to a dead endpoint; argument validation needs no server at all.</p>
+  </header>
+
+  <p class="note">Chrome targets <code>exportKeyingMaterial()</code> for <strong>Chrome 158</strong> behind the <code>WebTransportExportKeyingMaterial</code> runtime flag (<code>--enable-blink-features=WebTransportExportKeyingMaterial</code>, or <code>chrome://flags/#enable-experimental-web-platform-features</code>). On a pre-158 build the method is absent, and this page says so instead of pretending to validate — the "spec says" column is the contract, the "this browser did" column is only ever real output.</p>
+
+  <section class="stage" aria-labelledby="lab-title">
+    <h2 id="lab-title">The validation lab</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="label-bytes">label size (bytes)</label>
+        <input type="number" id="label-bytes" value="256" min="0" max="100000" step="1">
+        <p class="expect">spec: &gt; 255 → RangeError</p>
+      </div>
+      <div class="field">
+        <label for="context-bytes">context size (bytes)</label>
+        <input type="number" id="context-bytes" value="16" min="0" max="100000" step="1">
+        <p class="expect">spec: &gt; 255 → RangeError</p>
+      </div>
+      <div class="field">
+        <label for="output-length">outputLength</label>
+        <input type="number" id="output-length" value="32" min="0" max="100000" step="1">
+        <p class="expect">spec: 0, or above the impl ceiling (≥ 4096; Chromium: 4096) → RangeError</p>
+      </div>
+    </div>
+    <button type="button" id="fire">Fire the real call with these sizes</button>
+    <div class="table-wrap">
+      <table>
+        <caption>Calls made on this page (newest last)</caption>
+        <thead><tr><th scope="col">label / context / length</th><th scope="col">spec says</th><th scope="col">this browser did</th><th scope="col">match</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="4">No call yet.</td></tr></tbody>
+      </table>
+    </div>
+    <output id="lab-out" aria-live="polite"></output>
+  </section>
+
+  <section class="stage" aria-labelledby="presets-title">
+    <h2 id="presets-title">The four gates, one press each</h2>
+    <p>Each preset fills the fields with a canonical boundary case and fires.</p>
+    <div class="controls">
+      <button type="button" data-preset="255,255,4096" id="preset-max">All maxima (valid): 255 / 255 / 4096</button>
+      <button type="button" data-preset="256,16,32" id="preset-label">Label gate: 256 bytes</button>
+      <button type="button" data-preset="16,256,32" id="preset-context">Context gate: 256 bytes</button>
+      <button type="button" data-preset="16,16,0" id="preset-zero">Length gate: 0</button>
+      <button type="button" data-preset="16,16,4097" id="preset-ceiling">Ceiling gate: 4097</button>
+    </div>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>// The spec's order of checks, verbatim:
+// 1. label.byteLength  > 255            → reject RangeError
+// 2. context.byteLength > 255           → reject RangeError
+// 3. outputLength == 0 or > impl ceiling → reject RangeError  (ceiling ≥ 4096)
+// 4. [[State]] "closed"/"failed"        → reject InvalidStateError
+// 5. otherwise: run in parallel; abort to InvalidStateError on failure
+
+const t = new WebTransport("https://127.0.0.1:44443/never"); // never establishes
+await t.exportKeyingMaterial(new Uint8Array(256), ctx, 32);
+// → RangeError, immediately — gate 1 fires before the state is even looked at</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/4860330806214656" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#dom-webtransport-exportkeyingmaterial" target="_blank" rel="noopener">Spec: exportKeyingMaterial (the gate order)</a></li>
+    <li><a href="../exporter-surface-probe/">Exporter surface probe</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wt-ekm:gates]';
+  const DEAD = 'https://127.0.0.1:44443/never';
+  const hasWT = typeof WebTransport === 'function';
+  const hasEKM = hasWT && typeof WebTransport.prototype.exportKeyingMaterial === 'function';
+  const CHROMIUM_CEILING = 4096;
+
+  const labelBytes = document.getElementById('label-bytes');
+  const contextBytes = document.getElementById('context-bytes');
+  const outputLength = document.getElementById('output-length');
+  const fireBtn = document.getElementById('fire');
+  const rows = document.getElementById('rows');
+  const out = document.getElementById('lab-out');
+
+  function specVerdict(l, c, n) {
+    if (l > 255) return 'RangeError (label > 255)';
+    if (c > 255) return 'RangeError (context > 255)';
+    if (n === 0) return 'RangeError (length 0)';
+    if (n > CHROMIUM_CEILING) return 'RangeError if above the impl ceiling (Chromium: 4096)';
+    return 'pends, then InvalidStateError (this session never establishes)';
+  }
+
+  let firstRun = true;
+  async function fire() {
+    const l = Math.max(0, Math.floor(Number(labelBytes.value) || 0));
+    const c = Math.max(0, Math.floor(Number(contextBytes.value) || 0));
+    const n = Math.max(0, Math.floor(Number(outputLength.value) || 0));
+    const spec = specVerdict(l, c, n);
+    if (firstRun) { rows.innerHTML = ''; firstRun = false; }
+    const tr = document.createElement('tr');
+    const td1 = document.createElement('td');
+    td1.className = 'value';
+    td1.textContent = l + ' / ' + c + ' / ' + n;
+    const td2 = document.createElement('td');
+    td2.textContent = spec;
+    const td3 = document.createElement('td');
+    td3.className = 'value';
+    const td4 = document.createElement('td');
+    td4.className = 'value';
+    tr.append(td1, td2, td3, td4);
+    rows.append(tr);
+
+    if (!hasEKM) {
+      td3.textContent = hasWT ? 'method missing on this build' : 'no WebTransport at all';
+      td4.className = 'value mismatch';
+      td4.textContent = 'n/a';
+      out.textContent = 'No real call was made: this build has no exportKeyingMaterial. The "spec says" column states the contract; nothing here pretends to have executed it.';
+      globalThis.showcaseTelemetry?.assert('wt-ekm-gates-fallback', true, { hasWT, hasEKM, l, c, n });
+      return;
+    }
+
+    fireBtn.disabled = true;
+    const transport = new WebTransport(DEAD);
+    transport.closed.catch(() => {});
+    let result;
+    const t0 = performance.now();
+    try {
+      const bytes = await transport.exportKeyingMaterial(new Uint8Array(l), new Uint8Array(c), n);
+      result = 'resolved with Uint8Array(' + bytes.length + ')';
+    } catch (error) {
+      result = error.name + ' after ' + Math.round(performance.now() - t0) + 'ms';
+    }
+    try { transport.close(); } catch { /* connecting or failed */ }
+    td3.textContent = result;
+    const expectRange = l > 255 || c > 255 || n === 0 || n > CHROMIUM_CEILING;
+    const matched = expectRange ? result.startsWith('RangeError') : result.startsWith('InvalidStateError');
+    td4.className = 'value ' + (matched ? 'match' : 'mismatch');
+    td4.textContent = matched ? 'yes' : 'check';
+    out.textContent = matched
+      ? (expectRange
+        ? 'The argument gate fired with a real RangeError — before the (doomed) session state mattered at all.'
+        : 'Arguments passed every gate, so the call pended until the session failed, then rejected with the real InvalidStateError. With a reachable HTTP/3 server these same arguments would resolve with ' + n + ' secret bytes.')
+      : 'This browser answered "' + result + '" where the analysis expected ' + (expectRange ? 'RangeError' : 'InvalidStateError') + '. If the length is between 4097 and this build’s actual ceiling, the spec allows a higher implementation-defined limit — otherwise worth reporting.';
+    globalThis.showcaseTelemetry?.assert('wt-ekm-gate-order', matched || n > CHROMIUM_CEILING, { l, c, n, result });
+    console.log(LOG, l, c, n, '->', result);
+    fireBtn.disabled = false;
+  }
+
+  fireBtn.addEventListener('click', fire);
+  for (const btn of document.querySelectorAll('[data-preset]')) {
+    btn.addEventListener('click', () => {
+      const [l, c, n] = btn.getAttribute('data-preset').split(',');
+      labelBytes.value = l;
+      contextBytes.value = c;
+      outputLength.value = n;
+      fire();
+    });
+  }
+  console.log(LOG, 'ready', 'hasWT=' + hasWT, 'hasEKM=' + hasEKM);
+})();
+</script>
+</body>
+</html>
