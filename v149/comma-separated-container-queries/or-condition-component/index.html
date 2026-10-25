@@ -15,10 +15,13 @@
       border: 2px dashed var(--border-black);
       padding: 0.75rem;
       min-width: 180px;
-      max-width: 100%;
+      width: 640px;
       margin: 1.25rem 0;
       background: var(--bg-stone);
     }
+    /* Scroller lets the container grow past a narrow viewport, so the width
+       branch (>360px/>500px) is reachable on mobile without page overflow. */
+    .wrap-scroller { overflow-x: auto; max-width: 100%; }
     .resize-hint {
       font-family: var(--font-mono);
       font-size: 0.65rem;
@@ -180,11 +183,18 @@
   </div>
 
   <div class="toggle-row">
-    <button class="toggle-btn" id="forceWideBtn" onclick="toggleForceWide()">Force wide layout (--force-wide: 1)</button>
-    <button class="toggle-btn" id="showFullBtn" onclick="toggleShowFull()">Force full description (--show-full: 1)</button>
+    <button class="toggle-btn" id="forceWideBtn" aria-pressed="false" onclick="toggleForceWide()">Force wide layout (--force-wide: 1)</button>
+    <button class="toggle-btn" id="showFullBtn" aria-pressed="false" onclick="toggleShowFull()">Force full description (--show-full: 1)</button>
   </div>
 
-  <div class="container-wrap" id="container">
+  <p class="readout-row" style="margin-bottom:0.75rem">
+    <label class="readout" for="widthSlider" style="border:none;padding:0.28rem 0">Container width (same container the drag handle resizes)</label>
+    <input type="range" id="widthSlider" min="200" max="720" value="640" style="flex:1;min-width:140px">
+  </p>
+
+  <p class="rules-active" id="supportNote" hidden role="note">The rendered card disagrees with the clause arithmetic — the comma-separated rules did not apply when a clause matched. Comma-separated <code>@container</code> queries shipped in Chrome 150; this browser appears to have dropped the rules at parse time.</p>
+
+  <div class="wrap-scroller"><div class="container-wrap" id="container">
     <div class="resize-hint">← drag right edge to resize →</div>
     <div class="product-card">
       <div class="card-inner">
@@ -201,9 +211,9 @@
         </div>
       </div>
     </div>
-  </div>
+  </div></div>
 
-  <div class="rules-active" id="rulesActive">
+  <div class="rules-active" id="rulesActive" aria-live="polite">
     <div class="rule-row">
       <div class="rule-indicator off" id="r1ind"></div>
       <div>Rule 1 (<code>inline-size &gt; 360px, style(--force-wide: 1)</code>): side-by-side layout — <span id="r1label">inactive</span></div>
@@ -244,34 +254,70 @@
 </main>
 <script>
 (function () {
+  'use strict';
   const container = document.getElementById('container');
   const widthReadout = document.getElementById('widthReadout');
+  const cardInner = document.querySelector('.product-card .card-inner');
+  const descFull = document.querySelector('.card-desc-full');
+  const supportNote = document.getElementById('supportNote');
+  const slider = document.getElementById('widthSlider');
   let forceWide = false;
   let showFull = false;
+  let inlineSize = 0; // the container's content-box inline size (what the queries measure)
 
-  function updateReadout() {
-    const w = container.getBoundingClientRect().width;
-    widthReadout.textContent = Math.round(w) + 'px';
-
-    const r1 = forceWide || w > 360;
-    const r2 = showFull || w > 500;
-
-    document.getElementById('rule1State').textContent = r1 ? 'yes' : 'no';
-    document.getElementById('rule2State').textContent = r2 ? 'yes' : 'no';
-    document.getElementById('r1ind').className = 'rule-indicator ' + (r1 ? 'on' : 'off');
-    document.getElementById('r2ind').className = 'rule-indicator ' + (r2 ? 'on' : 'off');
-    document.getElementById('r1label').textContent = r1 ? 'active — ' + (w > 360 ? 'width branch' : 'style() branch') : 'inactive';
-    document.getElementById('r2label').textContent = r2 ? 'active — ' + (w > 500 ? 'width branch' : 'style() branch') : 'inactive';
+  // Rule state is read back from the RENDERED card (the styles the engine
+  // actually applied), never re-derived from width arithmetic.
+  function observed() {
+    return {
+      r1: getComputedStyle(cardInner).flexDirection === 'row',
+      r2: getComputedStyle(descFull).display === 'block',
+    };
   }
 
-  const ro = new ResizeObserver(updateReadout);
+  function updateReadout() {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const w = inlineSize;
+      widthReadout.textContent = Math.round(w) + 'px (content box)';
+
+      const { r1, r2 } = observed();
+      const exp1 = forceWide || w > 360;
+      const exp2 = showFull || w > 500;
+
+      const branch1 = w > 360 && forceWide ? 'both branches' : (w > 360 ? 'width branch' : 'style() branch');
+      const branch2 = w > 500 && showFull ? 'both branches' : (w > 500 ? 'width branch' : 'style() branch');
+      document.getElementById('rule1State').textContent = r1 ? 'yes' : 'no';
+      document.getElementById('rule2State').textContent = r2 ? 'yes' : 'no';
+      document.getElementById('r1ind').className = 'rule-indicator ' + (r1 ? 'on' : 'off');
+      document.getElementById('r2ind').className = 'rule-indicator ' + (r2 ? 'on' : 'off');
+      document.getElementById('r1label').textContent = r1 ? 'applied by the engine — via ' + branch1 : 'not applied (card is stacked)';
+      document.getElementById('r2label').textContent = r2 ? 'applied by the engine — via ' + branch2 : 'not applied (short description shown)';
+      supportNote.hidden = r1 === exp1 && r2 === exp2;
+
+      window.showcaseTelemetry?.assert(
+        'or-cond-engine-matches-expected',
+        r1 === exp1 && r2 === exp2,
+        { inlineSize: w, forceWide, showFull, observed: { r1, r2 }, expected: { exp1, exp2 } },
+      );
+    }));
+  }
+
+  const ro = new ResizeObserver(([entry]) => {
+    inlineSize = entry.contentRect.width;
+    if (document.activeElement !== slider) slider.value = String(Math.round(Math.min(720, Math.max(200, entry.borderBoxSize?.[0]?.inlineSize ?? inlineSize))));
+    updateReadout();
+  });
   ro.observe(container);
   updateReadout();
+
+  slider.addEventListener('input', () => {
+    container.style.width = slider.value + 'px';
+  });
 
   window.toggleForceWide = function () {
     forceWide = !forceWide;
     const btn = document.getElementById('forceWideBtn');
     btn.classList.toggle('active', forceWide);
+    btn.setAttribute('aria-pressed', String(forceWide));
     container.style.setProperty('--force-wide', forceWide ? '1' : '0');
     updateReadout();
   };
@@ -280,6 +326,7 @@
     showFull = !showFull;
     const btn = document.getElementById('showFullBtn');
     btn.classList.toggle('active', showFull);
+    btn.setAttribute('aria-pressed', String(showFull));
     container.style.setProperty('--show-full', showFull ? '1' : '0');
     updateReadout();
   };

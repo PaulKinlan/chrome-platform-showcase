@@ -60,6 +60,10 @@
       display: flex;
       flex-direction: column;
       gap: var(--space-2);
+      /* Sentinels the JS reads back with getComputedStyle so the match
+         pills report what the engine actually applied, not arithmetic. */
+      --rule1-match: no;
+      --rule2-match: no;
     }
     .demo-card-cq .card-title {
       font-family: var(--font-display);
@@ -80,11 +84,11 @@
     }
     /* Rule 1: wide container */
     @container demo-box (min-width: 400px) {
-      .demo-card-cq { flex-direction: row; align-items: center; }
+      .demo-card-cq { flex-direction: row; align-items: center; --rule1-match: yes; }
     }
     /* Rule 2: narrow OR style container (comma-separated) */
     @container demo-box (max-width: 250px), (min-width: 500px) {
-      .demo-card-cq { border-color: var(--accent-blue); }
+      .demo-card-cq { border-color: var(--accent-blue); --rule2-match: yes; }
       .demo-card-cq .card-title { color: var(--accent-blue); }
       .demo-card-cq .card-tag { background: var(--accent-blue); }
     }
@@ -173,17 +177,27 @@
     <h1>Multi-condition Explorer</h1>
     <p class="lede">Use commas to match wide containers AND narrow containers with the same rule. Drag the resize handle to see the card style change when the container is either very narrow OR very wide — two separate breakpoints in one <code>@container</code> rule.</p>
   </header>
-  <div class="match-row" id="match-row">
+  <div class="match-row" id="match-row" aria-live="polite">
     <div class="match-pill off" id="pill-rule1">rule 1 (≥400px): layout swap</div>
     <div class="match-pill off" id="pill-rule2">rule 2 (≤250px OR ≥500px): blue border</div>
   </div>
+
+  <p class="cq-input" style="margin-bottom:var(--space-3)">
+    <label for="stage-width">Container width (same stage the drag handle resizes)</label>
+    <span class="cq-slider-row">
+      <input type="range" id="stage-width" min="180" max="760" value="700">
+      <span id="stage-width-readout">—</span>
+    </span>
+  </p>
+
+  <p class="code-live" id="support-note" hidden role="note">The engine's rendered card disagrees with the expected clause arithmetic — the comma-separated rule did not apply when a clause matched. Comma-separated @container queries shipped in Chrome 150; this browser appears to have dropped the rule at parse time.</p>
 
   <div class="stage" id="stage">
     <div class="card-inner">
       <div class="demo-card-cq">
         <div class="card-title">Comma-separated @container</div>
         <div class="card-body">Drag the right edge to resize. The card layout changes at 400px. The blue border triggers at &lt;250px OR &gt;500px — two separate conditions in one rule.</div>
-        <span class="card-tag">Chrome 149</span>
+        <span class="card-tag">Chrome 150+ (listed in 149)</span>
       </div>
     </div>
   </div>
@@ -203,7 +217,7 @@
   <h2>the comma rule</h2>
   <p style="font-size:0.9rem;color:var(--text-charcoal);margin-bottom:var(--space-4)">A comma in <code>@container</code> means <em>any</em> query can match — exactly like <code>@media screen, print { … }</code>. Each comma-separated clause is evaluated independently against the named container, and if any clause passes, the block applies.</p>
 
-  <pre><code style="font-size:0.8rem;color:var(--text-charcoal);">/* Chrome 149+: OR logic with commas */
+  <pre><code style="font-size:0.8rem;color:var(--text-charcoal);">/* Chrome 150+ (listed against 149): OR logic with commas */
 @container card (max-width: 200px), (min-width: 600px) {
   /* applies when the container is very narrow OR very wide */
 }
@@ -234,35 +248,72 @@
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 <script>
-const stage = document.getElementById('stage');
-const codeLive = document.getElementById('code-live');
-const pill1 = document.getElementById('pill-rule1');
-const pill2 = document.getElementById('pill-rule2');
+(() => {
+  'use strict';
+  const stage = document.getElementById('stage');
+  const card = document.querySelector('.demo-card-cq');
+  const codeLive = document.getElementById('code-live');
+  const pill1 = document.getElementById('pill-rule1');
+  const pill2 = document.getElementById('pill-rule2');
+  const supportNote = document.getElementById('support-note');
+  const slider = document.getElementById('stage-width');
+  const sliderReadout = document.getElementById('stage-width-readout');
 
-const ro = new ResizeObserver(([entry]) => {
-  const w = Math.round(entry.contentRect.width);
-  const r1 = w >= 400;
-  const r2 = w <= 250 || w >= 500;
-  pill1.className = `match-pill ${r1 ? 'on' : 'off'}`;
-  pill2.className = `match-pill ${r2 ? 'on' : 'off'}`;
+  // Match state is read back from the ENGINE via the --ruleN-match sentinels
+  // the @container rules set on the card — never re-derived from arithmetic.
+  function observed() {
+    const cs = getComputedStyle(card);
+    return {
+      r1: cs.getPropertyValue('--rule1-match').trim() === 'yes',
+      r2: cs.getPropertyValue('--rule2-match').trim() === 'yes',
+    };
+  }
 
-  codeLive.textContent = `/* Active container width: ${w}px */
+  const ro = new ResizeObserver(([entry]) => {
+    const w = Math.round(entry.contentRect.width);
+    // Give the engine a frame to re-evaluate the container queries, then
+    // read the applied result back from computed styles.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const { r1, r2 } = observed();
+      const exp1 = w >= 400;
+      const exp2 = w <= 250 || w >= 500;
+      pill1.className = `match-pill ${r1 ? 'on' : 'off'}`;
+      pill2.className = `match-pill ${r2 ? 'on' : 'off'}`;
+      sliderReadout.textContent = w + 'px';
+      if (document.activeElement !== slider) slider.value = String(Math.min(760, Math.max(180, w)));
+      supportNote.hidden = r1 === exp1 && r2 === exp2;
+
+      codeLive.textContent = `/* Active container width: ${w}px */
 
 /* Rule 1: single condition — layout swap at ≥400px */
 @container demo-box (min-width: 400px) {
-  /* MATCH: ${r1 ? '✓ YES' : '✗ NO (container is ' + w + 'px)'} */
+  /* expected: ${exp1 ? '✓ should match' : '✗ should not match (container is ' + w + 'px)'} */
+  /* engine:   ${r1 ? '✓ APPLYING (flex-direction is row)' : '✗ not applied (card is stacked)'} */
   .card { flex-direction: row; }
 }
 
 /* Rule 2: comma-separated — blue at ≤250px OR ≥500px */
 @container demo-box (max-width: 250px), (min-width: 500px) {
-  /* clause 1 (≤250px): ${w <= 250 ? '✓ MATCH' : '✗ no match'} */
-  /* clause 2 (≥500px): ${w >= 500 ? '✓ MATCH' : '✗ no match'} */
-  /* rule result: ${r2 ? '✓ APPLYING (any clause matched)' : '✗ not applied'} */
+  /* clause 1 (≤250px): ${w <= 250 ? '✓ matches' : '✗ no match'} */
+  /* clause 2 (≥500px): ${w >= 500 ? '✓ matches' : '✗ no match'} */
+  /* engine: ${r2 ? '✓ APPLYING — read back from the rendered card' : '✗ not applied — read back from the rendered card'} */
   .card { border-color: var(--accent-blue); }
 }`;
-});
-ro.observe(stage);
+
+      window.showcaseTelemetry?.assert(
+        'multi-cond-engine-matches-expected',
+        r1 === exp1 && r2 === exp2,
+        { width: w, observed: { r1, r2 }, expected: { exp1, exp2 } },
+      );
+    }));
+  });
+  ro.observe(stage);
+
+  slider.addEventListener('input', () => {
+    stage.style.width = slider.value + 'px';
+    sliderReadout.textContent = slider.value + 'px';
+  });
+})();
 </script>
 
 
