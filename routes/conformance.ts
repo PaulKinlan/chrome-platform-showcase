@@ -8,7 +8,10 @@ import {
 } from "./conformance-renderers.ts";
 
 function conformanceHeaders(release: string, featureSlug: string): HeadersInit | undefined {
-  if (release === "v147" && featureSlug === "js-profiling-in-dedicated-workers") {
+  if (
+    (release === "v147" && featureSlug === "js-profiling-in-dedicated-workers") ||
+    (release === "v153" && featureSlug === "js-self-profiling-markers")
+  ) {
     return {
       "document-policy": "js-profiling",
     };

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransport connection statistics — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v159/">&larr; Chrome 159</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · network · webtransport</p>
+    <h1>WebTransport connection statistics</h1>
+    <p class="lede">Is the session slow because the network is slow, or because your app is slow? Chrome 159 ships <code>WebTransport.getStats()</code>: one asynchronous call that snapshots the underlying connection's health — <code>minRtt</code>, <code>smoothedRtt</code>, <code>rttVariation</code>, an <code>estimatedSendRate</code> when one is available, and a datagram ledger of expired, lost, and dropped counts. Statistics remain readable after a clean close; a <em>failed</em> connection rejects instead. Chromium does not currently expose the spec's byte or packet totals.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./stats-surface-probe/">The exact surface, probed at both moments</a></h3>
+      <p>Probe <code>'getStats' in WebTransport.prototype</code> and its property descriptor, then construct a real session to a dead endpoint and call <code>getStats()</code> twice — once while the session is still <code>connecting</code> (the spec says the promise waits), and once after it has <code>failed</code> (the spec says reject with <code>InvalidStateError</code>). Both settled outcomes shown verbatim, timestamps included.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./live-stats-monitor/">Live stats monitor: poll a real session once a second</a></h3>
+      <p>Connect to a WebTransport endpoint you can reach, then watch <code>minRtt</code> / <code>smoothedRtt</code> / <code>rttVariation</code> / <code>estimatedSendRate</code> / <code>atSendCapacity</code> tick in a live table with an RTT sparkline — the troubleshooting loop the feature exists for. Disconnect works mid-flight, and every connection failure is surfaced with the real error and a retry.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./datagram-ledger/">Datagram ledger: make expiry happen, then count it</a></h3>
+      <p>Set <code>datagrams.outgoingMaxAge</code> low, queue a burst of datagrams, and read <code>getStats().datagrams</code> before and after: <code>expiredOutgoing</code>, <code>lostOutgoing</code>, <code>droppedIncoming</code>, <code>expiredIncoming</code> as deltas between real snapshots — the four counters that tell unreliable-delivery apps what actually happened to their packets.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./after-close-snapshot/">After the end: closed resolves, failed rejects</a></h3>
+      <p>The spec draws a sharp line through terminal states: after a clean <code>close()</code> the promise resolves with the most recent stats; on a <code>failed</code> connection it rejects with <code>InvalidStateError</code>. The failed branch runs for real against a dead endpoint; the clean-close branch runs against any endpoint you can reach.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./field-coverage-matrix/">Field coverage: the spec dictionary vs this browser</a></h3>
+      <p>All fourteen <code>WebTransportConnectionStats</code> members and all four <code>WebTransportDatagramStats</code> members from the spec, matched against a real resolved stats object from your browser — which fields come back, which are <code>null</code>, and which Chromium currently withholds (the byte and packet totals, per the ChromeStatus entry).</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>A WebTransport application sees its own symptoms — late messages, slow transfers, dropped datagrams — but not their cause. Before <code>getStats()</code> there was no way to tell connection latency, congestion, or datagram loss apart from application-side delay: the QUIC stack knew, and the page did not. One asynchronous snapshot call exposes the connection's health so senders can adapt (shrink payloads when <code>expiredOutgoing</code> climbs, back off when <code>atSendCapacity</code> is true) and developers can troubleshoot with numbers instead of guesses.</p>
+    <p>The surface is deliberately narrower than the spec's full dictionary: Chromium currently reports the RTT trio, the estimated send rate, <code>atSendCapacity</code>, and the datagram counters, but not the connection byte/packet totals (<code>bytesSent</code>, <code>packetsReceived</code>, …). Pooled sessions are narrower still — only stats marked <em>pooled</em> in the spec (the RTT measurements) are reported, because sharing a connection's totals across origins would leak cross-site activity. The W3C Working Group has flagged <code>bytesAcknowledged</code> as a feature at risk for the same implementability reasons.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>const transport = new WebTransport("https://example.com:4433/wt");
+await transport.ready;
+
+const stats = await transport.getStats();
+stats.minRtt;            // DOMHighResTimeStamp (ms)
+stats.smoothedRtt;       // RFC 9002 §5.3 smoothed RTT
+stats.rttVariation;      // mean RTT variation
+stats.estimatedSendRate; // bits/s estimate, or null when unavailable
+stats.atSendCapacity;    // true when the connection is send-limited
+stats.datagrams;         // { expiredOutgoing, lostOutgoing,
+                         //   droppedIncoming, expiredIncoming }
+
+transport.close();
+await transport.closed;
+await transport.getStats(); // still resolves: most recent stats
+// …but on a FAILED connection getStats() rejects with InvalidStateError.</code></pre>
+    <p><code>getStats()</code> takes no arguments and returns a promise. Called while the session is <code>connecting</code>, the promise waits for the state to change. The method lives on <code>WebTransport</code> itself — the per-stream <code>WebTransportSendStream.getStats()</code> is a different, older surface with its own dictionary.</p>
+  </section>
+
+  <!-- research notes (weekly-hardening, 2026-10-25)
+    Use-case portfolio: (1) basic/canonical = stats-surface-probe (exact member
+    probe + descriptor + the two settled outcomes a session with no reachable
+    server can really produce); (2) practical product = live-stats-monitor
+    (1 Hz polling loop, RTT table + sparkline, honest connect/retry states);
+    (3) configuration/inspection = field-coverage-matrix (spec dictionary vs
+    actually-returned members, incl. the documented Chromium omission of
+    byte/packet totals) and datagram-ledger (outgoingMaxAge-driven expiry
+    counted via real snapshots); (4) edge/failure = after-close-snapshot
+    (closed-resolves vs failed-rejects line from the spec algorithm) plus the
+    failed-branch coverage in the probe; (5) novel composition = the monitor's
+    keepalive-datagram traffic generator feeding estimatedSendRate.
+    Exact surface (spec, w3c.github.io/webtransport, fetched 2026-10-25):
+      Promise<WebTransportConnectionStats> getStats();  // on WebTransport
+      dictionary WebTransportConnectionStats { bytesSent, bytesSentOverhead,
+        bytesAcknowledged (feature at risk), packetsSent, bytesLost,
+        packetsLost, bytesReceived, packetsReceived, smoothedRtt,
+        rttVariation, minRtt, required WebTransportDatagramStats datagrams,
+        unsigned long long? estimatedSendRate = null,
+        boolean atSendCapacity = false };
+      dictionary WebTransportDatagramStats { droppedIncoming, expiredIncoming,
+        expiredOutgoing, lostOutgoing };
+    getStats() algorithm: [[State]] failed -> reject InvalidStateError
+    immediately; connecting -> wait for the state change, then failed ->
+    reject InvalidStateError / closed -> resolve with most recent stats;
+    pooled connections report only pooled stats (the RTT trio).
+    Flag findings (runtime_enabled_features.json5, fetched 2026-10-25):
+      WebTransportStats, status "experimental" -> enable with
+      --enable-blink-features=WebTransportStats or
+      chrome://flags/#enable-experimental-web-platform-features.
+    Verified in this environment on headless Chromium 153 behind
+    --enable-blink-features=WebTransportStats: 'getStats' in
+    WebTransport.prototype === true; on a connection that fails to establish,
+    getStats() rejects InvalidStateError with Chromium's message "Cannot
+    retreive stats on a failed connection." (the typo is Chromium's).
+    Unflagged 153: the method is absent and every page labels the honest
+    pre-159 branch. The resolved-stats success path needs a reachable HTTP/3
+    endpoint; this container's proxy cannot tunnel QUIC, so that path is
+    labelled, not simulated. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5120203192139776" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransport-getstats" target="_blank" rel="noopener">WebTransport spec: getStats()</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dictdef-webtransportconnectionstats" target="_blank" rel="noopener">WebTransport spec: WebTransportConnectionStats</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dictdef-webtransportdatagramstats" target="_blank" rel="noopener">WebTransport spec: WebTransportDatagramStats</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md" target="_blank" rel="noopener">WebTransport explainer (stats section)</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/WebTransport/getStats" target="_blank" rel="noopener">MDN: WebTransport.getStats()</a></li>
+    <li><a href="https://microsoftedge.github.io/Demos/webtransport-getstats/" target="_blank" rel="noopener">MSEdge getStats() demo</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

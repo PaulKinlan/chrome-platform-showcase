@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live stats monitor — WebTransport connection statistics — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .controls { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); align-items: start; }
+    .field { display: grid; gap: var(--space-1); }
+    .field label { font-weight: 700; font-size: 0.9rem; }
+    .field input { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font: inherit; min-height: 44px; width: 100%; box-sizing: border-box; }
+    .field .hint { color: var(--text-muted); font-size: 0.82rem; }
+    .buttons { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+    .checkline { display: flex; gap: var(--space-2); align-items: center; font-size: 0.9rem; }
+    .checkline input { width: 1.4em; height: 1.4em; accent-color: var(--text-black); }
+    .state { border: 2px solid var(--border-black); padding: var(--space-2) var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .state.ready { color: var(--accent-emerald-dark); border-color: var(--accent-emerald); }
+    .state.failed { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .table-wrap { overflow-x: auto; max-width: 100%; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); }
+    td.value { font-family: var(--font-mono); font-weight: 700; }
+    .spark-wrap { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-2); }
+    .spark-wrap svg { display: block; width: 100%; height: 72px; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport connection statistics</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · webtransport · connection stats</p>
+    <h1>Live stats monitor: poll a real session once a second</h1>
+    <p class="lede">The loop the feature was shipped for: connect, then call <code>getStats()</code> on an interval and watch the connection describe itself — the RFC 9002 RTT trio, the <code>estimatedSendRate</code> when one is available, and <code>atSendCapacity</code>. A keepalive datagram per tick gives the estimator real traffic to work with. Every value in the table is read off a real resolved stats object; nothing is simulated.</p>
+  </header>
+
+  <p class="note">Chrome targets <code>WebTransport.getStats()</code> for <strong>Chrome 159</strong> behind the <code>WebTransportStats</code> runtime flag (<code>--enable-blink-features=WebTransportStats</code>, or <code>chrome://flags/#enable-experimental-web-platform-features</code>). The monitor needs a <em>reachable</em> HTTP/3 WebTransport endpoint; the default is a public echo server. Corporate proxies, container networks, and some VPNs block the UDP/QUIC packets WebTransport rides on — if the connection fails here, the real error is shown and that is the honest outcome, not a page bug.</p>
+
+  <section class="stage" aria-labelledby="mon-title">
+    <h2 id="mon-title">Connect and monitor</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="url">endpoint URL (https, HTTP/3)</label>
+        <input type="url" id="url" value="https://echo.webtransport.day:4433" spellcheck="false" list="endpoints">
+        <datalist id="endpoints">
+          <option value="https://echo.webtransport.day:4433"></option>
+          <option value="https://wt-ord.akaleapi.net:6161/echo"></option>
+          <option value="https://wt-ams.akaleapi.net:6161/echo"></option>
+        </datalist>
+        <p class="hint">Any WebTransport server you can reach.</p>
+      </div>
+      <div class="field">
+        <label class="checkline" for="keepalive"><input type="checkbox" id="keepalive" checked> send one small datagram per tick</label>
+        <p class="hint">Gives <code>estimatedSendRate</code> live traffic to estimate from.</p>
+      </div>
+    </div>
+    <div class="buttons">
+      <button type="button" id="connect">Connect and start polling</button>
+      <button type="button" id="disconnect" disabled>Disconnect</button>
+    </div>
+    <p class="state" id="state" aria-live="polite">idle — not connected</p>
+    <div class="table-wrap">
+      <table>
+        <caption>Latest getStats() snapshot (polled every second)</caption>
+        <thead><tr><th scope="col">member</th><th scope="col">value</th><th scope="col">meaning</th></tr></thead>
+        <tbody id="rows">
+          <tr><th scope="row"><code>minRtt</code></th><td class="value" id="v-minRtt">—</td><td>lowest RTT observed on the connection (ms)</td></tr>
+          <tr><th scope="row"><code>smoothedRtt</code></th><td class="value" id="v-smoothedRtt">—</td><td>RFC 9002 §5.3 smoothed RTT (ms)</td></tr>
+          <tr><th scope="row"><code>rttVariation</code></th><td class="value" id="v-rttVariation">—</td><td>mean variation of RTT samples (ms)</td></tr>
+          <tr><th scope="row"><code>estimatedSendRate</code></th><td class="value" id="v-estimatedSendRate">—</td><td>estimated send rate (bits/s), or null when unavailable</td></tr>
+          <tr><th scope="row"><code>atSendCapacity</code></th><td class="value" id="v-atSendCapacity">—</td><td>true when the connection is limited by its send capacity</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="spark-wrap">
+      <svg id="spark" viewBox="0 0 300 72" preserveAspectRatio="none" role="img" aria-labelledby="spark-label"><title id="spark-label">smoothedRtt over the last 60 samples</title><polyline id="spark-line" fill="none" stroke="var(--accent-blue)" stroke-width="2" points=""></polyline></svg>
+      <p class="hint" id="spark-text">sparkline: smoothedRtt over the last 60 samples — no samples yet</p>
+    </div>
+    <output id="out"></output>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const transport = new WebTransport(url);
+await transport.ready;
+
+const timer = setInterval(async () => {
+  const stats = await transport.getStats();
+  render(stats.minRtt, stats.smoothedRtt, stats.rttVariation,
+         stats.estimatedSendRate, stats.atSendCapacity);
+}, 1000);
+
+// optional traffic so the rate estimator has something to chew on:
+const writer = transport.datagrams.writable.getWriter();
+await writer.write(new Uint8Array(64));</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5120203192139776" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dictdef-webtransportconnectionstats" target="_blank" rel="noopener">Spec: WebTransportConnectionStats</a></li>
+    <li><a href="https://microsoftedge.github.io/Demos/webtransport-getstats/" target="_blank" rel="noopener">MSEdge getStats() demo</a></li>
+    <li><a href="../datagram-ledger/">Datagram ledger</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wt-stats:monitor]';
+  const hasWT = typeof WebTransport === 'function';
+  const hasStats = hasWT && typeof WebTransport.prototype.getStats === 'function';
+  const FIELDS = ['minRtt', 'smoothedRtt', 'rttVariation', 'estimatedSendRate', 'atSendCapacity'];
+
+  const urlInput = document.getElementById('url');
+  const keepalive = document.getElementById('keepalive');
+  const connectBtn = document.getElementById('connect');
+  const disconnectBtn = document.getElementById('disconnect');
+  const stateEl = document.getElementById('state');
+  const out = document.getElementById('out');
+  const sparkLine = document.getElementById('spark-line');
+  const sparkText = document.getElementById('spark-text');
+
+  let transport = null;
+  let timer = 0;
+  let writer = null;
+  let samples = [];
+  let ticks = 0;
+
+  function setState(cls, text) {
+    stateEl.className = 'state' + (cls ? ' ' + cls : '');
+    stateEl.textContent = text;
+  }
+
+  function fmt(name, value) {
+    if (value === undefined) return 'not returned';
+    if (value === null) return 'null (unavailable)';
+    if (typeof value === 'boolean') return String(value);
+    if (name === 'estimatedSendRate') return Math.round(value).toLocaleString('en-US') + ' bits/s';
+    return (Math.round(value * 1000) / 1000) + ' ms';
+  }
+
+  function render(stats) {
+    for (const name of FIELDS) {
+      const cell = document.getElementById('v-' + name);
+      cell.textContent = Object.hasOwn(stats, name) || stats[name] !== undefined ? fmt(name, stats[name]) : 'not returned';
+    }
+    if (typeof stats.smoothedRtt === 'number') {
+      samples.push(stats.smoothedRtt);
+      if (samples.length > 60) samples = samples.slice(-60);
+      const max = Math.max(...samples, 1);
+      const pts = samples.map((v, i) => (i * (300 / 59)).toFixed(1) + ',' + (68 - (v / max) * 64).toFixed(1)).join(' ');
+      sparkLine.setAttribute('points', pts);
+      sparkText.textContent = 'sparkline: smoothedRtt over the last ' + samples.length + ' samples — latest ' + fmt('smoothedRtt', stats.smoothedRtt) + ', max ' + fmt('smoothedRtt', max);
+    }
+  }
+
+  function clearSession(finalText, cls) {
+    if (timer) { clearInterval(timer); timer = 0; }
+    if (writer) { try { writer.releaseLock(); } catch { /* stream may be errored */ } writer = null; }
+    if (transport) { try { transport.close(); } catch { /* connecting or failed */ } transport = null; }
+    connectBtn.disabled = false;
+    disconnectBtn.disabled = true;
+    if (finalText) setState(cls || '', finalText);
+  }
+
+  async function tick() {
+    if (!transport) return;
+    ticks += 1;
+    if (keepalive.checked && writer) {
+      try { writer.write(new Uint8Array(64)).catch(() => {}); } catch { /* errored writable */ }
+    }
+    try {
+      const stats = await transport.getStats();
+      render(stats);
+      globalThis.showcaseTelemetry?.assert('wt-stats-monitor-snapshot-shape', typeof stats === 'object' && stats !== null && typeof stats.datagrams === 'object', { tick: ticks });
+    } catch (error) {
+      clearSession('polling stopped — getStats() rejected: ' + error.name + ' — ' + error.message, 'failed');
+      out.textContent = 'The poll loop stopped because getStats() rejected (' + error.name + '). On a session that failed mid-flight that is the spec behaviour: a failed connection rejects with InvalidStateError.';
+    }
+  }
+
+  async function connect() {
+    connectBtn.disabled = true;
+    out.textContent = '';
+    samples = [];
+    ticks = 0;
+    sparkLine.setAttribute('points', '');
+    sparkText.textContent = 'sparkline: smoothedRtt over the last 60 samples — no samples yet';
+    for (const name of FIELDS) document.getElementById('v-' + name).textContent = '—';
+
+    if (!hasWT) {
+      setState('failed', 'no WebTransport constructor in this browser');
+      out.textContent = 'There is no WebTransport constructor in this browser, so there is no connection to monitor.';
+      globalThis.showcaseTelemetry?.assert('wt-stats-monitor-fallback', true, { hasWT, hasStats });
+      connectBtn.disabled = false;
+      return;
+    }
+    if (!hasStats) {
+      setState('failed', 'this build has no WebTransport.getStats()');
+      out.textContent = 'This build has no getStats method on WebTransport, so there is nothing honest to poll. See the banner for the exact flag; on a 159+ build this page runs the full loop.';
+      globalThis.showcaseTelemetry?.assert('wt-stats-monitor-missing-branch', true, { hasStats });
+      connectBtn.disabled = false;
+      return;
+    }
+
+    let t;
+    try {
+      t = new WebTransport(urlInput.value);
+    } catch (error) {
+      setState('failed', 'constructor threw ' + error.name);
+      out.textContent = 'The constructor rejected the URL before any network traffic (' + error.name + ': ' + error.message + '). WebTransport URLs must be https and fragment-free.';
+      connectBtn.disabled = false;
+      return;
+    }
+    transport = t;
+    let established = false;
+    t.closed.then(
+      () => { if (transport === t && established) clearSession('connection closed by the peer', ''); },
+      (e) => { if (transport === t && established) clearSession('connection errored mid-session: ' + (e && e.name || 'error'), 'failed'); },
+    );
+    disconnectBtn.disabled = false;
+    setState('', 'connecting to ' + urlInput.value + ' …');
+
+    try {
+      await Promise.race([
+        t.ready,
+        new Promise((_, rej) => setTimeout(() => rej(new DOMException('gave up waiting after 15s', 'TimeoutError')), 15000)),
+      ]);
+    } catch (error) {
+      if (transport !== t) return; // user already disconnected mid-flight
+      clearSession('connection failed: ' + error.name + ' — ' + error.message, 'failed');
+      out.textContent = 'The connection genuinely failed (' + error.name + '). From networks that block UDP/QUIC this is the expected honest outcome — try an endpoint you can reach, or a network without a proxy in the way, then press connect again.';
+      globalThis.showcaseTelemetry?.assert('wt-stats-monitor-connect-failure-surfaced', true, { name: error.name });
+      return;
+    }
+    if (transport !== t) return;
+    established = true;
+
+    setState('ready', 'connected — polling getStats() every second');
+    out.textContent = 'Session established. The table and sparkline below update from a real getStats() snapshot every second.';
+    try { writer = t.datagrams.writable.getWriter(); } catch { writer = null; }
+    globalThis.showcaseTelemetry?.assert('wt-stats-monitor-established', true, { url: urlInput.value });
+    await tick();
+    timer = setInterval(tick, 1000);
+  }
+
+  function disconnect() {
+    const wasConnecting = transport && !timer;
+    clearSession(wasConnecting ? 'connection attempt abandoned' : 'disconnected — polling stopped', '');
+    out.textContent = wasConnecting
+      ? 'The in-flight connection attempt was abandoned with close(); nothing is being polled.'
+      : 'Disconnected cleanly. The last snapshot stays in the table; press connect to start a new session.';
+  }
+
+  connectBtn.addEventListener('click', connect);
+  disconnectBtn.addEventListener('click', disconnect);
+  console.log(LOG, 'ready', 'hasWT=' + hasWT, 'hasStats=' + hasStats);
+})();
+</script>
+</body>
+</html>

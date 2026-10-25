@@ -17,6 +17,9 @@
       box-shadow: var(--thin-shadow);
       background: var(--bg-paper);
       padding: var(--space-3);
+      /* 540/720px frame bodies are wider than their card — scroll within the
+         card instead of bleeding over the page. */
+      overflow-x: auto;
     }
     .frame-label {
       font-family: var(--font-mono);
@@ -31,6 +34,9 @@
       border: 1px dashed var(--text-muted);
       padding: var(--space-3);
       min-height: 90px;
+      /* content-box so the labelled width IS the container's inline-size —
+         under border-box the 360px frame measured ≈334px and never triggered. */
+      box-sizing: content-box;
     }
     .tile {
       background: var(--bg-stone);
@@ -50,19 +56,23 @@
     }
 
     /* The comma-separated rule under test.
-       Match if container is roomy (>= 360px) OR if the user has reduced motion preferences
-       (a single rule that combines container AND user-pref signals). */
-    @container tile (min-width: 360px), (prefers-reduced-motion: reduce) {
+       Match if container is roomy (>= 360px) OR if the --compact custom
+       property flag is set on the container — a size branch and a style()
+       branch in one rule. (A media-style condition such as
+       prefers-reduced-motion is NOT valid here: inside @container it is an
+       unknown query that parses but can never match.) */
+    /* Default verdict — overridden by the comma rule below when it applies,
+       so a parser that drops the comma rule shows an honest "no match"
+       instead of a blank verdict. */
+    .tile .verdict::before { content: "no match · cramped, flag off"; }
+    @container tile (min-width: 360px), tile style(--compact: on) {
       .tile {
         background: color-mix(in srgb, var(--accent-emerald) 22%, var(--bg-paper));
         font-family: var(--font-display);
         font-size: 1.4rem;
         color: var(--text-black);
       }
-      .tile .verdict::before { content: "match · roomy or reduced-motion"; }
-    }
-    @container tile (max-width: 359px) {
-      .tile .verdict::before { content: "no match · cramped"; }
+      .tile .verdict::before { content: "match · roomy or compact flag"; }
     }
 
     .ctl-row { display: flex; gap: var(--space-3); margin-bottom: var(--space-3); flex-wrap: wrap; }
@@ -89,14 +99,17 @@
   <header class="lede-block">
     <p class="eyebrow">demo · v149</p>
     <h1>Breakpoint Matrix</h1>
-    <p class="lede">Five frames at fixed widths — 220, 280, 360, 540, 720 — each running the same comma-separated <code>@container</code> rule. The rule mixes a container-size branch and a user-preference branch, so a single declaration handles both axes.</p>
+    <p class="lede">Five frames at fixed widths — 220, 280, 360, 540, 720 — each running the same comma-separated <code>@container</code> rule. The rule mixes a container-size branch and a <code>style()</code> custom-property branch, so a single declaration can be fired by either axis. Toggle the compact flag to fire the <code>style()</code> branch even in the cramped frames.</p>
   </header>
 
   <div class="ctl-row">
-    <button class="ctl on" id="all">Show all widths</button>
-    <button class="ctl" id="cramped">Hide ≥ 360</button>
+    <button class="ctl on" id="all" aria-pressed="true">Show all widths</button>
+    <button class="ctl" id="cramped" aria-pressed="false">Hide ≥ 360</button>
+    <button class="ctl" id="compact" aria-pressed="false">Compact flag (--compact: on)</button>
     <button class="ctl" id="enum">Read rule.conditionText</button>
   </div>
+
+  <p class="note" id="support-note" hidden>This browser dropped the comma-separated <code>@container</code> rule at parse time — comma-separated container queries shipped in <strong>Chrome 150</strong>. The tiles below show the default "no match" verdict everywhere.</p>
 
   <div class="matrix" id="matrix">
     <div class="frame w-220">
@@ -121,16 +134,18 @@
     </div>
   </div>
 
+  <p class="note" id="observed-out" aria-live="polite">Engine verdicts: reading computed styles…</p>
+
   <section>
     <h2>the rule</h2>
-<pre><code>@container tile (min-width: 360px), (prefers-reduced-motion: reduce) {
+<pre><code>@container tile (min-width: 360px), tile style(--compact: on) {
   .tile {
     background: emerald-tinted;
     font-family: display;
     font-size: 1.4rem;
   }
 }</code></pre>
-    <p>The second branch isn't a container query at all — it's a media-style condition. Same comma, same fall-through semantics; only one of the two needs to match.</p>
+    <p>The second branch is a <code>style()</code> query on a custom property — a completely different axis from container size, combined with the same comma fall-through semantics as <code>@media</code> lists: only one of the two needs to match. Note that a media condition such as <code>(prefers-reduced-motion: reduce)</code> is <em>not</em> valid inside <code>@container</code> — the comma list tolerates it as an unknown query, but an unknown query never matches, so that branch would be dead. The conformance suite's <code>fallback-with-unknown-feature</code> assertion proves exactly that tolerance.</p>
   </section>
 
   <section>
@@ -138,8 +153,8 @@
 <pre><code>const rule = [...document.styleSheets[0].cssRules]
   .find(r =&gt; r.constructor.name === 'CSSContainerRule');
 console.log(rule.conditionText);
-// "tile (min-width: 360px), (prefers-reduced-motion: reduce)"</code></pre>
-    <p id="cssom-out" class="note"></p>
+// "tile (min-width: 360px), tile style(--compact: on)"</code></pre>
+    <p id="cssom-out" class="note" aria-live="polite"></p>
   </section>
 
   <section>
@@ -155,35 +170,91 @@ console.log(rule.conditionText);
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 <script>
+(() => {
+  'use strict';
   const matrix = document.getElementById('matrix');
-  document.getElementById('all').addEventListener('click', () => {
+  const allBtn = document.getElementById('all');
+  const crampedBtn = document.getElementById('cramped');
+  const compactBtn = document.getElementById('compact');
+  const observedOut = document.getElementById('observed-out');
+  const supportNote = document.getElementById('support-note');
+  let compact = false;
+
+  // Capability probe: did the comma-separated rule survive parsing? The rule
+  // under test carries both branches, so look for its conditionText comma.
+  function findCommaRule() {
+    for (const sheet of document.styleSheets) {
+      try {
+        for (const r of sheet.cssRules) {
+          if (r.constructor && r.constructor.name === 'CSSContainerRule' && r.conditionText && r.conditionText.includes(',')) {
+            return r;
+          }
+        }
+      } catch (e) { /* cross-origin */ }
+    }
+    return null;
+  }
+  const commaRuleParsed = !!findCommaRule();
+  supportNote.hidden = commaRuleParsed;
+
+  // Report what the engine actually matched, read back from each tile's
+  // ::before verdict — never from re-implemented arithmetic.
+  const WIDTHS = [220, 280, 360, 540, 720];
+  function readVerdicts() {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const parts = [];
+      let agrees = true;
+      for (const w of WIDTHS) {
+        const verdict = document.querySelector('.frame.w-' + w + ' .tile .verdict');
+        if (!verdict) continue;
+        const content = getComputedStyle(verdict, '::before').content.replaceAll('"', '');
+        const matched = content.startsWith('match');
+        const expected = commaRuleParsed && (w >= 360 || compact);
+        if (matched !== expected) agrees = false;
+        parts.push(w + 'px → ' + (matched ? 'match' : 'no match'));
+      }
+      observedOut.textContent = 'Engine verdicts (computed ::before content)' +
+        (compact ? ', compact flag on: ' : ', compact flag off: ') + parts.join(' · ') + '.';
+      window.showcaseTelemetry?.assert(
+        'breakpoint-matrix-verdicts-match-spec',
+        agrees,
+        { commaRuleParsed, compact, parts },
+      );
+    }));
+  }
+
+  allBtn.addEventListener('click', () => {
     matrix.classList.remove('matrix-cramped');
-    document.getElementById('all').classList.add('on');
-    document.getElementById('cramped').classList.remove('on');
+    allBtn.classList.add('on'); allBtn.setAttribute('aria-pressed', 'true');
+    crampedBtn.classList.remove('on'); crampedBtn.setAttribute('aria-pressed', 'false');
+    readVerdicts();
   });
-  document.getElementById('cramped').addEventListener('click', () => {
+  crampedBtn.addEventListener('click', () => {
     matrix.classList.add('matrix-cramped');
-    document.getElementById('cramped').classList.add('on');
-    document.getElementById('all').classList.remove('on');
+    crampedBtn.classList.add('on'); crampedBtn.setAttribute('aria-pressed', 'true');
+    allBtn.classList.remove('on'); allBtn.setAttribute('aria-pressed', 'false');
+    readVerdicts();
+  });
+  compactBtn.addEventListener('click', () => {
+    compact = !compact;
+    compactBtn.classList.toggle('on', compact);
+    compactBtn.setAttribute('aria-pressed', String(compact));
+    document.querySelectorAll('.frame-body').forEach((body) => {
+      if (compact) body.style.setProperty('--compact', 'on');
+      else body.style.removeProperty('--compact');
+    });
+    readVerdicts();
   });
   document.getElementById('enum').addEventListener('click', () => {
     const out = document.getElementById('cssom-out');
     try {
-      // find @container rule within page styles
-      let found = null;
-      for (const sheet of document.styleSheets) {
-        try {
-          for (const r of sheet.cssRules) {
-            if (r.constructor && r.constructor.name === 'CSSContainerRule' && r.conditionText && r.conditionText.includes('tile')) {
-              found = r; break;
-            }
-          }
-        } catch (e) { /* cross-origin */ }
-        if (found) break;
-      }
-      out.textContent = found ? 'conditionText → ' + found.conditionText : 'CSSContainerRule not found in this document.';
+      const found = findCommaRule();
+      out.textContent = found ? 'conditionText → ' + found.conditionText : 'No comma-separated CSSContainerRule found in this document (requires Chrome 150+).';
     } catch (e) { out.textContent = 'error: ' + e.message; }
   });
+
+  readVerdicts();
+})();
 </script>
 </body>
 </html>
