@@ -38,7 +38,7 @@
   <header class="lede-block">
     <p class="eyebrow">v159 · svg · distance queries</p>
     <h1>Segment at length: which command is the pen in?</h1>
-    <p class="lede"><code>getPointAtLength()</code> has answered "<em>where</em> is the pen at distance <code>d</code>?" for years. The new <code>getPathSegmentAtLength()</code> answers the structural question — <em>which segment</em> owns that point — returning its <code>{type, values}</code> object, or <code>null</code> for an empty path or <code>NaN</code>. Drag the slider: the dot moves via the long-standing API, the highlighted row comes from the new one.</p>
+    <p class="lede"><code>getPointAtLength()</code> has answered "<em>where</em> is the pen at distance <code>d</code>?" for years. The new <code>getPathSegmentAtLength()</code> answers the structural question — <em>which segment</em> owns that point — returning its <code>{type, values}</code> object, or <code>null</code> for an empty path (<code>NaN</code> and infinite distances throw a <code>TypeError</code> — the argument is a restricted <code>float</code>). Drag the slider: the dot moves via the long-standing API, the highlighted row comes from the new one.</p>
   </header>
 
   <p class="note">Chrome targets the SVG Path Data API for <strong>Chrome 159</strong> behind the <code>SVGPathDataAPI</code> runtime flag (<code>--enable-blink-features=SVGPathDataAPI</code>, or <code>chrome://flags/#enable-experimental-web-platform-features</code>). Note: a mid-implementation build can ship <code>getPathData</code>/<code>setPathData</code> while <code>getPathSegmentAtLength</code> is still absent — this page probes the method itself and says exactly which case you are in.</p>
@@ -65,7 +65,7 @@
 
   <section class="stage" aria-labelledby="clamp-title">
     <h2 id="clamp-title">The clamping contract</h2>
-    <p>The spec pins four edges, matching <code>getPointAtLength()</code>'s behaviour: negative distances clamp to 0 (first segment), overshoot clamps to the total length (last segment), <code>NaN</code> returns <code>null</code>, and an empty path returns <code>null</code>.</p>
+    <p>The spec pins four edges: negative distances clamp to 0 — and because 0 falls exactly on the boundary between the zero-length moveto and the next segment, the spec's boundary rule hands back the <em>later</em> segment; overshoot clamps to the total length (final segment); <code>NaN</code> throws a <code>TypeError</code> before the lookup runs (restricted <code>float</code> argument); and an empty path returns <code>null</code>.</p>
     <button type="button" id="clamp">Run all four edge probes</button>
     <dl class="kv">
       <dt>getPathSegmentAtLength(-10)</dt><dd id="clamp-neg">…</dd>
@@ -79,9 +79,9 @@
   <section><h2>code path</h2><pre tabindex="0"><code>const seg = path.getPathSegmentAtLength(50);
 // → {type: "C", values: [45, 20, 85, 20, 115, 100]} — the segment the pen is in
 
-path.getPathSegmentAtLength(-10);    // clamps to 0        → first segment
-path.getPathSegmentAtLength(1e9);    // clamps to total    → last segment
-path.getPathSegmentAtLength(NaN);    // → null
+path.getPathSegmentAtLength(-10);    // clamps to 0 → boundary → the segment AFTER the zero-length M
+path.getPathSegmentAtLength(1e9);    // clamps to total → final segment
+path.getPathSegmentAtLength(NaN);    // throws TypeError (restricted float)
 emptyPath.getPathSegmentAtLength(1); // → null</code></pre></section>
 
   <section><h2>see also</h2><ul>
@@ -207,24 +207,34 @@ emptyPath.getPathSegmentAtLength(1); // → null</code></pre></section>
     try {
       results.neg = stagePath.getPathSegmentAtLength(-10);
       results.over = stagePath.getPathSegmentAtLength(total + 99999);
-      results.nan = stagePath.getPathSegmentAtLength(NaN);
+      try {
+        results.nan = { threw: false, value: stagePath.getPathSegmentAtLength(NaN) };
+      } catch (nanError) {
+        results.nan = { threw: true, name: nanError.name, isTypeError: nanError instanceof TypeError };
+      }
       results.empty = empty.getPathSegmentAtLength(10);
       cells.neg.textContent = show(results.neg);
       cells.over.textContent = show(results.over);
-      cells.nan.textContent = show(results.nan);
+      cells.nan.textContent = results.nan.threw
+        ? 'threw ' + results.nan.name + (results.nan.isTypeError ? ' (the spec-required TypeError)' : ' (spec requires TypeError)')
+        : show(results.nan.value) + ' — spec requires a TypeError here';
       cells.empty.textContent = show(results.empty);
-      const first = segments && segments[0];
-      const pass = results.nan === null && results.empty === null &&
-        results.neg !== null && (!first || results.neg.type === first.type) &&
+      // Clamped 0 sits on the boundary between the zero-length M and the next
+      // segment, and the spec's boundary rule returns the LATER segment.
+      const expectedNeg = segments && (segments.length > 1 ? segments[1] : segments[0]);
+      const pass = results.nan.threw && results.nan.isTypeError && results.empty === null &&
+        results.neg !== null && (!expectedNeg || results.neg.type === expectedNeg.type) &&
         results.over !== null;
       clampOut.textContent = pass
-        ? 'All four edges match the spec: negative clamped to the first segment, overshoot clamped into the final segment, NaN and the empty path both answered null.'
-        : 'At least one edge deviates from the spec contract (see values above) — a supporting build must clamp negative/overshoot and return null for NaN/empty. Worth reporting.';
+        ? 'All four edges match the spec: negative clamped to 0 and the boundary rule returned the segment after the zero-length moveto, overshoot clamped into the final segment, NaN threw TypeError, and the empty path answered null.'
+        : 'At least one edge deviates from the spec contract (see values above) — a supporting build must clamp negative to the post-boundary segment, clamp overshoot, throw TypeError for NaN, and return null only for an empty path. Worth reporting.';
       globalThis.showcaseTelemetry?.assert('svg-pathdata-clamping-contract', pass, {
-        neg: show(results.neg), over: show(results.over), nan: show(results.nan), empty: show(results.empty),
+        neg: show(results.neg), over: show(results.over),
+        nan: results.nan.threw ? 'threw ' + results.nan.name : show(results.nan.value),
+        empty: show(results.empty),
       });
     } catch (error) {
-      clampOut.textContent = 'A probe threw ' + error.name + ': ' + error.message + ' — the spec expects clamping and null, never an exception, for these inputs.';
+      clampOut.textContent = 'A probe threw ' + error.name + ': ' + error.message + ' — only the NaN probe may throw (TypeError); clamping and the empty path must not.';
       globalThis.showcaseTelemetry?.assert('svg-pathdata-clamping-contract', false, { error: error.name });
     }
     console.log(LOG, 'clamp probes run');
