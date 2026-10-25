@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Datagram ledger — WebTransport connection statistics — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .controls { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); align-items: start; }
+    .field { display: grid; gap: var(--space-1); }
+    .field label { font-weight: 700; font-size: 0.9rem; }
+    .field input { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font: inherit; min-height: 44px; width: 100%; box-sizing: border-box; }
+    .field .hint { color: var(--text-muted); font-size: 0.82rem; }
+    .buttons { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+    .state { border: 2px solid var(--border-black); padding: var(--space-2) var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .state.ready { color: var(--accent-emerald-dark); border-color: var(--accent-emerald); }
+    .state.failed { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .table-wrap { overflow-x: auto; max-width: 100%; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); }
+    td.value { font-family: var(--font-mono); font-weight: 700; }
+    td.delta { font-family: var(--font-mono); font-weight: 700; color: var(--accent-emerald-dark); }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport connection statistics</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · webtransport · connection stats</p>
+    <h1>Datagram ledger: make expiry happen, then count it</h1>
+    <p class="lede">Datagrams are allowed to die — that is the point of them. <code>getStats().datagrams</code> is the ledger of how they died: <code>expiredOutgoing</code> (older than <code>outgoingMaxAge</code> before they could be sent), <code>lostOutgoing</code> (sent, then declared lost per RFC 9002 §6.1), <code>droppedIncoming</code> (arrived faster than the app read them), and <code>expiredIncoming</code> (older than <code>incomingMaxAge</code> before being read). This page sets a deliberately tight <code>outgoingMaxAge</code>, queues a burst, and diffs two real snapshots.</p>
+  </header>
+
+  <p class="note">Chrome targets <code>WebTransport.getStats()</code> for <strong>Chrome 159</strong> behind the <code>WebTransportStats</code> runtime flag (<code>--enable-blink-features=WebTransportStats</code>, or <code>chrome://flags/#enable-experimental-web-platform-features</code>). The ledger needs an <em>established</em> session — that is the spec, not a limitation of this page — so connect to an endpoint you can reach first. Networks that block UDP/QUIC will fail the connection with the real error shown.</p>
+
+  <section class="stage" aria-labelledby="ledger-title">
+    <h2 id="ledger-title">Connect, burst, snapshot</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="url">endpoint URL (https, HTTP/3)</label>
+        <input type="url" id="url" value="https://echo.webtransport.day:4433" spellcheck="false" list="endpoints">
+        <datalist id="endpoints">
+          <option value="https://echo.webtransport.day:4433"></option>
+          <option value="https://wt-ord.akaleapi.net:6161/echo"></option>
+          <option value="https://wt-ams.akaleapi.net:6161/echo"></option>
+        </datalist>
+        <p class="hint">Any WebTransport server you can reach.</p>
+      </div>
+      <div class="field">
+        <label for="maxage">datagrams.outgoingMaxAge (ms)</label>
+        <input type="number" id="maxage" value="1" min="1" max="60000" inputmode="numeric">
+        <p class="hint">Tight on purpose — queued datagrams older than this are dropped and counted in <code>expiredOutgoing</code>.</p>
+      </div>
+      <div class="field">
+        <label for="burst">burst size (datagrams)</label>
+        <input type="number" id="burst" value="200" min="1" max="2000" inputmode="numeric">
+        <p class="hint">Queued back-to-back without awaiting, so the queue outlives the max age.</p>
+      </div>
+    </div>
+    <div class="buttons">
+      <button type="button" id="connect">Connect</button>
+      <button type="button" id="send" disabled>Queue burst, then snapshot</button>
+      <button type="button" id="disconnect" disabled>Disconnect</button>
+    </div>
+    <p class="state" id="state" aria-live="polite">idle — not connected</p>
+    <div class="table-wrap">
+      <table>
+        <caption>getStats().datagrams — before the burst, after it, and the delta</caption>
+        <thead><tr><th scope="col">counter</th><th scope="col">before</th><th scope="col">after</th><th scope="col">delta</th></tr></thead>
+        <tbody>
+          <tr><th scope="row"><code>expiredOutgoing</code></th><td class="value" id="b-expiredOutgoing">—</td><td class="value" id="a-expiredOutgoing">—</td><td class="delta" id="d-expiredOutgoing">—</td></tr>
+          <tr><th scope="row"><code>lostOutgoing</code></th><td class="value" id="b-lostOutgoing">—</td><td class="value" id="a-lostOutgoing">—</td><td class="delta" id="d-lostOutgoing">—</td></tr>
+          <tr><th scope="row"><code>droppedIncoming</code></th><td class="value" id="b-droppedIncoming">—</td><td class="value" id="a-droppedIncoming">—</td><td class="delta" id="d-droppedIncoming">—</td></tr>
+          <tr><th scope="row"><code>expiredIncoming</code></th><td class="value" id="b-expiredIncoming">—</td><td class="value" id="a-expiredIncoming">—</td><td class="delta" id="d-expiredIncoming">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <output id="out" aria-live="polite"></output>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const transport = new WebTransport(url);
+await transport.ready;
+
+transport.datagrams.outgoingMaxAge = 1; // ms — tight on purpose
+
+const before = (await transport.getStats()).datagrams;
+
+const writer = transport.datagrams.writable.getWriter();
+for (let i = 0; i &lt; 200; i++) writer.write(new Uint8Array(1024)); // no await
+await new Promise((r) =&gt; setTimeout(r, 250)); // let the queue age out
+
+const after = (await transport.getStats()).datagrams;
+after.expiredOutgoing - before.expiredOutgoing; // what never made it out</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5120203192139776" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dictdef-webtransportdatagramstats" target="_blank" rel="noopener">Spec: WebTransportDatagramStats</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransportdatagramduplexstream-outgoingmaxage" target="_blank" rel="noopener">Spec: outgoingMaxAge</a></li>
+    <li><a href="../live-stats-monitor/">Live stats monitor</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wt-stats:ledger]';
+  const hasWT = typeof WebTransport === 'function';
+  const hasStats = hasWT && typeof WebTransport.prototype.getStats === 'function';
+  const COUNTERS = ['expiredOutgoing', 'lostOutgoing', 'droppedIncoming', 'expiredIncoming'];
+
+  const urlInput = document.getElementById('url');
+  const maxAgeInput = document.getElementById('maxage');
+  const burstInput = document.getElementById('burst');
+  const connectBtn = document.getElementById('connect');
+  const sendBtn = document.getElementById('send');
+  const disconnectBtn = document.getElementById('disconnect');
+  const stateEl = document.getElementById('state');
+  const out = document.getElementById('out');
+
+  let transport = null;
+
+  function setState(cls, text) {
+    stateEl.className = 'state' + (cls ? ' ' + cls : '');
+    stateEl.textContent = text;
+  }
+
+  function cell(prefix, name) { return document.getElementById(prefix + '-' + name); }
+
+  function renderSnapshot(prefix, dg) {
+    for (const name of COUNTERS) {
+      cell(prefix, name).textContent = dg && name in dg ? String(dg[name]) : 'not returned';
+    }
+  }
+
+  function clearSession(finalText, cls) {
+    if (transport) { try { transport.close(); } catch { /* connecting or failed */ } transport = null; }
+    connectBtn.disabled = false;
+    sendBtn.disabled = true;
+    disconnectBtn.disabled = true;
+    if (finalText) setState(cls || '', finalText);
+  }
+
+  async function connect() {
+    connectBtn.disabled = true;
+    out.textContent = '';
+    if (!hasWT) {
+      setState('failed', 'no WebTransport constructor in this browser');
+      out.textContent = 'There is no WebTransport constructor in this browser, so there is no datagram queue to account for.';
+      globalThis.showcaseTelemetry?.assert('wt-stats-ledger-fallback', true, { hasWT, hasStats });
+      connectBtn.disabled = false;
+      return;
+    }
+    if (!hasStats) {
+      setState('failed', 'this build has no WebTransport.getStats()');
+      out.textContent = 'This build has no getStats method on WebTransport, so there is no ledger to read. See the banner for the exact flag; on a 159+ build this page runs the full flow.';
+      globalThis.showcaseTelemetry?.assert('wt-stats-ledger-missing-branch', true, { hasStats });
+      connectBtn.disabled = false;
+      return;
+    }
+    let t;
+    try {
+      t = new WebTransport(urlInput.value);
+    } catch (error) {
+      setState('failed', 'constructor threw ' + error.name);
+      out.textContent = 'The constructor rejected the URL before any network traffic (' + error.name + ': ' + error.message + ').';
+      connectBtn.disabled = false;
+      return;
+    }
+    transport = t;
+    let established = false;
+    t.closed.then(
+      () => { if (transport === t && established) clearSession('connection closed by the peer', ''); },
+      (e) => { if (transport === t && established) clearSession('connection errored mid-session: ' + (e && e.name || 'error'), 'failed'); },
+    );
+    disconnectBtn.disabled = false;
+    setState('', 'connecting to ' + urlInput.value + ' …');
+    try {
+      await Promise.race([
+        t.ready,
+        new Promise((_, rej) => setTimeout(() => rej(new DOMException('gave up waiting after 15s', 'TimeoutError')), 15000)),
+      ]);
+    } catch (error) {
+      if (transport !== t) return;
+      clearSession('connection failed: ' + error.name + ' — ' + error.message, 'failed');
+      out.textContent = 'The connection genuinely failed (' + error.name + '), so there is no queue and no ledger — the missing prerequisite is a reachable HTTP/3 endpoint, not the stats API. Try an endpoint you can reach and press connect again.';
+      globalThis.showcaseTelemetry?.assert('wt-stats-ledger-connect-failure-surfaced', true, { name: error.name });
+      return;
+    }
+    if (transport !== t) return;
+    established = true;
+    sendBtn.disabled = false;
+    setState('ready', 'connected — ready to queue a burst');
+    out.textContent = 'Session established. Queue a burst to age datagrams out of the send queue and watch the counters move.';
+  }
+
+  async function burst() {
+    const t = transport;
+    if (!t) return;
+    sendBtn.disabled = true;
+    const maxAge = Math.max(1, Number(maxAgeInput.value) || 1);
+    const count = Math.min(2000, Math.max(1, Number(burstInput.value) || 200));
+    try {
+      const before = (await t.getStats()).datagrams ?? null;
+      renderSnapshot('b', before);
+      t.datagrams.outgoingMaxAge = maxAge;
+      const writer = t.datagrams.writable.getWriter();
+      for (let i = 0; i < count; i++) {
+        writer.write(new Uint8Array(1024)).catch(() => { /* expired datagrams reject their write promise */ });
+      }
+      writer.releaseLock();
+      await new Promise((r) => setTimeout(r, Math.max(250, maxAge * 3)));
+      const after = (await t.getStats()).datagrams ?? null;
+      renderSnapshot('a', after);
+      let moved = false;
+      for (const name of COUNTERS) {
+        const d = cell('d', name);
+        if (before && after && name in before && name in after) {
+          const delta = after[name] - before[name];
+          d.textContent = (delta > 0 ? '+' : '') + delta;
+          if (delta !== 0) moved = true;
+        } else {
+          d.textContent = '—';
+        }
+      }
+      out.textContent = moved
+        ? 'The ledger moved: the deltas above are real spec counters diffed across your burst. A fast link may send everything before the max age bites — tighten outgoingMaxAge or enlarge the burst to push expiredOutgoing up.'
+        : 'Both snapshots resolved but no counter moved — on this link the whole burst was sent before outgoingMaxAge expired anything. That is an honest result; tighten the max age (1 ms) or enlarge the burst and run it again.';
+      globalThis.showcaseTelemetry?.assert('wt-stats-ledger-snapshots-resolved', !!(before && after), { maxAge, count, moved });
+    } catch (error) {
+      out.textContent = 'The flow failed with the real error: ' + error.name + ' — ' + error.message + '. If the session died mid-burst, getStats() on a failed connection rejects with InvalidStateError by spec.';
+      globalThis.showcaseTelemetry?.assert('wt-stats-ledger-snapshots-resolved', false, { name: error.name });
+    }
+    if (transport) sendBtn.disabled = false;
+  }
+
+  function disconnect() {
+    clearSession('disconnected', '');
+    out.textContent = 'Disconnected. The last snapshots stay in the table; connect again to take new ones.';
+  }
+
+  connectBtn.addEventListener('click', connect);
+  sendBtn.addEventListener('click', burst);
+  disconnectBtn.addEventListener('click', disconnect);
+  console.log(LOG, 'ready', 'hasWT=' + hasWT, 'hasStats=' + hasStats);
+})();
+</script>
+</body>
+</html>
