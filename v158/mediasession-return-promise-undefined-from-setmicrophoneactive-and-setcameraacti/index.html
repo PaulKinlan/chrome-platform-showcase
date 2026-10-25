@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediaSession: Return Promise&lt;undefined&gt; from setMicrophoneActive() and setCameraActive() — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v158/">&larr; Chrome 158</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v158 · media · mediasession</p>
+    <h1>MediaSession: Return Promise&lt;undefined&gt; from setMicrophoneActive() and setCameraActive()</h1>
+    <p class="lede">When <code>setMicrophoneActive()</code> and <code>setCameraActive()</code> shipped in Chrome 93 their WebIDL return type was <code>undefined</code> — fire-and-forget. The W3C Media Session spec was later updated so both methods return a <code>Promise&lt;undefined&gt;</code>: resolved once the user agent has acted on the capture-state change, rejected with an <code>InvalidStateError</code> <code>DOMException</code> when the document is not fully active. Chrome 158 aligns the implementation with that spec — a tiny signature change with a classic migration hazard attached.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./return-shape-probe/">Return-shape probe: what does this build hand back?</a></h3>
+      <p>Call the real <code>navigator.mediaSession.setMicrophoneActive(false)</code> and <code>setCameraActive(false)</code> and inspect exactly what comes back: <code>undefined</code> on a pre-158 build, a <code>Promise</code> on 158+ — and when it is a promise, await it and show that it resolves with <code>undefined</code>, as the spec requires.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./migration-safe-chaining/">Migration: chaining code that survives both shapes</a></h3>
+      <p>Three strategies run against the live API: naive <code>.then()</code> chaining (throws a <code>TypeError</code> on pre-158 builds — watch it happen for real), <code>Promise.resolve()</code> normalisation that works on every version, and an explicit thenable-shape check. Return-shape drift is a confirmed regression class in this showcase; this page is the antidote.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./call-console-toggles/">Call console: toggles, action handlers and the acknowledgement</a></h3>
+      <p>A believable in-call control bar wires <code>"togglemicrophone"</code> / <code>"togglecamera"</code> action handlers together with <code>setMicrophoneActive()</code> / <code>setCameraActive()</code> calls, logging each call's real settled result — the promise is how a 158+ page knows the user agent has acknowledged the state it declared.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./not-fully-active-rejection/">The one rejection the spec pins down: not fully active</a></h3>
+      <p>Capture a removed iframe's <code>mediaSession</code>, then call <code>setMicrophoneActive(true)</code> on it. Per spec, a document that is not fully active must get a promise rejected with <code>InvalidStateError</code>. On a pre-158 build there is no promise to reject — this page runs the sequence for real and labels exactly which contract this browser honoured.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>These methods let a page tell the user agent what it considers the current microphone and camera capture state, so browser and OS media UI (a tab's mute indicator, a video-call hub) can stay truthful. As shipped in Chrome 93 they returned nothing, so a page could not know when — or whether — the user agent had acted on the declaration, and had no channel for the failure case. The spec's <em>update capture state</em> algorithm was updated (w3c/mediasession PR #312, cited by the ChromeStatus entry) to return a promise: resolved with <code>undefined</code> once the capture-state UI has been updated, rejected with an <code>InvalidStateError</code> <code>DOMException</code> when the associated document is not fully active, and — where a user agent applies a pause policy — rejectable with <code>NotAllowedError</code> when the user agent denies the change.</p>
+    <p>Chrome 158 closes the gap between the 2021 implementation and the current spec. The risk of such a change is not the new capability but old code: anything that assumed <code>undefined</code> keeps working, while code written against the new spec (<code>.then()</code>, <code>await … .catch()</code>) breaks on older builds — the exact return-shape drift this showcase tracks as a recurring defect class.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>// Chrome 93–157 (as originally shipped):
+undefined setMicrophoneActive(boolean active);
+undefined setCameraActive(boolean active);
+
+// Chrome 158+ (current spec):
+Promise&lt;undefined&gt; setMicrophoneActive(boolean active);
+Promise&lt;undefined&gt; setCameraActive(boolean active);
+
+// Fully active document  → promise resolves with undefined.
+// Not fully active       → promise rejects with InvalidStateError.
+await navigator.mediaSession.setMicrophoneActive(false);</code></pre>
+    <p>The promise is produced by the spec's <em>update capture state</em> algorithm, shared by <code>setMicrophoneActive</code>, <code>setCameraActive</code> and (in the spec, not in this Chrome feature) <code>setScreenshareActive</code>. The migration-safe call for code that must run on both sides of 158 is <code>await Promise.resolve(navigator.mediaSession.setMicrophoneActive(active))</code>.</p>
+  </section>
+
+  <!-- research notes (weekly-hardening, 2026-10-25)
+    Use-case portfolio: (1) basic/canonical + inspection = return-shape-probe
+    (real calls, String(ret), instanceof Promise, awaited resolution value);
+    (2) edge/migration = migration-safe-chaining (naive .then TypeError on
+    pre-158 run live in try/catch, Promise.resolve normalisation, thenable
+    check — mirrors the repo's "return-shape drift" anti-regression case);
+    (3) practical product = call-console-toggles (togglemicrophone/togglecamera
+    action handlers + set*Active with settled-result log, aria-pressed state);
+    (4) edge/failure = not-fully-active-rejection (removed-iframe mediaSession,
+    spec-required InvalidStateError rejection vs the real pre-158 outcome).
+    Non-applicable angle, source-backed: a "novel/advanced composition" page
+    (e.g. tying set*Active to real getUserMedia tracks) is deliberately out of
+    scope — the Chrome 158 feature changes ONLY the WebIDL return type of two
+    existing methods (ChromeStatus 5188639100370944 summary + motivation), and
+    real capture would gate the demo on mic/camera permission without touching
+    the changed surface; the practical angle is covered permission-free by
+    call-console-toggles.
+    Exact surface (spec IDL, w3c.github.io/mediasession fetched 2026-10-25):
+      Promise<undefined> setMicrophoneActive(boolean active);
+      Promise<undefined> setCameraActive(boolean active);
+      update capture state: if document not fully active -> promise rejected
+      with InvalidStateError; visibility!=visible with active=true -> MAY
+      reject InvalidStateError; UA pause-policy denial -> NotAllowedError;
+      otherwise queue task -> resolve p with undefined.
+    Flag findings: no dedicated entry in runtime_enabled_features.json5
+    (fetched 2026-10-25; only MediaSession/MediaSessionChapterInformation,
+    both stable) — this is a Blink>Media>Session return-type alignment with
+    no runtime flag, so the pages banner on build age, not a flag.
+    MDN setMicrophoneActive (fetched 2026-10-25) still documents the return
+    value as "None (undefined)" — stale vs the current spec; cited as the
+    legacy shape only.
+    Verified in this environment on headless Chromium 153 (pre-158):
+    typeof both methods === "function", both return undefined (String(ret)
+    === "undefined"), naive .then() throws TypeError, removed-iframe call
+    returns undefined without throwing. 158+ branches are rendered from these
+    real calls when the returned value is a Promise. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5188639100370944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/mediasession/#dom-mediasession-setmicrophoneactive" target="_blank" rel="noopener">Media Session spec: setMicrophoneActive()</a></li>
+    <li><a href="https://w3c.github.io/mediasession/#dom-mediasession-setcameraactive" target="_blank" rel="noopener">Media Session spec: setCameraActive()</a></li>
+    <li><a href="https://github.com/w3c/mediasession/pull/312" target="_blank" rel="noopener">Spec PR #312: return a promise from the capture-state setters</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaSession/setMicrophoneActive" target="_blank" rel="noopener">MDN: setMicrophoneActive (documents the legacy undefined return)</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
