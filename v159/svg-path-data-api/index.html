@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SVG Path Data API — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v159/">&larr; Chrome 159</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · svg · dom</p>
+    <h1>SVG Path Data API</h1>
+    <p class="lede">Chrome removed <code>SVGPathSegList</code> in Chrome 48 — and for ten years the only way to touch an individual path segment was to parse the <code>d</code> string yourself or ship a polyfill. Chrome 159 closes that gap with the SVG Working Group's replacement: <code>getPathData()</code> reads a path as an array of plain <code>{type, values}</code> objects, <code>setPathData()</code> writes one back, and <code>getPathSegmentAtLength()</code> answers "which segment is the pen in at this distance?". <code>getPathData({normalize: true})</code> flattens everything to absolute <code>M</code>/<code>L</code>/<code>C</code>/<code>Z</code> — the four commands every morphing and interpolation library actually wants.</p>
+  </header>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./segment-inspector/">Segment inspector: the d attribute, structured</a></h3>
+      <p>Type any <code>d</code> string and read it back through the real <code>getPathData()</code> — every segment as a <code>{type, values}</code> row next to the live rendering. Each of the three new methods is probed separately on <code>SVGPathElement.prototype</code>, because a build can ship some of the surface without the rest — and this page tells you exactly which you have.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./normalize-lens/">Normalize lens: twenty commands in, four out</a></h3>
+      <p>The same path read twice — raw, preserving relative/shorthand/arc commands, and with <code>{normalize: true}</code>, which converts everything to absolute <code>M</code>, <code>L</code>, <code>C</code>, <code>Z</code>. Both readings render side by side so you can see the geometry survive while the command vocabulary collapses: H/V become L, quadratics become exact cubics, arcs become approximated cubics.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./path-editor/">Path editor: every number gets an input</a></h3>
+      <p>Parse a path with <code>getPathData()</code>, get one labelled numeric input per segment value, and watch <code>setPathData()</code> re-serialize the <code>d</code> attribute and re-render on every edit — the structured read-modify-write loop that previously needed a parser library, now a native roundtrip.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./segment-at-length/">Segment at length: which command is the pen in?</a></h3>
+      <p>Drag a distance slider from 0 to <code>getTotalLength()</code> and the page asks <code>getPathSegmentAtLength(distance)</code> which segment owns that point, highlighting it in the table while the long-standing <code>getPointAtLength()</code> positions the marker dot. Also exercises the spec's clamping contract: negative distances clamp to the first segment, overshoot clamps to the last, <code>NaN</code> returns <code>null</code>.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./morph-toolkit/">Morph toolkit: interpolation on normalized cubics</a></h3>
+      <p>The flagship use case the Chromium bug collected 45 upvotes for: normalize two different paths to absolute cubics with <code>getPathData({normalize: true})</code>, match their segment counts, then interpolate every value and write each frame back with <code>setPathData()</code> — a real path morph with no library and no string parsing in the hot loop.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Chromium removed the old <code>SVGPathSegList</code> API in January 2016 because it was overly complex — twenty-plus factory methods and live-mutation semantics — and poorly specified. The SVG Working Group specified a cleaner replacement, Firefox shipped it in Firefox 137 (April 2025), but Chrome never implemented it, leaving <a href="https://issues.chromium.org/issues/40441025" target="_blank" rel="noopener">crbug 40441025</a> open for ten years with 45 upvotes, 31 comments, and five reopened Sheriffbot closures. Every SVG editor, data-visualization library, and path-animation tool on Chrome has been parsing <code>d</code> strings by hand or shipping the ~4&nbsp;KB <code>path-data-polyfill</code>.</p>
+    <p>The new API uses plain <code>{type, values}</code> dictionaries rather than class instances — a deliberate decision confirmed by the SVG WG so that code written against the polyfill works unchanged against the native methods. Values are <code>unrestricted float</code> (NaN/Infinity accepted without throwing, matching SVG's lenient error model), and <code>setPathData()</code> validates in two levels: a segment missing <code>type</code> or <code>values</code> throws a <code>TypeError</code> structurally, while an unrecognized command letter or wrong value count is silently skipped — SVG's "render what you can" model, matching Firefox and the polyfill.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>const segments = path.getPathData();
+// → [{type: "M", values: [10, 80]}, {type: "C", values: [40, 10, 65, 10, 95, 80]}, …]
+
+const flat = path.getPathData({ normalize: true });
+// → absolute M / L / C / Z only (H/V→L, Q/T→C exactly, S→C, A→C approximated)
+
+segments[1].values[0] = 50;        // plain objects — edit in place
+path.setPathData(segments);        // re-serializes the d attribute
+
+path.getPathSegmentAtLength(50);   // → the {type, values} segment at distance 50
+path.getPathSegmentAtLength(NaN);  // → null; negative clamps to first, overshoot to last</code></pre>
+    <p>All twenty path commands (<code>M m L l H h V v C c S s Q q T t A a Z z</code>) round-trip through <code>getPathData()</code>/<code>setPathData()</code>. An empty or missing <code>d</code> reads as <code>[]</code>, and <code>setPathData([])</code> clears the attribute to the empty string (it stays present). <code>getPathData()</code> returns the base value, not the animated value — consistent with <code>getAttribute('d')</code>.</p>
+  </section>
+
+  <!-- research notes (weekly-hardening, 2026-10-25)
+    Use-case portfolio: (1) basic/canonical = segment-inspector (real
+    getPathData() on an editable d string, per-method surface probe since a
+    build can ship a partial surface); (2) configuration/inspection =
+    normalize-lens (raw vs {normalize:true} side by side, identical rendering,
+    command-vocabulary collapse table); (3) practical product use case =
+    path-editor (read-modify-write loop: getPathData -> labelled numeric
+    inputs -> setPathData -> re-serialized d + re-render); (4) edge/failure =
+    segment-at-length (method-level absence on this build handled honestly,
+    plus the spec clamping contract: negative->first, overshoot->last,
+    NaN->null, empty->null) and the lenient-validation edges exercised in
+    segment-inspector (unknown type / wrong arity silently skipped,
+    structurally invalid segment -> TypeError); (5) novel/advanced =
+    morph-toolkit (normalize-to-cubics interpolation, the D3/editor morphing
+    use case the crbug collected votes for). No angle recorded inapplicable.
+    Exact surface (spec + explainer appendix WebIDL, fetched 2026-10-25):
+      dictionary SVGPathSegment { required DOMString type; required sequence<unrestricted float> values; };
+      dictionary SVGPathDataSettings { boolean normalize = false; };
+      partial interface SVGPathElement {
+        sequence<SVGPathSegment> getPathData(optional SVGPathDataSettings settings = {});
+        undefined setPathData(sequence<SVGPathSegment> pathData);
+        SVGPathSegment? getPathSegmentAtLength(unrestricted float distance);
+      };
+    Flag findings (runtime_enabled_features.json5, fetched 2026-10-25):
+      SVGPathDataAPI, status "experimental" -> enable with
+      --enable-blink-features=SVGPathDataAPI or
+      chrome://flags/#enable-experimental-web-platform-features.
+    Verified in this environment on headless Chromium 153 behind
+    --enable-blink-features=SVGPathDataAPI: getPathData/setPathData are
+    present and behave per spec (raw read preserves h/q/a; normalize returns
+    absolute M/L/C/Z; setPathData([{M,[0,0]},{L,[50,50]}]) serializes
+    d="M 0 0 L 50 50"; missing-required-member segments throw TypeError).
+    Semantic-leniency DEVIATION measured on that build: setPathData TRUNCATES
+    the list at the first unknown-type or wrong-arity segment (valid prefix
+    kept; d removed entirely when the first segment is invalid, and
+    setPathData([]) removes the attribute instead of writing d="") — the
+    explainer says invalid segments are skipped and the rest kept. The
+    segment-inspector probe reports whichever behaviour the visitor's build
+    has. getPathSegmentAtLength is NOT yet implemented on that build even
+    behind the flag — the demos probe each method separately and label the
+    partial surface honestly. Unflagged 153: all three methods absent. -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/4787972240179200" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/svgwg/specs/paths/#InterfaceSVGPathData" target="_blank" rel="noopener">SVG Paths spec: SVGPathData mixin</a></li>
+    <li><a href="https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/SVG/SVGPathDataAPI/explainer.md" target="_blank" rel="noopener">Explainer (MSEdgeExplainers)</a></li>
+    <li><a href="https://docs.google.com/document/d/1uCVUqYGKgsCCu7LEtEdO3Yuea-MT-I2XsU6Eoe3mlQI/edit?usp=sharing" target="_blank" rel="noopener">Chromium design doc</a></li>
+    <li><a href="https://issues.chromium.org/issues/40441025" target="_blank" rel="noopener">crbug 40441025 (open since 2015)</a></li>
+    <li><a href="https://github.com/jarek-foksa/path-data-polyfill" target="_blank" rel="noopener">path-data-polyfill (the API's de-facto prior art)</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

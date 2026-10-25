@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Morph toolkit — SVG Path Data API — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    label { font-weight: 700; display: block; }
+    input[type="range"] { width: 100%; min-height: 44px; accent-color: var(--accent-blue); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    .preview { border: 2px solid var(--border-black); background: var(--bg-ivory); }
+    .preview svg { display: block; width: 100%; height: auto; }
+    .preview path { stroke-width: 2.5; }
+    #morph-path { fill: none; stroke: var(--accent-blue); }
+    .endpoints { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+    @media (max-width: 640px) { .endpoints { grid-template-columns: 1fr; } }
+    .endpoints figure { margin: 0; border: 1px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-2); }
+    .endpoints figcaption { font-weight: 700; font-size: 0.85rem; }
+    .endpoints svg { display: block; width: 100%; height: auto; }
+    .endpoints path { fill: none; stroke: var(--text-charcoal); stroke-width: 2; }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .verdict.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald); }
+    .verdict.no { color: var(--accent-rose); border-color: var(--accent-rose); }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; SVG Path Data API</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · svg · interpolation</p>
+    <h1>Morph toolkit: interpolation on normalized cubics</h1>
+    <p class="lede">Path morphing is the use case that kept <a href="https://issues.chromium.org/issues/40441025" target="_blank" rel="noopener">crbug 40441025</a> alive for ten years: to interpolate two paths you need them as numbers, in the <em>same</em> command vocabulary. <code>getPathData({normalize: true})</code> does both jobs at once — everything becomes absolute <code>M</code>/<code>L</code>/<code>C</code>/<code>Z</code> — and <code>setPathData()</code> writes each interpolated frame back without a single string parse in the hot loop.</p>
+  </header>
+
+  <p class="note">Chrome targets the SVG Path Data API for <strong>Chrome 159</strong> behind the <code>SVGPathDataAPI</code> runtime flag. On an earlier or unflagged build, launch with <code>--enable-blink-features=SVGPathDataAPI</code>, or flip <code>chrome://flags/#enable-experimental-web-platform-features</code> and relaunch.</p>
+
+  <section class="stage" aria-labelledby="morph-title">
+    <h2 id="morph-title">Star ⇄ blob</h2>
+    <div class="endpoints">
+      <figure><figcaption>Path A — a five-point star (L commands)</figcaption><svg viewBox="0 0 120 120" aria-hidden="true"><path id="path-a" d="M 60 10 L 72 45 L 110 45 L 80 68 L 92 105 L 60 82 L 28 105 L 40 68 L 10 45 L 48 45 Z"/></svg></figure>
+      <figure><figcaption>Path B — a blob (C commands)</figcaption><svg viewBox="0 0 120 120" aria-hidden="true"><path id="path-b" d="M 60 15 C 95 15, 110 40, 105 65 C 100 92, 80 108, 58 105 C 32 102, 12 85, 15 58 C 18 32, 30 15, 60 15 Z"/></svg></figure>
+    </div>
+    <p class="verdict" id="morph-verdict" aria-live="polite">Reading…</p>
+    <div class="preview"><svg viewBox="0 0 120 120" width="240" height="240" role="img" aria-label="Morph result between the star and the blob"><path id="morph-path" d=""/></svg></div>
+    <label for="t">Interpolation t: <span id="t-label">0.00</span></label>
+    <input type="range" id="t" min="0" max="100" step="1" value="0" aria-describedby="morph-out">
+    <div class="controls">
+      <button type="button" id="play">Play morph</button>
+      <button type="button" id="stop" disabled>Stop</button>
+    </div>
+    <output id="morph-out" aria-live="polite"></output>
+  </section>
+
+  <section><h2>how the toolkit works</h2>
+    <p>Both endpoint paths are read with <code>getPathData({normalize: true})</code>, so each becomes a list of absolute <code>M</code>/<code>L</code>/<code>C</code>/<code>Z</code> segments. Every <code>L</code> is then promoted to an equivalent <code>C</code> (control points placed at thirds along the line — geometrically identical), and the shorter list is padded with degenerate cubics that sit on its final point until the counts match. From there, morphing is pure arithmetic: <code>value = a + (b − a) · t</code> for every number, and one <code>setPathData()</code> per frame.</p>
+    <pre tabindex="0"><code>const A = pathA.getPathData({ normalize: true });  // M/L/C/Z only
+const B = pathB.getPathData({ normalize: true });
+const [fromSegs, toSegs] = matchCubics(A, B);       // same length, same types
+
+function frame(t) {
+  stage.setPathData(fromSegs.map((seg, i) => ({
+    type: seg.type,
+    values: seg.values.map((v, j) => v + (toSegs[i].values[j] - v) * t),
+  })));
+}</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/4787972240179200" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/svgwg/specs/paths/#InterfaceSVGPathData" target="_blank" rel="noopener">Spec: SVGPathDataSettings.normalize</a></li>
+    <li><a href="../normalize-lens/">Normalize lens (the conversion itself)</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[svg-pathdata:morph]';
+  const hasGet = 'getPathData' in SVGPathElement.prototype;
+  const hasSet = 'setPathData' in SVGPathElement.prototype;
+  const supported = hasGet && hasSet;
+  const pathA = document.getElementById('path-a');
+  const pathB = document.getElementById('path-b');
+  const morphPath = document.getElementById('morph-path');
+  const verdict = document.getElementById('morph-verdict');
+  const slider = document.getElementById('t');
+  const tLabel = document.getElementById('t-label');
+  const out = document.getElementById('morph-out');
+  const playBtn = document.getElementById('play');
+  const stopBtn = document.getElementById('stop');
+  let fromSegs = null;
+  let toSegs = null;
+  let raf = 0;
+
+  // Promote an absolute L segment to an equivalent C (thirds along the line).
+  function lineToCubic(from, seg) {
+    const [x, y] = seg.values;
+    const [fx, fy] = from;
+    return { type: 'C', values: [fx + (x - fx) / 3, fy + (y - fy) / 3, fx + 2 * (x - fx) / 3, fy + 2 * (y - fy) / 3, x, y] };
+  }
+
+  // Convert a normalized M/L/C/Z list to M + uniform C list (+ Z), tracking the pen.
+  function toCubics(segments) {
+    const cubics = [];
+    let pen = [0, 0];
+    let start = [0, 0];
+    for (const seg of segments) {
+      if (seg.type === 'M') {
+        cubics.push({ type: 'M', values: [...seg.values] });
+        pen = [seg.values[0], seg.values[1]];
+        start = [...pen];
+      } else if (seg.type === 'L') {
+        cubics.push(lineToCubic(pen, seg));
+        pen = [seg.values[0], seg.values[1]];
+      } else if (seg.type === 'C') {
+        cubics.push({ type: 'C', values: [...seg.values] });
+        pen = [seg.values[4], seg.values[5]];
+      } else if (seg.type === 'Z') {
+        // close with an explicit cubic back to the subpath start so counts stay numeric
+        cubics.push(lineToCubic(pen, { type: 'L', values: start }));
+        pen = [...start];
+      }
+    }
+    return cubics;
+  }
+
+  function pad(list, target) {
+    const padded = [...list];
+    const last = padded[padded.length - 1];
+    const end = last.type === 'C' ? [last.values[4], last.values[5]] : [last.values[0], last.values[1]];
+    while (padded.length < target) {
+      padded.push({ type: 'C', values: [end[0], end[1], end[0], end[1], end[0], end[1]] });
+    }
+    return padded;
+  }
+
+  function frame(t) {
+    const segs = fromSegs.map((seg, i) => ({
+      type: seg.type,
+      values: seg.values.map((v, j) => v + (toSegs[i].values[j] - v) * t),
+    }));
+    segs.push({ type: 'Z', values: [] });
+    morphPath.setPathData(segs);
+  }
+
+  function setT(t) {
+    tLabel.textContent = t.toFixed(2);
+    if (!supported) return;
+    frame(t);
+    out.textContent = 't = ' + t.toFixed(2) + ' — ' + fromSegs.length + ' matched segments interpolated and written back with setPathData(); current d attribute is ' + morphPath.getAttribute('d').length + ' characters of browser-serialized path.';
+  }
+
+  if (!supported) {
+    verdict.className = 'verdict no';
+    verdict.textContent = 'This build is missing ' + (!hasGet ? 'getPathData' : 'setPathData') + ', so the morph cannot run — there is no native way to read the endpoints as numbers. The two endpoint drawings above still render; enable the SVGPathDataAPI flag (see banner) on a Chrome 159 build for the live morph. Nothing below is simulated.';
+    out.textContent = 'Morph unavailable: the slider reports t but no frames are written, because setPathData does not exist here.';
+    playBtn.disabled = true;
+    globalThis.showcaseTelemetry?.assert('svg-pathdata-morph-fallback', true, { hasGet, hasSet });
+  } else {
+    const a = toCubics(pathA.getPathData({ normalize: true }));
+    const b = toCubics(pathB.getPathData({ normalize: true }));
+    const n = Math.max(a.length, b.length);
+    fromSegs = pad(a, n);
+    toSegs = pad(b, n);
+    verdict.className = 'verdict yes';
+    verdict.textContent = 'Both endpoints were normalized with getPathData({normalize: true}) — star: ' + a.length + ' segments, blob: ' + b.length + ' segments, matched at ' + n + '. Every frame below is a real setPathData() write.';
+    setT(0);
+    globalThis.showcaseTelemetry?.assert('svg-pathdata-morph-normalized', fromSegs.length === toSegs.length && fromSegs.length > 0, { star: a.length, blob: b.length, matched: n });
+  }
+
+  slider.addEventListener('input', () => {
+    if (raf) { cancelAnimationFrame(raf); raf = 0; stopBtn.disabled = true; playBtn.disabled = !supported; }
+    setT(Number(slider.value) / 100);
+  });
+
+  playBtn.addEventListener('click', () => {
+    if (!supported) return;
+    playBtn.disabled = true;
+    stopBtn.disabled = false;
+    const t0 = performance.now();
+    const DURATION = 2400;
+    const tick = (now) => {
+      const phase = ((now - t0) % (DURATION * 2)) / DURATION; // 0..2 ping-pong
+      const t = phase <= 1 ? phase : 2 - phase;
+      slider.value = String(Math.round(t * 100));
+      setT(t);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    console.log(LOG, 'play');
+  });
+
+  stopBtn.addEventListener('click', () => {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+    stopBtn.disabled = true;
+    playBtn.disabled = !supported;
+    out.textContent += ' Stopped at t = ' + tLabel.textContent + ' — the frame on screen is exactly the frame the loop last wrote.';
+    console.log(LOG, 'stop at t=' + tLabel.textContent);
+  });
+
+  console.log(LOG, 'ready', 'supported=' + supported);
+})();
+</script>
+</body>
+</html>
