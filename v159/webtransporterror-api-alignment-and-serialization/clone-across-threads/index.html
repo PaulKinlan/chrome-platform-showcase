@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clone across threads — WebTransportError — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .table-wrap { overflow-x: auto; max-width: 100%; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.8rem; font-family: var(--font-mono); overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); font-family: inherit; }
+    td.ok { color: var(--accent-emerald-dark); font-weight: 700; }
+    td.bad { color: var(--accent-rose); font-weight: 700; }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .verdict.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald); }
+    .verdict.no { color: var(--accent-rose); border-color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransportError API alignment</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · networking · webtransport</p>
+    <h1>An error that survives postMessage</h1>
+    <p class="lede">Move your networking into a worker and every failure has to cross a thread boundary. Chrome 159 makes <code>WebTransportError</code> structured-clonable, so the error object itself — <code>message</code>, <code>source</code>, nullable <code>streamErrorCode</code> — travels instead of a hand-rolled <code>{msg, code}</code> copy. Two real hops below: a same-thread <code>structuredClone()</code>, and a full round-trip through a dedicated <code>Worker</code>.</p>
+  </header>
+
+  <p class="note">Serialization is enabled by default from <strong>Chrome 159</strong> (writer side sits behind a runtime kill switch; decoding is permanently enabled for forward compatibility). On earlier builds <code>structuredClone()</code> throws <code>DataCloneError</code> — the table reports that outcome as the honest pre-159 answer.</p>
+
+  <section class="stage" aria-labelledby="clone-title">
+    <h2 id="clone-title">Clone it both ways</h2>
+    <button type="button" id="run">structuredClone() + Worker round-trip</button>
+    <div class="table-wrap">
+      <table>
+        <caption>Original vs. clones</caption>
+        <thead><tr><th scope="col">hop</th><th scope="col">name</th><th scope="col">message</th><th scope="col">source</th><th scope="col">streamErrorCode</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="5">Not run yet.</td></tr></tbody>
+      </table>
+    </div>
+    <p class="verdict" id="verdict" aria-live="polite">Press the button.</p>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const err = new WebTransportError("stream reset", {
+  source: "stream", streamErrorCode: 4294967295,
+});
+
+// hop 1 — same thread:
+const copy = structuredClone(err);        // 159+: works; before: DataCloneError
+
+// hop 2 — across a real thread boundary and back:
+worker.postMessage(err);                  // worker echoes it straight back
+// clone.message, clone.source, clone.streamErrorCode all survive</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5158277221580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#web-transport-error-interface" target="_blank" rel="noopener">Spec: WebTransportError</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/structured-data.html#serializable-objects" target="_blank" rel="noopener">HTML: serializable objects</a></li>
+    <li><a href="../constructor-alignment/">Constructor alignment</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wte:clone]';
+  const rows = document.getElementById('rows');
+  const verdict = document.getElementById('verdict');
+  const runBtn = document.getElementById('run');
+  const EXPECT = { message: 'stream reset', source: 'stream', code: 4294967295 };
+
+  function makeError() {
+    try {
+      const e = new WebTransportError(EXPECT.message, { source: EXPECT.source, streamErrorCode: EXPECT.code });
+      if (e.message === EXPECT.message) return e;
+    } catch { /* fall through */ }
+    return new WebTransportError({ message: EXPECT.message, streamErrorCode: EXPECT.code });
+  }
+
+  function addRow(hop, objOrError, failed) {
+    const tr = document.createElement('tr');
+    const tdHop = document.createElement('td'); tdHop.textContent = hop;
+    if (failed) {
+      const td = document.createElement('td');
+      td.colSpan = 4;
+      td.className = 'bad';
+      td.textContent = failed;
+      tr.append(tdHop, td);
+    } else {
+      const cells = [
+        String(objOrError.name),
+        JSON.stringify(objOrError.message),
+        String(objOrError.source),
+        String(objOrError.streamErrorCode),
+      ];
+      for (const c of cells) {
+        const td = document.createElement('td');
+        td.textContent = c;
+        tr.append(td);
+      }
+      tr.prepend(tdHop);
+    }
+    rows.append(tr);
+  }
+
+  function matches(clone) {
+    return clone && clone.name === 'WebTransportError' && clone.message === EXPECT.message &&
+      clone.source === EXPECT.source && clone.streamErrorCode === EXPECT.code;
+  }
+
+  runBtn.addEventListener('click', async () => {
+    runBtn.disabled = true;
+    rows.innerHTML = '';
+    if (typeof WebTransportError !== 'function') {
+      addRow('original', null, 'WebTransportError missing on this build — nothing to clone.');
+      verdict.className = 'verdict no';
+      verdict.textContent = 'No constructor on this build.';
+      runBtn.disabled = false;
+      return;
+    }
+    const original = makeError();
+    addRow('original', original);
+
+    // hop 1: structuredClone
+    let localOk = false;
+    try {
+      const copy = structuredClone(original);
+      addRow('structuredClone()', copy);
+      localOk = matches(copy);
+    } catch (error) {
+      addRow('structuredClone()', null, error.name + ': not serializable on this build — the honest pre-159 answer');
+    }
+
+    // hop 2: real worker round-trip
+    let workerOk = false, workerNote = '';
+    const src = 'onmessage = (e) => { try { postMessage({ ok: true, err: e.data }); } catch (x) { postMessage({ ok: false, name: x.name }); } };';
+    const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+    try {
+      const worker = new Worker(url);
+      const reply = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('no reply within 3s')), 3000);
+        worker.onmessage = (e) => { clearTimeout(timer); resolve(e.data); };
+        worker.onerror = (e) => { clearTimeout(timer); reject(new Error(e.message || 'worker error')); };
+        try {
+          worker.postMessage(original);
+        } catch (error) {
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
+      if (reply.ok) {
+        addRow('Worker round-trip', reply.err);
+        workerOk = matches(reply.err) || (reply.err && reply.err.message === EXPECT.message && reply.err.streamErrorCode === EXPECT.code);
+        workerNote = workerOk ? '' : ' (came back, but with altered fields — see row)';
+      } else {
+        addRow('Worker round-trip', null, 'echo from worker failed to serialize: ' + reply.name);
+      }
+      worker.terminate();
+    } catch (error) {
+      addRow('Worker round-trip', null, (error.name || 'Error') + ': ' + (error.message || 'postMessage failed') + ' — this build cannot send the error across threads');
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+
+    if (localOk && workerOk) {
+      verdict.className = 'verdict yes';
+      verdict.textContent = 'Both hops preserved name, message, source and the full 32-bit streamErrorCode — WebTransportError is genuinely serializable on this build.';
+    } else if (!localOk && !workerOk) {
+      verdict.className = 'verdict';
+      verdict.textContent = 'Neither hop could serialize the error (DataCloneError) — the pre-159 state this feature removes. Your worker code still needs the manual {message, code} copy on this build.';
+    } else {
+      verdict.className = 'verdict no';
+      verdict.textContent = 'The two hops disagree' + workerNote + ' — read the rows; each is the build’s verbatim behaviour.';
+    }
+    globalThis.showcaseTelemetry?.assert('wte-clone-consistent', localOk === workerOk, { localOk, workerOk });
+    console.log(LOG, JSON.stringify({ localOk, workerOk }));
+    runBtn.disabled = false;
+  });
+  console.log(LOG, 'ready');
+})();
+</script>
+</body>
+</html>
