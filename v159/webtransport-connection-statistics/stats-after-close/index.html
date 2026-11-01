@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stats after close — WebTransport connection statistics — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    ol.timeline { margin: 0; padding-left: 1.4rem; display: grid; gap: var(--space-1); }
+    ol.timeline li { font-size: 0.9rem; }
+    ol.timeline li .v { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-charcoal); overflow-wrap: anywhere; }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .verdict.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald); }
+    .verdict.no { color: var(--accent-rose); border-color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport connection statistics</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · networking · webtransport</p>
+    <h1>The ledger outlives the connection</h1>
+    <p class="lede">A session dies; its story should not. The feature's lifecycle promise is that <strong>statistics remain accessible after the connection closes</strong> — the post-mortem numbers for your telemetry. This page runs the whole lifecycle against a dead endpoint (construct → fail → keep asking) and records what <code>getStats()</code> does at each step, verbatim.</p>
+  </header>
+
+  <p class="note">Needs <strong>Chrome 159</strong> or <code>--enable-blink-features=WebTransportStats</code>. The dead endpoint (<code>https://127.0.0.1:44443</code>, nothing listens) makes the lifecycle fully reproducible without a server: the session fails fast, which IS the close we then interrogate. On a build without getStats(), each step honestly records the missing method.</p>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">Run the lifecycle</h2>
+    <button type="button" id="run">Construct → fail → getStats() three times</button>
+    <ol class="timeline">
+      <li>getStats() immediately after construction<br><span class="v" id="t-1">—</span></li>
+      <li>await closed (the session fails: dead endpoint)<br><span class="v" id="t-2">—</span></li>
+      <li>getStats() right after the failure<br><span class="v" id="t-3">—</span></li>
+      <li>getStats() again, 1.5 s later — still answerable?<br><span class="v" id="t-4">—</span></li>
+    </ol>
+    <p class="verdict" id="verdict" aria-live="polite">Press the button.</p>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const wt = new WebTransport(dead);
+wt.closed.catch(() =&gt; {});          // the failure is the fixture
+
+try { await wt.closed; } catch {}
+const postMortem = await wt.getStats();  // the spec keeps this readable
+report(postMortem.minRtt, postMortem.datagrams.lostOutgoing);</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5120203192139776" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransport-getstats" target="_blank" rel="noopener">Spec: getStats()</a></li>
+    <li><a href="../getstats-probe/">getStats probe</a></li>
+    <li><a href="../live-stats-dashboard/">Live stats dashboard</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wt-stats:afterclose]';
+  const DEAD = 'https://127.0.0.1:44443/never';
+  const hasWT = typeof WebTransport === 'function';
+  const hasStats = hasWT && 'getStats' in WebTransport.prototype;
+  const runBtn = document.getElementById('run');
+  const verdict = document.getElementById('verdict');
+  const cells = [1, 2, 3, 4].map((i) => document.getElementById('t-' + i));
+
+  function brief(stats) {
+    if (!stats || typeof stats !== 'object') return String(stats);
+    const d = stats.datagrams || {};
+    return 'resolved { minRtt: ' + String(stats.minRtt) + ', smoothedRtt: ' + String(stats.smoothedRtt) +
+      ', estimatedSendRate: ' + String(stats.estimatedSendRate) +
+      ', datagrams: { expired: ' + String(d.expiredOutgoing) + ', lost: ' + String(d.lostOutgoing) + ', dropped: ' + String(d.droppedIncoming) + ' } }';
+  }
+
+  async function callStats(wt, cell) {
+    if (!hasStats) { cell.textContent = 'getStats missing on this build'; return 'missing'; }
+    try {
+      const s = await Promise.race([
+        wt.getStats(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('did not settle within 2s')), 2000)),
+      ]);
+      cell.textContent = brief(s);
+      return 'resolved';
+    } catch (error) {
+      cell.textContent = 'rejected: ' + (error.name || 'Error') + ' — ' + error.message;
+      return 'rejected:' + (error.name || 'Error');
+    }
+  }
+
+  runBtn.addEventListener('click', async () => {
+    runBtn.disabled = true;
+    for (const c of cells) c.textContent = '…';
+    verdict.className = 'verdict';
+    verdict.textContent = 'Running the lifecycle…';
+    if (!hasWT) {
+      for (const c of cells) c.textContent = 'WebTransport missing';
+      verdict.className = 'verdict no';
+      verdict.textContent = 'No WebTransport on this build — no lifecycle to run.';
+      runBtn.disabled = false;
+      return;
+    }
+    let wt;
+    try {
+      wt = new WebTransport(DEAD);
+    } catch (error) {
+      verdict.className = 'verdict no';
+      verdict.textContent = 'Constructor threw ' + error.name + '.';
+      runBtn.disabled = false;
+      return;
+    }
+    wt.ready.catch(() => {});
+    const o1 = await callStats(wt, cells[0]);
+    try {
+      await wt.closed;
+      cells[1].textContent = 'closed resolved (unexpected for a dead endpoint)';
+    } catch (error) {
+      cells[1].textContent = 'closed rejected as expected: ' + (error.name || 'Error') + ' — ' + (error.message || '').slice(0, 80);
+    }
+    const o3 = await callStats(wt, cells[2]);
+    await new Promise((r) => setTimeout(r, 1500));
+    const o4 = await callStats(wt, cells[3]);
+    if (o3 === 'resolved' && o4 === 'resolved') {
+      verdict.className = 'verdict yes';
+      verdict.textContent = 'The ledger outlived the connection: getStats() kept answering after the session failed, immediately and 1.5 s later — the post-mortem contract holds on this build.';
+    } else if (o1 === 'missing') {
+      verdict.className = 'verdict no';
+      verdict.textContent = 'No getStats() on this build — the lifecycle ran (construct + fail were real), but there is nothing to read. See the banner for the flag.';
+    } else {
+      verdict.className = 'verdict';
+      verdict.textContent = 'This build’s post-close behaviour: step 3 ' + o3 + ', step 4 ' + o4 + ' — recorded verbatim. (The spec direction is that stats stay accessible; a rejection here is a finding worth keeping.)';
+    }
+    globalThis.showcaseTelemetry?.assert('wt-stats-lifecycle-ran', true, { o1, o3, o4 });
+    console.log(LOG, JSON.stringify({ o1, o3, o4 }));
+    runBtn.disabled = false;
+  });
+  console.log(LOG, 'ready', 'hasStats=' + hasStats);
+})();
+</script>
+</body>
+</html>
