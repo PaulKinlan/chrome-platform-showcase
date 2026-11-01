@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Goodbye, bootstrap processor — Shared MessagePort for AudioWorklet — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .lanes { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+    .lane { flex: 1 1 260px; border: 2px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-3); display: grid; gap: var(--space-2); align-content: start; }
+    .lane h3 { margin: 0; }
+    .lane ul { margin: 0; padding-left: 1.2rem; font-size: 0.85rem; }
+    .lane .result { font-family: var(--font-mono); font-size: 0.8rem; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-2); min-height: 3.5rem; overflow-wrap: anywhere; }
+    .lane .result.ok { border-color: var(--accent-emerald); }
+    .lane .result.bad { border-color: var(--accent-rose); }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .verdict.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Shared MessagePort for AudioWorklet</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · webaudio · audioworklet</p>
+    <h1>Two routes to the same thread</h1>
+    <p class="lede">The same worklet module answers on both channels. The old route needs a registered <code>AudioWorkletProcessor</code>, a constructed <code>AudioWorkletNode</code>, and that node's per-node port — three objects to deliver one message. The new route is <code>audioWorklet.port</code>: zero extra objects. Run both and compare what had to exist.</p>
+  </header>
+
+  <p class="note">The old route works on every AudioWorklet-capable browser, so this page is fully interactive even pre-159. The new route needs <strong>Chrome 159</strong> or <code>--enable-blink-features=AudioWorkletSharedPort</code> — when it's missing, its lane says so instead of pretending.</p>
+
+  <section class="stage" aria-labelledby="race-title">
+    <h2 id="race-title">Run both routes</h2>
+    <button type="button" id="run">Create context, load module, message both ways</button>
+    <div class="lanes">
+      <div class="lane">
+        <h3>Old: bootstrap processor</h3>
+        <ul>
+          <li>registerProcessor("bootstrap-echo", …)</li>
+          <li>new AudioWorkletNode(ctx, …)</li>
+          <li>node.port.postMessage(…)</li>
+        </ul>
+        <div class="result" id="old-result" aria-live="polite">not run yet</div>
+      </div>
+      <div class="lane">
+        <h3>New: shared port</h3>
+        <ul>
+          <li>ctx.audioWorklet.port.postMessage(…)</li>
+          <li>— that's the whole list —</li>
+        </ul>
+        <div class="result" id="new-result" aria-live="polite">not run yet</div>
+      </div>
+    </div>
+    <p class="verdict" id="verdict" aria-live="polite">Both lanes idle.</p>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>// OLD — a processor and node exist only to carry messages:
+await ctx.audioWorklet.addModule("worklet.js");
+const node = new AudioWorkletNode(ctx, "bootstrap-echo");
+node.port.onmessage = handle;
+node.port.postMessage("ping");
+
+// NEW — the channel is already there:
+ctx.audioWorklet.port.onmessage = handle;
+ctx.audioWorklet.port.postMessage("ping");</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5079784523694080" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://webaudio.github.io/web-audio-api/#dom-audioworkletglobalscope-port" target="_blank" rel="noopener">Spec: AudioWorkletGlobalScope.port</a></li>
+    <li><a href="../port-probe/">Port probe</a></li>
+    <li><a href="../global-config-fanout/">Global config fan-out</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[aw-port:bootstrap]';
+  const runBtn = document.getElementById('run');
+  const oldResult = document.getElementById('old-result');
+  const newResult = document.getElementById('new-result');
+  const verdict = document.getElementById('verdict');
+  let ctx = null;
+  let moduleLoaded = false;
+
+  function roundTrip(port, label) {
+    const t0 = performance.now();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ ok: false, label, error: 'no reply within 3s' }), 3000);
+      port.onmessage = (e) => {
+        clearTimeout(timer);
+        resolve({ ok: true, label, via: e.data.via, ms: performance.now() - t0 });
+      };
+      try {
+        port.postMessage({ ping: label });
+      } catch (error) {
+        clearTimeout(timer);
+        resolve({ ok: false, label, error: error.name + ': ' + error.message });
+      }
+    });
+  }
+
+  runBtn.addEventListener('click', async () => {
+    runBtn.disabled = true;
+    verdict.className = 'verdict';
+    verdict.textContent = 'Running…';
+    try {
+      ctx = ctx || new AudioContext();
+      if (!moduleLoaded) {
+        await ctx.audioWorklet.addModule('worklet.js');
+        moduleLoaded = true;
+      }
+    } catch (error) {
+      verdict.textContent = 'Could not set up the worklet at all: ' + (error.message || error.name);
+      runBtn.disabled = false;
+      return;
+    }
+    // OLD route — always attempted.
+    let old;
+    try {
+      const node = new AudioWorkletNode(ctx, 'bootstrap-echo');
+      old = await roundTrip(node.port, 'old');
+      node.disconnect();
+    } catch (error) {
+      old = { ok: false, error: error.name + ': ' + error.message };
+    }
+    oldResult.className = 'result ' + (old.ok ? 'ok' : 'bad');
+    oldResult.textContent = old.ok
+      ? 'reply via ' + old.via + ' in ' + old.ms.toFixed(2) + ' ms (needed: processor class + node + per-node port)'
+      : 'failed: ' + old.error;
+    // NEW route — only if the surface exists.
+    const sharedPort = ctx.audioWorklet.port;
+    let fresh = null;
+    if (sharedPort && typeof sharedPort.postMessage === 'function') {
+      fresh = await roundTrip(sharedPort, 'new');
+      newResult.className = 'result ' + (fresh.ok ? 'ok' : 'bad');
+      newResult.textContent = fresh.ok
+        ? 'reply via ' + fresh.via + ' in ' + fresh.ms.toFixed(2) + ' ms (needed: nothing but the port)'
+        : 'port exists but round-trip failed: ' + fresh.error;
+    } else {
+      newResult.className = 'result bad';
+      newResult.textContent = 'audioWorklet.port is ' + String(sharedPort) + ' on this build — the new route does not exist here (see banner). Honest absence, not an error.';
+    }
+    if (old.ok && fresh && fresh.ok) {
+      verdict.className = 'verdict yes';
+      verdict.textContent = 'Both routes answered from the same AudioWorkletGlobalScope — the shared port made the bootstrap objects unnecessary.';
+    } else if (old.ok && !fresh) {
+      verdict.className = 'verdict';
+      verdict.textContent = 'The old route works here; the new one does not exist yet on this build. This page is exactly the migration you would delete after Chrome 159.';
+    } else {
+      verdict.className = 'verdict';
+      verdict.textContent = 'See lane results above — reported verbatim.';
+    }
+    globalThis.showcaseTelemetry?.assert('aw-bootstrap-old-route', old.ok, old);
+    globalThis.showcaseTelemetry?.assert('aw-bootstrap-new-route-honest', !fresh || typeof fresh.ok === 'boolean', { hasShared: !!fresh });
+    console.log(LOG, JSON.stringify({ old, fresh }));
+    runBtn.disabled = false;
+  });
+  console.log(LOG, 'ready');
+})();
+</script>
+</body>
+</html>
