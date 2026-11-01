@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Global config fan-out — Shared MessagePort for AudioWorklet — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    .slider-row { display: grid; grid-template-columns: 1fr max-content; gap: var(--space-2); align-items: center; }
+    .slider-row input[type="range"] { width: 100%; min-height: 44px; accent-color: var(--text-black); }
+    .slider-row output { font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-charcoal); }
+    .table-wrap { overflow-x: auto; max-width: 100%; }
+    table { width: 100%; border-collapse: collapse; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; margin-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; font-size: 0.82rem; font-family: var(--font-mono); overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); font-family: inherit; }
+    .bar { height: 0.8rem; background: var(--accent-blue); border: 1px solid var(--border-black); }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); }
+    .verdict.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald); }
+    .verdict.no { color: var(--accent-rose); border-color: var(--accent-rose); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Shared MessagePort for AudioWorklet</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · webaudio · audioworklet</p>
+    <h1>One message, every processor</h1>
+    <p class="lede">The practical case: scope-level state. Three <code>config-gain</code> processor instances all read one module-global <code>config</code> object. A single message on the shared port updates it — no per-node fan-out loop, no N ports. The proof is rendered, not claimed: an <code>OfflineAudioContext</code> renders a constant signal through the three nodes and reports the output level, before and after the broadcast.</p>
+  </header>
+
+  <p class="note">Needs <strong>Chrome 159</strong> or <code>--enable-blink-features=AudioWorkletSharedPort</code>. Without the shared port, the baseline render still runs (the processors just keep their default <code>gain: 1</code>) and the broadcast step reports that it had no channel — the level simply, and honestly, does not change.</p>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">Broadcast, then render the proof</h2>
+    <div class="slider-row">
+      <label for="gain" style="grid-column: 1 / -1; font-weight: 700;">Gain to broadcast to the whole scope</label>
+      <input type="range" id="gain" min="0" max="100" value="25" step="5">
+      <output id="gain-out" for="gain">0.25</output>
+    </div>
+    <button type="button" id="run">Render baseline → broadcast → render again</button>
+    <div class="table-wrap">
+      <table>
+        <caption>Offline renders (constant source 0.5 → three config-gain nodes, summed)</caption>
+        <thead><tr><th scope="col">render</th><th scope="col">peak</th><th scope="col">expected</th><th scope="col">level</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="4">Nothing rendered yet.</td></tr></tbody>
+      </table>
+    </div>
+    <p class="verdict" id="verdict" aria-live="polite">Pick a gain and run.</p>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>// worklet.js — ONE handler, read by EVERY processor instance
+let config = { gain: 1 };
+port.onmessage = (e) =&gt; { config = { ...config, ...e.data };
+                          port.postMessage({ applied: config }); };
+
+// main thread — one message instead of node1.port, node2.port, node3.port…
+ctx.audioWorklet.port.postMessage({ gain: 0.25 });
+await ack;                       // wait for {applied} before rendering</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5079784523694080" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://webaudio.github.io/web-audio-api/#dom-audioworklet-port" target="_blank" rel="noopener">Spec: AudioWorklet.port</a></li>
+    <li><a href="../port-probe/">Port probe</a></li>
+    <li><a href="../goodbye-bootstrap-processor/">Goodbye, bootstrap processor</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[aw-port:fanout]';
+  const gainInput = document.getElementById('gain');
+  const gainOut = document.getElementById('gain-out');
+  const runBtn = document.getElementById('run');
+  const rows = document.getElementById('rows');
+  const verdict = document.getElementById('verdict');
+  const SRC = 0.5, NODES = 3;
+
+  gainInput.addEventListener('input', () => { gainOut.textContent = (Number(gainInput.value) / 100).toFixed(2); });
+
+  function peakOf(buffer) {
+    let peak = 0;
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) peak = Math.max(peak, Math.abs(data[i]));
+    return peak;
+  }
+
+  async function renderOnce(gain, broadcast) {
+    const ctx = new OfflineAudioContext(1, 4096, 48000);
+    await ctx.audioWorklet.addModule('../global-config-fanout/worklet.js');
+    const shared = ctx.audioWorklet.port;
+    let broadcastState = 'not requested';
+    if (broadcast) {
+      if (shared && typeof shared.postMessage === 'function') {
+        broadcastState = await new Promise((resolve) => {
+          const timer = setTimeout(() => resolve('sent, but no ack within 2s'), 2000);
+          shared.onmessage = (e) => { clearTimeout(timer); resolve('acked: applied ' + JSON.stringify(e.data.applied)); };
+          shared.postMessage({ gain });
+        });
+      } else {
+        broadcastState = 'NO shared port on this build — nothing was broadcast';
+      }
+    }
+    const src = new ConstantSourceNode(ctx, { offset: SRC });
+    for (let i = 0; i < NODES; i++) {
+      const n = new AudioWorkletNode(ctx, 'config-gain');
+      src.connect(n).connect(ctx.destination);
+    }
+    src.start();
+    const buffer = await ctx.startRendering();
+    return { peak: peakOf(buffer), broadcastState };
+  }
+
+  function addRow(label, peak, expected) {
+    const tr = document.createElement('tr');
+    const td1 = document.createElement('td'); td1.textContent = label;
+    const td2 = document.createElement('td'); td2.textContent = peak.toFixed(3);
+    const td3 = document.createElement('td'); td3.textContent = expected.toFixed(3);
+    const td4 = document.createElement('td');
+    const bar = document.createElement('div'); bar.className = 'bar';
+    bar.style.width = Math.min(100, peak / (SRC * NODES) * 100).toFixed(1) + '%';
+    td4.append(bar);
+    tr.append(td1, td2, td3, td4);
+    rows.append(tr);
+  }
+
+  runBtn.addEventListener('click', async () => {
+    runBtn.disabled = true;
+    rows.innerHTML = '';
+    verdict.className = 'verdict';
+    verdict.textContent = 'Rendering…';
+    const gain = Number(gainInput.value) / 100;
+    try {
+      const base = await renderOnce(1, false);
+      addRow('baseline (default gain 1)', base.peak, SRC * NODES);
+      const after = await renderOnce(gain, true);
+      addRow('after broadcasting {gain: ' + gain.toFixed(2) + '}', after.peak, SRC * NODES * gain);
+      const expected = SRC * NODES * gain;
+      const applied = Math.abs(after.peak - expected) < 0.05;
+      const unchanged = Math.abs(after.peak - SRC * NODES) < 0.05;
+      if (after.broadcastState.startsWith('acked') && applied) {
+        verdict.className = 'verdict yes';
+        verdict.textContent = 'One message changed all ' + NODES + ' processors: peak went ' + base.peak.toFixed(3) + ' → ' + after.peak.toFixed(3) + ' (' + after.broadcastState + ').';
+      } else if (after.broadcastState.indexOf('NO shared port') === 0 && unchanged) {
+        verdict.className = 'verdict no';
+        verdict.textContent = 'No shared port on this build, so nothing was broadcast and the level honestly stayed at ' + after.peak.toFixed(3) + '. On Chrome 159 (or behind the flag) the second render drops to ' + expected.toFixed(3) + '.';
+      } else {
+        verdict.className = 'verdict no';
+        verdict.textContent = 'Unexpected combination: broadcast "' + after.broadcastState + '", peak ' + after.peak.toFixed(3) + ' (expected ' + expected.toFixed(3) + ' applied, or ' + (SRC * NODES).toFixed(3) + ' untouched). Reported verbatim.';
+      }
+      globalThis.showcaseTelemetry?.assert('aw-fanout-rendered', true, { base: base.peak, after: after.peak, broadcast: after.broadcastState });
+      globalThis.showcaseTelemetry?.assert('aw-fanout-honest', applied || unchanged, { after: after.peak, expected });
+      console.log(LOG, JSON.stringify({ base: base.peak, after: after.peak, state: after.broadcastState }));
+    } catch (error) {
+      verdict.className = 'verdict no';
+      verdict.textContent = 'Render failed: ' + (error.message || error.name) + ' — infrastructure failure, reported as such.';
+      globalThis.showcaseTelemetry?.assert('aw-fanout-rendered', false, { error: String(error) });
+    } finally {
+      runBtn.disabled = false;
+    }
+  });
+  console.log(LOG, 'ready');
+})();
+</script>
+</body>
+</html>
