@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Global-scope ping/pong — Shared MessagePort for AudioWorklet — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    [hidden] { display: none !important; }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; min-width: 0; }
+    .stage > * { min-width: 0; margin: 0; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); overflow-wrap: anywhere; }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; text-align: left; max-width: 100%; }
+    button.secondary { background: var(--bg-paper); color: var(--text-black); }
+    button:disabled { background: var(--bg-stone); color: var(--text-muted); border-color: var(--text-muted); cursor: not-allowed; }
+    button:focus-visible, select:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    label { display: inline-flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; min-height: 44px; }
+    select, input[type="number"] { min-height: 44px; font: inherit; border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); padding: 0 var(--space-2); }
+    input[type="checkbox"] { width: 24px; height: 24px; }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); overflow-wrap: anywhere; }
+    .verdict.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald-dark); }
+    .verdict.no { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .verdict.old { color: var(--text-charcoal); border-color: var(--accent-amber); border-style: dashed; }
+    output, .log { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.8rem; overflow-wrap: anywhere; white-space: pre-wrap; font-family: var(--font-mono); }
+    .log { list-style: none; margin: 0; max-height: 16rem; overflow: auto; }
+    .log li { padding: 2px 0; border-bottom: 1px solid var(--bg-ivory); }
+    .ledger { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: var(--space-2); }
+    .ledger div { border: 2px solid var(--border-black); padding: var(--space-2); background: var(--bg-ivory); color: var(--text-charcoal); }
+    .ledger dt { font-size: 0.8rem; color: var(--text-charcoal); }
+    .ledger dd { margin: 0; font-family: var(--font-mono); font-weight: 700; font-size: 1.1rem; color: var(--text-black); overflow-wrap: anywhere; }
+    .table-wrapper { overflow-x: auto; max-width: 100%; border: 2px solid var(--border-black); }
+    table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; color: var(--text-charcoal); background: var(--bg-paper); overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); color: var(--text-black); }
+    caption { text-align: left; font-weight: 700; padding: var(--space-2); color: var(--text-black); }
+    td.pass { color: var(--accent-emerald-dark); font-weight: 700; }
+    td.fail { color: var(--accent-rose); font-weight: 700; }
+    td.blocked { color: var(--text-charcoal); font-weight: 700; }
+    td.pass, td.fail, td.blocked { white-space: nowrap; }
+    pre { max-width: 100%; overflow-x: auto; }
+    code { overflow-wrap: anywhere; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Shared MessagePort for AudioWorklet</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · multimedia · basic / canonical</p>
+    <h1>Global-scope ping/pong</h1>
+    <p class="lede">The canonical use: the main thread reads <code>audioContext.audioWorklet.port</code>, the module running in the <code>AudioWorkletGlobalScope</code> listens on its global <code>port</code>, and the two talk directly — with <strong>zero</strong> <code>AudioWorkletNode</code>s created. The counter below proves it.</p>
+  </header>
+
+  <p class="note"><strong>Flag-gated in Chrome.</strong> The members are <code>[RuntimeEnabled=AudioWorkletSharedPort]</code> in Blink (status <em>experimental</em>; ChromeStatus: proposed for Chrome 159, already shipped in Firefox 138). To try the real path in a Chrome build that contains the implementation: enable <code>chrome://flags/#enable-experimental-web-platform-features</code> and relaunch, or launch with <code>--enable-blink-features=AudioWorkletSharedPort</code> (or <code>--enable-features=AudioWorkletSharedPort</code>, or <code>--enable-experimental-web-platform-features</code>). Chrome for Testing 153 does not contain the attribute even with those switches (verified) — use a current Canary. Without it, this page says so and runs the labelled <em>old pattern</em> instead.</p>
+
+  <section class="stage" aria-labelledby="s1">
+    <h2 id="s1">1 · Create a context and read the port (before any module)</h2>
+    <p>Per the spec the <code>MessageChannel</code> is created inside the <code>AudioContext</code> constructor, so <code>audioWorklet.port</code> must already be a <code>MessagePort</code> before <code>addModule()</code>.</p>
+    <div class="controls"><button type="button" id="create">Create AudioContext (silent)</button></div>
+    <p class="verdict" id="port-state">No context yet.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="s2">
+    <h2 id="s2">2 · Load the scope module</h2>
+    <p><code>scope.js</code> sets <code>port.onmessage</code> during module evaluation and announces itself. It registers a processor only for the old-pattern fallback — nothing instantiates it on the shared path.</p>
+    <div class="controls"><button type="button" id="load" disabled>addModule('scope.js')</button></div>
+    <p class="verdict" id="module-state">Waiting for step 1.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="s3">
+    <h2 id="s3">3 · Ping the global scope</h2>
+    <div class="controls">
+      <button type="button" id="ping" disabled>Send ping over audioWorklet.port</button>
+      <button type="button" id="old" class="secondary" disabled>Old pattern: ping via a bootstrap AudioWorkletNode</button>
+    </div>
+    <dl class="ledger">
+      <div><dt>AudioWorkletNodes created</dt><dd id="nodes">0</dd></div>
+      <div><dt>pongs received</dt><dd id="pongs">0</dd></div>
+      <div><dt>last round trip</dt><dd id="rtt">—</dd></div>
+      <div><dt>reply came via</dt><dd id="via">—</dd></div>
+    </dl>
+    <p class="verdict" id="ping-state">Waiting for step 2.</p>
+    <h3 id="log-title">Message log</h3>
+    <ol class="log" id="log" aria-labelledby="log-title"></ol>
+  </section>
+
+  <p id="status" class="visually-hidden" aria-live="polite"></p>
+
+  <section><h2>the code</h2>
+    <pre tabindex="0"><code>// main thread
+const ctx = new AudioContext();
+ctx.audioWorklet.port.onmessage = (e) =&gt; console.log(e.data);
+await ctx.audioWorklet.addModule('scope.js');
+ctx.audioWorklet.port.postMessage({ type: 'ping' });
+
+// scope.js — AudioWorkletGlobalScope
+port.onmessage = (e) =&gt; port.postMessage({ type: 'pong', frame: currentFrame });</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5079784523694080" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://webaudio.github.io/web-audio-api/#dom-audioworklet-port" target="_blank" rel="noopener">Spec: AudioWorklet.port</a></li>
+    <li><a href="https://webaudio.github.io/web-audio-api/#dom-audioworkletglobalscope-port" target="_blank" rel="noopener">Spec: AudioWorkletGlobalScope.port</a></li>
+    <li><a href="https://developer.mozilla.org/docs/Web/API/AudioWorkletGlobalScope/port" target="_blank" rel="noopener">MDN: AudioWorkletGlobalScope.port</a></li>
+    <li><a href="../round-trip-inspector/">Round-trip inspector</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const status = $('status');
+  const PROTO_HAS_PORT = typeof AudioWorklet !== 'undefined' && 'port' in AudioWorklet.prototype;
+  let ctx = null, shared = null, moduleLoaded = false, nodes = 0, pongs = 0, bootstrap = null;
+  const log = (line) => {
+    const li = document.createElement('li');
+    li.textContent = `${(performance.now() / 1000).toFixed(3)}s  ${line}`;
+    $('log').prepend(li);
+    while ($('log').children.length > 30) $('log').lastChild.remove();
+  };
+  const announce = (t) => { status.textContent = t; };
+  const setVerdict = (el, cls, text) => { el.className = 'verdict ' + cls; el.textContent = text; };
+
+  function onPong(d) {
+    if (d.type === 'module-evaluated') {
+      log(`scope → main: module-evaluated (port instanceof MessagePort: ${d.portIsMessagePort}, sampleRate ${d.sampleRate})`);
+      setVerdict($('module-state'), 'yes', 'The scope announced itself over its global port during module evaluation — no processor, no node.');
+      globalThis.showcaseTelemetry?.assert('awsp-pingpong-module-evaluated', d.portIsMessagePort === true, d);
+      return;
+    }
+    if (d.type === 'bootstrap-ready') { log(`bootstrap processor ready (scope has global port: ${d.scopeHasPort})`); return; }
+    if (d.type !== 'pong') return;
+    pongs++;
+    const rtt = performance.now() - d.sentAt;
+    $('pongs').textContent = String(pongs);
+    $('rtt').textContent = `${rtt.toFixed(2)} ms`;
+    $('via').textContent = d.via;
+    log(`scope → main: pong #${d.seq} via ${d.via} (scope frame ${d.scopeCurrentFrame}, ${rtt.toFixed(2)} ms)`);
+    const sharedPath = d.via.startsWith('AudioWorkletGlobalScope');
+    setVerdict($('ping-state'), sharedPath ? 'yes' : 'old', sharedPath
+      ? `Pong #${d.seq} arrived over the shared port in ${rtt.toFixed(2)} ms with ${nodes} AudioWorkletNode(s) in existence.`
+      : `Pong #${d.seq} arrived — but via the OLD bootstrap-node pattern (1 extra AudioWorkletNode). This is the workaround the shared port removes.`);
+    announce(`Pong ${d.seq} received via ${sharedPath ? 'shared port' : 'bootstrap node'} in ${rtt.toFixed(1)} milliseconds.`);
+    if (sharedPath) globalThis.showcaseTelemetry?.assert('awsp-pingpong-shared-roundtrip', nodes === 0, { nodes, rtt });
+  }
+
+  $('create').addEventListener('click', async () => {
+    $('create').disabled = true;
+    try {
+      ctx = new AudioContext();
+      await ctx.resume();
+      const p = ctx.audioWorklet.port;
+      shared = (p instanceof MessagePort) ? p : null;
+      if (shared) {
+        shared.onmessage = (e) => onPong(e.data || {});
+        setVerdict($('port-state'), 'yes', `ctx.audioWorklet.port is a MessagePort before addModule() (same object on re-read: ${p === ctx.audioWorklet.port}). AudioWorklet.prototype has 'port': ${PROTO_HAS_PORT}.`);
+        log('main: audioWorklet.port read — MessagePort, handler attached');
+      } else {
+        setVerdict($('port-state'), 'no', `Not supported here: 'port' in AudioWorklet.prototype is ${PROTO_HAS_PORT}, ctx.audioWorklet.port is ${String(p)}. Step 3 offers the old bootstrap-node pattern instead (labelled).`);
+        log(`main: audioWorklet.port is ${String(p)} — shared port unavailable`);
+      }
+      globalThis.showcaseTelemetry?.assert(shared ? 'awsp-pingpong-port-present' : 'awsp-pingpong-port-absent-fallback', true, { proto: PROTO_HAS_PORT });
+      $('load').disabled = false;
+      setVerdict($('module-state'), '', 'Ready to load.');
+    } catch (err) {
+      setVerdict($('port-state'), 'no', `AudioContext failed: ${err.name}: ${err.message}`);
+      globalThis.showcaseTelemetry?.assert('awsp-pingpong-context', false, { error: err.name });
+      $('create').disabled = false;
+    }
+  });
+
+  $('load').addEventListener('click', async () => {
+    $('load').disabled = true;
+    setVerdict($('module-state'), '', 'Loading scope.js…');
+    try {
+      await ctx.audioWorklet.addModule('scope.js');
+      moduleLoaded = true;
+      log('main: addModule resolved');
+      if (!shared) setVerdict($('module-state'), 'no', 'Module loaded, but this browser gives the scope no global port — it cannot announce itself. Only the old pattern can reach it.');
+      $('ping').disabled = !shared;
+      $('old').disabled = false;
+      setVerdict($('ping-state'), shared ? '' : 'no', shared ? 'Ready — send a ping.' : 'Shared port unavailable: the ping button stays disabled. Use the old-pattern button to see the workaround.');
+    } catch (err) {
+      setVerdict($('module-state'), 'no', `addModule failed: ${err.name}: ${err.message}`);
+      globalThis.showcaseTelemetry?.assert('awsp-pingpong-addmodule', false, { error: err.name });
+      $('load').disabled = false;
+    }
+  });
+
+  let seq = 0;
+  $('ping').addEventListener('click', () => {
+    if (!shared || !moduleLoaded) return;
+    seq++;
+    shared.postMessage({ type: 'ping', seq, sentAt: performance.now() });
+    log(`main → scope: ping #${seq} over audioWorklet.port`);
+  });
+
+  $('old').addEventListener('click', () => {
+    if (!moduleLoaded) return;
+    if (!bootstrap) {
+      bootstrap = new AudioWorkletNode(ctx, 'pingpong-bootstrap');
+      nodes++;
+      $('nodes').textContent = String(nodes);
+      bootstrap.port.onmessage = (e) => onPong(e.data || {});
+      log('main: OLD PATTERN — created bootstrap AudioWorkletNode just to get a port');
+      globalThis.showcaseTelemetry?.assert('awsp-pingpong-old-pattern', true, { shared: !!shared });
+    }
+    seq++;
+    bootstrap.port.postMessage({ type: 'ping', seq, sentAt: performance.now() });
+    log(`main → scope: ping #${seq} over bootstrapNode.port (old pattern)`);
+  });
+})();
+</script>
+</body>
+</html>
