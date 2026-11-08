@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker error relay — WebTransportError API alignment and serialization — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../wte-demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransportError API alignment and serialization</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · network · practical architecture</p>
+    <h1>Worker error relay</h1>
+    <p class="lede">A common WebTransport architecture keeps the session in a dedicated worker so the UI thread never janks on stream I/O. When a stream or the session fails, the worker has to tell the UI <em>why</em>. With serializable <code>WebTransportError</code> it can just <code>postMessage(error)</code> and the UI receives a real <code>WebTransportError</code> — <code>instanceof</code>, <code>source</code> and the full 32-bit <code>streamErrorCode</code> intact — and can branch on them directly.</p>
+  </header>
+
+  <p class="note"><strong>No network session is opened.</strong> A real WebTransport session needs an HTTP/3 server, which this site does not run, so the worker <em>constructs</em> the error a failing session or stream would reject with. Everything after that — the worker's <code>postMessage</code>, the structured clone, the type of the received value — is real. In a build without serializable <code>WebTransportError</code> (Chrome 153 tested; no flag enables it) the worker's <code>postMessage</code> throws <code>DataCloneError</code> and it falls back to an app-level <code>{name, message, source, streamErrorCode}</code> wire shape — shown below as <strong>FALLBACK</strong>, never as native.</p>
+
+  <p class="status" id="wstate" role="status">Starting the connection-manager worker…</p>
+
+  <section class="stage" aria-labelledby="w-title">
+    <h2 id="w-title">Worker → UI: report a failure</h2>
+    <div class="btn-row">
+      <button type="button" class="fail" data-s="stream-reset" disabled>Stream reset (code 500)</button>
+      <button type="button" class="fail" data-s="quota" disabled>Quota exceeded (code 70000)</button>
+      <button type="button" class="fail" data-s="max-code" disabled>Max code (4294967295)</button>
+      <button type="button" class="fail" data-s="session-closed" disabled>Session closed (code null)</button>
+    </div>
+    <div aria-live="polite" aria-atomic="true">
+      <dl class="readout">
+        <div><dt>what the UI thread received</dt><dd id="r-kind">—</dd></div>
+        <div><dt>transport path</dt><dd id="r-path">—</dd></div>
+        <div><dt>source · streamErrorCode</dt><dd id="r-fields">—</dd></div>
+        <div><dt>UI decision (branching on the fields)</dt><dd id="r-decision">—</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="stage" aria-labelledby="u-title">
+    <h2 id="u-title">UI → worker: send a cancel reason</h2>
+    <p>The other direction: the user hits “cancel upload”, and the UI hands the worker a <code>WebTransportError</code> to use as the stream's <code>abort()</code> reason (in a real client the worker would pass it to <code>writer.abort(reason)</code>, which sends the code to the peer).</p>
+    <div class="controls">
+      <div class="field"><label for="ab-code">cancel code</label><input type="number" id="ab-code" value="65536" inputmode="numeric"></div>
+    </div>
+    <div class="btn-row"><button type="button" id="ab-send" disabled>Send cancel reason to worker</button></div>
+    <p class="status" id="ab-out" aria-live="polite">Not sent yet.</p>
+  </section>
+
+  <section><h2>why this matters</h2>
+    <p>Before, a worker-based client had to flatten every error into a plain object and every consumer had to agree on that shape — and anything above 255 had already been lost in Chromium's byte-sized code. Now the error crosses the thread boundary as itself, so shared error-handling code (<code>if (e instanceof WebTransportError &amp;&amp; e.source === "session")</code>) works the same in the worker and on the UI thread.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5158277221580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://developer.chrome.com/docs/capabilities/web-apis/webtransport" target="_blank" rel="noopener">Chrome for Developers: WebTransport</a></li>
+    <li><a href="../serialization-channels/">Serialization across channels</a></li>
+    <li><a href="../reconnect-diagnostics/">Reconnect diagnostics (IndexedDB)</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script src="../wte-lib.js"></script>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const WTE = globalThis.WTE;
+  const PROTOCOL = { 500: 'server overloaded — retry this stream after backoff', 70000: 'quota exceeded — show the upgrade prompt, do not retry', 4294967295: 'reserved/max code — log and surface as a protocol bug' };
+
+  function decide(e) {
+    if (e.source === 'session') return 'session-level failure — tear down every stream and reconnect with exponential backoff';
+    if (e.streamErrorCode === null || e.streamErrorCode === undefined) return 'stream error without an application code — retry once';
+    return PROTOCOL[e.streamErrorCode] ? 'code ' + e.streamErrorCode + ': ' + PROTOCOL[e.streamErrorCode] : 'unknown application code ' + e.streamErrorCode + ' — log it';
+  }
+
+  let worker;
+  try {
+    worker = new Worker('./error-worker.js');
+  } catch (err) {
+    $('wstate').textContent = 'Could not start the worker: ' + err.name + ': ' + err.message;
+    $('wstate').className = 'status fallback';
+    return;
+  }
+  worker.onerror = (ev) => { $('wstate').textContent = 'Worker error: ' + (ev.message || 'failed to load'); $('wstate').className = 'status fallback'; };
+
+  worker.onmessage = (ev) => {
+    const m = ev.data;
+    if (m.type === 'ready') {
+      $('wstate').textContent = 'Worker ready — WebTransportError in worker: ' + (m.hasWTE ? 'yes' : 'no') + '; standard constructor: ' + (m.standardCtor ? 'yes' : 'no (legacy dictionary form only)') + '; serialization: ' + (m.serialization ? 'yes — errors will arrive as real WebTransportError objects' : 'no — expect DataCloneError and the labelled wire-shape fallback') + '.';
+      $('wstate').className = 'status ' + (m.serialization ? 'ok' : 'fallback');
+      document.querySelectorAll('button.fail').forEach((b) => { b.disabled = !m.hasWTE; });
+      $('ab-send').disabled = !WTE.has();
+      globalThis.showcaseTelemetry?.assert('wte-worker-ready', m.hasWTE === true, m);
+      return;
+    }
+    if (m.type === 'failure') {
+      const e = m.error;
+      const native = WTE.has() && e instanceof WebTransportError;
+      $('r-kind').textContent = native ? 'a real WebTransportError (instanceof true, name ' + WTE.fmt(e.name) + ')' : WTE.describe(e).kind;
+      $('r-path').textContent = 'native structured clone · worker built it with the ' + m.ctor + ' constructor';
+      $('r-fields').textContent = WTE.fmt(e.source) + ' · ' + WTE.fmt(e.streamErrorCode);
+      $('r-decision').textContent = decide(e);
+      globalThis.showcaseTelemetry?.assert('wte-worker-relay-native', native, { scenario: m.scenario, source: e.source, code: e.streamErrorCode });
+    } else if (m.type === 'failure-wire') {
+      const rebuilt = WTE.fromWire(m.wire);
+      const e = rebuilt.value;
+      $('r-kind').textContent = 'FALLBACK — wire shape, rebuilt as ' + WTE.describe(e).kind;
+      $('r-path').textContent = 'worker postMessage threw ' + m.cloneError.name + ' (' + m.cloneError.message + '); rebuilt via ' + rebuilt.via;
+      $('r-fields').textContent = WTE.fmt(e.source) + ' · ' + WTE.fmt(e.streamErrorCode) + (m.ctor === 'legacy' ? ' (worker could only use the legacy constructor: source fixed to "stream", code clamped to 0–255)' : '');
+      $('r-decision').textContent = decide(e) + ' [decided from fallback data]';
+      globalThis.showcaseTelemetry?.assert('wte-worker-relay-fallback', true, { scenario: m.scenario, cloneError: m.cloneError.name });
+    } else if (m.type === 'no-ctor') {
+      $('r-kind').textContent = 'worker could not construct a WebTransportError: ' + (m.error && m.error.message);
+    } else if (m.type === 'abort-ack') {
+      const d = m.desc;
+      $('ab-out').textContent = 'Worker received: ' + d.kind + ' · source ' + WTE.fmt(d.source) + ' · streamErrorCode ' + WTE.fmt(d.streamErrorCode) + '.';
+      $('ab-out').className = 'status ' + (d.kind === 'WebTransportError instance' ? 'ok' : 'fallback');
+    }
+  };
+
+  document.querySelectorAll('button.fail').forEach((b) => {
+    b.addEventListener('click', () => worker.postMessage({ type: 'fail', scenario: b.dataset.s }));
+  });
+
+  $('ab-send').addEventListener('click', () => {
+    const raw = $('ab-code').value;
+    const code = raw === '' ? null : Number(raw);
+    const made = WTE.make('upload cancelled by user', 'stream', code);
+    if (!made.value) { $('ab-out').textContent = 'No WebTransportError constructor usable here.'; return; }
+    try {
+      worker.postMessage({ type: 'abort-reason', reason: made.value });
+      $('ab-out').textContent = 'Sent (native clone) — waiting for the worker…';
+      globalThis.showcaseTelemetry?.assert('wte-ui-to-worker-native', true, { code: made.value.streamErrorCode });
+    } catch (err) {
+      worker.postMessage({ type: 'abort-reason', reason: WTE.toWire(made.value) });
+      $('ab-out').textContent = 'postMessage threw ' + err.name + ' — FALLBACK: sent the plain wire shape instead. Waiting for the worker…';
+      $('ab-out').className = 'status fallback';
+      globalThis.showcaseTelemetry?.assert('wte-ui-to-worker-fallback', err.name === 'DataCloneError', { name: err.name });
+    }
+  });
+  console.log('[wte:worker-relay] page ready');
+})();
+</script>
+</body>
+</html>

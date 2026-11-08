@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reconnect diagnostics — WebTransportError API alignment and serialization — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../wte-demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransportError API alignment and serialization</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · network · practical persistence</p>
+    <h1>Reconnect diagnostics</h1>
+    <p class="lede">IndexedDB stores values with the same structured-serialization algorithm as <code>postMessage</code>, so a serializable <code>WebTransportError</code> can be saved as-is. A reconnecting client can persist the last failure, and after a reload or crash its diagnostics screen reads back a real <code>WebTransportError</code> — not a lossy string — to explain why the previous session died.</p>
+  </header>
+
+  <p class="note"><strong>Nothing here touches the network</strong> — the “failure” is constructed locally, as a real session would reject with it (no HTTP/3 server is available). The IndexedDB write and read are real. Where serialization is unsupported (Chrome 153 tested — no flag enables it — or a newer build launched with the writer kill switch <code>--disable-blink-features=WebTransportErrorSerialization</code>), <code>put()</code> throws <code>DataCloneError</code> and the page stores a plain <code>{name, message, source, streamErrorCode}</code> record instead, labelled <strong>FALLBACK</strong>. Chromium keeps the <em>reader</em> permanently enabled, so a record written natively stays readable even after the kill switch disables writing.</p>
+
+  <p class="status" id="db-state" role="status">Opening the diagnostics database…</p>
+
+  <section class="stage" aria-labelledby="last-title">
+    <h2 id="last-title">Last session failure (read from IndexedDB)</h2>
+    <div aria-live="polite" aria-atomic="true">
+      <dl class="readout">
+        <div><dt>stored record</dt><dd id="l-enc">—</dd></div>
+        <div><dt>read back as</dt><dd id="l-kind">—</dd></div>
+        <div><dt>message</dt><dd id="l-msg">—</dd></div>
+        <div><dt>source · streamErrorCode</dt><dd id="l-fields">—</dd></div>
+        <div><dt>recorded at</dt><dd id="l-at">—</dd></div>
+        <div><dt>diagnosis</dt><dd id="l-diag">—</dd></div>
+      </dl>
+    </div>
+    <div class="btn-row">
+      <button type="button" id="reread" disabled aria-describedby="db-state">Read it back again</button>
+      <button type="button" id="reload" class="secondary">Reload the page (simulates a restart)</button>
+      <button type="button" id="clear" class="secondary" disabled aria-describedby="db-state">Clear stored failure</button>
+    </div>
+  </section>
+
+  <section class="stage" aria-labelledby="sim-title">
+    <h2 id="sim-title">Record a failure</h2>
+    <div class="btn-row">
+      <button type="button" class="rec" data-m="idle timeout — session closed" data-s="session" data-c="" disabled aria-describedby="db-state">Session closed (code null)</button>
+      <button type="button" class="rec" data-m="stream aborted: auth token expired" data-s="stream" data-c="401" disabled aria-describedby="db-state">Stream aborted (code 401)</button>
+      <button type="button" class="rec" data-m="stream reset: rate limited" data-s="stream" data-c="100000" disabled aria-describedby="db-state">Stream reset (code 100000)</button>
+    </div>
+    <p class="status" id="w-out" aria-live="polite">Nothing written this visit.</p>
+  </section>
+
+  <section><h2>why decoding is never switched off</h2>
+    <p>The kill switch only gates the <em>writer</em>. If Chromium ever had to turn serialization off, values that sites had already written to IndexedDB (or other structured-clone storage) would otherwise become unreadable and break those sites' startup paths. Keeping the versioned decoder always on means a kill-switch flip can only stop <em>new</em> writes — the format version, source discriminant, has-code flag and payload length are all validated on read.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5158277221580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/IndexedDB/#clone-value" target="_blank" rel="noopener">IndexedDB: clone a value (structured serialization)</a></li>
+    <li><a href="../worker-error-relay/">Worker error relay</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script src="../wte-lib.js"></script>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const WTE = globalThis.WTE;
+  const DB = 'wte-reconnect-diagnostics';
+  const STORE = 'failures';
+  let db = null;
+
+  function setReady(ready) {
+    for (const b of document.querySelectorAll('button.rec, #reread, #clear')) b.disabled = !ready || (b.classList.contains('rec') && !WTE.has());
+  }
+  function req(r) { return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+  function done(tx) { return new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error); }); }
+
+  function diagnose(e) {
+    if (e.source === 'session') return 'The whole session ended — reconnect with backoff; check server idle timeout.';
+    if (e.streamErrorCode === 401) return 'Stream rejected for auth — refresh the token before reconnecting.';
+    if (e.streamErrorCode === 100000) return 'Rate limited (code above 255 — only representable with the full 32-bit field) — delay reconnect.';
+    return 'Stream error ' + WTE.fmt(e.streamErrorCode) + ' — log and retry.';
+  }
+
+  function render(rec) {
+    if (!rec) {
+      for (const id of ['l-enc', 'l-kind', 'l-msg', 'l-fields', 'l-at']) $(id).textContent = '—';
+      $('l-diag').textContent = 'No failure stored. Record one below, then reload.';
+      return;
+    }
+    const native = rec.encoding === 'native';
+    const e = native ? rec.error : WTE.fromWire(rec.wire).value;
+    const d = WTE.describe(native ? rec.error : rec.wire);
+    $('l-enc').textContent = native ? 'native WebTransportError (structured-serialized by IndexedDB)' : 'FALLBACK plain record (put() had thrown ' + rec.cloneError + ')';
+    $('l-kind').textContent = d.kind + (native && d.kind !== 'WebTransportError instance' ? ' — UNEXPECTED: decoded value lost its type' : '');
+    $('l-msg').textContent = WTE.fmt(e.message);
+    $('l-fields').textContent = WTE.fmt(e.source) + ' · ' + WTE.fmt(e.streamErrorCode);
+    $('l-at').textContent = new Date(rec.at).toLocaleString();
+    $('l-diag').textContent = diagnose(e) + (native ? '' : ' [from fallback data]');
+    globalThis.showcaseTelemetry?.assert(native ? 'wte-idb-decode-native' : 'wte-idb-decode-fallback', native ? d.kind === 'WebTransportError instance' : true, { kind: d.kind, encoding: rec.encoding });
+  }
+
+  async function readLast() {
+    const tx = db.transaction(STORE, 'readonly');
+    const rec = await req(tx.objectStore(STORE).get('last'));
+    render(rec);
+  }
+
+  async function record(btn) {
+    const code = btn.dataset.c === '' ? null : Number(btn.dataset.c);
+    const made = WTE.make(btn.dataset.m, btn.dataset.s, code);
+    if (!made.value) { $('w-out').textContent = 'No WebTransportError constructor usable here.'; return; }
+    const at = Date.now();
+    const tx = db.transaction(STORE, 'readwrite');
+    let rec;
+    try {
+      rec = { encoding: 'native', at, error: made.value };
+      tx.objectStore(STORE).put(rec, 'last');
+    } catch (err) {
+      if (!err || err.name !== 'DataCloneError') { $('w-out').textContent = 'put() threw ' + (err && err.name) + ': ' + (err && err.message); tx.abort(); return; }
+      rec = { encoding: 'wire-fallback', at, cloneError: err.name + ': ' + err.message, wire: WTE.toWire(made.value) };
+      tx.objectStore(STORE).put(rec, 'last');
+    }
+    await done(tx);
+    const native = rec.encoding === 'native';
+    $('w-out').textContent = native
+      ? 'Stored the WebTransportError itself (built with the ' + made.via + ' constructor). Reload to read it back.'
+      : 'FALLBACK: put() threw ' + rec.cloneError + ' — stored a plain {name, message, source, streamErrorCode} record instead' + (made.via === 'legacy' ? ' (legacy constructor: source fixed to "stream", code clamped to 0–255)' : '') + '.';
+    $('w-out').className = 'status ' + (native ? 'ok' : 'fallback');
+    globalThis.showcaseTelemetry?.assert('wte-idb-write', native === WTE.serializationSupported(), { encoding: rec.encoding, ctor: made.via });
+    await readLast();
+  }
+
+  (async () => {
+    setReady(false);
+    try {
+      const open = indexedDB.open(DB, 1);
+      open.onupgradeneeded = () => open.result.createObjectStore(STORE);
+      db = await req(open);
+      $('db-state').textContent = 'Diagnostics database open. Serialization in this browser: ' + (WTE.serializationSupported() ? 'supported — failures are stored as WebTransportError objects.' : 'NOT supported — writes will use the labelled plain-record fallback.');
+      $('db-state').className = 'status ' + (WTE.serializationSupported() ? 'ok' : 'fallback');
+      setReady(true);
+      await readLast();
+    } catch (err) {
+      $('db-state').textContent = 'IndexedDB unavailable: ' + (err && err.name) + ': ' + (err && err.message) + ' (private browsing or storage blocked?). The demo cannot persist here.';
+      $('db-state').className = 'status fallback';
+    }
+  })();
+
+  document.querySelectorAll('button.rec').forEach((b) => b.addEventListener('click', () => record(b).catch((err) => { $('w-out').textContent = 'Write failed: ' + err.name + ': ' + err.message; })));
+  $('reread').addEventListener('click', () => readLast().catch((err) => { $('l-diag').textContent = 'Read failed: ' + err.name + ': ' + err.message; }));
+  $('clear').addEventListener('click', async () => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).delete('last');
+    await done(tx);
+    $('w-out').textContent = 'Stored failure cleared.';
+    $('w-out').className = 'status';
+    render(null);
+  });
+  $('reload').addEventListener('click', () => location.reload());
+  console.log('[wte:idb] script ready');
+})();
+</script>
+</body>
+</html>
