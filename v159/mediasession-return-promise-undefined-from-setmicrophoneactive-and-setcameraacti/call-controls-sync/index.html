@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video-call controls in sync — MediaSession Promise&lt;undefined&gt; — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    [hidden] { display: none !important; }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); min-width: 0; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; min-inline-size: 44px; }
+    button.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    button[aria-pressed="false"] { background: var(--bg-ivory); color: var(--accent-rose); border-color: var(--accent-rose); }
+    button[aria-pressed="true"] { background: var(--accent-emerald-dark); color: var(--bg-ivory); border-color: var(--accent-emerald-dark); }
+    button.hangup { background: var(--accent-rose); color: var(--bg-ivory); border-color: var(--accent-rose); }
+    button:disabled { background: var(--bg-stone); color: var(--text-muted); border-color: var(--text-muted); cursor: not-allowed; }
+    button[aria-busy="true"] { outline: 3px dashed var(--accent-amber); outline-offset: 2px; }
+    button:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); margin: 0; overflow-wrap: anywhere; }
+    .verdict.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald-dark); }
+    .verdict.no { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .callbar { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); align-items: start; }
+    .tile { aspect-ratio: 16 / 9; background: var(--text-charcoal); color: var(--bg-ivory); display: grid; place-items: center; border: 2px solid var(--border-black); min-width: 0; }
+    .tile video { inline-size: 100%; block-size: 100%; object-fit: cover; display: block; }
+    .actions { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-1); font-family: var(--font-mono); font-size: 0.85rem; }
+    .actions li { overflow-wrap: anywhere; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.8rem; overflow-wrap: anywhere; white-space: pre-wrap; font-family: var(--font-mono); max-block-size: 18rem; overflow-y: auto; }
+    pre { overflow-x: auto; max-width: 100%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; MediaSession: Return Promise&lt;undefined&gt;</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · media session · practical product use case</p>
+    <h1>Video-call controls in sync with the browser</h1>
+    <p class="lede">A call app owns two copies of its mute state: the button in its own UI and the browser's media-session controls (the Picture-in-Picture window's mic/camera/hang-up buttons, OS media hubs). <code>setMicrophoneActive()</code>/<code>setCameraActive()</code> push the app's state to the browser; the <code>togglemicrophone</code>, <code>togglecamera</code> and <code>hangup</code> action handlers pull the browser's requests back. With the promise return, the app can <em>await</em> the browser's acknowledgement before committing — and revert if a user agent refuses.</p>
+  </header>
+
+  <p class="note"><strong>No permission is requested on load.</strong> Joining the "call" only calls the media-session methods — no capture starts. The optional <em>Use my real camera and microphone</em> button asks for capture only when you press it. There is no flag for the Promise return: Chrome 158 and earlier return <code>undefined</code>, and this page handles both shapes with <code>await</code>.</p>
+
+  <section class="stage" aria-labelledby="handlers-title">
+    <h2 id="handlers-title">1 · Which call actions this browser accepts</h2>
+    <p>Each action name is probed with a real <code>setActionHandler(name, fn)</code> inside try/catch — an unknown <code>MediaSessionAction</code> throws <code>TypeError</code>. The last two are in the current spec but not in Chromium's enum.</p>
+    <ul class="actions" id="action-probe" aria-live="polite"><li>Probing…</li></ul>
+  </section>
+
+  <section class="stage" aria-labelledby="call-title">
+    <h2 id="call-title">2 · The call</h2>
+    <div class="callbar">
+      <div class="tile" id="tile" aria-label="Self view"><span id="tile-text">Not in a call</span></div>
+      <div class="controls" role="group" aria-label="Call controls">
+        <button type="button" id="join">Join call</button>
+        <button type="button" id="mic" aria-pressed="false" disabled>Microphone</button>
+        <button type="button" id="cam" aria-pressed="false" disabled>Camera</button>
+        <button type="button" id="hangup" class="hangup" disabled>Hang up</button>
+        <button type="button" id="real" class="secondary" disabled>Use my real camera and microphone</button>
+      </div>
+    </div>
+    <p class="verdict" id="state" aria-live="polite">Not in a call. Press "Join call".</p>
+  </section>
+
+  <section class="stage" aria-labelledby="ui-title">
+    <h2 id="ui-title">3 · Act as the browser's media-session UI</h2>
+    <p>The browser invokes your registered handlers when a user presses its own mic/camera/hang-up buttons — which a page cannot trigger. These buttons call <strong>the exact handler function this page registered</strong> with <code>setActionHandler()</code>, labelled as a stand-in for that browser button press, so you can watch the round trip: handler → app state → <code>setXActive()</code> back to the browser.</p>
+    <div class="controls" role="group" aria-label="Stand-ins for browser media-session buttons">
+      <button type="button" class="secondary" data-action="togglemicrophone" disabled>Browser UI: togglemicrophone</button>
+      <button type="button" class="secondary" data-action="togglecamera" disabled>Browser UI: togglecamera</button>
+      <button type="button" class="secondary" data-action="hangup" disabled>Browser UI: hangup</button>
+    </div>
+  </section>
+
+  <section class="stage" aria-labelledby="log-title">
+    <h2 id="log-title">4 · Event log (raw return values)</h2>
+    <output id="log">Nothing yet.</output>
+  </section>
+
+  <section><h2>the pattern</h2>
+    <pre tabindex="0"><code>async function setMic(on) {
+  micButton.setAttribute('aria-busy', 'true');
+  try {
+    await navigator.mediaSession.setMicrophoneActive(on); // Promise (159+) or undefined (≤158)
+    state.mic = on;                                         // commit only after the UA accepted
+    stream?.getAudioTracks().forEach((t) =&gt; { t.enabled = on; });
+  } catch (e) {
+    // A UA may reject (NotAllowedError / InvalidStateError): keep the old state
+    announce(`Browser refused: ${e.name}`);
+  } finally {
+    micButton.removeAttribute('aria-busy');
+    micButton.setAttribute('aria-pressed', String(state.mic));
+  }
+}
+navigator.mediaSession.setActionHandler('togglemicrophone', () =&gt; setMic(!state.mic));</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5188639100370944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/mediasession/#enumdef-mediasessionaction" target="_blank" rel="noopener">Spec: MediaSessionAction enum</a></li>
+    <li><a href="https://developer.chrome.com/blog/media-session/" target="_blank" rel="noopener">Chrome for Developers: Media Session</a></li>
+    <li><a href="../capture-pause-policy-lab/">Capture pause-policy lab</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="../shape.js"></script>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const S = globalThis.__msPromiseShape;
+  const ms = navigator.mediaSession;
+  const $ = (id) => document.getElementById(id);
+  const logEl = $('log');
+  const stateEl = $('state');
+  const micBtn = $('mic'), camBtn = $('cam'), joinBtn = $('join'), hangBtn = $('hangup'), realBtn = $('real');
+  const state = { inCall: false, mic: false, cam: false, busy: false };
+  const handlers = {};
+  const accepted = {};
+  let stream = null;
+  let logLines = [];
+  const t0 = performance.now();
+
+  function log(line) {
+    logLines.unshift(`[${((performance.now() - t0) / 1000).toFixed(2)}s] ${line}`);
+    logLines = logLines.slice(0, 40);
+    logEl.textContent = logLines.join('\n');
+  }
+
+  // 1 · probe every candidate action
+  const ACTIONS = ['togglemicrophone', 'togglecamera', 'hangup', 'togglescreenshare', 'voiceactivity'];
+  const probeList = $('action-probe');
+  probeList.replaceChildren();
+  for (const a of ACTIONS) {
+    const li = document.createElement('li');
+    if (!ms) { li.textContent = `${a}: navigator.mediaSession missing`; probeList.append(li); continue; }
+    try {
+      ms.setActionHandler(a, () => {});
+      ms.setActionHandler(a, null);
+      accepted[a] = true;
+      li.textContent = `${a}: accepted`;
+    } catch (e) {
+      accepted[a] = false;
+      li.textContent = `${a}: rejected — ${S.errorText(e)}`;
+    }
+    probeList.append(li);
+  }
+  globalThis.showcaseTelemetry?.assert('ms-promise-call-actions-accepted', !!(accepted.togglemicrophone && accepted.togglecamera && accepted.hangup), accepted);
+
+  const methodsOk = !!(ms && typeof ms.setMicrophoneActive === 'function' && typeof ms.setCameraActive === 'function');
+  if (!methodsOk) {
+    joinBtn.disabled = true;
+    stateEl.className = 'verdict no';
+    stateEl.textContent = 'navigator.mediaSession.setMicrophoneActive/setCameraActive are not available in this browser, so there is nothing to keep in sync. (They shipped in Chrome 93 and Safari.)';
+    globalThis.showcaseTelemetry?.assert('ms-promise-call-methods-missing', true, {});
+  }
+
+  // Call a media-session setter, log the RAW return shape, then await it safely.
+  async function push(method, on, why) {
+    const r = S.invoke(ms[method], ms, [on]);
+    if (r.threw) { log(`${method}(${on}) [${why}] threw synchronously: ${r.errorText}`); throw r.error; }
+    log(`${method}(${on}) [${why}] returned ${r.shape.tag} (typeof ${r.shape.typeof})`);
+    const s = await S.settle(r.value, r.t0, 4000);
+    if (s.state === 'rejected') { log(`  → rejected: ${s.errorText}`); throw s.error; }
+    if (s.state === 'fulfilled') log(`  → fulfilled with ${S.fmtValue(s.value)} after ${s.ms.toFixed(2)} ms`);
+    else if (s.state === 'not-a-promise') log('  → not a promise (pre-Chrome-159 void return); nothing to wait for');
+    else log(`  → ${s.state}`);
+    globalThis.showcaseTelemetry?.assert('ms-promise-call-push-shape', r.shape.isPromiseAnyRealm || r.shape.typeof === 'undefined', { method, tag: r.shape.tag, state: s.state });
+    return { shape: r.shape, settled: s };
+  }
+
+  function render() {
+    micBtn.setAttribute('aria-pressed', String(state.mic));
+    camBtn.setAttribute('aria-pressed', String(state.cam));
+    micBtn.textContent = state.mic ? 'Microphone on' : 'Microphone muted';
+    camBtn.textContent = state.cam ? 'Camera on' : 'Camera off';
+    // busy is signalled with aria-busy + a click guard, not disabled, so focus is never dropped mid-await
+    for (const b of [micBtn, camBtn, hangBtn, realBtn]) b.disabled = !state.inCall;
+    realBtn.disabled = realBtn.disabled || !!stream || !navigator.mediaDevices?.getUserMedia;
+    joinBtn.disabled = state.inCall || !methodsOk;
+    document.querySelectorAll('[data-action]').forEach((b) => { b.disabled = !state.inCall || !handlers[b.dataset.action]; });
+    if (!stream) $('tile-text').textContent = state.inCall ? (state.cam ? 'Camera on (no capture — not opted in)' : 'Camera off') : 'Not in a call';
+    stream?.getAudioTracks().forEach((t) => { t.enabled = state.mic; });
+    stream?.getVideoTracks().forEach((t) => { t.enabled = state.cam; });
+  }
+
+  async function setKind(kind, on, why) {
+    if (state.busy) return;
+    const btn = kind === 'mic' ? micBtn : camBtn;
+    const method = kind === 'mic' ? 'setMicrophoneActive' : 'setCameraActive';
+    state.busy = true; btn.setAttribute('aria-busy', 'true'); render();
+    try {
+      await push(method, on, why);
+      state[kind] = on;
+      stateEl.className = 'verdict yes';
+      stateEl.textContent = `${kind === 'mic' ? 'Microphone' : 'Camera'} ${on ? 'on' : (kind === 'mic' ? 'muted' : 'off')} — browser acknowledged (${why}).`;
+    } catch (e) {
+      stateEl.className = 'verdict no';
+      stateEl.textContent = `The browser refused ${method}(${on}): ${S.errorText(e)}. App state kept as it was.`;
+    } finally {
+      state.busy = false; btn.removeAttribute('aria-busy'); render();
+    }
+  }
+
+  function registerHandlers() {
+    const map = {
+      togglemicrophone: () => { log('handler togglemicrophone invoked'); setKind('mic', !state.mic, 'togglemicrophone handler'); },
+      togglecamera: () => { log('handler togglecamera invoked'); setKind('cam', !state.cam, 'togglecamera handler'); },
+      hangup: () => { log('handler hangup invoked'); hangUp('hangup handler'); },
+    };
+    for (const [a, fn] of Object.entries(map)) {
+      try { ms.setActionHandler(a, fn); handlers[a] = fn; log(`setActionHandler('${a}') registered`); }
+      catch (e) { log(`setActionHandler('${a}') rejected: ${S.errorText(e)}`); }
+    }
+  }
+  function clearHandlers() {
+    for (const a of Object.keys(handlers)) { try { ms.setActionHandler(a, null); } catch { /* already rejected at register time */ } delete handlers[a]; }
+  }
+
+  joinBtn.addEventListener('click', async () => {
+    if (state.busy) return;
+    state.busy = true;
+    try {
+      // Join muted, camera off; tell the browser so its UI starts in the right state.
+      await push('setMicrophoneActive', false, 'join');
+      await push('setCameraActive', false, 'join');
+      state.inCall = true; state.mic = false; state.cam = false;
+      registerHandlers();
+      stateEl.className = 'verdict yes';
+      stateEl.textContent = 'In the call: microphone muted, camera off. Browser media-session state matches.';
+      globalThis.showcaseTelemetry?.assert('ms-promise-call-joined', true, {});
+      state.busy = false; render(); micBtn.focus();
+    } catch (e) {
+      stateEl.className = 'verdict no';
+      stateEl.textContent = `Could not sync the join state: ${S.errorText(e)}`;
+      globalThis.showcaseTelemetry?.assert('ms-promise-call-joined', false, { error: e?.name });
+    } finally { state.busy = false; render(); }
+  });
+
+  async function hangUp(why) {
+    if (!state.inCall || state.busy) return;
+    state.busy = true;
+    try {
+      await push('setMicrophoneActive', false, why);
+      await push('setCameraActive', false, why);
+    } catch (e) { log(`hang-up sync error (call ends anyway): ${S.errorText(e)}`); }
+    clearHandlers();
+    stream?.getTracks().forEach((t) => t.stop());
+    stream = null;
+    const v = $('tile').querySelector('video'); if (v) v.remove();
+    $('tile-text').hidden = false;
+    state.inCall = false; state.mic = false; state.cam = false; state.busy = false;
+    stateEl.className = 'verdict';
+    stateEl.textContent = `Call ended (${why}). Handlers cleared, any capture stopped.`;
+    render();
+    joinBtn.focus();
+  }
+
+  micBtn.addEventListener('click', () => setKind('mic', !state.mic, 'app button'));
+  camBtn.addEventListener('click', () => setKind('cam', !state.cam, 'app button'));
+  hangBtn.addEventListener('click', () => hangUp('app button'));
+  document.querySelectorAll('[data-action]').forEach((b) => {
+    b.addEventListener('click', () => { const fn = handlers[b.dataset.action]; if (fn) { log(`(stand-in for browser UI press: ${b.dataset.action})`); fn({ action: b.dataset.action }); } });
+  });
+
+  realBtn.addEventListener('click', async () => {
+    realBtn.disabled = true;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      const v = document.createElement('video');
+      v.muted = true; v.playsInline = true; v.autoplay = true; v.srcObject = stream;
+      v.setAttribute('aria-label', 'Your camera preview');
+      $('tile-text').hidden = true;
+      $('tile').append(v);
+      log(`getUserMedia granted: ${stream.getTracks().map((t) => t.kind + ':' + t.label).join(', ')}`);
+      render();
+      stateEl.className = 'verdict yes';
+      stateEl.textContent = 'Real tracks attached. The mic/camera buttons now also set track.enabled after the browser acknowledges.';
+    } catch (e) {
+      log(`getUserMedia failed: ${S.errorText(e)}`);
+      stateEl.className = 'verdict no';
+      stateEl.textContent = `Capture not available: ${S.errorText(e)}. The media-session sync still works without it.`;
+      realBtn.disabled = false;
+    }
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

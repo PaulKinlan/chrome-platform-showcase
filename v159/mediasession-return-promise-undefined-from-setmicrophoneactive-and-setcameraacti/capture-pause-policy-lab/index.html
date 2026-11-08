@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Capture pause-policy lab — MediaSession Promise&lt;undefined&gt; — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    [hidden] { display: none !important; }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); min-width: 0; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; min-inline-size: 44px; }
+    button.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    button:disabled { background: var(--bg-stone); color: var(--text-muted); border-color: var(--text-muted); cursor: not-allowed; }
+    button:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); margin: 0; overflow-wrap: anywhere; }
+    .verdict.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald-dark); }
+    .verdict.no { color: var(--accent-rose); border-color: var(--accent-rose); }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.8rem; overflow-wrap: anywhere; white-space: pre-wrap; font-family: var(--font-mono); max-block-size: 20rem; overflow-y: auto; }
+    pre { overflow-x: auto; max-width: 100%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; MediaSession: Return Promise&lt;undefined&gt;</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · media session × media capture · advanced composition</p>
+    <h1>Capture pause-policy lab</h1>
+    <p class="lede">Why a promise at all? The spec lets a user agent implement a <em>capture pause policy</em>: when the page calls <code>setMicrophoneActive(false)</code>, the browser pauses every microphone input and, after updating its UI, sets the matching <code>MediaStreamTrack</code>s' <code>muted</code> state — then resolves. Unmuting may wait for a prompt, or be refused. This lab composes the two APIs for real and timestamps the promise's settle time against each track's <code>mute</code>/<code>unmute</code> events, so you can see what <em>your</em> browser actually does.</p>
+  </header>
+
+  <p class="note"><strong>Capture is opt-in.</strong> Nothing is requested on load; <em>Start capture</em> calls <code>getUserMedia()</code> only when you press it. The setter buttons also work without capture. Chromium's implementation (<code>media_session.cc</code>) updates the browser's mic/camera state and resolves immediately — it applies no pause policy, so in Chrome expect <code>muted</code> to stay <code>false</code>. That is a real, reported observation, not a failure of this page. There is no flag for this change.</p>
+
+  <section class="stage" aria-labelledby="cap-title">
+    <h2 id="cap-title">1 · Capture (optional)</h2>
+    <div class="controls">
+      <button type="button" id="start">Start capture (camera + mic)</button>
+      <button type="button" id="start-audio" class="secondary">Start capture (mic only)</button>
+      <button type="button" id="stop" class="secondary" disabled>Stop capture</button>
+    </div>
+    <output id="tracks" aria-live="polite">No tracks. The setters below still run.</output>
+  </section>
+
+  <section class="stage" aria-labelledby="set-title">
+    <h2 id="set-title">2 · Call the setters and watch the tracks</h2>
+    <div class="controls" role="group" aria-label="Media session setters">
+      <button type="button" data-m="setMicrophoneActive" data-a="false">await setMicrophoneActive(false)</button>
+      <button type="button" data-m="setMicrophoneActive" data-a="true">await setMicrophoneActive(true)</button>
+      <button type="button" data-m="setCameraActive" data-a="false">await setCameraActive(false)</button>
+      <button type="button" data-m="setCameraActive" data-a="true">await setCameraActive(true)</button>
+    </div>
+    <p class="verdict" id="verdict" aria-live="polite">No call yet.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="hidden-title">
+    <h2 id="hidden-title">3 · Unmute while hidden</h2>
+    <p>The spec says: if <code>active</code> is true and the document is not <code>"visible"</code>, the user agent MAY reject with <code>InvalidStateError</code>. Press the button, then switch to another tab within 5 seconds; come back to read what happened.</p>
+    <div class="controls">
+      <button type="button" id="hidden-run">In 5 s: await setCameraActive(true)</button>
+      <button type="button" id="hidden-cancel" class="secondary" disabled>Cancel the pending call</button>
+    </div>
+    <p class="verdict" id="hidden-verdict" aria-live="polite">Not scheduled.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="tl-title">
+    <h2 id="tl-title">4 · Timeline</h2>
+    <output id="timeline">Events will be timestamped here (ms since page load).</output>
+  </section>
+
+  <section><h2>reading the timeline</h2>
+    <p>With a pause policy (spec): <code>mute</code> events are queued <em>after</em> the browser updates its UI, in the same parallel steps that resolve the promise — so code that awaits the setter can read <code>track.muted</code> moments later instead of polling. Without one (Chromium today): the promise resolves in a microtask and the tracks keep flowing; an app that wants silence must still set <code>track.enabled = false</code> itself.</p>
+    <pre tabindex="0"><code>await navigator.mediaSession.setMicrophoneActive(false);
+// spec pause policy: audio tracks soon fire 'mute' and report muted === true
+// Chromium: muted stays false — so also do:
+stream.getAudioTracks().forEach((t) =&gt; { t.enabled = false; });</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5188639100370944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/mediasession/#update-capture-state" target="_blank" rel="noopener">Spec: update capture state (pause policy)</a></li>
+    <li><a href="https://w3c.github.io/mediacapture-main/#track-muted" target="_blank" rel="noopener">Media Capture: track muted state</a></li>
+    <li><a href="../call-controls-sync/">Video-call controls in sync</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="../shape.js"></script>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const S = globalThis.__msPromiseShape;
+  const $ = (id) => document.getElementById(id);
+  const ms = navigator.mediaSession;
+  const available = !!(ms && typeof ms.setMicrophoneActive === 'function' && typeof ms.setCameraActive === 'function');
+  let stream = null;
+  let lines = [];
+  let hiddenTimer = 0;
+
+  const now = () => performance.now().toFixed(1);
+  function tl(text) {
+    lines.unshift(`${now().padStart(9)}  ${text}`);
+    lines = lines.slice(0, 60);
+    $('timeline').textContent = lines.join('\n');
+  }
+  function renderTracks() {
+    $('tracks').textContent = stream
+      ? stream.getTracks().map((t) => `${t.kind}: "${t.label}" readyState=${t.readyState} muted=${t.muted} enabled=${t.enabled}`).join('\n')
+      : 'No tracks. The setters below still run.';
+    $('stop').disabled = !stream;
+    $('start').disabled = !!stream || !navigator.mediaDevices?.getUserMedia;
+    $('start-audio').disabled = $('start').disabled;
+  }
+
+  async function startCapture(constraints) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      for (const t of stream.getTracks()) {
+        t.addEventListener('mute', () => { tl(`${t.kind} track 'mute' event (muted=${t.muted})`); renderTracks(); });
+        t.addEventListener('unmute', () => { tl(`${t.kind} track 'unmute' event (muted=${t.muted})`); renderTracks(); });
+        t.addEventListener('ended', () => { tl(`${t.kind} track ended`); renderTracks(); });
+      }
+      tl(`getUserMedia granted: ${stream.getTracks().map((t) => t.kind).join(' + ')}`);
+    } catch (e) {
+      tl(`getUserMedia failed: ${S.errorText(e)}`);
+      $('tracks').textContent = `Capture unavailable: ${S.errorText(e)}. The setters below still run without tracks.`;
+      return;
+    }
+    renderTracks();
+    $('stop').focus();
+  }
+  $('start').addEventListener('click', () => startCapture({ audio: true, video: true }));
+  $('start-audio').addEventListener('click', () => startCapture({ audio: true }));
+  $('stop').addEventListener('click', () => { stream?.getTracks().forEach((t) => t.stop()); stream = null; tl('capture stopped'); renderTracks(); $('start').focus(); });
+
+  async function callSetter(method, active, verdictEl, context) {
+    if (!available) {
+      verdictEl.className = 'verdict no';
+      verdictEl.textContent = 'navigator.mediaSession.setMicrophoneActive/setCameraActive are not exposed in this browser.';
+      return null;
+    }
+    const kind = method === 'setMicrophoneActive' ? 'audio' : 'video';
+    const before = stream ? stream.getTracks().filter((t) => t.kind === kind).map((t) => t.muted) : [];
+    tl(`${method}(${active}) called${context ? ' ' + context : ''} — visibilityState=${document.visibilityState}`);
+    const r = S.invoke(ms[method], ms, [active]);
+    if (r.threw) { tl(`  threw synchronously: ${r.errorText}`); verdictEl.className = 'verdict no'; verdictEl.textContent = `${method}(${active}) threw synchronously: ${r.errorText}`; return r; }
+    tl(`  returned ${r.shape.tag}`);
+    const s = await S.settle(r.value, r.t0, 10000);
+    if (s.state === 'fulfilled') tl(`  promise fulfilled with ${S.fmtValue(s.value)} after ${s.ms.toFixed(2)} ms`);
+    else if (s.state === 'rejected') tl(`  promise REJECTED after ${s.ms.toFixed(2)} ms: ${s.errorText}`);
+    else tl(`  ${s.state}`);
+    // Give a pause policy's queued 'mute' tasks a chance to run before reading.
+    await new Promise((res) => setTimeout(res, 250));
+    const after = stream ? stream.getTracks().filter((t) => t.kind === kind).map((t) => t.muted) : [];
+    tl(`  250 ms later: ${kind} tracks muted ${JSON.stringify(before)} → ${JSON.stringify(after)}`);
+    renderTracks();
+    // A pause policy is only evidenced by a CHANGE: muted=true after (false), or muted→false after (true).
+    const flipped = after.length > 0 && after.every((m) => m === !active) && (active === false || before.some((m) => m));
+    const nothingToUnmute = active === true && after.length > 0 && !before.some((m) => m);
+    let msg;
+    if (s.state === 'not-a-promise') msg = `${method}(${active}) returned undefined — pre-Chrome-159 signature, so there was nothing to await; `;
+    else if (s.state === 'fulfilled') msg = `${method}(${active}) resolved after ${s.ms.toFixed(2)} ms; `;
+    else if (s.state === 'rejected') msg = `${method}(${active}) was REJECTED (${s.errorText}); `;
+    else msg = `${method}(${active}): ${s.state}; `;
+    msg += !stream ? 'no capture tracks to observe.' : nothingToUnmute ? `${kind} tracks were not muted before the call (muted=false throughout), so there was nothing to unmute — this run says nothing about a pause policy.` : flipped ? `${kind} tracks now report muted=${!active} — a capture pause policy is in effect.` : `${kind} tracks' muted state did not follow — no pause policy here (expected in Chromium).`;
+    verdictEl.className = s.state === 'rejected' ? 'verdict no' : 'verdict yes';
+    verdictEl.textContent = msg;
+    globalThis.showcaseTelemetry?.assert('ms-promise-lab-setter-settled', s.state === 'fulfilled' || s.state === 'not-a-promise' || s.state === 'rejected', { method, active, state: s.state, tracks: after.length, flipped });
+    return { r, s };
+  }
+
+  document.querySelectorAll('[data-m]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      b.setAttribute('aria-busy', 'true');
+      try { await callSetter(b.dataset.m, b.dataset.a === 'true', $('verdict')); } finally { b.removeAttribute('aria-busy'); }
+    });
+  });
+
+  $('hidden-run').addEventListener('click', () => {
+    const v = $('hidden-verdict');
+    clearTimeout(hiddenTimer);
+    v.className = 'verdict';
+    v.textContent = 'Scheduled: switch tabs now. The call runs in 5 seconds.';
+    $('hidden-run').disabled = true;
+    $('hidden-cancel').disabled = false;
+    $('hidden-cancel').focus();
+    tl('hidden-unmute call scheduled for +5 s');
+    hiddenTimer = setTimeout(async () => {
+      $('hidden-cancel').disabled = true;
+      $('hidden-run').disabled = false;
+      const vis = document.visibilityState;
+      const res = await callSetter('setCameraActive', true, v, '(delayed)');
+      if (res?.s) {
+        v.textContent = `At call time visibilityState was "${vis}". ` + v.textContent +
+          (vis !== 'visible' && res.s.state !== 'rejected' ? ' The UA chose not to use the spec\'s optional hidden-document rejection.' : '');
+      }
+      if (document.activeElement === document.body) $('hidden-run').focus();
+    }, 5000);
+  });
+  $('hidden-cancel').addEventListener('click', () => {
+    clearTimeout(hiddenTimer);
+    $('hidden-cancel').disabled = true;
+    $('hidden-run').disabled = false;
+    $('hidden-run').focus();
+    $('hidden-verdict').className = 'verdict';
+    $('hidden-verdict').textContent = 'Cancelled — nothing was called.';
+    tl('hidden-unmute call cancelled');
+  });
+  document.addEventListener('visibilitychange', () => tl(`visibilitychange → ${document.visibilityState}`));
+  renderTracks();
+})();
+</script>
+</body>
+</html>
