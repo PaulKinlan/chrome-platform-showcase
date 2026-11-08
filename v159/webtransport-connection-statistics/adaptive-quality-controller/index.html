@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Adaptive quality controller — WebTransport connection statistics — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../wts-demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport connection statistics</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · network · practical product use case</p>
+    <h1>Adaptive quality controller</h1>
+    <p class="lede">This is the reason the stats exist. A live-streaming or cloud-gaming client picks its bitrate tier from <code>estimatedSendRate</code>. It treats <code>smoothedRtt</code> rising above <code>minRtt</code> as queueing delay, and growth in <code>datagrams.lostOutgoing</code> as loss. Both trigger a step down. The controller below runs that logic. Every input is labelled with where it came from: a live session, a recorded real trace, or numbers you typed in.</p>
+  </header>
+
+  <p class="note" id="banner"><strong>Behind a flag in Chrome 153–158.</strong> <code>WebTransport.prototype.getStats</code> is gated by Blink's <code>WebTransportStats</code> runtime feature (<code>status: "experimental"</code>; ChromeStatus targets Chrome 159 for desktop, Android and WebView). To try it now: open <code>chrome://flags/#enable-experimental-web-platform-features</code>, set it to <em>Enabled</em> and relaunch — or start Chrome with <code>--enable-blink-features=WebTransportStats</code>. There is no dedicated chrome://flags entry for the stats method itself. Reading statistics also needs a live HTTP/3 WebTransport session, which this site cannot host: use a public echo server or run your own (instructions on the <a href="../#local-server">feature page</a>). Every number on this page comes from a real <code>getStats()</code> call — nothing is simulated.</p>
+
+  <p class="status" id="support" role="status">Probing <code>WebTransport.prototype.getStats</code>…</p>
+
+  <section class="stage" aria-labelledby="src-title">
+    <h2 id="src-title">1 · Where the stats come from</h2>
+    <fieldset>
+      <legend>input source</legend>
+      <div class="check"><input type="radio" name="src" id="src-live" value="live"><label for="src-live">Live — real <code>getStats()</code> calls on a connection you open below</label></div>
+      <div class="check"><input type="radio" name="src" id="src-rec" value="recorded" checked><label for="src-rec">Recorded sample data — a real trace captured from Chrome 153 (flagged) against a local Deno echo server over loopback</label></div>
+      <div class="check"><input type="radio" name="src" id="src-what" value="whatif"><label for="src-what">What-if — numbers you enter (hypothetical, not measured)</label></div>
+    </fieldset>
+    <p class="source-banner" id="src-banner" role="status">Source: recorded sample data.</p>
+
+    <div id="live-box" hidden>
+  <section class="conn" id="conn" aria-labelledby="conn-title">
+    <h2 id="conn-title">Connection</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="conn-url">WebTransport URL</label>
+        <input type="url" id="conn-url" list="conn-servers" value="https://wt-ord.akaleapi.net:6161/echo" required autocomplete="off" spellcheck="false" aria-describedby="conn-url-hint">
+        <datalist id="conn-servers"></datalist>
+        <p class="hint" id="conn-url-hint">Defaults to the public echo server used by Microsoft's <code>webtransport-getstats</code> sample. Any HTTP/3 WebTransport endpoint that echoes datagrams works.</p>
+      </div>
+      <div class="field">
+        <label for="conn-hash">serverCertificateHashes (optional, SHA-256)</label>
+        <input type="text" id="conn-hash" autocomplete="off" spellcheck="false" aria-describedby="conn-hash-hint">
+        <p class="hint" id="conn-hash-hint">Base64 or hex SHA-256 of a self-signed ECDSA certificate (valid ≤ 14 days) — only for a local server. Leave empty for public servers.</p>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button type="button" id="conn-connect">Connect</button>
+      <button type="button" id="conn-close" class="secondary">Close connection</button>
+    </div>
+    <p class="status" id="conn-state" role="status">Checking support…</p>
+  </section>
+    </div>
+
+    <div id="rec-box">
+      <p>40 snapshots, one every 500 ms, taken on 2026-11-08 from a real session: idle, then 64 KiB bidirectional-stream writes, then bursts of 300 datagrams, then idle again. This is loopback, so RTTs are under 3 ms and the estimate is in Gbit/s. A real network looks very different, which is why the <em>what-if</em> source exists.</p>
+      <div class="btn-row">
+        <button type="button" id="rec-step">Step one snapshot</button>
+        <button type="button" id="rec-play" class="secondary">Play</button>
+        <button type="button" id="rec-pause" class="secondary">Pause</button>
+        <button type="button" id="rec-rewind" class="secondary">Rewind</button>
+      </div>
+      <p class="hint">Snapshot <output id="rec-pos">0</output> of 40.</p>
+    </div>
+
+    <div id="what-box" hidden>
+      <div class="controls">
+        <div class="field"><label for="w-srtt">smoothedRtt (ms)</label><input type="number" id="w-srtt" value="80" min="0" step="0.1" inputmode="decimal"></div>
+        <div class="field"><label for="w-min">minRtt (ms)</label><input type="number" id="w-min" value="30" min="0" step="0.1" inputmode="decimal"></div>
+        <div class="field"><label for="w-rate">estimatedSendRate (Mbit/s)</label><input type="number" id="w-rate" value="4" min="0" step="0.1" inputmode="decimal"></div>
+        <div class="field"><label for="w-lost">new lostOutgoing since last decision</label><input type="number" id="w-lost" value="0" min="0" step="1" inputmode="numeric"></div>
+        <div class="field"><div class="check"><input type="checkbox" id="w-null"><label for="w-null"><code>estimatedSendRate</code> is <code>null</code> (no estimate yet)</label></div></div>
+      </div>
+      <div class="btn-row"><button type="button" id="w-run">Decide with these numbers</button></div>
+    </div>
+  </section>
+
+  <section class="stage" aria-labelledby="ctl-title">
+    <h2 id="ctl-title">2 · Controller</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="headroom">Use <output id="headroom-out" for="headroom">80</output>% of <code>estimatedSendRate</code></label>
+        <input type="range" id="headroom" min="40" max="100" step="5" value="80" aria-describedby="headroom-hint">
+        <p class="hint" id="headroom-hint">Headroom for audio, retransmissions and the estimate's own error.</p>
+      </div>
+      <div class="field">
+        <label for="qdelay">Step down when <code>smoothedRtt − minRtt</code> exceeds <output id="qdelay-out" for="qdelay">25</output> ms</label>
+        <input type="range" id="qdelay" min="1" max="200" step="1" value="25" aria-describedby="qdelay-hint">
+        <p class="hint" id="qdelay-hint">Queueing delay. Try 1 ms with the loopback trace to make the controller react to its tiny spikes.</p>
+      </div>
+    </div>
+    <ol class="tiers" id="tiers" aria-label="bitrate ladder"></ol>
+    <dl class="kpis">
+      <div><dt>input smoothedRtt / minRtt</dt><dd id="i-rtt">—</dd></div>
+      <div><dt>input estimatedSendRate</dt><dd id="i-rate">—</dd></div>
+      <div><dt>budget</dt><dd id="i-budget">—</dd></div>
+      <div><dt>chosen tier</dt><dd id="i-tier">—</dd></div>
+    </dl>
+    <h3>Decision log</h3>
+    <div class="log" id="log" role="log" aria-live="polite" aria-relevant="additions" tabindex="0" aria-label="Decision log"><p>No decisions yet.</p></div>
+  </section>
+
+  <section><h2>the decision rule</h2>
+<pre tabindex="0"><code>function decide(s, prevLost) {
+  if (s.estimatedSendRate === null) return { hold: "no estimate yet" };
+  const budget = s.estimatedSendRate * headroom;           // bit/s
+  const fit = ladder.findLast(t =&gt; t.bps &lt;= budget) ?? ladder[0];
+  const queueing = s.smoothedRtt - s.minRtt;                // ms
+  const lost = s.datagrams.lostOutgoing - prevLost;
+  if (lost &gt; 0 || queueing &gt; maxQueueMs) return stepDown(); // congestion signal
+  return stepUpAtMostOneTierAfter(3, fit);                   // hysteresis
+}</code></pre>
+    <p>The rule checks for <code>null</code>, because Chromium returns <code>null</code> when it has no estimate. It also checks that the RTT members exist, because Chromium leaves them out until QUIC has an RTT sample. Without those checks the controller would read <code>undefined</code> as zero and pick the wrong tier.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5120203192139776" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md#stats" target="_blank" rel="noopener">Explainer: stats</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransportconnectionstats-estimatedsendrate" target="_blank" rel="noopener">Spec: estimatedSendRate</a></li>
+    <li><a href="../live-stats-dashboard/">Live stats dashboard</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script src="../wts-lib.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const sup = WTS.supported();
+  $("support").textContent = sup
+    ? "typeof WebTransport.prototype.getStats === \"function\" — the live source is available once you connect."
+    : "WebTransport.prototype.getStats is not exposed here, so the live source cannot run. The recorded trace and what-if sources still work and are labelled as such.";
+  $("support").className = "status " + (sup ? "ok" : "fallback");
+  globalThis.showcaseTelemetry?.assert("wts-abr-support-probe", true, { getStatsExposed: sup, fallback: !sup });
+
+  // Recorded sample data: real getStats() snapshots, Chrome for Testing 153.0.8010.12 with
+  // --enable-blink-features=WebTransportStats -> Deno 2.9.8 WebTransport echo on 127.0.0.1:4433,
+  // 2026-11-08. Columns: t(ms), phase, smoothedRtt, rttVariation, minRtt, estimatedSendRate,
+  // droppedIncoming, expiredOutgoing, lostOutgoing. (expiredIncoming was not returned.)
+  const TRACE = [[518,"idle",1.179,0.88,0.257,301163712,0,0,0],[1019,"idle",1.179,0.88,0.257,301163712,0,0,0],[1521,"idle",1.179,0.88,0.257,301163712,0,0,0],[2022,"idle",1.179,0.88,0.257,301163712,0,0,0],[2523,"idle",1.179,0.88,0.257,301163712,0,0,0],[3024,"idle",1.179,0.88,0.257,301163712,0,0,0],[3525,"idle",1.179,0.88,0.257,301163712,0,0,0],[4026,"idle",1.179,0.88,0.257,301163712,0,0,0],[4527,"stream-bulk",2.511,0.769,0.051,2855578368,0,0,0],[5028,"stream-bulk",1.707,0.426,0.051,4562012672,0,0,0],[5529,"stream-bulk",0.334,0.135,0.051,10348863488,0,0,0],[6029,"stream-bulk",1.391,0.822,0.051,2485180928,0,0,0],[6533,"stream-bulk",0.588,0.599,0.051,4254613504,0,0,0],[7034,"stream-bulk",1.006,0.477,0.051,2495047424,0,0,0],[7534,"stream-bulk",1.323,0.423,0.051,1907710848,0,0,0],[8041,"stream-bulk",0.433,0.277,0.051,2596497408,0,0,0],[8542,"stream-bulk",0.9,0.567,0.051,751123136,0,0,0],[9043,"stream-bulk",0.365,0.201,0.051,2050482560,0,0,0],[9545,"datagram-burst",0.087,0.064,0.027,8602263552,0,0,0],[10046,"datagram-burst",0.056,0.021,0.024,13363552256,0,0,0],[10548,"datagram-burst",0.072,0.068,0.024,10393413632,0,0,0],[11050,"datagram-burst",0.043,0.003,0.018,17401886720,0,0,0],[11552,"datagram-burst",0.09,0.041,0.018,8313819648,0,0,0],[12053,"datagram-burst",0.78,1.191,0.018,959278848,0,0,0],[12555,"datagram-burst",0.209,0.133,0.018,3579955712,0,0,0],[13059,"datagram-burst",0.231,0.089,0.018,3238787072,0,0,0],[13560,"stream-bulk",1.447,0.492,0.018,583076096,0,0,0],[14062,"stream-bulk",0.718,0.093,0.018,1304611968,0,0,0],[14562,"stream-bulk",0.287,0.171,0.018,2645088768,0,0,0],[15064,"stream-bulk",0.32,0.136,0.018,2278027008,0,0,0],[15565,"stream-bulk",0.394,0.199,0.018,2126082816,0,0,0],[16066,"stream-bulk",0.583,0.397,0.018,1541460992,0,0,0],[16566,"idle",0.583,0.397,0.018,1541460992,0,0,0],[17067,"idle",0.583,0.397,0.018,1541460992,0,0,0],[17569,"idle",0.583,0.397,0.018,1541460992,0,0,0],[18070,"idle",0.583,0.397,0.018,1541460992,0,0,0],[18570,"idle",0.583,0.397,0.018,1541460992,0,0,0],[19071,"idle",0.583,0.397,0.018,1541460992,0,0,0],[19572,"idle",0.583,0.397,0.018,1541460992,0,0,0],[20073,"idle",0.583,0.397,0.018,1541460992,0,0,0]];
+  const fromTrace = (r) => ({ smoothedRtt: r[2], rttVariation: r[3], minRtt: r[4], estimatedSendRate: r[5], datagrams: { droppedIncoming: r[6], expiredOutgoing: r[7], lostOutgoing: r[8] }, _phase: r[1], _t: r[0] });
+
+  const LADDER = [
+    { name: "audio only", bps: 64e3 },
+    { name: "240p", bps: 400e3 },
+    { name: "480p", bps: 1.2e6 },
+    { name: "720p", bps: 3e6 },
+    { name: "1080p", bps: 6e6 },
+    { name: "1440p", bps: 10e6 },
+    { name: "4K", bps: 20e6 },
+  ];
+  const tierEls = LADDER.map((t) => {
+    const li = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = t.name;
+    const pill = document.createElement("span");
+    pill.className = "pill";
+    pill.textContent = WTS.fmtRate(t.bps);
+    li.append(name, pill);
+    $("tiers").append(li);
+    return li;
+  });
+
+  let tier = 2;
+  let goodStreak = 0;
+  let prevLost = null;
+  let source = "recorded";
+
+  function paintTier() {
+    tierEls.forEach((li, i) => {
+      li.classList.toggle("chosen", i === tier);
+      if (i === tier) li.setAttribute("aria-current", "true"); else li.removeAttribute("aria-current");
+    });
+    $("i-tier").textContent = LADDER[tier].name;
+  }
+  paintTier();
+
+  const SOURCE_LABEL = { live: "LIVE getStats()", recorded: "RECORDED sample", whatif: "WHAT-IF (hypothetical)" };
+  function log(text) {
+    const log = $("log");
+    if (log.firstElementChild && log.firstElementChild.textContent === "No decisions yet.") log.textContent = "";
+    const p = document.createElement("p");
+    p.textContent = "[" + SOURCE_LABEL[source] + "] " + text;
+    log.prepend(p);
+    while (log.children.length > 30) log.lastElementChild.remove();
+  }
+
+  function decide(s, note) {
+    const headroom = Number($("headroom").value) / 100;
+    const maxQ = Number($("qdelay").value);
+    const hasRtt = typeof s.smoothedRtt === "number" && typeof s.minRtt === "number";
+    $("i-rtt").textContent = hasRtt ? s.smoothedRtt.toFixed(3) + " / " + s.minRtt.toFixed(3) + " ms" : "not returned";
+    $("i-rate").textContent = WTS.fmtRate(s.estimatedSendRate);
+    const lostNow = s.datagrams && typeof s.datagrams.lostOutgoing === "number" ? s.datagrams.lostOutgoing : null;
+    const lostDelta = typeof s._lostDelta === "number" ? s._lostDelta : (lostNow !== null && prevLost !== null ? lostNow - prevLost : 0);
+    if (lostNow !== null) prevLost = lostNow;
+    const prefix = note ? note + ": " : "";
+    if (typeof s.estimatedSendRate !== "number") {
+      $("i-budget").textContent = "—";
+      goodStreak = 0;
+      log(prefix + "estimatedSendRate is " + (s.estimatedSendRate === null ? "null" : "not returned") + " — holding " + LADDER[tier].name + " (no estimate to act on).");
+      return;
+    }
+    const budget = s.estimatedSendRate * headroom;
+    $("i-budget").textContent = WTS.fmtRate(Math.round(budget));
+    let fit = 0;
+    LADDER.forEach((t, i) => { if (t.bps <= budget) fit = i; });
+    const queueing = hasRtt ? s.smoothedRtt - s.minRtt : null;
+    const before = tier;
+    let why;
+    if (lostDelta > 0) {
+      tier = Math.max(0, Math.min(tier, fit) - 1);
+      goodStreak = 0;
+      why = lostDelta + " datagram(s) declared lost → step down";
+    } else if (queueing !== null && queueing > maxQ) {
+      tier = Math.max(0, Math.min(tier, fit) - 1);
+      goodStreak = 0;
+      why = "queueing " + queueing.toFixed(3) + " ms > " + maxQ + " ms → step down";
+    } else if (fit < tier) {
+      tier = fit;
+      goodStreak = 0;
+      why = "budget " + WTS.fmtRate(Math.round(budget)) + " no longer fits → drop to the largest tier that does";
+    } else if (fit > tier) {
+      goodStreak++;
+      if (goodStreak >= 3) { tier++; goodStreak = 0; why = "3 healthy snapshots in a row → step up one tier"; }
+      else why = "healthy (" + goodStreak + "/3 before stepping up)";
+    } else {
+      goodStreak = 0;
+      why = "at the largest tier the budget allows";
+    }
+    paintTier();
+    log(prefix + why + (before !== tier ? " (" + LADDER[before].name + " → " + LADDER[tier].name + ")" : " — " + LADDER[tier].name));
+  }
+
+  // --- source switching ---
+  function setSource(v) {
+    source = v;
+    $("live-box").hidden = v !== "live";
+    $("rec-box").hidden = v !== "recorded";
+    $("what-box").hidden = v !== "whatif";
+    pausePlay();
+    stopLive();
+    prevLost = null;
+    goodStreak = 0;
+    $("src-banner").textContent = v === "live"
+      ? "Source: live getStats() on your connection. Numbers are measured now."
+      : v === "recorded"
+      ? "Source: recorded sample data (real Chrome 153 snapshots over loopback, 2026-11-08). Not live."
+      : "Source: what-if numbers you typed in. Hypothetical, not measured.";
+    if (v === "live" && panel.phase === "connected") startLive();
+  }
+  for (const r of document.querySelectorAll('input[name="src"]')) r.addEventListener("change", () => setSource(r.value));
+
+  // --- recorded ---
+  let pos = 0, playTimer = 0;
+  function stepRec() {
+    if (pos >= TRACE.length) { pausePlay(); log("end of recorded trace — press Rewind to replay"); return false; }
+    const s = fromTrace(TRACE[pos++]);
+    $("rec-pos").value = String(pos);
+    decide(s, "snapshot " + pos + " (t=" + (s._t / 1000).toFixed(1) + "s, " + s._phase + ")");
+    return true;
+  }
+  function pausePlay() {
+    clearInterval(playTimer);
+    playTimer = 0;
+    $("rec-play").disabled = false;
+    $("rec-pause").disabled = true;
+  }
+  $("rec-step").addEventListener("click", () => { pausePlay(); stepRec(); });
+  $("rec-play").addEventListener("click", () => {
+    if (playTimer) return;
+    $("rec-play").disabled = true;
+    $("rec-pause").disabled = false;
+    playTimer = setInterval(stepRec, 500);
+  });
+  $("rec-pause").addEventListener("click", pausePlay);
+  $("rec-rewind").addEventListener("click", () => { pausePlay(); pos = 0; prevLost = null; goodStreak = 0; tier = 2; paintTier(); $("rec-pos").value = "0"; log("rewound to snapshot 0, tier reset to 480p"); });
+  pausePlay();
+
+  // --- what-if ---
+  $("w-run").addEventListener("click", () => {
+    const nul = $("w-null").checked;
+    decide({
+      smoothedRtt: Number($("w-srtt").value),
+      minRtt: Number($("w-min").value),
+      estimatedSendRate: nul ? null : Math.round(Number($("w-rate").value) * 1e6),
+      datagrams: {},
+      _lostDelta: Math.max(0, Number($("w-lost").value) || 0),
+    }, "typed values");
+  });
+  $("w-null").addEventListener("change", () => { $("w-rate").disabled = $("w-null").checked; });
+
+  // --- live ---
+  WTS.fillDatalist($("conn-servers"));
+  let liveTimer = 0, liveGen = 0, current = null, liveAsserted = false;
+  const panel = WTS.bindPanel($("conn"), {
+    onCreate(wt) { current = wt; stopLive(); },
+    onReady(wt) {
+      (async () => { try { const r = wt.datagrams.readable.getReader(); for (;;) { const x = await r.read(); if (x.done) break; } } catch { /* ended */ } })();
+      if (source === "live") startLive();
+    },
+    onEnd() { stopLive(); log("connection ended — live decisions stopped"); },
+  });
+  function startLive() {
+    if (!current || panel.phase !== "connected") return;
+    const gen = ++liveGen;
+    const loop = async () => {
+      if (gen !== liveGen) return;
+      try {
+        const s = await current.getStats();
+        if (gen !== liveGen) return;
+        if (!liveAsserted) {
+          liveAsserted = true;
+          globalThis.showcaseTelemetry?.assert("wts-abr-live-stats", typeof s.datagrams === "object", { estimatedSendRate: s.estimatedSendRate, hasRtt: typeof s.smoothedRtt === "number" });
+        }
+        decide(s, "live snapshot");
+      } catch (e) {
+        if (gen === liveGen) log("getStats() rejected: " + WTS.err(e));
+        return;
+      }
+      liveTimer = setTimeout(loop, 1000);
+    };
+    loop();
+  }
+  function stopLive() { liveGen++; clearTimeout(liveTimer); }
+
+  for (const [id, out] of [["headroom", "headroom-out"], ["qdelay", "qdelay-out"]]) {
+    $(id).addEventListener("input", () => { $(out).value = $(id).value; });
+  }
+})();
+</script>
+</body>
+</html>

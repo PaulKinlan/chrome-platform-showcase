@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live stats dashboard — WebTransport connection statistics — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../wts-demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport connection statistics</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · network · inspection tooling</p>
+    <h1>Live stats dashboard</h1>
+    <p class="lede">The spec calls <code>getStats()</code> results <em>snapshots</em>: nothing updates on its own. A connection-health panel has to poll. This one runs <code>getStats()</code> on an interval you choose, plots <code>smoothedRtt</code> against <code>minRtt</code> and the <code>estimatedSendRate</code> trend, and tracks how much each datagram counter has grown. It stops right away when you press Stop, and pauses while the tab is hidden.</p>
+  </header>
+
+  <p class="note" id="banner"><strong>Behind a flag in Chrome 153–158.</strong> <code>WebTransport.prototype.getStats</code> is gated by Blink's <code>WebTransportStats</code> runtime feature (<code>status: "experimental"</code>; ChromeStatus targets Chrome 159 for desktop, Android and WebView). To try it now: open <code>chrome://flags/#enable-experimental-web-platform-features</code>, set it to <em>Enabled</em> and relaunch — or start Chrome with <code>--enable-blink-features=WebTransportStats</code>. There is no dedicated chrome://flags entry for the stats method itself. Reading statistics also needs a live HTTP/3 WebTransport session, which this site cannot host: use a public echo server or run your own (instructions on the <a href="../#local-server">feature page</a>). Every number on this page comes from a real <code>getStats()</code> call — nothing is simulated.</p>
+
+  <p class="status" id="support" role="status">Probing <code>WebTransport.prototype.getStats</code>…</p>
+
+  <section class="conn" id="conn" aria-labelledby="conn-title">
+    <h2 id="conn-title">Connection</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="conn-url">WebTransport URL</label>
+        <input type="url" id="conn-url" list="conn-servers" value="https://wt-ord.akaleapi.net:6161/echo" required autocomplete="off" spellcheck="false" aria-describedby="conn-url-hint">
+        <datalist id="conn-servers"></datalist>
+        <p class="hint" id="conn-url-hint">Defaults to the public echo server used by Microsoft's <code>webtransport-getstats</code> sample. Any HTTP/3 WebTransport endpoint that echoes datagrams works.</p>
+      </div>
+      <div class="field">
+        <label for="conn-hash">serverCertificateHashes (optional, SHA-256)</label>
+        <input type="text" id="conn-hash" autocomplete="off" spellcheck="false" aria-describedby="conn-hash-hint">
+        <p class="hint" id="conn-hash-hint">Base64 or hex SHA-256 of a self-signed ECDSA certificate (valid ≤ 14 days) — only for a local server. Leave empty for public servers.</p>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button type="button" id="conn-connect">Connect</button>
+      <button type="button" id="conn-close" class="secondary">Close connection</button>
+    </div>
+    <p class="status" id="conn-state" role="status">Checking support…</p>
+  </section>
+
+  <section class="stage" aria-labelledby="poll-title">
+    <h2 id="poll-title">Poll</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="interval">Polling interval</label>
+        <select id="interval" aria-describedby="interval-hint">
+          <option value="250">250 ms</option>
+          <option value="500">500 ms</option>
+          <option value="1000" selected>1 s</option>
+          <option value="2000">2 s</option>
+          <option value="5000">5 s</option>
+        </select>
+        <p class="hint" id="interval-hint">The next call is scheduled only after the previous one settles, so calls never pile up.</p>
+      </div>
+      <div class="field">
+        <label for="burst">Datagram burst size</label>
+        <input type="number" id="burst" value="200" min="1" max="5000" inputmode="numeric" aria-describedby="burst-hint">
+        <p class="hint" id="burst-hint">Sends real datagrams of <code>maxDatagramSize</code> bytes, so you can watch the counters and send-rate react.</p>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button type="button" id="start">Start polling</button>
+      <button type="button" id="stop" class="secondary">Stop</button>
+      <button type="button" id="burst-btn" class="secondary">Send burst</button>
+      <button type="button" id="reset" class="secondary">Clear history</button>
+    </div>
+    <p class="status" id="poll-state" role="status" aria-live="polite">Not polling.</p>
+
+    <dl class="kpis" id="kpis">
+      <div><dt>smoothedRtt</dt><dd id="k-srtt">—</dd></div>
+      <div><dt>minRtt</dt><dd id="k-min">—</dd></div>
+      <div><dt>rttVariation</dt><dd id="k-var">—</dd></div>
+      <div><dt>estimatedSendRate</dt><dd id="k-rate">—</dd></div>
+      <div><dt>datagrams.droppedIncoming (Δ)</dt><dd id="k-drop">—</dd></div>
+      <div><dt>datagrams.expiredIncoming (Δ)</dt><dd id="k-expin">—</dd></div>
+      <div><dt>datagrams.expiredOutgoing (Δ)</dt><dd id="k-expout">—</dd></div>
+      <div><dt>datagrams.lostOutgoing (Δ)</dt><dd id="k-lost">—</dd></div>
+      <div><dt>samples / last call</dt><dd id="k-n">0</dd></div>
+    </dl>
+
+    <figure class="chart">
+      <svg id="rtt-chart" viewBox="0 0 600 160" role="img" aria-labelledby="rtt-title rtt-desc">
+        <title id="rtt-title">smoothedRtt and minRtt over the last 60 samples</title>
+        <desc id="rtt-desc">No samples yet.</desc>
+        <line class="axis" x1="40" y1="140" x2="595" y2="140"></line>
+        <line class="axis" x1="40" y1="10" x2="40" y2="140"></line>
+        <text x="2" y="16" id="rtt-max">—</text>
+        <text x="2" y="144">0</text>
+        <polyline class="line-a" id="rtt-line" points=""></polyline>
+        <polyline class="line-b" id="min-line" points=""></polyline>
+      </svg>
+      <figcaption>Solid blue: <code>smoothedRtt</code>. Dashed green: <code>minRtt</code>. Y axis in milliseconds. The table below has the same data as text.</figcaption>
+    </figure>
+    <figure class="chart">
+      <svg id="rate-chart" viewBox="0 0 600 120" role="img" aria-labelledby="rate-title rate-desc">
+        <title id="rate-title">estimatedSendRate over the last 60 samples</title>
+        <desc id="rate-desc">No samples yet.</desc>
+        <line class="axis" x1="40" y1="100" x2="595" y2="100"></line>
+        <line class="axis" x1="40" y1="10" x2="40" y2="100"></line>
+        <text x="2" y="16" id="rate-max">—</text>
+        <text x="2" y="104">0</text>
+        <polyline class="line-a" id="rate-line" points=""></polyline>
+      </svg>
+      <figcaption><code>estimatedSendRate</code> in bits per second. Gaps mean the sample was <code>null</code> (no estimate yet).</figcaption>
+    </figure>
+
+    <div class="matrix-wrap">
+      <div class="scroll" tabindex="0" role="region" aria-labelledby="hist-cap">
+        <table class="matrix" id="hist">
+          <caption id="hist-cap">Last 10 snapshots (newest first)</caption>
+          <thead><tr><th scope="col">t (s)</th><th scope="col">smoothedRtt</th><th scope="col">minRtt</th><th scope="col">rttVariation</th><th scope="col">estimatedSendRate</th><th scope="col">dropped in</th><th scope="col">expired out</th><th scope="col">lost out</th></tr></thead>
+          <tbody id="hist-rows"><tr><td colspan="8">No samples yet.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section><h2>what to look for</h2>
+    <p>On an idle connection the RTT values and the send-rate estimate often stay the same from call to call. QUIC updates them only when acknowledgements arrive, and an idle session sends almost nothing. Press <em>Send burst</em> while polling and the estimate moves. If the server echoes faster than this page reads, <code>droppedIncoming</code> goes up. The datagram counters only ever grow, so the dashboard shows each one's change since polling started. A Chromium source comment warns that the send-rate estimate is poor unless the BBR congestion controller is in use. Treat it as a trend, not a measured throughput.</p>
+  </section>
+
+  <section><h2>the code</h2>
+<pre tabindex="0"><code>let timer, generation = 0;
+async function poll(wt, gen) {
+  const s = await wt.getStats();          // one snapshot
+  if (gen !== generation) return;         // Stop pressed meanwhile: drop it
+  render(s);
+  timer = setTimeout(() =&gt; poll(wt, gen), intervalMs);
+}
+start = () =&gt; poll(wt, ++generation);
+stop  = () =&gt; { generation++; clearTimeout(timer); };</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5120203192139776" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransport-getstats" target="_blank" rel="noopener">Spec: getStats() algorithm</a></li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc9002#section-5" target="_blank" rel="noopener">RFC 9002 §5: estimating the RTT</a></li>
+    <li><a href="../adaptive-quality-controller/">Adaptive quality controller</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script src="../wts-lib.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const sup = WTS.supported();
+  $("support").textContent = sup
+    ? "typeof WebTransport.prototype.getStats === \"function\" — the method is exposed."
+    : "WebTransport.prototype.getStats is not exposed here — the dashboard cannot poll. Enable the flag in the banner and reload.";
+  $("support").className = "status " + (sup ? "ok" : "fallback");
+  globalThis.showcaseTelemetry?.assert("wts-dashboard-support-probe", true, { getStatsExposed: sup, fallback: !sup });
+
+  WTS.fillDatalist($("conn-servers"));
+  let current = null;
+  let timer = 0;
+  let generation = 0;
+  let polling = false;
+  let hiddenPause = false;
+  let history = [];
+  let base = null;
+  let t0 = 0;
+  let asserted = false;
+
+  const panel = WTS.bindPanel($("conn"), {
+    onCreate(wt) {
+      stop("New connection — polling reset.");
+      current = wt;
+      clearHistory();
+      sync();
+    },
+    onReady(wt) {
+      drain(wt);
+      sync();
+      start();
+    },
+    onEnd() {
+      if (polling) {
+        // one last poll: the spec says closed sessions resolve with the most recent stats
+        const wt = current, gen = generation;
+        stop("Connection ended — polling stopped.");
+        wt.getStats().then((s) => { if (gen + 1 === generation) render(s, true); }, () => {});
+      }
+      sync();
+    },
+  });
+
+  async function drain(wt) {
+    // Read echoes so they do not count as droppedIncoming unless the server floods us.
+    let reader;
+    try {
+      reader = wt.datagrams.readable.getReader();
+      for (;;) { const { done } = await reader.read(); if (done) break; }
+    } catch { /* session ended */ }
+  }
+
+  function sync() {
+    const connected = panel.phase === "connected";
+    $("start").disabled = !sup || !connected || polling;
+    $("stop").disabled = !polling;
+    $("burst-btn").disabled = !sup || !connected;
+    $("interval").disabled = false;
+  }
+  sync();
+
+  function clearHistory() {
+    history = [];
+    base = null;
+    t0 = performance.now();
+    $("hist-rows").innerHTML = '<tr><td colspan="8">No samples yet.</td></tr>';
+    for (const id of ["k-srtt", "k-min", "k-var", "k-rate", "k-drop", "k-expin", "k-expout", "k-lost"]) $(id).textContent = "—";
+    $("k-n").textContent = "0";
+    drawCharts();
+  }
+
+  function start() {
+    if (!current || panel.phase !== "connected" || polling) return;
+    polling = true;
+    const gen = ++generation;
+    $("poll-state").textContent = "Polling every " + $("interval").selectedOptions[0].text + ".";
+    sync();
+    tick(current, gen);
+  }
+  function stop(msg) {
+    generation++;
+    clearTimeout(timer);
+    timer = 0;
+    if (polling) $("poll-state").textContent = msg || "Stopped. No further getStats() calls are made.";
+    polling = false;
+    sync();
+  }
+
+  async function tick(wt, gen) {
+    if (gen !== generation) return;
+    if (document.hidden) { hiddenPause = true; return; }
+    const c0 = performance.now();
+    let s;
+    try {
+      s = await wt.getStats();
+    } catch (e) {
+      if (gen !== generation) return;
+      stop("getStats() rejected: " + WTS.err(e));
+      return;
+    }
+    if (gen !== generation) return; // Stop pressed while the call was in flight: discard.
+    render(s, false, performance.now() - c0);
+    timer = setTimeout(() => tick(wt, gen), Number($("interval").value));
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && hiddenPause && polling) {
+      hiddenPause = false;
+      tick(current, generation);
+    }
+  });
+
+  function delta(name, s) {
+    const v = s.datagrams ? s.datagrams[name] : undefined;
+    if (typeof v !== "number") return "not returned";
+    const b = base && typeof base[name] === "number" ? base[name] : v;
+    return v + " (+" + (v - b) + ")";
+  }
+
+  function render(s, final, callMs) {
+    if (!base) base = Object.assign({}, s.datagrams || {});
+    const t = (performance.now() - t0) / 1000;
+    history.push({ t, s });
+    if (history.length > 60) history.shift();
+    $("k-srtt").textContent = WTS.fmtMs(s.smoothedRtt);
+    $("k-min").textContent = WTS.fmtMs(s.minRtt);
+    $("k-var").textContent = WTS.fmtMs(s.rttVariation);
+    $("k-rate").textContent = WTS.fmtRate(s.estimatedSendRate);
+    $("k-drop").textContent = delta("droppedIncoming", s);
+    $("k-expin").textContent = delta("expiredIncoming", s);
+    $("k-expout").textContent = delta("expiredOutgoing", s);
+    $("k-lost").textContent = delta("lostOutgoing", s);
+    $("k-n").textContent = history.length + (final ? " (final, after close)" : callMs !== undefined ? " / " + callMs.toFixed(1) + " ms" : "");
+    const rows = history.slice(-10).reverse().map(({ t, s }) => {
+      const d = s.datagrams || {};
+      const cell = (v) => "<td>" + (v === undefined ? "—" : v === null ? "null" : String(v)) + "</td>";
+      return "<tr><th scope=\"row\">" + t.toFixed(1) + "</th>" + cell(s.smoothedRtt) + cell(s.minRtt) + cell(s.rttVariation) + cell(s.estimatedSendRate) + cell(d.droppedIncoming) + cell(d.expiredOutgoing) + cell(d.lostOutgoing) + "</tr>";
+    });
+    $("hist-rows").innerHTML = rows.join("");
+    const labels = ["t (s)", "smoothedRtt", "minRtt", "rttVariation", "estimatedSendRate", "dropped in", "expired out", "lost out"];
+    for (const tr of $("hist-rows").rows) [...tr.cells].forEach((c, i) => { c.dataset.label = labels[i]; });
+    drawCharts();
+    if (!asserted) {
+      asserted = true;
+      globalThis.showcaseTelemetry?.assert("wts-dashboard-snapshot", typeof s.datagrams === "object" && s.datagrams !== null, { keys: Object.keys(s) });
+    }
+  }
+
+  function points(values, w, h, top, max) {
+    const n = values.length;
+    const out = [];
+    values.forEach((v, i) => {
+      if (typeof v !== "number") return;
+      const x = 40 + (n === 1 ? 0 : (i / (n - 1)) * (w - 45));
+      const y = top + h - (max > 0 ? (v / max) * h : 0);
+      out.push(x.toFixed(1) + "," + y.toFixed(1));
+    });
+    return out.join(" ");
+  }
+  function drawCharts() {
+    const srtt = history.map((h) => h.s.smoothedRtt);
+    const min = history.map((h) => h.s.minRtt);
+    const rate = history.map((h) => h.s.estimatedSendRate);
+    const nums = (a) => a.filter((v) => typeof v === "number");
+    const rmax = Math.max(0, ...nums(srtt), ...nums(min));
+    const qmax = Math.max(0, ...nums(rate));
+    $("rtt-line").setAttribute("points", points(srtt, 600, 130, 10, rmax));
+    $("min-line").setAttribute("points", points(min, 600, 130, 10, rmax));
+    $("rate-line").setAttribute("points", points(rate, 600, 90, 10, qmax));
+    $("rtt-max").textContent = rmax ? rmax.toFixed(1) + "ms" : "—";
+    $("rate-max").textContent = qmax ? WTS.fmtRate(qmax).replace(" ", "") : "—";
+    const last = history[history.length - 1];
+    $("rtt-desc").textContent = last
+      ? history.length + " samples. Latest smoothedRtt " + WTS.fmtMs(last.s.smoothedRtt) + ", minRtt " + WTS.fmtMs(last.s.minRtt) + ", peak " + rmax.toFixed(3) + " ms."
+      : "No samples yet.";
+    $("rate-desc").textContent = last ? "Latest estimatedSendRate " + WTS.fmtRate(last.s.estimatedSendRate) + "; peak " + WTS.fmtRate(qmax || null) + "." : "No samples yet.";
+  }
+
+  $("start").addEventListener("click", start);
+  $("stop").addEventListener("click", () => stop());
+  $("reset").addEventListener("click", clearHistory);
+  $("interval").addEventListener("change", () => {
+    if (polling) $("poll-state").textContent = "Polling every " + $("interval").selectedOptions[0].text + " (applies from the next call).";
+  });
+  $("burst-btn").addEventListener("click", async () => {
+    const wt = current;
+    if (!wt || panel.phase !== "connected") return;
+    $("burst-btn").disabled = true;
+    const n = Math.max(1, Math.min(5000, Number($("burst").value) || 1));
+    const size = Math.max(1, wt.datagrams.maxDatagramSize || 1000);
+    const writer = wt.datagrams.writable.getWriter();
+    const payload = new Uint8Array(size);
+    const writes = [];
+    for (let i = 0; i < n; i++) writes.push(writer.write(payload));
+    const results = await Promise.allSettled(writes);
+    try { writer.releaseLock(); } catch { /* ignore */ }
+    const failed = results.filter((r) => r.status === "rejected").length;
+    $("poll-state").textContent = "Sent a burst of " + n + " × " + size + "-byte datagrams" + (failed ? " (" + failed + " writes rejected)" : "") + "." + (polling ? " Polling continues." : " Start polling to see the effect.");
+    sync();
+  });
+})();
+</script>
+</body>
+</html>
