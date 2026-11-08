@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deprecate and stop firing events during subframe removal — Chrome 156 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v156/">&larr; Chrome 156</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v156 · DOM / HTML · deprecation &amp; behaviour change · developer trial (flag)</p>
+    <h1>Deprecate and stop firing events during subframe removal</h1>
+    <p class="lede">When you remove an <code>&lt;iframe&gt;</code> from the DOM, Chrome — like Firefox and Safari — has always run the frame's <code>pagehide</code>, <code>visibilitychange</code> and <code>unload</code> handlers <em>synchronously, in the middle of your removal call</em>, while the iframe is still connected. The HTML Standard's "destroy a child navigable" fires none of them. Behind <code>OmitSubframeDetachmentEventsOnRemoval</code>, Chrome stops firing them, so a subframe that can script its ancestors can no longer re-enter and mutate the parent's DOM mid-removal. Navigating a frame still fires <code>pagehide</code> as before.</p>
+  </header>
+
+  <p class="note"><strong>Try the new behaviour:</strong> launch Chromium 156 or later (Canary/Dev) with <code>--enable-blink-features=OmitSubframeDetachmentEventsOnRemoval</code> (equivalently <code>--enable-features=OmitSubframeDetachmentEventsOnRemoval</code>). There is no <code>chrome://flags</code> entry, and <code>--enable-experimental-web-platform-features</code> does not enable it. Every demo below detects the behaviour your browser actually has by removing a real probe frame — never from the version number.</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./removal-event-probe/">Removal event probe</a></h3>
+      <p>The canonical experiment: a same-origin iframe with all three listeners, <code>iframe.remove()</code>, and a sequence-numbered trace showing which events fired, in what order, whether they ran inside the call, and that <code>frameElement.isConnected</code> was still <code>true</code> while they did. Plus an opaque-origin <code>sandbox="allow-scripts"</code> contrast reported over a <code>MessagePort</code> with wall-clock timing.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./timeline-explorer/">Detachment timeline explorer</a></h3>
+      <p>Inspection tool: choose listeners, nesting depth (up to three levels), origin, and the removal path — <code>remove()</code>, removing an ancestor, <code>replaceChildren()</code>, <code>innerHTML</code>, <code>textContent</code>, <code>replaceWith()</code>, an <code>insertBefore()</code> "move" — against the two contrasts that must not change: <code>moveBefore()</code> and navigating the frame.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./cleanup-migration/">Cleanup that survives silent removal</a></h3>
+      <p>The product case and the migration: a draft-saving widget closed by its host with three strategies — legacy save-in-<code>pagehide</code>, a host-driven teardown handshake, and save-as-you-type — showing which drafts survive in your mode, a heartbeat proving a removed frame can never notice its own removal later, and the <code>allow="unload 'none'"</code> Permissions Policy contrast.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./reentrancy-hazard/">Re-entrancy hazards during removal</a></h3>
+      <p>Edge and failure cases, run for real: a handler that re-inserts its own iframe (the caller's <code>remove()</code> throws and leaves a connected iframe with no browsing context), removes itself first, deletes a sibling, detaches the container running <code>replaceChildren()</code>, or reads a container while <code>innerHTML = ''</code> is mid-flight.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it is changing</h2>
+    <p>Blink dispatched the three events from <code>Document::DispatchUnloadEvents</code> while detaching a removed frame (<code>FrameDetachType::kRemove</code>), inside <code>ContainerNode::RemoveChild</code>. Script in a subframe that can access an ancestor's DOM could therefore mutate that DOM during node removal — a source of crashes and inconsistent DOM state — and it contradicts the HTML Standard, which destroys a removed child navigable silently (<a href="https://github.com/whatwg/html/issues/10194">whatwg/html#10194</a>). A compatibility study over the October 2026 HTTP Archive crawl plus 367 live mobile pages found 0 user-facing breakage: the handlers that do run on removal are mostly invisible telemetry beacons or benign cleanup (Auth0 lock release, Google Publisher Tags slot disposal, YouTube player state). To keep churn minimal, ChromeStatus scopes the change to subframes that can script an ancestor (<code>SecurityOrigin::CanAccess</code> on any ancestor), about 0.026% of mobile pages; checking only the parent would miss an A1 → B → A2 cross-site sandwich.</p>
+  </section>
+
+  <section><h2>the exact surface</h2>
+    <pre tabindex="0"><code>// Legacy (default Chrome, Firefox, Safari): these run INSIDE remove()
+// child frame (same-origin with the host):
+addEventListener('pagehide', (e) =&gt; { /* e.persisted === false */ });
+document.addEventListener('visibilitychange', () =&gt; { /* visibilityState 'hidden' */ });
+addEventListener('unload', () =&gt; { /* only where Permissions Policy allows unload */ });
+
+// host page — any DOM removal path detaches the frame (FrameDetachType::kRemove):
+iframe.remove();  wrapper.remove();  container.replaceChildren();
+container.innerHTML = '';  container.textContent = '';  iframe.replaceWith(x);
+other.insertBefore(iframe, null);   // a remove + insert: detaches and reloads
+
+// With OmitSubframeDetachmentEventsOnRemoval: none of the listeners above run.
+// Unchanged in both modes:
+other.moveBefore(iframe, null);     // atomic move: no detach, no events, no reload
+iframe.srcdoc = '…';                // navigation: pagehide/visibilitychange/unload still fire</code></pre>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id: 5754395122860032 — listing name "Deprecate and stop firing events during subframe
+    removal", v156 listing. ChromeStatus: status "In developer trial (Behind a flag)"; owner
+    nrosenthal@chromium.org; component Blink>HTML>IFrame; bug issues.chromium.org/issues/552675453;
+    finch_name and flag_name both OmitSubframeDetachmentEventsOnRemoval; stages list desktop_first 156
+    (two stages) and desktop_last 158 on one stage; wpt_descr names the Blink web test
+    fast/frames/subframe-detachment-events-on-removal.html (same-origin, cross-origin/opaque,
+    sandboxed with/without allow-same-origin, A1->B->A2 sandwich). Spec read: HTML "destroy a child
+    navigable" (no pagehide/unload on DOM removal). Explainers read in full: whatwg/html#10194
+    (domfarolino; annevk supportive in principle; all engines currently fire; WPT
+    dom/nodes/insertion-removing-steps/insertion-removing-steps-iframe.window.html) and Noam
+    Rosenthal's compat gist (Option 1 = all subframes, matching the spec and the runtime flag;
+    Option 2b = only when canAccessAnyAncestor; Option 2a parent-only rejected because of the A1->B->A2
+    sandwich; Chrome 156.0.8078.79 runs used --enable-blink-features=OmitSubframeDetachmentEventsOnRemoval).
+    Chromium source (main): runtime_enabled_features.json5 entry "OmitSubframeDetachmentEventsOnRemoval"
+    has NO status field (off by default; not "experimental", so the experimental-web-platform-features
+    switch does not enable it; no chrome://flags entry in flag_descriptions.h). Gate lives in
+    third_party/blink/renderer/core/dom/document.cc Document::DispatchUnloadEvents: if
+    !will_commit_new_document_in_this_frame && !IsMainFrame() && flag -> load_event_progress_ =
+    kUnloadEventHandled; return. LocalFrame::DetachImpl calls
+    DispatchUnloadEventAndFillOldDocumentInfoIfNeeded(type != kRemove). No dedicated use counter or
+    deprecation.json5 message found; the study measured existing counters kDocumentPageHideFired (2227)
+    and kDocumentUnloadFired (203).
+    EMPIRICAL (headless Chrome for Testing): 153.0.8010.12 has no such feature (both switches inert, legacy
+    everywhere). 159.0.8149.0 (Canary CfT, downloaded for verification): default = legacy (same-origin
+    pagehide -> visibilitychange -> unload all inside remove(), frameElement.isConnected === true);
+    --enable-blink-features=... AND --enable-features=... both silence same-origin AND opaque sandboxed
+    frames — i.e. the shipped code is Option 1, wider than the ChromeStatus "scriptable subframes"
+    wording; the pages report what they observe and the opaque conformance assertion is worded as the
+    HTML contract. Navigation (srcdoc swap) still fires pagehide(persisted=false)/visibilitychange in
+    both modes; moveBefore fires nothing in both. Default-mode hazards reproduced: re-insert ->
+    NotFoundError + connected iframe with null contentWindow; sibling deleted; container detached during
+    replaceChildren; handler observes container mid-innerHTML. Chrome 159 also applied its separate
+    unload deprecation (Permissions Policy 'unload' disallowed) in some launches but not others for the
+    same localhost origin; the kit checks permissionsPolicy/featurePolicy.allowsFeature('unload') and
+    skips/labels unload instead of registering an ignored listener.
+    Use-case portfolio: (1) basic/canonical = removal-event-probe; (2) configuration/inspection =
+    timeline-explorer (listeners x depth x origin x 9 removal/contrast paths); (3) practical product =
+    cleanup-migration (draft widget, three strategies); (4) edge/failure/migration = reentrancy-hazard
+    (5 hazards) + the migration checklist in cleanup-migration; (5) novel/advanced composition = the
+    moveBefore state-preserving move and the allow="unload 'none'" Permissions Policy compositions are
+    built into timeline-explorer and cleanup-migration rather than as a separate page — a standalone
+    page would duplicate those controls. Cross-site (OOPIF) sandwich not buildable: this deployment is a
+    single origin; recorded as a manual conformance assertion.
+    modern-web-guidance consulted (npx modern-web-guidance@latest): accessibility (live regions:
+    polite status for outcomes, role=log for histories, fieldset/legend, labels), responsive-table
+    (table wrapper with role=region + tabindex + caption), responsive-design/css-layout (select width
+    overflow fix), move-dom-element-without-losing-state (moveBefore with feature detection),
+    full-session-analytics (fetchLater instead of detach-time beacons). Recorded per concept.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5754395122860032" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/document-sequences.html#destroy-a-child-navigable" target="_blank" rel="noopener">HTML Standard: destroy a child navigable</a></li>
+    <li><a href="https://github.com/whatwg/html/issues/10194" target="_blank" rel="noopener">whatwg/html#10194: Browsers synchronously fire pagehide &amp; unload, while the standard doesn't</a></li>
+    <li><a href="https://gist.github.com/noamr/f80676a616444de7efb5be671692e919" target="_blank" rel="noopener">Compatibility study (HTTP Archive + live pages)</a></li>
+    <li><a href="https://issues.chromium.org/issues/552675453" target="_blank" rel="noopener">Chromium tracking bug 552675453</a></li>
+    <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/core/dom/document.cc?q=OmitSubframeDetachmentEventsOnRemovalEnabled" target="_blank" rel="noopener">Chromium source: Document::DispatchUnloadEvents gate</a></li>
+    <li><a href="https://developer.chrome.com/docs/web-platform/deprecating-unload" target="_blank" rel="noopener">Deprecating the unload event</a></li>
+    <li><a href="./conformance/">Conformance suite for this feature</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Migration side-by-side — Deprecate and remove WebRTC peer connection method — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../dtmf-lab.css">
+</head>
+<body>
+<main class="lab">
+  <p class="crumbs"><a href="../">&larr; Deprecate and remove WebRTC peer connection method</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · migration</p>
+    <h1>Legacy vs standard, on the same live call</h1>
+    <p class="lede">Start one real loopback call, then run the legacy <code>pc.createDTMFSender(track)</code> code and the standard <code>sender.dtmf</code> code against it. Both columns execute exactly the code shown. Below, a drop-in helper reproduces every legacy validation with standard API only — and a comparison table proves it behaves identically on this browser.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="call-h">
+    <h2 id="call-h">The call</h2>
+    <div class="row">
+      <button type="button" id="start">Start loopback call</button>
+      <button type="button" id="hangup" class="secondary" disabled>Hang up</button>
+    </div>
+    <dl class="meters">
+      <div class="meter"><dt>pcA.connectionState</dt><dd id="state">idle</dd></div>
+      <div class="meter"><dt>sender.dtmf.canInsertDTMF</dt><dd id="can">—</dd></div>
+      <div class="meter"><dt>legacy method in this browser</dt><dd id="legacy-present">…</dd></div>
+    </dl>
+  </section>
+
+  <div class="cols">
+    <section class="stage" aria-labelledby="legacy-h">
+      <h2 id="legacy-h">Before (non-standard, removed in 160)</h2>
+<pre class="code" tabindex="0" aria-label="Legacy code">const dtmf = pc.createDTMFSender(track);
+dtmf.ontonechange = (e) =&gt; log(e.tone);
+dtmf.insertDTMF("*12#", 100, 70);</pre>
+      <button type="button" id="run-legacy" disabled>Run legacy code</button>
+      <div class="log" id="legacy-log" role="log" aria-live="polite" aria-label="Legacy code output"><p>Start the call first.</p></div>
+    </section>
+    <section class="stage" aria-labelledby="std-h">
+      <h2 id="std-h">After (standard webrtc-pc)</h2>
+<pre class="code" tabindex="0" aria-label="Standard code">const sender = pc.getSenders()
+  .find((s) =&gt; s.track === track);
+const dtmf = sender.dtmf; // or keep the sender from addTrack()
+dtmf.ontonechange = (e) =&gt; log(e.tone);
+dtmf.insertDTMF("*12#", 100, 70);</pre>
+      <button type="button" id="run-std" disabled>Run standard code</button>
+      <div class="log" id="std-log" role="log" aria-live="polite" aria-label="Standard code output"><p>Start the call first.</p></div>
+    </section>
+  </div>
+
+  <section class="stage" aria-labelledby="helper-h">
+    <h2 id="helper-h">Drop-in helper: same contract, standard API only</h2>
+    <p>If your code base calls <code>createDTMFSender</code> in many places, replace the calls with this function. It throws the same exception types the Chromium implementation threw, so existing error handling keeps working. The source below is printed from the function the page actually runs.</p>
+    <pre class="code" id="helper-src" tabindex="0" aria-label="Helper source"></pre>
+    <button type="button" id="compare">Compare helper vs legacy on four inputs</button>
+    <div class="scroll" tabindex="0" role="region" aria-label="Helper comparison">
+      <table class="matrix mid">
+        <thead><tr><th scope="col">input</th><th scope="col">pc.createDTMFSender()</th><th scope="col">getDTMFSender()</th><th scope="col">same?</th></tr></thead>
+        <tbody id="cmp-body"><tr><td colspan="4">Not run yet.</td></tr></tbody>
+      </table>
+    </div>
+    <p id="cmp-summary" role="status" class="hint"></p>
+  </section>
+
+  <section><h2>migration notes</h2>
+    <ul>
+      <li>The legacy method never created anything new in Chromium: it searched <code>pc</code>'s senders for the track and returned <code>sender.dtmf</code>. Holding on to the <code>RTCRtpSender</code> from <code>addTrack()</code> / <code>addTransceiver()</code> is the cleanest migration.</li>
+      <li>Feature-detect the replacement with <code>"dtmf" in RTCRtpSender.prototype</code>; never with <code>createDTMFSender</code>.</li>
+      <li>If the track is swapped with <code>replaceTrack()</code>, a <code>s.track === track</code> lookup stops matching. Keep the sender reference instead of re-finding it.</li>
+    </ul>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5160724576993280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webrtc-pc/#dom-rtcrtpsender-dtmf" target="_blank" rel="noopener">webrtc-pc: RTCRtpSender.dtmf</a></li>
+    <li><a href="https://w3c.github.io/webrtc-pc/#dtmf-example" target="_blank" rel="noopener">webrtc-pc: DTMF example</a></li>
+    <li><a href="../removal-probe/">Removal probe</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { legacyMethodPresent, describeError, createLoopback, makeSilentAudioTrack, tele } from "../dtmf-lab.js";
+
+const $ = (id) => document.getElementById(id);
+
+// The drop-in replacement. Mirrors the checks in Chromium's
+// RTCPeerConnection::createDTMFSender (rtc_peer_connection.cc), in the same order.
+function getDTMFSender(pc, track) {
+  if (pc.signalingState === "closed") {
+    throw new DOMException("The RTCPeerConnection's signalingState is 'closed'.", "InvalidStateError");
+  }
+  if (track.kind !== "audio") {
+    throw new DOMException("track.kind is not 'audio'.", "SyntaxError");
+  }
+  const sender = pc.getSenders().find((s) => s.track === track);
+  if (!sender) {
+    throw new DOMException("No RTCRtpSender is available for the track provided.", "SyntaxError");
+  }
+  if (!sender.dtmf) {
+    throw new DOMException("Unable to create DTMF sender for track", "SyntaxError");
+  }
+  return sender.dtmf;
+}
+$("helper-src").textContent = getDTMFSender.toString();
+
+const present = legacyMethodPresent();
+$("legacy-present").textContent = present ? "present (pre-160)" : "removed";
+
+let call = null;
+let running = false;
+
+function line(logEl, text, cls) {
+  if (logEl.dataset.fresh !== "1") { logEl.textContent = ""; logEl.dataset.fresh = "1"; }
+  const p = document.createElement("p");
+  if (cls) p.className = cls;
+  p.textContent = text;
+  logEl.append(p);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setRunEnabled(on) {
+  $("run-legacy").disabled = !on;
+  $("run-std").disabled = !on;
+}
+function refresh() {
+  $("state").textContent = call ? call.pcA.connectionState : "idle";
+  $("can").textContent = call ? String(call.sender.dtmf.canInsertDTMF) : "—";
+}
+
+$("start").addEventListener("click", async () => {
+  if (call) return;
+  $("start").disabled = true;
+  $("state").textContent = "negotiating";
+  try {
+    call = createLoopback();
+    call.pcA.addEventListener("connectionstatechange", refresh);
+    await call.negotiate();
+    refresh();
+    setRunEnabled(true);
+    $("hangup").disabled = false;
+    for (const id of ["legacy-log", "std-log"]) { $(id).dataset.fresh = "0"; line($(id), "Call connected. Ready."); }
+  } catch (error) {
+    $("state").textContent = `failed: ${describeError(error)}`;
+    call?.close(); call = null; $("start").disabled = false;
+  }
+});
+
+$("hangup").addEventListener("click", () => {
+  if (!call) return;
+  call.close(); refresh(); call = null;
+  setRunEnabled(false);
+  $("hangup").disabled = true; $("start").disabled = false;
+  $("state").textContent = "closed";
+});
+
+function runOn(dtmf, logEl, label) {
+  return new Promise((resolve) => {
+    const seen = [];
+    const t0 = performance.now();
+    dtmf.ontonechange = (e) => {
+      seen.push(e.tone);
+      line(logEl, e.tone === "" ? `+${Math.round(performance.now() - t0)} ms  done (tone="")` : `+${Math.round(performance.now() - t0)} ms  tone="${e.tone}"  toneBuffer="${dtmf.toneBuffer}"`, e.tone === "" ? "ok" : "");
+      if (e.tone === "") { dtmf.ontonechange = null; resolve(seen.join("")); }
+    };
+    dtmf.insertDTMF("*12#", 100, 70);
+    line(logEl, `${label}: insertDTMF("*12#", 100, 70) queued; toneBuffer="${dtmf.toneBuffer}"`);
+  });
+}
+
+$("run-legacy").addEventListener("click", async () => {
+  if (!call || running) return;
+  running = true; setRunEnabled(false);
+  const log = $("legacy-log"); log.dataset.fresh = "0";
+  try {
+    const { pcA: pc, track } = call;
+    const dtmf = pc.createDTMFSender(track);
+    line(log, `createDTMFSender returned the same object as sender.dtmf: ${dtmf === call.sender.dtmf}`, "ok");
+    const seq = await runOn(dtmf, log, "legacy");
+    tele("dtmf-migration-legacy-ran", seq === "*12#", { seq });
+  } catch (error) {
+    const removed = error instanceof TypeError && !legacyMethodPresent();
+    line(log, `threw ${describeError(error)}`, removed ? "ok" : "err");
+    if (removed) line(log, "Expected on Chrome 160+: the method is removed. The right-hand column is the fix.");
+    tele("dtmf-migration-legacy-removed", removed, { error: describeError(error) });
+  } finally {
+    running = false; if (call) setRunEnabled(true);
+  }
+});
+
+$("run-std").addEventListener("click", async () => {
+  if (!call || running) return;
+  running = true; setRunEnabled(false);
+  const log = $("std-log"); log.dataset.fresh = "0";
+  try {
+    const { pcA: pc, track } = call;
+    const sender = pc.getSenders().find((s) => s.track === track);
+    const dtmf = sender.dtmf;
+    const seq = await runOn(dtmf, log, "standard");
+    tele("dtmf-migration-standard-ran", seq === "*12#", { seq });
+  } catch (error) {
+    line(log, `threw ${describeError(error)}`, "err");
+    tele("dtmf-migration-standard-ran", false, { error: describeError(error) });
+  } finally {
+    running = false; if (call) setRunEnabled(true);
+  }
+});
+
+function outcome(fn) {
+  try {
+    const r = fn();
+    return { key: "ok", text: r && r.constructor ? `returned ${r.constructor.name}` : `returned ${String(r)}` };
+  } catch (e) {
+    return { key: e.name, text: `threw ${e.name}` };
+  }
+}
+
+$("compare").addEventListener("click", () => {
+  const audio = makeSilentAudioTrack();
+  const other = makeSilentAudioTrack();
+  const canvas = document.createElement("canvas");
+  canvas.getContext("2d").fillRect(0, 0, 1, 1);
+  const video = canvas.captureStream().getVideoTracks()[0];
+  const pc = new RTCPeerConnection();
+  pc.addTrack(audio.track, audio.stream);
+  pc.addTrack(video);
+  const cases = [
+    ["attached audio track", () => pc, audio.track],
+    ["video track", () => pc, video],
+    ["audio track not on this pc", () => pc, other.track],
+  ];
+  const rows = [];
+  for (const [label, getPc, track] of cases) {
+    rows.push([label, outcome(() => getPc().createDTMFSender(track)), outcome(() => getDTMFSender(getPc(), track))]);
+  }
+  pc.close();
+  rows.push(["after pc.close()", outcome(() => pc.createDTMFSender(audio.track)), outcome(() => getDTMFSender(pc, audio.track))]);
+  const body = $("cmp-body");
+  body.textContent = "";
+  let same = 0;
+  for (const [label, legacy, helper] of rows) {
+    const tr = document.createElement("tr");
+    const eq = legacy.key === helper.key;
+    if (eq) same++;
+    for (const [text, cls] of [[label, ""], [legacy.text, ""], [helper.text, ""], [eq ? "yes" : "no", eq ? "ok" : ""]]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      if (cls) td.className = cls;
+      tr.append(td);
+    }
+    body.append(tr);
+  }
+  const removed = !legacyMethodPresent();
+  $("cmp-summary").textContent = removed
+    ? "The legacy column throws TypeError on every row because the method is removed in this browser; the helper column shows the behaviour your code keeps after migrating."
+    : `${same} of ${rows.length} inputs behave identically (same return type or same exception name).`;
+  tele("dtmf-helper-matches-legacy", removed || same === rows.length, { same, total: rows.length, removed });
+  video.stop(); audio.stop(); other.stop();
+});
+</script>
+</body>
+</html>

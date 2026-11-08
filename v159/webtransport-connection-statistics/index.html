@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransport connection statistics — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="./wts-demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v159/">&larr; Chrome 159</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · network / connectivity · chromium catches up</p>
+    <h1>WebTransport connection statistics</h1>
+    <p class="lede"><code>WebTransport.getStats()</code> returns an asynchronous snapshot of an existing connection's health. It reports round-trip time (<code>smoothedRtt</code>, <code>rttVariation</code>, <code>minRtt</code>, in milliseconds) when QUIC has a sample, an <code>estimatedSendRate</code> in bits per second (or <code>null</code>), and <code>datagrams</code> counters for dropped, expired and lost datagrams. The last snapshot stays readable after the connection closes. Chromium does not expose the spec's byte and packet totals.</p>
+  </header>
+
+  <p class="note"><strong>How to try it today:</strong> the method is gated by Blink's <code>WebTransportStats</code> runtime feature, <code>status: "experimental"</code> in <code>runtime_enabled_features.json5</code>. ChromeStatus targets Chrome 159 for desktop, Android and WebView. Enable <code>chrome://flags/#enable-experimental-web-platform-features</code> and relaunch, or start Chrome with <code>--enable-blink-features=WebTransportStats</code>. Both were tested on Chrome 153, and both expose the method. There is no dedicated chrome://flags entry for it. You also need a live HTTP/3 WebTransport server, which this site cannot host (Deno Deploy serves TCP only). Use a public echo server or <a href="#local-server">run your own</a>. Every demo checks for the method itself and labels its fallback.</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./stats-field-inspector/">Stats field inspector</a></h3>
+      <p>Basic: connect, call <code>getStats()</code>, and check every spec member against the dictionary you got back. Each one is marked returned, <code>null</code> or not returned, next to whether Chromium's IDL declares it. This makes the missing <code>bytesSent</code>/<code>packetsSent</code> totals and <code>atSendCapacity</code> visible, not assumed.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./live-stats-dashboard/">Live stats dashboard</a></h3>
+      <p>Inspection tooling: a polling health panel with an interval selector, Start/Stop (an in-flight result after Stop is discarded), pause-while-hidden, RTT and send-rate sparklines with a text table alternative, and the change in each datagram counter since polling started. A burst button generates real traffic.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./adaptive-quality-controller/">Adaptive quality controller</a></h3>
+      <p>Practical: a bitrate-ladder controller that sizes its budget from <code>estimatedSendRate</code>, steps down on queueing delay (<code>smoothedRtt − minRtt</code>) or new <code>lostOutgoing</code>, and steps up only after a run of healthy snapshots. Three inputs, each labelled: live stats, a recorded real Chrome trace, or what-if numbers you type in.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./closed-and-failed-connections/">Closed &amp; failed connections</a></h3>
+      <p>Edge cases with no server: <code>getStats()</code> called while a doomed connection is still connecting, and again after it failed. Both reject with <code>InvalidStateError</code>. Also a constructor that refuses a non-https URL, and a defensive cross-browser helper. With a server: stats after <code>close()</code>, the same members in every call within a session, and concurrent calls.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./datagram-expiry-lab/">Datagram expiry lab</a></h3>
+      <p>Configuration plus composition: inspect and set <code>incomingMaxAge</code>, <code>outgoingMaxAge</code> and the <code>*MaxBufferedDatagrams</code> knobs, and compare 20 edge values against the editor's draft (no server needed). Then overflow the receive queue, age incoming datagrams out, and flood with a tiny <code>outgoingMaxAge</code>, watching the matching counter.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Applications built on WebTransport, such as game netcode, live media and telemetry uplinks, need to tell network latency, congestion and datagram loss or expiry apart from slowness in their own code. Without stats they had to infer all of it from application-level pings. ChromeStatus frames <code>getStats()</code> as one asynchronous call that reads the existing connection's health so a page can adapt how it sends. It creates no connection and changes nothing about transmission. Firefox shipped <code>getStats()</code> in 158. Safari 27.2 exposes the method but returns default-initialised values. WebTransport is an Interop 2026 focus area, and the returned fields differ between engines. That is why every demo here checks each member and never assumes it is there.</p>
+  </section>
+
+  <section><h2>the API surface</h2>
+<pre tabindex="0"><code>// Chromium: web_transport.idl
+[CallWith=ScriptState, RuntimeEnabled=WebTransportStats]
+Promise&lt;WebTransportConnectionStats&gt; getStats();
+
+// Chromium: web_transport_connection_stats.idl
+dictionary WebTransportConnectionStats {
+  DOMHighResTimeStamp smoothedRtt;          // ms, absent until QUIC has an RTT sample
+  DOMHighResTimeStamp rttVariation;
+  DOMHighResTimeStamp minRtt;
+  required WebTransportDatagramStats datagrams;
+  unsigned long long? estimatedSendRate = null;   // bit/s
+};
+// The W3C dictionary also has bytesSent, bytesSentOverhead, bytesAcknowledged, packetsSent,
+// bytesLost, packetsLost, bytesReceived, packetsReceived and atSendCapacity. Chromium omits them.
+
+dictionary WebTransportDatagramStats {
+  unsigned long long droppedIncoming;   // receive queue overflowed (incomingMaxBufferedDatagrams)
+  unsigned long long expiredIncoming;   // older than datagrams.incomingMaxAge before being read
+  unsigned long long expiredOutgoing;   // older than datagrams.outgoingMaxAge before being sent
+  unsigned long long lostOutgoing;      // declared lost per RFC 9002 §6.1
+};
+
+const wt = new WebTransport("https://example.com:4433/echo");
+await wt.ready;
+const { smoothedRtt, estimatedSendRate, datagrams } = await wt.getStats();</code></pre>
+  </section>
+
+  <section id="local-server"><h2>run your own echo server (Deno)</h2>
+    <p>The demos were verified against this server, running locally. Deno 2.9 has <code>Deno.QuicEndpoint</code> and <code>Deno.upgradeWebTransport</code> behind <code>--unstable-net</code>. Chrome accepts a self-signed certificate only through <code>serverCertificateHashes</code>: ECDSA P-256, valid for at most 14 days. Paste the printed hash into a demo's <em>serverCertificateHashes</em> field. From this public https site, Chrome may also ask for permission before it lets the page reach <code>127.0.0.1</code> (Local Network Access). Running the showcase locally avoids that.</p>
+<pre tabindex="0"><code>openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout key.pem -out cert.pem -days 10 -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+openssl x509 -in cert.pem -outform der | openssl dgst -sha256 -binary | base64   # → the hash
+
+// echo.ts — deno run --unstable-net --allow-net --allow-read echo.ts
+const endpoint = new Deno.QuicEndpoint({ hostname: "127.0.0.1", port: 4433 });
+const listener = endpoint.listen({
+  cert: Deno.readTextFileSync("cert.pem"), key: Deno.readTextFileSync("key.pem"),
+  alpnProtocols: ["h3"],
+});
+for await (const incoming of listener) {
+  (async () =&gt; {
+    const wt = await Deno.upgradeWebTransport(await incoming.accept());
+    await wt.ready;
+    const r = wt.datagrams.readable.getReader(), w = wt.datagrams.writable.getWriter();
+    for (;;) { const { value, done } = await r.read(); if (done) break; await w.write(value); }
+  })().catch(() =&gt; {});
+}</code></pre>
+    <p>Then use the URL <code>https://127.0.0.1:4433/echo</code>. The public servers offered by default, <code>wt-ord.akaleapi.net</code> and <code>wt-ams.akaleapi.net</code> on port 6161, are the ones Microsoft's <code>webtransport-getstats</code> sample uses. Whether you can reach them depends on your network allowing UDP/QUIC.</p>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id 5120203192139776 — listing name "WebTransport connection statistics", v159 listing.
+    ChromeStatus: feature_type "Chromium catches up"; status Proposed; browsers.chrome desktop/android/webview
+    = 159; finch_name WebTransportStats; flag_name enable-experimental-web-platform-features; owner
+    vbryhider@microsoft.com; bug crbug 573538454; component Blink>Network>WebTransport. FF view: shipped in
+    Firefox 158 (2026-10-13). Safari view: 27.2 exposes getStats() but WebKit 7625.2.8 returns
+    default-initialised stats; WebKit main added bytesSent/bytesReceived. interop_compat_risks: Chromium omits
+    bytesSent, bytesSentOverhead, bytesAcknowledged, packetsSent, bytesLost, packetsLost, bytesReceived,
+    packetsReceived and atSendCapacity. ergonomics: values are snapshots; RTT ms; estimatedSendRate bit/s or null.
+    Spec read (w3c.github.io/webtransport editor's draft): getStats() steps — reject InvalidStateError if
+    [[State]] "failed"; in parallel wait while "connecting"; "failed" → reject InvalidStateError; "closed" →
+    resolve with most recent stats (collection point implementation-defined); pooled connections reveal only
+    pooled stats; UA may withhold members but decides once per session ("a member present in one getStats()
+    result won't disappear from later results"). WebTransportConnectionStats IDL (14 members) and
+    WebTransportDatagramStats (droppedIncoming/expiredIncoming/expiredOutgoing/lostOutgoing, RFC 9002 §6.1).
+    Datagram knobs: incomingMaxAge (unrestricted double?, negative/NaN → RangeError, 0 → null);
+    outgoingMaxAge (unrestricted double, non-nullable in the draft; negative/0/NaN → RangeError);
+    *MaxBufferedDatagrams (<1 → 1). Explainer #stats, MDN getStats, Edge sample (MicrosoftEdge/Demos
+    webtransport-getstats: script.js read; endpoints https://wt-ord.akaleapi.net:6161/echo and
+    https://wt-ams.akaleapi.net:6161/echo; uses Object.hasOwn per member — same honesty approach adopted here).
+    Chromium source (main, chromium.googlesource.com):
+      - runtime_enabled_features.json5: { name: "WebTransportStats", status: "experimental", base_feature: "none" }
+        with comment "enabling this without setting WebTransportCongestionControl to either BBRv1 or BBRv2
+        will produce poor bandwidth estimates". No chrome://flags entry in about_flags.cc (only
+        webtransport-developer-mode and local-network-access-check-webtransport exist).
+      - modules/webtransport/web_transport.idl: [CallWith=ScriptState, RuntimeEnabled=WebTransportStats]
+        Promise<WebTransportConnectionStats> getStats(); Exposed=(Window,Worker), SecureContext.
+      - web_transport_connection_stats.idl: smoothedRtt, rttVariation, minRtt, required datagrams,
+        estimatedSendRate = null (no byte/packet totals, no atSendCapacity).
+      - web_transport.cc getStats(): if !transport_remote_ bound and !connection_pending_ → resolve
+        latest_stats_ or reject InvalidStateError "Cannot retreive stats on a failed connection." (sic);
+        overlapping calls coalesce into one mojo GetStats; OnConnectionEstablished sets latest_stats_ from
+        initial stats and resolves queued calls; OnClosed stores final stats; HandlePendingGetStatsResolvers
+        resolves latest_stats_ or rejects InvalidStateError. ConvertStatsFromMojom: RTT members set only if
+        min_rtt > 0; estimatedSendRate null when 0; expiredOutgoing/lostOutgoing from network service;
+        droppedIncoming/expiredIncoming from the renderer DatagramQueue (UpdateIncomingDatagramStats).
+      - datagram_duplex_stream.cc (main): ValidateAndNormalizeMaxAge("must be non-negative and not NaN").
+    Verification: Chrome for Testing 153.0.8010.12 headless via Playwright (no chrome-devtools-mcp in this
+    environment). Default: typeof WebTransport.prototype.getStats "undefined". With
+    --enable-blink-features=WebTransportStats OR --enable-experimental-web-platform-features: "function".
+    Failing URL (https://getstats-probe.invalid/ and https://localhost:1/): ready rejects WebTransportError
+    "Opening handshake failed." source session; getStats called while connecting AND after failure both
+    reject InvalidStateError; same in a dedicated worker. Real success path verified against a local Deno
+    2.9.8 WebTransport echo (QuicEndpoint + upgradeWebTransport, self-signed P-256 + serverCertificateHashes,
+    test-only, not shipped): keys datagrams/estimatedSendRate/minRtt/rttVariation/smoothedRtt; datagrams keys
+    droppedIncoming/expiredOutgoing/lostOutgoing (expiredIncoming NOT returned on 153 even with
+    incomingMaxAge=1); bytesSent undefined; atSendCapacity absent; concurrent calls → distinct equal objects;
+    after close() stats resolve and are stable. Chrome 153 setter deviations (both age attributes): -1 and 0 are
+    silently ignored (previous value kept, no throw); NaN and Infinity → TypeError "non-finite". Public Edge echo servers: handshake failed in ~20 ms from
+    this build sandbox (UDP/QUIC egress apparently not available here) — reachability from users' networks
+    NOT verified.
+    Use-case portfolio: (1) basic/canonical = stats-field-inspector; (2) inspection tooling =
+    live-stats-dashboard (+ datagram knob inspector in datagram-expiry-lab); (3) practical product =
+    adaptive-quality-controller (live / recorded real trace / what-if, every source labelled);
+    (4) edge/failure/migration = closed-and-failed-connections (failed, connecting, closed, refused URL,
+    cross-browser helper, per-session member stability, concurrency); (5) novel composition =
+    datagram-expiry-lab (datagram queue knobs × stats counters). Not built: pooled-connection stats
+    (requires the allowPooling option, absent from Chromium's web_transport_options.idl — the spec's pooled-only
+    branch is unobservable); per-stream WebTransportSendStream/ReceiveStream getStats() — separate IDL
+    (web_transport_send_stream_stats.idl) and not part of this ChromeStatus entry.
+    modern-web-guidance consulted (npx modern-web-guidance@latest search/retrieve): accessibility (live
+    regions, SVG role=img + title/desc, chart text-table alternative, target sizes, focus-visible),
+    responsive-table (captioned table in a labelled focusable scroll region; container-query stacked cards),
+    efficient-background-processing (pause polling when not rendered — visibilitychange used),
+    accessible-error-announcement / forms (labelled URL input with :user-invalid styling + hints),
+    css-layout (minmax(0,1fr) grids, min-width:0). Recorded per concept in guidanceConsulted.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5120203192139776" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dictdef-webtransportconnectionstats" target="_blank" rel="noopener">Spec: WebTransportConnectionStats</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#web-transport-connection-stats" target="_blank" rel="noopener">Spec: connection stats section</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md#stats" target="_blank" rel="noopener">Explainer: stats</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/WebTransport/getStats" target="_blank" rel="noopener">MDN: WebTransport.getStats()</a></li>
+    <li><a href="https://github.com/MicrosoftEdge/Demos/tree/main/webtransport-getstats" target="_blank" rel="noopener">Microsoft Edge sample source</a></li>
+    <li><a href="https://microsoftedge.github.io/Demos/webtransport-getstats" target="_blank" rel="noopener">Microsoft Edge sample (live)</a></li>
+    <li><a href="https://issues.chromium.org/issues/573538454" target="_blank" rel="noopener">Tracking bug 573538454</a></li>
+    <li><a href="https://github.com/web-platform-tests/interop/issues/1121" target="_blank" rel="noopener">Interop 2026 WebTransport proposal</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

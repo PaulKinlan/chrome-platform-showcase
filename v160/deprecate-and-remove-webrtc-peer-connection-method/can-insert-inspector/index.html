@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>canInsertDTMF inspector — Deprecate and remove WebRTC peer connection method — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../dtmf-lab.css">
+  <style>
+    .steps { display: grid; gap: var(--space-2); grid-template-columns: 1fr; }
+    @media (min-width: 720px) { .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    table.matrix td.dev { font-weight: 700; text-decoration: underline wavy var(--accent-amber); text-underline-offset: 3px; }
+  </style>
+</head>
+<body>
+<main class="lab">
+  <p class="crumbs"><a href="../">&larr; Deprecate and remove WebRTC peer connection method</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · inspection tool</p>
+    <h1><code>canInsertDTMF</code> inspector</h1>
+    <p class="lede">The legacy method handed you a DTMF sender immediately, which hid an important rule: tones can only be sent once the call is up. The spec's <em>determine if DTMF can be sent</em> algorithm has six conditions. Step through a real negotiation, then break the call in different ways, and compare the browser's <code>canInsertDTMF</code> against what the spec algorithm predicts from the observed state.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="cfg-h">
+    <h2 id="cfg-h">Configure, then step</h2>
+    <div class="cols">
+      <div class="field">
+        <label for="direction">Transceiver direction (offerer)</label>
+        <select id="direction">
+          <option value="sendrecv">sendrecv</option>
+          <option value="sendonly">sendonly</option>
+          <option value="recvonly">recvonly (cannot send DTMF)</option>
+        </select>
+      </div>
+      <label class="check"><input type="checkbox" id="strip"> Remove audio/telephone-event with setCodecPreferences()</label>
+    </div>
+    <div class="steps">
+      <button type="button" id="s1">1 · new RTCPeerConnection ×2 + addTransceiver(track)</button>
+      <button type="button" id="s2" disabled>2 · A: setLocalDescription() (offer)</button>
+      <button type="button" id="s3" disabled>3 · B: setRemoteDescription + answer</button>
+      <button type="button" id="s4" disabled>4 · A: setRemoteDescription(answer), wait for ICE</button>
+    </div>
+    <h3>Then break it</h3>
+    <div class="steps">
+      <button type="button" id="m-active" disabled>encodings[0].active = false</button>
+      <button type="button" id="m-null" disabled>sender.replaceTrack(null)</button>
+      <button type="button" id="m-stop" disabled>transceiver.stop()</button>
+      <button type="button" id="m-close" disabled>pcA.close()</button>
+    </div>
+    <div class="row"><button type="button" id="reset" class="secondary">Reset</button></div>
+    <p id="status" role="status" class="hint">Start with step 1.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="tbl-h">
+    <h2 id="tbl-h">Observed state after each step</h2>
+    <div class="scroll" tabindex="0" role="region" aria-label="canInsertDTMF observations (scrolls sideways on narrow screens)">
+      <table class="matrix wide">
+        <thead><tr>
+          <th scope="col">step</th><th scope="col">connection</th><th scope="col">currentDirection</th><th scope="col">track</th><th scope="col">active</th><th scope="col">telephone-event negotiated</th><th scope="col">spec predicts</th><th scope="col">canInsertDTMF</th><th scope="col">insertDTMF("")</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="9">No steps yet.</td></tr></tbody>
+      </table>
+    </div>
+    <p class="hint">“insertDTMF("")” is a harmless probe: the empty string plays nothing, but the method still runs the can-send check first and throws <code>InvalidStateError</code> when DTMF cannot be sent. Rows where the browser disagrees with the spec prediction are marked <strong>deviates</strong>.</p>
+  </section>
+
+  <section><h2>the six conditions</h2>
+    <ol>
+      <li>the connection's <code>connectionState</code> is <code>"connected"</code>;</li>
+      <li>the transceiver is not stopping;</li>
+      <li>the sender has a track;</li>
+      <li>the transceiver's <code>currentDirection</code> is <code>sendrecv</code> or <code>sendonly</code>;</li>
+      <li><code>sendEncodings[0].active</code> is not false;</li>
+      <li>an <code>audio/telephone-event</code> codec was negotiated for sending.</li>
+    </ol>
+    <p>Chromium's implementation (<code>rtc_dtmf_sender.cc</code>) delegates the check to the WebRTC engine and carries a TODO (crbug.com/891638) for the transceiver-state conditions; the inspector shows you, on your browser, which conditions are actually enforced.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5160724576993280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webrtc-pc/#dfn-determine-if-dtmf-can-be-sent" target="_blank" rel="noopener">webrtc-pc: determine if DTMF can be sent</a></li>
+    <li><a href="../tone-buffer-edge-lab/">Tone buffer edge lab</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { describeError, createLoopback, waitForConnected, telephoneEventLines, tele } from "../dtmf-lab.js";
+
+const $ = (id) => document.getElementById(id);
+let call = null;
+let first = true;
+let busy = false;
+const STEP_IDS = ["s1", "s2", "s3", "s4"];
+const MUT_IDS = ["m-active", "m-null", "m-stop", "m-close"];
+
+function enableOnly(ids) {
+  for (const id of [...STEP_IDS, ...MUT_IDS]) $(id).disabled = !ids.includes(id);
+  $("direction").disabled = !ids.includes("s1");
+  $("strip").disabled = !ids.includes("s1");
+}
+
+function observe(label) {
+  const { pcA, transceiver, sender } = call;
+  const dtmf = sender.dtmf;
+  const conn = pcA.connectionState;
+  const cur = transceiver.currentDirection;
+  const stopping = transceiver.direction === "stopped" || cur === "stopped";
+  let active = "n/a";
+  try {
+    const enc = sender.getParameters().encodings;
+    active = enc && enc[0] && "active" in enc[0] ? String(enc[0].active) : "(no encodings yet)";
+  } catch { active = "(unreadable)"; }
+  const answer = pcA.remoteDescription?.sdp || "";
+  const te = telephoneEventLines(answer);
+  const teText = !answer ? "(no answer yet)" : te.length ? `yes: ${te.join(", ")}` : "no";
+  const predicted = conn === "connected" && !stopping && !!sender.track &&
+    (cur === "sendrecv" || cur === "sendonly") && active !== "false" && te.length > 0;
+  const can = dtmf ? dtmf.canInsertDTMF : null;
+  let probe;
+  try { dtmf.insertDTMF(""); probe = "no throw"; } catch (e) { probe = e.name; }
+  const consistent = (can === true) === (probe === "no throw");
+  const row = [label, conn, String(cur), sender.track ? sender.track.kind : "null", active, teText, String(predicted), String(can), probe];
+  const tbody = $("rows");
+  if (first) { tbody.textContent = ""; first = false; }
+  const tr = document.createElement("tr");
+  row.forEach((text, i) => {
+    const td = document.createElement("td");
+    td.textContent = text;
+    if (i === 7) {
+      if (can !== predicted) { td.textContent = `${text} — deviates`; td.className = "dev"; }
+      else if (can) td.className = "ok";
+    }
+    tr.append(td);
+  });
+  tbody.append(tr);
+  $("status").textContent = `${label}: canInsertDTMF is ${can}; the spec algorithm predicts ${predicted}${can !== predicted ? " — this browser deviates here" : ""}.`;
+  tele("dtmf-caninsert-probe-consistent", consistent, { label, can, probe });
+  return { can, predicted };
+}
+
+async function guarded(fn) {
+  if (busy) return;
+  busy = true;
+  try { await fn(); } catch (error) {
+    $("status").textContent = `Error: ${describeError(error)}`;
+  } finally { busy = false; }
+}
+
+$("s1").addEventListener("click", () => guarded(async () => {
+  call = createLoopback({ direction: $("direction").value, stripTelephoneEvent: $("strip").checked });
+  const r = observe(`1 created (${$("direction").value}${$("strip").checked ? ", no telephone-event" : ""})`);
+  tele("dtmf-caninsert-false-before-negotiation", r.can === false, {});
+  enableOnly(["s2"]);
+}));
+$("s2").addEventListener("click", () => guarded(async () => {
+  await call.offer();
+  observe(`2 offer set (${telephoneEventLines(call.pcA.localDescription.sdp).length} telephone-event lines offered)`);
+  enableOnly(["s3"]);
+}));
+$("s3").addEventListener("click", () => guarded(async () => {
+  await call.answerOnB();
+  observe("3 B answered");
+  enableOnly(["s4"]);
+}));
+$("s4").addEventListener("click", () => guarded(async () => {
+  $("status").textContent = "Applying answer and waiting for ICE to connect…";
+  await call.applyAnswer();
+  try { await waitForConnected(call.pcA, 8000); } catch (e) { $("status").textContent = describeError(e); }
+  // canInsertDTMF can lag connectionstatechange by a task or two: allow 1 s grace.
+  const t0 = performance.now();
+  while (!call.sender.dtmf.canInsertDTMF && performance.now() - t0 < 1000) await new Promise((r) => setTimeout(r, 25));
+  const r = observe("4 answer applied");
+  if ($("direction").value !== "recvonly" && !$("strip").checked) tele("dtmf-caninsert-true-when-connected", r.can === true, {});
+  else tele("dtmf-caninsert-false-when-not-sendable", r.can === false, { direction: $("direction").value, strip: $("strip").checked });
+  enableOnly(MUT_IDS);
+}));
+$("m-active").addEventListener("click", () => guarded(async () => {
+  const p = call.sender.getParameters();
+  if (p.encodings?.[0]) { p.encodings[0].active = false; await call.sender.setParameters(p); }
+  observe("encodings[0].active = false");
+  $("m-active").disabled = true;
+}));
+$("m-null").addEventListener("click", () => guarded(async () => {
+  await call.sender.replaceTrack(null);
+  observe("replaceTrack(null)");
+  $("m-null").disabled = true;
+}));
+$("m-stop").addEventListener("click", () => guarded(async () => {
+  call.transceiver.stop();
+  observe("transceiver.stop()");
+  $("m-stop").disabled = true; $("m-active").disabled = true; $("m-null").disabled = true;
+}));
+$("m-close").addEventListener("click", () => guarded(async () => {
+  call.pcA.close();
+  observe("pcA.close()");
+  enableOnly([]);
+}));
+$("reset").addEventListener("click", () => {
+  if (busy) return;
+  call?.close();
+  call = null;
+  first = true;
+  $("rows").innerHTML = '<tr><td colspan="9">No steps yet.</td></tr>';
+  $("status").textContent = "Reset. Start with step 1.";
+  enableOnly(["s1"]);
+});
+</script>
+</body>
+</html>

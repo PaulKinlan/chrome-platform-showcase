@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Re-entrancy hazards — Deprecate and stop firing events during subframe removal — Chrome 156 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../subframe-demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Deprecate and stop firing events during subframe removal</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v156 · behaviour change · edge cases &amp; failure modes</p>
+    <h1>Re-entrancy hazards during removal</h1>
+    <p class="lede">The reason for this change: a same-origin subframe's <code>pagehide</code> handler runs <em>inside</em> the parent's DOM removal, while the iframe is still connected, and it can mutate the very tree being edited. Each experiment below arms a real subframe with a handler that does something hostile to the parent, then performs an ordinary removal. Read what your browser actually ended up with.</p>
+  </header>
+
+  <p class="note"><strong>Behind a flag:</strong> run once in default Chrome and once in Chromium 156+ launched with <code>--enable-blink-features=OmitSubframeDetachmentEventsOnRemoval</code> (or <code>--enable-features=OmitSubframeDetachmentEventsOnRemoval</code>). With the flag the handlers never run, so every removal does exactly what the calling code asked.</p>
+
+  <div id="mode" class="mode-banner" role="status" aria-live="polite">Probing which behaviour this browser has…</div>
+
+  <section class="stage" aria-labelledby="h-title">
+    <h2 id="h-title">Experiments</h2>
+    <div class="button-row" id="buttons">
+      <button type="button" data-case="reinsert">1 · Handler re-inserts its own iframe elsewhere during iframe.remove()</button>
+      <button type="button" data-case="selfremove">2 · Handler removes its iframe first; then the caller's remove() continues</button>
+      <button type="button" data-case="sibling">3 · Handler removes the iframe's next sibling during parent.removeChild(iframe)</button>
+      <button type="button" data-case="container">4 · Handler detaches the container that is running replaceChildren()</button>
+      <button type="button" data-case="observe">5 · Handler reads the container while innerHTML = '' is clearing it</button>
+    </div>
+    <div class="frame-host" id="stage" aria-label="Experiment stage"><p class="empty">Each experiment builds its own small tree here.</p></div>
+    <div class="frame-host" id="elsewhere" aria-label="Second container used by experiment 1"><p class="empty">Second container.</p></div>
+    <p class="verdict" id="verdict" role="status" aria-live="polite">Pick an experiment.</p>
+    <div class="table-wrap" tabindex="0" role="region" aria-labelledby="res-cap">
+      <table class="trace"><caption id="res-cap">Results so far</caption>
+        <thead><tr><th scope="col">experiment</th><th scope="col">handler ran inside the call?</th><th scope="col">what the calling code observed</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="3">No experiments run yet.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section><h2>why this matters</h2>
+    <p>Every "Expected by the caller" outcome above is what a framework's reconciler assumes: after <code>remove()</code> the node is gone and nothing else moved. In legacy mode a subframe can break that contract from inside the removal — re-parenting a node mid-flight, making the caller's own call throw <code>NotFoundError</code>, deleting nodes the caller still holds, or leaving an iframe that is connected yet has no browsing context. In the engine these same paths have produced crashes and inconsistent DOM state; the compat study found Google Publisher Tags mutating ad-slot state from a friendly frame's <code>pagehide</code> during <code>innerHTML = ''</code>. With the flag, <code>Document::DispatchUnloadEvents</code> returns early for a removed subframe, so none of this can happen.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5754395122860032" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/whatwg/html/issues/10194" target="_blank" rel="noopener">whatwg/html#10194: browsers synchronously fire pagehide &amp; unload, the standard doesn't</a></li>
+    <li><a href="https://issues.chromium.org/issues/552675453" target="_blank" rel="noopener">Chromium tracking bug 552675453</a></li>
+    <li><a href="../cleanup-migration/">Cleanup migration patterns</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script src="../subframe-kit.js"></script>
+<script>
+(() => {
+  'use strict';
+  const Kit = globalThis.SubframeKit;
+  const $ = (id) => document.getElementById(id);
+  let modeResult = null;
+  let busy = false;
+  let count = 0;
+  Kit.detectMode().then((r) => { modeResult = r; Kit.renderMode($('mode'), r); });
+
+  // Each handler runs inside the subframe. `ran` is reported through the kit
+  // (the pagehide listener reports first, then this extra handler acts).
+  const HANDLERS = {
+    reinsert: "addEventListener('pagehide', function(){ parent.document.getElementById('elsewhere').append(frameElement); });",
+    selfremove: "addEventListener('pagehide', function(){ frameElement.remove(); });",
+    sibling: "addEventListener('pagehide', function(){ var s = frameElement.nextElementSibling; if (s) s.remove(); });",
+    container: "addEventListener('pagehide', function(){ frameElement.parentNode.remove(); });",
+    observe: "addEventListener('pagehide', function(){ parent.__subframeHazardSeen = Array.prototype.map.call(frameElement.parentNode.children, function(e){ return e.tagName.toLowerCase(); }).join(', '); });",
+  };
+  const LABELS = {
+    reinsert: '1 · re-insert during remove()', selfremove: '2 · handler removes first', sibling: '3 · sibling removal',
+    container: '4 · detach the container', observe: '5 · read mid-innerHTML',
+  };
+  const chip = (tag, id, text) => Object.assign(document.createElement(tag), { id, textContent: text, className: 'empty' });
+
+  async function runCase(name) {
+    const stage = $('stage'), elsewhere = $('elsewhere');
+    stage.replaceChildren(); elsewhere.replaceChildren();
+    const container = document.createElement('div');
+    container.className = 'frame-host'; container.id = 'hazard-container';
+    stage.append(container);
+    const f = await Kit.create({ parent: container, events: ['pagehide'], extra: HANDLERS[name], title: `hazard subframe (${name})` });
+    const iframe = f.iframe;
+    let observed = '', expected = '', broke = false;
+    globalThis.__subframeHazardSeen = null;
+    let trace;
+    if (name === 'reinsert') {
+      trace = await Kit.measure(() => iframe.remove(), { settleMs: 300 });
+      const inElsewhere = iframe.parentNode === elsewhere;
+      let hasWindow = false; try { hasWindow = !!iframe.contentWindow; } catch { hasWindow = false; }
+      observed = `remove() ${trace.thrown ? `threw ${trace.thrown}` : 'returned normally'}; iframe.isConnected=${iframe.isConnected}${inElsewhere ? ' (now in the second container)' : ''}; contentWindow ${hasWindow ? 'present' : 'null'}${iframe.isConnected && !hasWindow ? ' — a connected iframe with no browsing context' : ''}.`;
+      expected = 'remove() returns, iframe disconnected.';
+      broke = !!trace.thrown || iframe.isConnected;
+    } else if (name === 'selfremove') {
+      trace = await Kit.measure(() => iframe.remove(), { settleMs: 200 });
+      observed = `remove() ${trace.thrown ? `threw ${trace.thrown}` : 'returned normally'}; iframe.isConnected=${iframe.isConnected}.`;
+      expected = 'remove() returns without throwing.';
+      broke = !!trace.thrown;
+    } else if (name === 'sibling') {
+      container.append(chip('p', 'sib-a', 'sibling A'), chip('p', 'sib-c', 'sibling C'));
+      trace = await Kit.measure(() => container.removeChild(iframe), { settleMs: 200 });
+      const left = [...container.children].map((e) => e.id).join(', ') || 'nothing';
+      observed = `removeChild ${trace.thrown ? `threw ${trace.thrown}` : 'returned'}; container now holds: ${left}.`;
+      expected = 'container still holds sib-a, sib-c.';
+      broke = left !== 'sib-a, sib-c';
+    } else if (name === 'container') {
+      container.prepend(chip('p', 'before', 'old child'));
+      trace = await Kit.measure(() => container.replaceChildren(chip('p', 'fresh', 'new child from replaceChildren()')), { settleMs: 200 });
+      observed = `replaceChildren ${trace.thrown ? `threw ${trace.thrown}` : 'returned'}; container.isConnected=${container.isConnected}; children: ${[...container.children].map((e) => e.id).join(', ')}.`;
+      expected = 'container stays in the document holding #fresh.';
+      broke = !container.isConnected;
+      if (!container.isConnected) stage.append(chip('p', 'gone', 'The container (and its new child) vanished from the page.'));
+    } else {
+      container.prepend(chip('span', 'first', 'first'));
+      container.append(chip('span', 'last', 'last'));
+      trace = await Kit.measure(() => { container.innerHTML = ''; }, { settleMs: 200 });
+      const seen = globalThis.__subframeHazardSeen;
+      observed = seen ? `while innerHTML = '' was running, the handler saw the container still holding: ${seen}.` : 'the handler never ran, so no code observed the half-finished mutation.';
+      expected = 'no script can observe the container mid-mutation.';
+      broke = !!seen;
+    }
+    const ran = trace.events.some((e) => e.timing === 'sync-during-call');
+    return { ran, observed, expected, broke, thrown: trace.thrown };
+  }
+
+  $('buttons').addEventListener('click', async (e) => {
+    const b = e.target.closest('button[data-case]');
+    if (!b || busy) return;
+    busy = true;
+    document.querySelectorAll('#buttons button').forEach((x) => x.setAttribute('aria-disabled', 'true'));
+    const name = b.dataset.case;
+    try {
+      const r = await runCase(name);
+      const v = $('verdict');
+      v.className = 'verdict ' + (r.broke ? 'bad' : 'good');
+      v.textContent = `${LABELS[name]}: ${r.ran ? 'the subframe handler ran inside the call' : 'no handler ran'}. Observed: ${r.observed} Expected by the caller: ${r.expected}`;
+      count++;
+      const rows = $('rows'); if (count === 1) rows.replaceChildren();
+      const tr = document.createElement('tr');
+      for (const t of [LABELS[name], r.ran ? 'yes' : 'no', `${r.broke ? 'BROKEN: ' : 'as expected: '}${r.observed}`]) { const td = document.createElement('td'); td.textContent = t; tr.append(td); }
+      rows.append(tr);
+      // Coherence: a broken outcome must coincide with a handler that ran.
+      globalThis.showcaseTelemetry?.assert('subframe-hazard-coherent', !r.broke || r.ran, { name, ran: r.ran, broke: r.broke, mode: modeResult?.mode });
+      if (modeResult?.mode === 'omits') globalThis.showcaseTelemetry?.assert('subframe-hazard-prevented-when-omitted', !r.ran && !r.broke, { name });
+    } catch (err) {
+      $('verdict').className = 'verdict bad';
+      $('verdict').textContent = `Experiment could not run: ${err.name}: ${err.message}`;
+    } finally {
+      document.querySelectorAll('#buttons button').forEach((x) => x.setAttribute('aria-disabled', 'false'));
+      busy = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

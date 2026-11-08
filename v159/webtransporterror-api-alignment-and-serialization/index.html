@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransportError API alignment and serialization — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v159/">&larr; Chrome 159</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · network / connectivity · chromium catches up</p>
+    <h1>WebTransportError API alignment and serialization</h1>
+    <p class="lede">Chromium's <code>WebTransportError</code> predates the final WebTransport spec. This change adds the standard <code>new WebTransportError(message, {source, streamErrorCode})</code> constructor while keeping the shipped dictionary constructor as a compatibility overload, carries the full <code>unsigned long</code> stream error code instead of an 8-bit one, and makes the error structured-clonable — so it survives <code>postMessage()</code>, <code>structuredClone()</code> and IndexedDB with its <code>message</code>, <code>source</code> and nullable <code>streamErrorCode</code> intact.</p>
+  </header>
+
+  <p class="note"><strong>How to try it:</strong> there is no flag to flip. The constructor and code-width changes are unflagged, and Blink's <code>WebTransportErrorSerialization</code> runtime feature is <code>status: "stable"</code> — on by default, kept only as a writer-side kill switch (<code>--disable-blink-features=WebTransportErrorSerialization</code> turns writing off; reading stays on). ChromeStatus lists <code>enable-experimental-web-platform-features</code>, but Chrome 153 launched with it (and with <code>--enable-blink-features=WebTransportErrorSerialization</code>) behaves exactly like default 153: the standard form throws <code>TypeError</code> and cloning throws <code>DataCloneError</code>. You need a Chromium build containing the change (ChromeStatus: Chrome 159 desktop and Android). Every demo detects the behaviour itself and labels its fallback.</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./constructor-inspector/">Constructor inspector</a></h3>
+      <p>Basic: set message, <code>source</code> and <code>streamErrorCode</code>, choose the standard or legacy form, and read every field — <code>name</code>, <code>message</code>, <code>source</code>, <code>streamErrorCode</code>, the legacy <code>code</code> (0), <code>instanceof DOMException</code> — off the object you actually got, or the exception you actually got.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./constructor-compatibility-matrix/">Constructor compatibility matrix</a></h3>
+      <p>Inspection + migration: ten constructor calls run live and compared against three reference behaviours (spec-only, legacy-only Chromium, aligned Chromium), exposing how WebIDL overload resolution treats an object, <code>null</code>, a number or a trailing argument — plus a runnable feature-detecting helper for libraries that must span both builds.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./stream-error-code-range/">Stream error code range lab</a></h3>
+      <p>Edge cases: 22 values (256, 65535, 2<sup>32</sup>−1, 2<sup>32</sup>, −1, 1.6, 2.5, <code>NaN</code>, <code>"0x10"</code>, <code>null</code>…) through both constructors, compared with WebIDL <code>[Clamp]</code> for <code>unsigned long?</code> vs <code>octet</code>, with the HTTP/3 error code each would map to (computed, not sent). Surfaces a real deviation: Chromium's octet conversion truncates fractions (1.6 → 1) where WebIDL rounds.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./serialization-channels/">Serialization across channels</a></h3>
+      <p>The serialization contract: send an error through <code>structuredClone()</code>, <code>MessageChannel</code>, <code>BroadcastChannel</code> and a same-origin iframe (a separate realm) and see whether a real <code>WebTransportError</code> arrives — or the real <code>DataCloneError</code>, with an opt-in labelled wire-shape fallback.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./worker-error-relay/">Worker error relay</a></h3>
+      <p>Practical architecture: a connection-manager worker reports stream/session failures to the UI thread by posting the <code>WebTransportError</code> itself; the UI branches on <code>source</code> and the full 32-bit code. Also UI → worker cancel reasons. No network session is opened — the worker constructs the error, the clone is real.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./reconnect-diagnostics/">Reconnect diagnostics</a></h3>
+      <p>Practical persistence: store the last failure in IndexedDB, reload, and a diagnostics panel reads back a real <code>WebTransportError</code> — demonstrating why Chromium keeps the decoder permanently on even if the writer kill switch is ever flipped.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>The motivation on ChromeStatus is interoperability: Chromium accepted only a dictionary constructor, narrowed outgoing application stream error codes to 8 bits although the attribute is an <code>unsigned long</code>, and threw <code>DataCloneError</code> for a type the spec marks <code>[Serializable]</code>. Firefox already ships the aligned API including serialization (and contributed the WPT coverage); WebKit has landed the constructor and code-width changes; the rest is tracked in Interop 2026. Applications that move errors between workers or persist them can now do so without custom conversion; the legacy constructor stays, measured by a UseCounter, so no existing code breaks. The intentional observable changes: codes above 255 are no longer truncated, and cloning now succeeds instead of throwing.</p>
+  </section>
+
+  <section><h2>the API surface</h2>
+    <pre tabindex="0"><code>// W3C WebTransport §12 (+ Chromium's compatibility overload)
+[Exposed=(Window,Worker), Serializable, SecureContext]
+interface WebTransportError : DOMException {
+  constructor(optional DOMString message = "", optional WebTransportErrorOptions options = {});
+  // Chromium only, [MeasureAs=WebTransportErrorLegacyConstructor]:
+  constructor(WebTransportErrorInit init, optional any legacyIgnored);
+  readonly attribute WebTransportErrorSource source;
+  readonly attribute unsigned long? streamErrorCode;
+};
+dictionary WebTransportErrorOptions {
+  WebTransportErrorSource source = "stream";
+  [Clamp] unsigned long? streamErrorCode = null;
+};
+dictionary WebTransportErrorInit {        // legacy
+  [Clamp] octet streamErrorCode;
+  DOMString message;
+};
+enum WebTransportErrorSource { "stream", "session" };
+
+const e = new WebTransportError("quota exceeded", { source: "stream", streamErrorCode: 70000 });
+worker.postMessage(e);                     // arrives as a WebTransportError
+const copy = structuredClone(e);           // copy.streamErrorCode === 70000</code></pre>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id 5158277221580800 — listing name "WebTransportError API alignment and serialization",
+    v159 listing. ChromeStatus: feature_type "Chromium catches up"; status Proposed;
+    browsers.chrome desktop/android/webview = 159; finch_name WebTransportErrorSerialization;
+    flag_name enable-experimental-web-platform-features; non_finch_justification "Ships enabled to
+    100%. The runtime feature is retained as a serialization kill switch". bug crbug 577073049;
+    owner monicach@microsoft.com; spec https://www.w3.org/TR/webtransport/#web-transport-error-interface
+    (read the editor's draft §12 in full: constructor steps, [[Source]]/[[StreamErrorCode]] slots,
+    code 0 because no legacy name mapping, §12.4 serialization/deserialization steps, §13 protocol
+    mapping streamErrorCode -> httpErrorCode). WPT: webtransport/idlharness + Mozilla PR
+    web-platform-tests/wpt#63842. MDN WebTransportError + Chrome for Developers WebTransport docs read.
+    Chromium source (main, read via chromium.googlesource.com):
+      - modules/webtransport/web_transport_error.idl: [Exposed=(Window,Worker), Serializable,
+        SecureContext]; constructor(optional DOMString message = "", optional WebTransportErrorOptions
+        options = {}); [MeasureAs=WebTransportErrorLegacyConstructor] constructor(WebTransportErrorInit
+        init, optional any legacyIgnored).
+      - web_transport_error_options.idl: source = "stream"; [Clamp] unsigned long? streamErrorCode = null.
+      - web_transport_error_init.idl (legacy): [Clamp] octet streamErrorCode; DOMString message.
+      - web_transport_error.cc: legacy Create() always sets source kStream; message defaults "".
+      - bindings/modules/v8/serialization/v8_script_value_serializer_for_modules.cc: WebTransportError
+        handled before the core DOMException path, gated by
+        RuntimeEnabledFeatures::WebTransportErrorSerializationEnabled(); writes kWebTransportErrorTag,
+        format version, UTF-8 message, reserved empty stack, source tag, has-code flag, uint32 code.
+      - v8_script_value_deserializer_for_modules.cc: reader NOT gated by the feature; validates
+        version, source discriminant <= kSession, has-code flag <= 1; tag exposure checks
+        V8WebTransportError::IsExposed.
+      - runtime_enabled_features.json5: { name: "WebTransportErrorSerialization", status: "stable" }.
+        No runtime feature exists for the constructor/code-width alignment.
+    Exact enable steps: none needed in a build with the change. --enable-experimental-web-platform-features
+    does not affect it (status already stable). Kill switch: --disable-blink-features=WebTransportErrorSerialization.
+    Verification browser: Chrome for Testing 153.0.8010.12 headless (only build available here; no
+    chrome-devtools-mcp). Observed in 153 default AND with --enable-experimental-web-platform-features
+    --enable-blink-features=WebTransportErrorSerialization (identical): standard form -> TypeError "The
+    provided value is not of type 'WebTransportErrorInit'"; legacy {message:'x',streamErrorCode:3} -> x/
+    stream/3; 300 -> 255; -5 -> 0; new W(null) -> ""; new W(42) -> TypeError; {message:'x'},'extra' -> x;
+    structuredClone / Worker / BroadcastChannel postMessage -> DataCloneError "WebTransportError object
+    could not be cloned."; plain DOMException clones fine; WebTransportError exposed in dedicated workers
+    on localhost. [Clamp] deviation found: legacy octet conversion TRUNCATES fractions in 153 (1.6->1,
+    1.5->1, 3.5->3) vs WebIDL round-half-even; recorded on the code-range page. The 159 success path could NOT be run here; its expectations are derived from the
+    IDL/serializer source above.
+    Use-case portfolio: (1) basic = constructor-inspector; (2) inspection/migration tooling =
+    constructor-compatibility-matrix (+ helper); (4) edge/failure = stream-error-code-range ([Clamp] both
+    overloads, null vs undefined, computed HTTP/3 mapping) and the DataCloneError fallbacks in every
+    serialization page; serialization contract inspector = serialization-channels; (3) practical =
+    worker-error-relay and reconnect-diagnostics (IndexedDB; decode-always-on rationale); (5) novel
+    composition = worker relay + persisted diagnostics together model a full worker-hosted client.
+    Not built: a real network demo of the 32-bit code on the wire (writer.abort / RESET_STREAM /
+    STOP_SENDING) — requires an HTTP/3 WebTransport server that this Deno Deploy site cannot host;
+    recorded honestly on the code-range page and as a manual conformance assertion.
+    modern-web-guidance consulted (npx modern-web-guidance@latest): accessibility (live regions),
+    forms (labels, aria-describedby hints, inputmode), responsive-table (semantic table, captioned
+    focusable region, container-query stacked layout), css-layout/responsive-design (grid minmax(0,1fr),
+    overflow-wrap). Recorded per concept in guidanceConsulted.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5158277221580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#web-transport-error-interface" target="_blank" rel="noopener">W3C WebTransport: WebTransportError interface</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/WebTransportError" target="_blank" rel="noopener">MDN: WebTransportError</a></li>
+    <li><a href="https://developer.chrome.com/docs/capabilities/web-apis/webtransport" target="_blank" rel="noopener">Chrome for Developers: WebTransport</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md" target="_blank" rel="noopener">WebTransport explainer</a></li>
+    <li><a href="https://github.com/web-platform-tests/wpt/pull/63842" target="_blank" rel="noopener">WPT PR 63842 (Mozilla)</a></li>
+    <li><a href="https://issues.chromium.org/issues/577073049" target="_blank" rel="noopener">Chromium tracking bug 577073049</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

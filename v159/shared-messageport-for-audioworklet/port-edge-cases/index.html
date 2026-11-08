@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Port edge cases — Shared MessagePort for AudioWorklet — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    [hidden] { display: none !important; }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); align-content: start; min-width: 0; }
+    .stage > * { min-width: 0; margin: 0; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); overflow-wrap: anywhere; }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; text-align: left; max-width: 100%; }
+    button.secondary { background: var(--bg-paper); color: var(--text-black); }
+    button:disabled { background: var(--bg-stone); color: var(--text-muted); border-color: var(--text-muted); cursor: not-allowed; }
+    button:focus-visible, select:focus-visible, input:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    label { display: inline-flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; min-height: 44px; }
+    select, input[type="number"] { min-height: 44px; font: inherit; border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); padding: 0 var(--space-2); }
+    input[type="checkbox"] { width: 24px; height: 24px; }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); overflow-wrap: anywhere; }
+    .verdict.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald-dark); }
+    .verdict.no { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .verdict.old { color: var(--text-charcoal); border-color: var(--accent-amber); border-style: dashed; }
+    output, .log { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.8rem; overflow-wrap: anywhere; white-space: pre-wrap; font-family: var(--font-mono); }
+    .log { list-style: none; margin: 0; max-height: 16rem; overflow: auto; }
+    .log li { padding: 2px 0; border-bottom: 1px solid var(--bg-ivory); }
+    .ledger { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: var(--space-2); }
+    .ledger div { border: 2px solid var(--border-black); padding: var(--space-2); background: var(--bg-ivory); color: var(--text-charcoal); }
+    .ledger dt { font-size: 0.8rem; color: var(--text-charcoal); }
+    .ledger dd { margin: 0; font-family: var(--font-mono); font-weight: 700; font-size: 1.1rem; color: var(--text-black); overflow-wrap: anywhere; }
+    .table-wrapper { overflow-x: auto; max-width: 100%; border: 2px solid var(--border-black); }
+    table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+    th, td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; color: var(--text-charcoal); background: var(--bg-paper); overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); color: var(--text-black); }
+    caption { text-align: left; font-weight: 700; padding: var(--space-2); color: var(--text-black); }
+    td.pass { color: var(--accent-emerald-dark); font-weight: 700; }
+    td.fail { color: var(--accent-rose); font-weight: 700; }
+    td.blocked { color: var(--text-charcoal); font-weight: 700; }
+    td.pass, td.fail, td.blocked { white-space: nowrap; }
+    pre { max-width: 100%; overflow-x: auto; }
+    code { overflow-wrap: anywhere; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Shared MessagePort for AudioWorklet</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · multimedia · edge cases, failure modes &amp; migration</p>
+    <h1>Port edge cases</h1>
+    <p class="lede">Ten real experiments on the shared port's contract: identity, per-context channels, read-only-ness, messages posted <em>before</em> <code>addModule()</code>, the <code>start()</code> rule for <code>addEventListener</code>, transfer lists, <code>DataCloneError</code>, <code>close()</code> — plus the migration row: feature-detect, and fall back to a bootstrap node only when the port is missing.</p>
+  </header>
+
+  <p class="note"><strong>Flag-gated in Chrome.</strong> The members are <code>[RuntimeEnabled=AudioWorkletSharedPort]</code> in Blink (status <em>experimental</em>; ChromeStatus: proposed for Chrome 159, already shipped in Firefox 138). To try the real path in a Chrome build that contains the implementation: enable <code>chrome://flags/#enable-experimental-web-platform-features</code> and relaunch, or launch with <code>--enable-blink-features=AudioWorkletSharedPort</code> (or <code>--enable-features=AudioWorkletSharedPort</code>, or <code>--enable-experimental-web-platform-features</code>). Chrome for Testing 153 does not contain the attribute even with those switches (verified) — use a current Canary. Without it, this page says so and runs the labelled <em>old pattern</em> instead.</p>
+
+  <section class="stage" aria-labelledby="s1">
+    <h2 id="s1">Run the bench</h2>
+    <p>Creates three silent contexts (two real-time, one offline), runs every row for real, then closes them.</p>
+    <div class="controls"><button type="button" id="run">Run all edge cases</button></div>
+    <p class="verdict" id="verdict" aria-live="polite">Not run yet.</p>
+    <div class="table-wrapper" tabindex="0" role="region" aria-labelledby="cap">
+      <table>
+        <caption id="cap">Edge-case results in this browser</caption>
+        <thead><tr><th scope="col">#</th><th scope="col">case</th><th scope="col">result</th><th scope="col">observed</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section><h2>what the spec says (and what these rows check)</h2>
+    <ul>
+      <li>The <code>MessageChannel</code> is created in the <code>AudioContext</code> / <code>OfflineAudioContext</code> constructor: port1 becomes <code>audioWorklet.port</code>, port2 is transferred to the scope. So the port exists, and can be posted to, before any module loads — messages queue until the scope listens.</li>
+      <li>It is a plain HTML <code>MessagePort</code>: <code>onmessage</code> starts it implicitly, <code>addEventListener('message')</code> needs <code>start()</code>; transfer lists, cloning errors and <code>close()</code> behave exactly as they do for any port.</li>
+      <li>The spec's note asks authors who listen on either side to <code>close()</code> one end when done so resources can be collected.</li>
+    </ul>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5079784523694080" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://webaudio.github.io/web-audio-api/#setting-the-messageport-on-the-scope" target="_blank" rel="noopener">Spec: setting the MessagePort on the scope</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/web-messaging.html#message-ports" target="_blank" rel="noopener">HTML: MessagePort (start, close, transfer)</a></li>
+    <li><a href="https://github.com/WebAudio/web-audio-api/pull/2507" target="_blank" rel="noopener">web-audio-api PR #2507</a></li>
+    <li><a href="../worker-to-worklet-bridge/">Worker → worklet bridge</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Resolves with the first matching message, or null after `ms` (a timeout is data, not an error).
+  const waitFor = (port, type, ms = 1500) => new Promise((resolve) => {
+    const t = setTimeout(() => { port.removeEventListener('message', h); resolve(null); }, ms);
+    function h(e) { if (e.data && e.data.type === type) { clearTimeout(t); port.removeEventListener('message', h); resolve(e.data); } }
+    port.addEventListener('message', h);
+  });
+  const isPort = (p) => p instanceof MessagePort;
+  let n = 0;
+  function row(label, state, observed) {
+    const tr = document.createElement('tr');
+    const cells = [String(++n), label, state, observed];
+    cells.forEach((c, i) => { const td = document.createElement('td'); td.textContent = c; if (i === 2) td.className = state; tr.append(td); });
+    $('rows').append(tr);
+    return state;
+  }
+  const BLOCKED = 'blocked';
+
+  $('run').addEventListener('click', async () => {
+    $('run').disabled = true;
+    $('rows').replaceChildren(); n = 0;
+    $('verdict').className = 'verdict'; $('verdict').textContent = 'Running…';
+    const states = [];
+    const contexts = [];
+    try {
+      const ctx = new AudioContext(); contexts.push(ctx);
+      await ctx.resume();
+      const port = ctx.audioWorklet.port;
+      const supported = isPort(port);
+
+      // 1 identity
+      states.push(supported
+        ? row('Port identity: same object on every read', port === ctx.audioWorklet.port ? 'pass' : 'fail', `instanceof MessagePort: true; a === b: ${port === ctx.audioWorklet.port}`)
+        : row('Port identity: same object on every read', BLOCKED, `no shared port: audioWorklet.port is ${String(port)}; 'port' in AudioWorklet.prototype: ${'port' in AudioWorklet.prototype}`));
+
+      // 2 per-context + OfflineAudioContext
+      const off = new OfflineAudioContext(1, 128, 8000);
+      const offPort = off.audioWorklet.port;
+      states.push(supported
+        ? row('One channel per context (also on OfflineAudioContext)', isPort(offPort) && offPort !== port ? 'pass' : 'fail', `offline port is MessagePort: ${isPort(offPort)}; distinct from realtime port: ${offPort !== port}`)
+        : row('One channel per context (also on OfflineAudioContext)', BLOCKED, `offline audioWorklet.port is ${String(offPort)}`));
+
+      // 3 readonly
+      if (supported) {
+        let threw = null;
+        try { ctx.audioWorklet.port = null; } catch (e) { threw = e.name; }
+        states.push(row('Read-only attribute (assignment in strict mode)', threw === 'TypeError' && ctx.audioWorklet.port === port ? 'pass' : 'fail', `assignment threw: ${threw}; value unchanged: ${ctx.audioWorklet.port === port}`));
+      } else states.push(row('Read-only attribute (assignment in strict mode)', BLOCKED, 'no shared port'));
+
+      // 4 + 5: messages before addModule; announce at module evaluation
+      let evaluated = null;
+      if (supported) {
+        evaluated = waitFor(port, 'evaluated', 3000);
+        port.start();
+        for (const tag of ['early-1', 'early-2', 'early-3']) port.postMessage({ type: 'note', tag });
+      }
+      await ctx.audioWorklet.addModule('scope.js');
+      if (supported) {
+        const ev = await evaluated;
+        states.push(row('Scope port usable during module evaluation', ev && ev.portIsMessagePort ? 'pass' : 'fail', ev ? `scope announced itself at evaluation; its port instanceof MessagePort: ${ev.portIsMessagePort}` : 'no announcement within 3 s'));
+        const listP = waitFor(port, 'list');
+        port.postMessage({ type: 'list', tag: 'list' });
+        const list = await listP;
+        const got = list ? list.received.slice(0, 3).join(', ') : 'nothing';
+        states.push(row('Messages posted BEFORE addModule are queued, in order', got === 'early-1, early-2, early-3' ? 'pass' : 'fail', `scope's first three messages: ${got}`));
+      } else {
+        states.push(row('Scope port usable during module evaluation', BLOCKED, 'no shared port: the module cannot reach the main thread on its own'));
+        states.push(row('Messages posted BEFORE addModule are queued, in order', BLOCKED, 'no shared port to post to before a node exists'));
+      }
+
+      // 6 addEventListener needs start()
+      if (supported) {
+        const ctxB = new AudioContext(); contexts.push(ctxB);
+        await ctxB.resume();
+        await ctxB.audioWorklet.addModule('scope.js');
+        const pb = ctxB.audioWorklet.port;
+        let count = 0;
+        pb.addEventListener('message', (e) => { if (e.data && e.data.type === 'echo') count++; });
+        pb.postMessage({ type: 'echo', seq: 1 });
+        await wait(500);
+        const before = count;
+        pb.start();
+        await wait(500);
+        states.push(row('addEventListener() alone delivers nothing until start()', before === 0 && count === 1 ? 'pass' : 'fail', `echoes seen before start(): ${before}; after start(): ${count}`));
+      } else states.push(row('addEventListener() alone delivers nothing until start()', BLOCKED, 'no shared port'));
+
+      // 7 transfer ArrayBuffer
+      if (supported) {
+        const buf = new ArrayBuffer(4096);
+        const replyP = waitFor(port, 'buffer');
+        port.postMessage({ type: 'buffer', buffer: buf }, [buf]);
+        const reply = await replyP;
+        states.push(row('Transfer list: ArrayBuffer moves, main copy detaches', buf.byteLength === 0 && reply && reply.byteLength === 4096 ? 'pass' : 'fail', `main byteLength after post: ${buf.byteLength}; scope received: ${reply ? reply.byteLength : 'no reply'}`));
+      } else states.push(row('Transfer list: ArrayBuffer moves, main copy detaches', BLOCKED, 'no shared port'));
+
+      // 8 transfer a MessagePort
+      if (supported) {
+        const mc = new MessageChannel();
+        const adoptedP = waitFor(mc.port1, 'adopted');
+        mc.port1.start();
+        const ackP = waitFor(port, 'adopt-ack');
+        port.postMessage({ type: 'adopt-port' }, [mc.port2]);
+        const [adopted, ack] = await Promise.all([adoptedP, ackP]);
+        states.push(row('Transfer a MessagePort into the scope (new dedicated channel)', adopted && ack && ack.gotPort ? 'pass' : 'fail', adopted ? `reply arrived on the transferred channel; scope saw e.ports.length = ${ack ? ack.portsLength : '?'}` : 'no reply on the transferred port'));
+        mc.port1.close();
+      } else states.push(row('Transfer a MessagePort into the scope (new dedicated channel)', BLOCKED, 'no shared port'));
+
+      // 9 DataCloneError
+      if (supported) {
+        let name = null;
+        try { port.postMessage({ type: 'echo', fn: () => 1 }); } catch (e) { name = e.name; }
+        states.push(row('Uncloneable payload throws DataCloneError synchronously', name === 'DataCloneError' ? 'pass' : 'fail', `threw: ${name}`));
+      } else states.push(row('Uncloneable payload throws DataCloneError synchronously', BLOCKED, 'no shared port'));
+
+      // 10 close()
+      if (supported) {
+        const ctxC = new AudioContext(); contexts.push(ctxC);
+        await ctxC.resume();
+        await ctxC.audioWorklet.addModule('scope.js');
+        const pc = ctxC.audioWorklet.port;
+        pc.start();
+        const liveP = waitFor(pc, 'echo', 1500);
+        pc.postMessage({ type: 'echo', seq: 1 });
+        const live = await liveP;
+        pc.close();
+        let threw = null;
+        const deadP = waitFor(pc, 'echo', 600);
+        try { pc.postMessage({ type: 'echo', seq: 2 }); } catch (e) { threw = e.name; }
+        const dead = await deadP;
+        states.push(row('close() ends the channel: later posts are silently dropped', live && !dead && !threw && pc === ctxC.audioWorklet.port ? 'pass' : 'fail', `echo before close: ${!!live}; echo after close: ${!!dead}; post after close threw: ${threw}; same object after close: ${pc === ctxC.audioWorklet.port}`));
+      } else states.push(row('close() ends the channel: later posts are silently dropped', BLOCKED, 'no shared port'));
+
+      // 11 migration: feature-detect, fall back to bootstrap node (always runs)
+      {
+        let chan, used, node = null;
+        if (supported) { chan = port; used = 'shared port (no node)'; }
+        else { node = new AudioWorkletNode(ctx, 'edge-bootstrap'); chan = node.port; chan.start(); used = 'OLD PATTERN: bootstrap AudioWorkletNode'; }
+        const echoP = waitFor(chan, 'echo');
+        chan.postMessage({ type: 'echo', seq: 99 });
+        const echo = await echoP;
+        states.push(row('Migration: feature-detect, fall back only when missing', echo ? 'pass' : 'fail', `channel used: ${used}; echo via ${echo ? echo.via : 'none'}`));
+        globalThis.showcaseTelemetry?.assert(supported ? 'awsp-edge-migration-shared' : 'awsp-edge-migration-fallback', !!echo, { used });
+        node?.disconnect();
+      }
+
+      const pass = states.filter((s) => s === 'pass').length;
+      const fail = states.filter((s) => s === 'fail').length;
+      const blocked = states.filter((s) => s === BLOCKED).length;
+      $('verdict').className = fail ? 'verdict no' : supported ? 'verdict yes' : 'verdict no';
+      $('verdict').textContent = supported
+        ? `${pass} pass, ${fail} fail of ${states.length} rows — the shared port behaves as the spec and HTML MessagePort rules require${fail ? ' except for the failing rows' : ''}.`
+        : `Shared port unavailable: ${blocked} rows blocked (not passed), migration row ${states[states.length - 1]} using the old bootstrap-node fallback.`;
+      globalThis.showcaseTelemetry?.assert(supported ? 'awsp-edge-all' : 'awsp-edge-unsupported', fail === 0, { pass, fail, blocked });
+    } catch (err) {
+      $('verdict').className = 'verdict no';
+      $('verdict').textContent = `Bench failed: ${err.name}: ${err.message}`;
+      globalThis.showcaseTelemetry?.assert('awsp-edge-error', false, { error: String(err) });
+    } finally {
+      for (const c of contexts) { try { await c.close(); } catch {} }
+      $('run').disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

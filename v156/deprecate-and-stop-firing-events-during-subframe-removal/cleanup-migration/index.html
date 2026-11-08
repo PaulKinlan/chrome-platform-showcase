@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cleanup migration — Deprecate and stop firing events during subframe removal — Chrome 156 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../subframe-demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Deprecate and stop firing events during subframe removal</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v156 · behaviour change · migration guide</p>
+    <h1>Cleanup that survives silent removal</h1>
+    <p class="lede">The code this change breaks is real: an embedded widget (editor, chat box, ad slot, auth helper) that flushes its state in <code>pagehide</code> or <code>unload</code> when the host page tears it out. Try the same draft-saving widget with three cleanup strategies, close it the way a framework would — <code>iframe.remove()</code> — and see which drafts survive in your browser's current mode.</p>
+  </header>
+
+  <p class="note"><strong>Behind a flag:</strong> to see the strategies diverge, launch Chromium 156+ with <code>--enable-blink-features=OmitSubframeDetachmentEventsOnRemoval</code> (or <code>--enable-features=OmitSubframeDetachmentEventsOnRemoval</code>). In default Chrome all three strategies keep the draft — which is exactly why the legacy one looks safe today.</p>
+
+  <div id="mode" class="mode-banner" role="status" aria-live="polite">Probing which behaviour this browser has…</div>
+
+  <section class="stage" aria-labelledby="w-title">
+    <h2 id="w-title">1 · A draft-saving widget, three ways</h2>
+    <fieldset>
+      <legend>Widget cleanup strategy</legend>
+      <label><input type="radio" name="strategy" value="pagehide" checked> Legacy: save in <code>pagehide</code></label>
+      <label><input type="radio" name="strategy" value="teardown"> Parent sends a teardown message, waits for the ack, then removes</label>
+      <label><input type="radio" name="strategy" value="incremental"> Save as you type (no lifecycle event)</label>
+    </fieldset>
+    <div class="button-row">
+      <button type="button" id="open">Open widget</button>
+      <button type="button" id="type" aria-disabled="true">Type a sample draft into it</button>
+      <button type="button" id="close" aria-disabled="true">Close widget (iframe.remove())</button>
+    </div>
+    <div class="frame-host" id="w-host" aria-label="Widget stage"><p class="empty">Widget closed.</p></div>
+    <p class="verdict" id="w-verdict" role="status" aria-live="polite">Open the widget, type (in the frame or with the button), then close it.</p>
+    <dl class="table-wrap" style="margin:0;padding:var(--space-3);display:grid;gap:var(--space-2)">
+      <div><dt><strong>Draft found in storage after close</strong></dt><dd id="w-saved" style="margin:0;font-family:var(--font-mono);overflow-wrap:anywhere">—</dd></div>
+      <div><dt><strong>Widget heartbeats received after removal</strong></dt><dd id="w-beats" style="margin:0;font-family:var(--font-mono)">—</dd></div>
+    </dl>
+    <h3 id="wl-title">Results so far</h3>
+    <div class="log" id="w-log" role="log" aria-labelledby="wl-title"><p>No widget closed yet.</p></div>
+  </section>
+
+  <section class="stage" aria-labelledby="p-title">
+    <h2 id="p-title">2 · <code>unload</code> is on its way out regardless</h2>
+    <p>Independently of this change, Chrome is deprecating <code>unload</code> and lets any page opt a frame out with Permissions Policy. Here two same-origin frames are removed side by side: one default, one with <code>allow="unload 'none'"</code>. The readout shows what <code>document.permissionsPolicy</code> (or the older <code>featurePolicy</code>) reports inside each frame and which events actually fired.</p>
+    <div class="button-row"><button type="button" id="policy-run">Create both frames and remove them</button></div>
+    <div class="frame-host" id="p-host" aria-label="Permissions Policy stage"><p class="empty">Frames appear here briefly.</p></div>
+    <div class="table-wrap" tabindex="0" role="region" aria-labelledby="p-cap">
+      <table class="trace"><caption id="p-cap">unload policy vs events on removal</caption>
+        <thead><tr><th scope="col">frame</th><th scope="col">allowsFeature('unload')</th><th scope="col">events fired on remove()</th></tr></thead>
+        <tbody id="p-rows"><tr><td colspan="3">Not run yet.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section><h2>the migration checklist</h2>
+    <ol>
+      <li><strong>The host owns teardown.</strong> If the host page knows it is about to remove a frame, it tells the frame first (<code>postMessage({type: 'teardown'})</code>, or a direct call for same-origin), awaits an acknowledgement with a timeout, then removes. This works identically in both modes and in every engine.</li>
+      <li><strong>Persist incrementally.</strong> State that matters (drafts, cart contents, queue positions) is saved when it changes, not at the end of life. Nothing is lost if the frame is destroyed silently, crashes, or is killed in the background.</li>
+      <li><strong>Keep <code>pagehide</code> for navigation, not removal.</strong> Navigating the frame (or the top-level page) still fires <code>pagehide</code>; use it for back/forward-cache friendly cleanup, never <code>unload</code>.</li>
+      <li><strong>Do not try to detect removal from inside.</strong> A removed frame's document is destroyed: its timers stop, so a <code>frameElement?.isConnected</code> watchdog in a later task never runs — the heartbeat counter above stays at 0.</li>
+      <li><strong>Moving is not removing.</strong> If the frame is merely being re-parented, use <code>moveBefore()</code> (feature-detected) so it is never detached — see the <a href="../timeline-explorer/">timeline explorer</a>.</li>
+      <li><strong>Telemetry beacons</strong> that used detach events should queue with <code>fetchLater()</code> (where available) as data is produced rather than fire at teardown.</li>
+    </ol>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5754395122860032" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://gist.github.com/noamr/f80676a616444de7efb5be671692e919" target="_blank" rel="noopener">Compat study: who relied on these events (Auth0 lock release, GPT slot disposal, telemetry beacons)</a></li>
+    <li><a href="https://developer.chrome.com/docs/web-platform/deprecating-unload" target="_blank" rel="noopener">Deprecating the unload event</a></li>
+    <li><a href="https://developer.chrome.com/docs/web-platform/page-lifecycle-api" target="_blank" rel="noopener">Page Lifecycle API</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script src="../subframe-kit.js"></script>
+<script>
+(() => {
+  'use strict';
+  const Kit = globalThis.SubframeKit;
+  const $ = (id) => document.getElementById(id);
+  const KEY = 'subframe-removal-demo-draft';
+  let modeResult = null;
+  Kit.detectMode().then((r) => { modeResult = r; Kit.renderMode($('mode'), r); });
+
+  // Storage the widget writes to: sessionStorage when available, else an
+  // in-memory vault on this page (private mode / blocked storage).
+  const vault = new Map();
+  Object.defineProperty(globalThis, '__subframeDraftVault', { value: Object.freeze({
+    save(text) { try { sessionStorage.setItem(KEY, text); } catch { vault.set(KEY, text); } },
+    read() { try { const v = sessionStorage.getItem(KEY); if (v != null) return v; } catch { /* blocked */ } return vault.has(KEY) ? vault.get(KEY) : null; },
+    clear() { try { sessionStorage.removeItem(KEY); } catch { /* blocked */ } vault.delete(KEY); },
+    beat() { beats.count++; if (beats.removed) beats.after++; },
+  }) });
+  const beats = { count: 0, after: 0, removed: false };
+
+  function widgetScript(strategy) {
+    // Runs inside the same-origin widget frame.
+    return `
+      var vault = parent.__subframeDraftVault;
+      var ta = document.getElementById('draft');
+      function save(){ vault.save(ta.value); }
+      ${strategy === 'pagehide' ? "addEventListener('pagehide', save);" : ''}
+      ${strategy === 'incremental' ? "ta.addEventListener('input', save);" : ''}
+      ${strategy === 'teardown' ? "addEventListener('message', function(e){ if (e.source === parent && e.data && e.data.type === 'teardown' && e.ports[0]) { save(); e.ports[0].postMessage('flushed'); } });" : ''}
+      setInterval(function(){ vault.beat(); }, 100);
+    `;
+  }
+  const widgetBody = '<label for="draft" style="display:block;font-weight:700">Draft</label><textarea id="draft" rows="2" style="width:95%;font:inherit;min-height:44px"></textarea>';
+
+  let widget = null, strategy = null, busy = false, results = 0;
+  const btn = (id, on) => $(id).setAttribute('aria-disabled', on ? 'false' : 'true');
+  const on = (id) => $(id).getAttribute('aria-disabled') !== 'true';
+
+  $('open').addEventListener('click', async () => {
+    if (busy || widget) return; busy = true;
+    try {
+      strategy = document.querySelector('input[name=strategy]:checked').value;
+      globalThis.__subframeDraftVault.clear();
+      beats.count = 0; beats.after = 0; beats.removed = false;
+      $('w-host').replaceChildren();
+      widget = await Kit.create({ parent: $('w-host'), events: [], extra: widgetScript(strategy), body: widgetBody, title: `draft widget (${strategy} strategy)` });
+      widget.iframe.style.height = '8rem';
+      btn('type', true); btn('close', true); btn('open', false);
+      document.querySelectorAll('input[name=strategy]').forEach((r) => { r.disabled = true; });
+      $('w-verdict').className = 'verdict';
+      $('w-verdict').textContent = `Widget open with the "${strategy}" strategy. Type a draft, then close it.`;
+      $('w-saved').textContent = '—'; $('w-beats').textContent = '—';
+    } finally { busy = false; }
+  });
+
+  $('type').addEventListener('click', () => {
+    if (!on('type') || !widget) return;
+    const ta = widget.iframe.contentDocument.getElementById('draft');
+    ta.value = 'Meeting notes: ship the teardown handshake before the flag flips.';
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+
+  function requestTeardown(iframe) {
+    return new Promise((resolve) => {
+      const mc = new MessageChannel();
+      const t = setTimeout(() => resolve('timeout'), 1000);
+      mc.port1.onmessage = () => { clearTimeout(t); resolve('acked'); };
+      iframe.contentWindow.postMessage({ type: 'teardown' }, location.origin, [mc.port2]);
+    });
+  }
+
+  $('close').addEventListener('click', async () => {
+    if (!on('close') || !widget || busy) return;
+    busy = true; btn('close', false); btn('type', false);
+    const w = widget; widget = null;
+    let typed = '';
+    try { typed = w.iframe.contentDocument.getElementById('draft').value; } catch { typed = ''; }
+    let handshake = null;
+    if (strategy === 'teardown') handshake = await requestTeardown(w.iframe);
+    await Kit.measure(() => { w.iframe.remove(); beats.removed = true; }, { settleMs: 600 });
+    const saved = globalThis.__subframeDraftVault.read();
+    $('w-host').replaceChildren(Object.assign(document.createElement('p'), { className: 'empty', textContent: 'Widget closed.' }));
+    $('w-saved').textContent = saved == null || saved === '' ? '(nothing saved)' : JSON.stringify(saved);
+    $('w-beats').textContent = `${beats.after} (of ${beats.count} total)`;
+    const kept = !!typed && saved === typed;
+    const v = $('w-verdict');
+    v.className = 'verdict ' + (!typed ? '' : kept ? 'good' : 'bad');
+    v.textContent = !typed
+      ? 'Nothing was typed, so there was nothing to save. Open it again and type a draft first.'
+      : kept
+        ? `Draft preserved with the "${strategy}" strategy${handshake ? ` (teardown handshake: ${handshake})` : ''}.`
+        : `Draft LOST with the "${strategy}" strategy: the widget never got a chance to save because removal fired no pagehide in this browser.`;
+    results++;
+    const log = $('w-log'); if (results === 1) log.replaceChildren();
+    const p = document.createElement('p');
+    p.textContent = `${strategy}: draft ${!typed ? 'not typed' : kept ? 'kept' : 'lost'}; heartbeats after removal: ${beats.after}; mode: ${modeResult ? modeResult.mode : 'probing'}.`;
+    log.append(p);
+    if (typed && strategy !== 'pagehide') globalThis.showcaseTelemetry?.assert('subframe-migration-strategy-keeps-draft', kept, { strategy, handshake });
+    if (typed && strategy === 'pagehide' && modeResult) globalThis.showcaseTelemetry?.assert('subframe-legacy-strategy-matches-mode', modeResult.mode === 'omits' ? !kept : modeResult.mode === 'legacy' ? kept : true, { mode: modeResult.mode, kept });
+    globalThis.showcaseTelemetry?.assert('subframe-removed-frame-runs-no-tasks', beats.after === 0, { after: beats.after });
+    btn('open', true);
+    document.querySelectorAll('input[name=strategy]').forEach((r) => { r.disabled = false; });
+    busy = false;
+    if (document.activeElement === document.body || !document.activeElement) $('open').focus();
+  });
+
+  // ---- Permissions Policy contrast ----
+  let policyBusy = false;
+  $('policy-run').addEventListener('click', async () => {
+    if (policyBusy) return; policyBusy = true;
+    const host = $('p-host'); host.replaceChildren();
+    const rows = $('p-rows'); rows.replaceChildren();
+    try {
+      let defaultAllowed = null;
+      for (const [name, allow] of [['default', null], ["allow=\"unload 'none'\"", "unload 'none'"]]) {
+        const f = await Kit.create({ parent: host, allow, title: `policy frame: ${name}` });
+        const trace = await Kit.measure(() => f.iframe.remove(), { settleMs: 200 });
+        const tr = document.createElement('tr');
+        for (const t of [name, String(f.unloadAllowed), trace.events.map((e) => e.type).join(' → ') || 'none']) { const td = document.createElement('td'); td.textContent = t; tr.append(td); }
+        rows.append(tr);
+        if (!allow) defaultAllowed = f.unloadAllowed;
+        if (allow) globalThis.showcaseTelemetry?.assert('subframe-unload-policy-none-respected', f.unloadAllowed === false && !trace.events.some((e) => e.type === 'unload'), { unloadAllowed: f.unloadAllowed });
+      }
+      const note = document.createElement('tr'); const ntd = document.createElement('td'); ntd.colSpan = 3;
+      ntd.textContent = defaultAllowed === false
+        ? 'Even the default frame reports unload as disallowed: Chrome\'s unload deprecation already applies to this page, so only pagehide/visibilitychange remain (and only in legacy removal mode).'
+        : defaultAllowed === true ? 'The default frame may still use unload; the opted-out frame cannot — the allow attribute is the per-frame switch.' : 'This browser exposes no permissionsPolicy/featurePolicy object, so policy state is unknown here.';
+      note.append(ntd); rows.append(note);
+    } catch (e) {
+      const tr = document.createElement('tr'); const td = document.createElement('td'); td.colSpan = 3; td.textContent = `Could not run: ${e.message}`; tr.append(td); rows.append(tr);
+    } finally {
+      host.replaceChildren(Object.assign(document.createElement('p'), { className: 'empty', textContent: 'Both frames removed.' }));
+      policyBusy = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

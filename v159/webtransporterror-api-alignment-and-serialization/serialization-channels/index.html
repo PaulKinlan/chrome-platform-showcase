@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Serialization across channels — WebTransportError API alignment and serialization — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../wte-demo.css">
+  <style>
+    iframe.echo { width: 100%; height: 4.5rem; border: 2px solid var(--border-black); background: var(--bg-ivory); box-sizing: border-box; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransportError API alignment and serialization</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · network · serialization inspector</p>
+    <h1>Serialization across channels</h1>
+    <p class="lede"><code>WebTransportError</code> is now <code>[Serializable]</code>: the structured-clone algorithm copies its <code>message</code>, <code>source</code> and nullable <code>streamErrorCode</code> and rebuilds a real <code>WebTransportError</code> on the other side. Before, Chromium threw <code>DataCloneError</code>. Send one through four real channels and see exactly what arrives.</p>
+  </header>
+
+  <p class="note"><strong>Kill switch, not a flag.</strong> Serialization is on by default in builds that contain it; Blink's <code>WebTransportErrorSerialization</code> runtime feature (<code>status: "stable"</code>) exists only as a writer-side kill switch. To watch the off state in such a build, launch with <code>--disable-blink-features=WebTransportErrorSerialization</code>: writing then throws <code>DataCloneError</code> again, while <em>reading</em> already-stored values keeps working (see the <a href="../reconnect-diagnostics/">IndexedDB diagnostics</a> demo). In a build without the change (Chrome 153 tested, with and without <code>--enable-experimental-web-platform-features</code>), every channel below reports the real <code>DataCloneError</code>. The “wire-shape fallback” is ordinary app code and is labelled as such wherever it runs.</p>
+
+  <p class="status" id="support" role="status">Probing structuredClone(WebTransportError)…</p>
+
+  <section class="stage" aria-labelledby="s-title">
+    <h2 id="s-title">The error to send</h2>
+    <div class="controls">
+      <div class="field"><label for="msg">message</label><input type="text" id="msg" value="stream reset by peer" autocomplete="off"></div>
+      <div class="field"><label for="src">source</label><select id="src"><option value="stream">"stream"</option><option value="session">"session" (code null)</option></select></div>
+      <div class="field"><label for="code">streamErrorCode (stream errors)</label><input type="number" id="code" value="4294967295" inputmode="numeric"></div>
+      <div class="field"><div class="check"><input type="checkbox" id="fallback" checked><label for="fallback">on DataCloneError, retry with the labelled wire-shape fallback</label></div></div>
+    </div>
+    <p>Constructed with: <span id="made">—</span></p>
+  </section>
+
+  <section class="stage" aria-labelledby="c-title">
+    <h2 id="c-title">Send it</h2>
+    <div class="btn-row">
+      <button type="button" id="b-clone">structuredClone()</button>
+      <button type="button" id="b-mc">MessageChannel</button>
+      <button type="button" id="b-bc">BroadcastChannel</button>
+      <button type="button" id="b-frame" disabled aria-describedby="frame-state">same-origin iframe</button>
+      <button type="button" id="b-dom" class="secondary">contrast: plain DOMException</button>
+      <button type="button" id="b-clear" class="secondary">Clear log</button>
+    </div>
+    <p id="frame-state" class="hint">Loading the echo frame…</p>
+    <iframe class="echo" id="echo" src="./echo-frame.html" title="Same-origin echo frame that reports what it received"></iframe>
+    <div class="log" id="log" role="log" aria-live="polite" aria-label="Channel results"><p>No sends yet.</p></div>
+  </section>
+
+  <section><h2>what the serializer preserves</h2>
+    <p>Chromium's writer emits a versioned record — format version, UTF-8 message, a reserved (empty) stack field, a source discriminant, a has-code flag and a 32-bit code — and the reader validates every field before constructing the object. The <code>stack</code> is <em>not</em> carried yet, and the received object's <code>name</code> comes from the interface, not from the payload. The nullable code survives as <code>null</code>, distinct from <code>0</code>; the contrast button shows that a plain <code>DOMException</code> was always cloneable — it was only the subclass that failed.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5158277221580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#web-transport-error-serialization" target="_blank" rel="noopener">WebTransport spec §12.4: Serialization</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/structured-data.html#serializable-objects" target="_blank" rel="noopener">HTML: serializable objects</a></li>
+    <li><a href="../worker-error-relay/">Worker error relay</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script src="../wte-lib.js"></script>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const WTE = globalThis.WTE;
+  const logEl = $('log');
+  let fresh = true;
+  let seq = 0;
+
+  const ser = WTE.has() && WTE.serializationSupported();
+  $('support').textContent = !WTE.has() ? 'WebTransportError is not defined here (secure context required).'
+    : ser ? 'Serialization: supported — structuredClone returned a real WebTransportError with message, source and code intact.'
+      : 'Serialization: NOT supported — structuredClone(WebTransportError) throws DataCloneError in this browser (pre-alignment build, or the WebTransportErrorSerialization kill switch is off).';
+  $('support').className = 'status ' + (ser ? 'ok' : 'fallback');
+  globalThis.showcaseTelemetry?.assert('wte-serialization-probe', true, { serializationSupported: ser });
+
+  function log(parts) {
+    if (fresh) { logEl.textContent = ''; fresh = false; }
+    const p = document.createElement('p');
+    for (const [text, cls] of parts) {
+      const s = document.createElement('span');
+      if (cls) s.className = cls;
+      s.textContent = text;
+      p.append(s);
+    }
+    logEl.append(p);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function current() {
+    const src = $('src').value;
+    const code = src === 'session' ? null : ($('code').value === '' ? null : Number($('code').value));
+    const m = WTE.make($('msg').value, src, code);
+    $('made').textContent = m.via === 'standard' ? 'new WebTransportError(' + JSON.stringify($('msg').value) + ', {source: ' + JSON.stringify(src) + ', streamErrorCode: ' + String(code) + '})'
+      : m.via === 'legacy' ? 'new WebTransportError({message, streamErrorCode}) — legacy form, because the standard form is unavailable (source fixed to "stream", code clamped to 0–255)'
+        : 'nothing — no usable constructor';
+    return m.value;
+  }
+
+  function summarise(d) {
+    return d.kind + ' · name ' + WTE.fmt(d.name) + ' · message ' + WTE.fmt(d.message) + ' · source ' + WTE.fmt(d.source) + ' · code ' + WTE.fmt(d.streamErrorCode);
+  }
+  function report(channel, sent, received, usedFallback) {
+    const d = WTE.describe(received);
+    const intact = d.kind === 'WebTransportError instance' && d.message === sent.message && d.source === sent.source && d.streamErrorCode === sent.streamErrorCode;
+    if (usedFallback) log([['FALLBACK ', 'tag-fallback'], [channel + ': wire shape rebuilt via ' + usedFallback + ' → ' + summarise(d)]]);
+    else log([[intact ? 'INTACT ' : 'CHANGED ', intact ? 'tag-ok' : 'tag-fail'], [channel + ': received ' + summarise(d)]]);
+    globalThis.showcaseTelemetry?.assert('wte-channel-' + channel.replace(/\W+/g, '-').toLowerCase(), usedFallback ? true : intact, { usedFallback: !!usedFallback, kind: d.kind });
+  }
+  function refused(channel, err) {
+    log([['DataCloneError ', 'tag-fail'], [channel + ': ' + err.name + ': ' + err.message]]);
+  }
+
+  // Each channel: send(value) returns a Promise of the received value; throws synchronously on DataCloneError.
+  const channels = {
+    'structuredClone': (v) => Promise.resolve(structuredClone(v)),
+    'MessageChannel': (v) => new Promise((resolve, reject) => {
+      const mc = new MessageChannel();
+      mc.port2.onmessage = (e) => { resolve(e.data); mc.port1.close(); mc.port2.close(); };
+      try { mc.port1.postMessage(v); } catch (err) { mc.port1.close(); mc.port2.close(); reject(err); }
+    }),
+    'BroadcastChannel': (v) => new Promise((resolve, reject) => {
+      const name = 'wte-demo-' + (++seq);
+      const rx = new BroadcastChannel(name);
+      const tx = new BroadcastChannel(name);
+      const t = setTimeout(() => { rx.close(); tx.close(); reject(new Error('BroadcastChannel timed out')); }, 3000);
+      rx.onmessage = (e) => { clearTimeout(t); rx.close(); tx.close(); resolve(e.data); };
+      try { tx.postMessage(v); } catch (err) { clearTimeout(t); rx.close(); tx.close(); reject(err); }
+    }),
+  };
+
+  async function send(channel) {
+    const v = current();
+    if (!v) { log([['UNAVAILABLE ', 'tag-fail'], [channel + ': no WebTransportError could be constructed here.']]); return; }
+    const sent = { message: v.message, source: v.source, streamErrorCode: v.streamErrorCode };
+    try {
+      report(channel, sent, await channels[channel](v), null);
+    } catch (err) {
+      if (err && err.name === 'DataCloneError') {
+        refused(channel, err);
+        if ($('fallback').checked) {
+          const back = await channels[channel](WTE.toWire(v));
+          const rebuilt = WTE.fromWire(back);
+          report(channel, sent, rebuilt.value, rebuilt.via);
+        }
+        globalThis.showcaseTelemetry?.assert('wte-channel-refused-only-when-unsupported', !ser, { channel });
+      } else {
+        log([['ERROR ', 'tag-fail'], [channel + ': ' + (err && err.name) + ': ' + (err && err.message)]]);
+      }
+    }
+  }
+  $('b-clone').addEventListener('click', () => send('structuredClone'));
+  $('b-mc').addEventListener('click', () => send('MessageChannel'));
+  $('b-bc').addEventListener('click', () => send('BroadcastChannel'));
+
+  // iframe echo
+  const frame = $('echo');
+  const pending = new Map();
+  addEventListener('message', (ev) => {
+    if (ev.origin !== location.origin || ev.source !== frame.contentWindow || !ev.data) return;
+    if (ev.data.kind === 'wte-echo-ready') { $('b-frame').disabled = false; $('frame-state').textContent = 'Echo frame ready.'; return; }
+    if (ev.data.kind === 'wte-echo-reply' && pending.has(ev.data.id)) {
+      const { sent, fallback } = pending.get(ev.data.id);
+      pending.delete(ev.data.id);
+      const d = ev.data.desc;
+      if (fallback) {
+        log([['FALLBACK ', 'tag-fallback'], ['iframe: frame received the plain wire object (' + d.kind + ') · message ' + WTE.fmt(d.message) + ' · source ' + WTE.fmt(d.source) + ' · code ' + WTE.fmt(d.streamErrorCode)]]);
+        return;
+      }
+      const intact = d.kind === 'WebTransportError instance' && d.message === sent.message && d.source === sent.source && d.streamErrorCode === sent.streamErrorCode;
+      log([[intact ? 'INTACT ' : 'CHANGED ', intact ? 'tag-ok' : 'tag-fail'], ['iframe (its own realm): received ' + summarise(d)]]);
+      globalThis.showcaseTelemetry?.assert('wte-channel-iframe', intact, { kind: d.kind });
+    }
+  });
+  $('b-frame').addEventListener('click', () => {
+    const v = current();
+    if (!v) return;
+    const id = ++seq;
+    const sent = { message: v.message, source: v.source, streamErrorCode: v.streamErrorCode };
+    try {
+      pending.set(id, { sent, fallback: false });
+      frame.contentWindow.postMessage({ kind: 'wte-echo', id, payload: v }, location.origin);
+    } catch (err) {
+      pending.delete(id);
+      if (err && err.name === 'DataCloneError') {
+        refused('iframe', err);
+        if ($('fallback').checked) {
+          const fid = ++seq;
+          pending.set(fid, { sent, fallback: true });
+          frame.contentWindow.postMessage({ kind: 'wte-echo', id: fid, payload: WTE.toWire(v) }, location.origin);
+        }
+      } else {
+        log([['ERROR ', 'tag-fail'], ['iframe: ' + (err && err.name) + ': ' + (err && err.message)]]);
+      }
+    }
+  });
+
+  $('b-dom').addEventListener('click', () => {
+    try {
+      const c = structuredClone(new DOMException('plain', 'NetworkError'));
+      log([['CONTRAST ', null], ['structuredClone(new DOMException("plain", "NetworkError")) → ' + c.constructor.name + ' · name ' + WTE.fmt(c.name) + ' · message ' + WTE.fmt(c.message) + ' — DOMException itself has always been serializable.']]);
+    } catch (err) {
+      log([['CONTRAST ', null], ['plain DOMException clone threw ' + err.name + ': ' + err.message]]);
+    }
+  });
+  $('b-clear').addEventListener('click', () => { logEl.textContent = ''; const p = document.createElement('p'); p.textContent = 'Log cleared.'; logEl.append(p); fresh = true; });
+  $('src').addEventListener('change', () => { $('code').disabled = $('src').value === 'session'; current(); });
+  current();
+  console.log('[wte:channels] ready serialization=' + ser);
+})();
+</script>
+</body>
+</html>
