@@ -70,6 +70,7 @@
     .btn-row button {
       padding: 0.4rem 0.9rem;
       font-size: 0.8rem;
+      min-height: 44px;
       cursor: pointer;
     }
 
@@ -111,6 +112,7 @@
     }
     .strip-item { color: var(--accent-rose); display: block; }
     .strip-ok { color: var(--accent-emerald); display: block; }
+    .strip-info { color: var(--text-charcoal); display: block; }
 
     .note {
       background: var(--bg-stone);
@@ -137,7 +139,7 @@
   </header>
 
   <div class="note" id="support-note">
-    <strong>Chrome 146 required</strong> for the native Sanitizer API. In older browsers this demo falls back to a JavaScript innerHTML-based approach with a simplistic pattern-filter to illustrate the concept — it is NOT a real sanitizer.
+    <strong>Sanitizer API not detected</strong> (<code>Element.prototype.setHTML</code>). It ships enabled by default in Chrome and Edge 146+ and Firefox 148+; Safari does not support it yet. Without it this demo falls back to a simplistic pattern-filter to illustrate the concept — it is NOT a real sanitizer.
   </div>
 
   <section>
@@ -167,7 +169,7 @@
 
     <div style="margin-top:0.5rem;">
       <div class="panel-label">What was stripped / kept:</div>
-      <div class="strip-log" id="strip-log">&mdash;</div>
+      <div class="strip-log" id="strip-log" role="status" aria-live="polite">&mdash;</div>
     </div>
 
     <div class="btn-row" style="margin-top:0.75rem;">
@@ -219,7 +221,7 @@ output.innerHTML = userInput; // XSS risk!</code></pre>
 <script>alert('XSS via script tag')<\/script>
 <img src="x" onerror="alert('XSS via onerror')" alt="">
 <a href="javascript:alert('XSS via href')">Click me</a>
-<p onclick="alert('XSS via onclick')" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">Click this paragraph</p>`,
+<p onclick="alert('XSS via onclick')">Click this paragraph</p>`,
 
     safe: `<h2>Meeting Notes</h2>
 <p>Team discussed the <strong>Q3 roadmap</strong> and agreed on the following:</p>
@@ -230,7 +232,7 @@ output.innerHTML = userInput; // XSS risk!</code></pre>
 </ul>
 <p>Next meeting: <b>Thursday at 10am</b>.</p>`,
 
-    tricky: `<!-- Comment nodes survive -->
+    tricky: `<!-- An HTML comment (the default sanitizer drops comments) -->
 <p style="color:red">Inline styles</p>
 <svg><script>alert('SVG script')<\/script></svg>
 <img src=1 onerror=alert(1) alt="">
@@ -251,7 +253,7 @@ output.innerHTML = userInput; // XSS risk!</code></pre>
   const supportsSetHTML = typeof Element.prototype.setHTML === 'function';
   if (supportsSetHTML) {
     document.getElementById('support-note').innerHTML =
-      '<strong>Chrome 146+ detected</strong> — native <code>Sanitizer</code> API is available. Results are from the real browser sanitizer.';
+      '<strong>Sanitizer API detected</strong> — native <code>setHTML()</code> is available. Results are from the real browser sanitizer.';
   }
 
   function escapeForDisplay(str) {
@@ -261,15 +263,6 @@ output.innerHTML = userInput; // XSS risk!</code></pre>
   document.getElementById('btn-sanitize').addEventListener('click', () => {
     const raw = input.value;
     if (!raw.trim()) return;
-
-    // Detect what was in the original
-    const dangerPatterns = [
-      { label: '<script>', re: /<script/i },
-      { label: 'inline event handlers', re: /\bon\w+\s*=/i },
-      { label: 'javascript: URL', re: /href\s*=\s*["']?\s*javascript:/i },
-      { label: '<iframe>', re: /<iframe/i },
-      { label: '<embed>/<object>', re: /<(embed|object)/i },
-    ];
 
     if (supportsSetHTML) {
       renderOutput.setHTML(raw);
@@ -288,25 +281,70 @@ output.innerHTML = userInput; // XSS risk!</code></pre>
     // Show serialized result
     serialOutput.textContent = sanitizedHTML || '(empty — all content stripped)';
 
-    // Build strip log
-    const logs = [];
-    for (const pat of dangerPatterns) {
-      if (pat.re.test(raw)) {
-        const stillPresent = pat.re.test(sanitizedHTML);
-        if (!stillPresent) {
-          logs.push(`<span class="strip-item">✗ stripped: ${pat.label}</span>`);
-        } else {
-          logs.push(`<span style="color:var(--accent-rose);">⚠ still present: ${pat.label} (check browser version)</span>`);
-        }
+    // Build the strip log from a DOM diff: the raw input parsed inertly (a <template>
+    // never runs scripts or handlers) vs. what the sanitizer actually inserted.
+    // Labels are set with textContent so names like "<script>" are shown literally.
+    const before = inventory(parseInert(raw));
+    const after = inventory(renderOutput);
+    const removed = diffCounts(before, after);
+    const lines = [];
+    if (!supportsSetHTML) {
+      lines.push(['strip-info', 'Fallback pattern-filter in use (no native setHTML) — this is NOT a real sanitizer.']);
+    }
+    for (const [key, n] of removed) {
+      lines.push(['strip-item', '✗ removed: ' + key + (n > 1 ? ' ×' + n : '')]);
+    }
+    const keptEls = [...after].filter(([k]) => k.startsWith('<')).map(([k]) => k);
+    if (removed.length === 0) {
+      lines.push(['strip-ok', '✓ Nothing removed — the sanitizer kept this input unchanged.']);
+    }
+    if (keptEls.length) {
+      lines.push(['strip-ok', '✓ kept: ' + keptEls.join(' ')]);
+    } else if (removed.length) {
+      lines.push(['strip-info', 'No elements kept — only text survived.']);
+    }
+    stripLog.replaceChildren(...lines.map(([cls, text]) => {
+      const span = document.createElement('span');
+      span.className = cls;
+      span.textContent = text;
+      return span;
+    }));
+  });
+
+  // Parse untrusted markup without executing anything: <template> content is inert.
+  function parseInert(html) {
+    const t = document.createElement('template');
+    t.innerHTML = html;
+    return t.content;
+  }
+
+  // Count elements, attributes, javascript: URLs and comments in a tree.
+  function inventory(root) {
+    const counts = new Map();
+    const add = (k) => counts.set(k, (counts.get(k) || 0) + 1);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_COMMENT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (n.nodeType === Node.COMMENT_NODE) { add('comment node'); continue; }
+      const ns = n.namespaceURI;
+      const prefix = ns === 'http://www.w3.org/2000/svg' && n.localName !== 'svg' ? 'svg ' :
+        ns === 'http://www.w3.org/1998/Math/MathML' && n.localName !== 'math' ? 'math ' : '';
+      add('<' + prefix + n.localName + '>');
+      for (const attr of n.attributes) {
+        const v = attr.value.replace(/[\u0000-\u0020]/g, '').toLowerCase();
+        add(v.startsWith('javascript:') ? attr.name + '="javascript:…" URL' : attr.name + '="…" attribute');
       }
     }
-    if (logs.length === 0) {
-      logs.push('<span class="strip-ok">✓ No dangerous patterns detected in input — all content passed through</span>');
-    } else {
-      logs.push(`<span class="strip-ok">✓ Safe elements preserved (b, p, strong, em, a[href], ul, li, etc.)</span>`);
+    return counts;
+  }
+
+  function diffCounts(before, after) {
+    const out = [];
+    for (const [k, n] of before) {
+      const gone = n - (after.get(k) || 0);
+      if (gone > 0) out.push([k, gone]);
     }
-    stripLog.innerHTML = logs.join('');
-  });
+    return out;
+  }
 
   // Load XSS preset by default
   input.value = PRESETS.xss;
