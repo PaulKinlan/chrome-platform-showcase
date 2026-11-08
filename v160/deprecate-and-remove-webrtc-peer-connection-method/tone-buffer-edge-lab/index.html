@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tone buffer edge lab — Deprecate and remove WebRTC peer connection method — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../dtmf-lab.css">
+  <style>
+    .exps { display: grid; gap: var(--space-2); grid-template-columns: 1fr; }
+    @media (min-width: 720px) { .exps { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    .timeline { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
+    .timeline li { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: var(--space-2); align-items: center; font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-black); }
+    .bar { height: 1rem; background: var(--bg-stone); border: 1px solid var(--border-black); position: relative; overflow: hidden; }
+    .bar span { position: absolute; top: 0; bottom: 0; width: 4px; background: var(--accent-blue); }
+  </style>
+</head>
+<body>
+<main class="lab">
+  <p class="crumbs"><a href="../">&larr; Deprecate and remove WebRTC peer connection method</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · edge cases + timing</p>
+    <h1>Tone buffer edge lab</h1>
+    <p class="lede">The spec rules code migrating off <code>createDTMFSender()</code> has to get right, each one run for real against a negotiated loopback call: duration and gap clamping (measured from actual <code>tonechange</code> timestamps), replacing the buffer mid-playout, cancelling with an empty string, the 2-second comma, lower-case normalisation, <code>InvalidCharacterError</code> and <code>InvalidStateError</code>.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="call-h">
+    <h2 id="call-h">Loopback call</h2>
+    <div class="row"><button type="button" id="connect">Connect call</button></div>
+    <dl class="meters">
+      <div class="meter"><dt>connectionState</dt><dd id="state">idle</dd></div>
+      <div class="meter"><dt>canInsertDTMF</dt><dd id="can">—</dd></div>
+      <div class="meter"><dt>toneBuffer</dt><dd id="buf" aria-live="off">—</dd></div>
+    </dl>
+  </section>
+
+  <section class="stage" aria-labelledby="exp-h">
+    <h2 id="exp-h">Experiments</h2>
+    <p class="hint">Experiments 7 and 8 need no call. The others enable once connected; one runs at a time.</p>
+    <div class="exps">
+      <button type="button" data-exp="clamp-min" disabled>1 · Minimum clamp: (10 ms, 5 ms) vs (40 ms, 30 ms)</button>
+      <button type="button" data-exp="clamp-max" disabled>2 · Maximum clamp: one tone at 7000 ms (≈7 s)</button>
+      <button type="button" data-exp="replace" disabled>3 · Replace the buffer mid-playout</button>
+      <button type="button" data-exp="cancel" disabled>4 · Cancel with insertDTMF("")</button>
+      <button type="button" data-exp="comma" disabled>5 · Comma pause: "1,2"</button>
+      <button type="button" data-exp="lower" disabled>6 · Lower case "abcd" is normalised</button>
+      <button type="button" data-exp="invalid">7 · Invalid characters</button>
+      <button type="button" data-exp="unnegotiated">8 · Before negotiation + video sender</button>
+    </div>
+    <p id="running" role="status" class="hint">Idle.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="res-h">
+    <h2 id="res-h">Results</h2>
+    <div class="scroll" tabindex="0" role="region" aria-label="Experiment results">
+      <table class="matrix mid">
+        <thead><tr><th scope="col">experiment</th><th scope="col">spec says</th><th scope="col">observed</th><th scope="col">verdict</th></tr></thead>
+        <tbody id="results"><tr><td colspan="4">Nothing run yet.</td></tr></tbody>
+      </table>
+    </div>
+    <h3 id="tl-h">Timeline of the last timed experiment</h3>
+    <ul class="timeline" id="timeline" aria-labelledby="tl-h"><li>No timed run yet.</li></ul>
+  </section>
+
+  <section><h2>what Chromium actually does</h2>
+    <p>Chromium clamps exactly as the spec says (<code>kMinToneDurationMs = 40</code>, <code>kMaxToneDurationMs = 6000</code>, <code>kMinInterToneGapMs = 30</code>) and upper-cases the buffer. Its measured spacing between tone starts is typically <em>duration + 2 × gap</em> rather than the spec's <em>duration + gap</em>, because the engine waits one gap after the tone and Blink schedules the next playout task a further gap later; the timeline above shows whatever your browser really does.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5160724576993280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webrtc-pc/#dom-rtcdtmfsender-insertdtmf" target="_blank" rel="noopener">webrtc-pc: insertDTMF() steps</a></li>
+    <li><a href="https://wpt.fyi/results/webrtc/RTCDTMFSender-insertDTMF.https.html" target="_blank" rel="noopener">WPT: RTCDTMFSender-insertDTMF</a></li>
+    <li><a href="../can-insert-inspector/">canInsertDTMF inspector</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { describeError, createLoopback, makeSilentAudioTrack, playAndCollect, invalidCharacters, tele } from "../dtmf-lab.js";
+
+const $ = (id) => document.getElementById(id);
+let call = null;
+let busy = false;
+let firstResult = true;
+const buttons = [...document.querySelectorAll("[data-exp]")];
+
+function refresh() {
+  const d = call?.sender.dtmf;
+  $("state").textContent = call ? call.pcA.connectionState : "idle";
+  $("can").textContent = d ? String(d.canInsertDTMF) : "—";
+  $("buf").textContent = d ? `"${d.toneBuffer}"` : "—";
+}
+function setButtons() {
+  for (const b of buttons) {
+    const needsCall = !["invalid", "unnegotiated"].includes(b.dataset.exp);
+    b.disabled = busy || (needsCall && !call?.sender.dtmf.canInsertDTMF);
+  }
+}
+function result(name, spec, observed, pass) {
+  const tb = $("results");
+  if (firstResult) { tb.textContent = ""; firstResult = false; }
+  const tr = document.createElement("tr");
+  for (const [text, cls] of [[name, ""], [spec, ""], [observed, ""], [pass ? "matches" : "differs", pass ? "ok" : ""]]) {
+    const td = document.createElement("td");
+    td.textContent = text;
+    if (cls) td.className = cls;
+    tr.append(td);
+  }
+  tb.prepend(tr);
+}
+function timeline(events) {
+  const ul = $("timeline");
+  ul.textContent = "";
+  const total = Math.max(1, events[events.length - 1]?.t || 1);
+  for (const e of events) {
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = `+${e.t} ms ${e.tone === "" ? "end" : JSON.stringify(e.tone)}`;
+    const bar = document.createElement("span");
+    bar.className = "bar";
+    bar.setAttribute("aria-hidden", "true");
+    const mark = document.createElement("span");
+    mark.style.left = `calc(${(e.t / total) * 100}% - 2px)`;
+    bar.append(mark);
+    li.append(label, bar);
+    ul.append(li);
+  }
+}
+const intervals = (events) => events.slice(1).map((e, i) => e.t - events[i].t);
+const avg = (xs) => xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : NaN;
+const play = (tones, d, g, onEvent) => playAndCollect(call.sender.dtmf, tones, d, g, (rec) => { refresh(); onEvent?.(rec); });
+
+const EXPS = {
+  async "clamp-min"() {
+    const low = await play("111", 10, 5);
+    const floor = await play("111", 40, 30);
+    timeline(low.events);
+    const a = avg(intervals(low.events)), b = avg(intervals(floor.events));
+    const pass = Math.abs(a - b) <= 20;
+    result("1 minimum clamp", "duration < 40 → 40; interToneGap < 30 → 30, so (10, 5) plays exactly like (40, 30)",
+      `mean spacing (10, 5): ${a} ms; (40, 30): ${b} ms`, pass);
+    tele("dtmf-edge-min-clamp", pass, { a, b });
+  },
+  async "clamp-max"() {
+    const r = await play("1", 7000, 30);
+    timeline(r.events);
+    const end = r.events[r.events.length - 1].t;
+    const pass = end >= 5900 && end < 6900;
+    result("2 maximum clamp", "duration > 6000 → 6000, so a 7000 ms request ends ≈6 s after it starts",
+      `terminal tonechange at +${end} ms`, pass);
+    tele("dtmf-edge-max-clamp", pass, { end });
+  },
+  async replace() {
+    let swapped = false;
+    const r = await play("123456", 200, 70, (rec) => {
+      if (!swapped && rec.tone === "1") { swapped = true; call.sender.dtmf.insertDTMF("99", 100, 70); refresh(); }
+    });
+    timeline(r.events);
+    const seq = r.events.map((e) => e.tone || "∅").join(" ");
+    const pass = seq === "1 9 9 ∅";
+    result("3 replace buffer", 'insertDTMF replaces [[ToneBuffer]]; after "1" starts, insertDTMF("99") drops 23456',
+      `sequence: ${seq}`, pass);
+    tele("dtmf-edge-replace-buffer", pass, { seq });
+  },
+  async cancel() {
+    let cancelled = false;
+    let bufAfter = null;
+    const r = await play("123456", 200, 70, (rec) => {
+      if (!cancelled && rec.tone === "1") { cancelled = true; call.sender.dtmf.insertDTMF(""); bufAfter = call.sender.dtmf.toneBuffer; refresh(); }
+    });
+    timeline(r.events);
+    const seq = r.events.map((e) => e.tone || "∅").join(" ");
+    const pass = seq === "1 ∅" && bufAfter === "";
+    result("4 cancel", 'insertDTMF("") cancels tones queued after the one playing; then tonechange("")',
+      `sequence: ${seq}; toneBuffer right after cancel: "${bufAfter}"`, pass);
+    tele("dtmf-edge-cancel", pass, { seq, bufAfter });
+  },
+  async comma() {
+    const r = await play("1,2", 100, 70);
+    timeline(r.events);
+    const c = r.events.find((e) => e.tone === ",");
+    const two = r.events.find((e) => e.tone === "2");
+    const pause = c && two ? two.t - c.t : NaN;
+    const pass = pause >= 1900 && pause <= 2400;
+    result("5 comma", '"," delays the next character by 2000 ms', `"," → "2" spacing: ${pause} ms`, pass);
+    tele("dtmf-edge-comma", pass, { pause });
+  },
+  async lower() {
+    let bufNow = "";
+    const p = play("abcd", 60, 40);
+    bufNow = call.sender.dtmf.toneBuffer;
+    const r = await p;
+    timeline(r.events);
+    const seq = r.events.map((e) => e.tone || "∅").join(" ");
+    const pass = bufNow === "ABCD" && seq === "A B C D ∅";
+    result("6 lower case", "a–d MUST be normalised to A–D on entry", `toneBuffer right after the call: "${bufNow}"; events: ${seq}`, pass);
+    tele("dtmf-edge-lowercase", pass, { bufNow, seq });
+  },
+  async invalid() {
+    // Needs a sender whose canInsertDTMF is true, otherwise InvalidStateError wins
+    // (the spec checks can-send first). Use the live call if connected, else make one.
+    let own = null;
+    let c = call;
+    if (!c?.sender.dtmf.canInsertDTMF) { own = createLoopback(); await own.negotiate(); c = own; }
+    const samples = ["E", "1 2", "12-3", "#*x", "٣", "p"];
+    const out = [];
+    let pass = true;
+    for (const s of samples) {
+      try {
+        c.sender.dtmf.insertDTMF(s);
+        out.push(`${JSON.stringify(s)}: no throw`);
+        pass = false;
+      } catch (e) {
+        out.push(`${JSON.stringify(s)}: ${e.name}`);
+        if (e.name !== "InvalidCharacterError" || invalidCharacters(s).length === 0) pass = false;
+      }
+    }
+    const bufferUntouched = c.sender.dtmf.toneBuffer === "";
+    pass = pass && bufferUntouched;
+    result("7 invalid characters", "any character outside 0-9 A-D a-d # * , → InvalidCharacterError, thrown before the buffer is replaced",
+      `${out.join("; ")}; toneBuffer still "${c.sender.dtmf.toneBuffer}"`, pass);
+    tele("dtmf-edge-invalid-chars", pass, { out });
+    own?.close();
+  },
+  async unnegotiated() {
+    const fresh = createLoopback();
+    const can = fresh.sender.dtmf.canInsertDTMF;
+    let err = "no throw";
+    try { fresh.sender.dtmf.insertDTMF("1"); } catch (e) { err = e.name; }
+    const canvas = document.createElement("canvas");
+    canvas.getContext("2d").fillRect(0, 0, 1, 1);
+    const video = canvas.captureStream().getVideoTracks()[0];
+    const vs = fresh.pcA.addTrack(video);
+    const vdtmf = vs.dtmf;
+    fresh.close(); video.stop();
+    const pass = can === false && err === "InvalidStateError" && vdtmf === null;
+    result("8 before negotiation", "not connected → canInsertDTMF false and insertDTMF throws InvalidStateError; a video sender's dtmf is null",
+      `canInsertDTMF=${can}; insertDTMF("1") → ${err}; videoSender.dtmf=${vdtmf === null ? "null" : String(vdtmf)}`, pass);
+    tele("dtmf-edge-unnegotiated", pass, { can, err });
+  },
+};
+
+for (const b of buttons) {
+  b.addEventListener("click", async () => {
+    if (busy) return;
+    busy = true; setButtons();
+    $("running").textContent = `Running: ${b.textContent}`;
+    try {
+      await EXPS[b.dataset.exp]();
+      $("running").textContent = `Finished: ${b.textContent}. See the newest results row.`;
+    } catch (error) {
+      $("running").textContent = `Error in ${b.textContent}: ${describeError(error)}`;
+      result(b.textContent, "—", `threw ${describeError(error)}`, false);
+    } finally {
+      busy = false; setButtons(); refresh();
+    }
+  });
+}
+
+$("connect").addEventListener("click", async () => {
+  if (call || busy) return;
+  $("connect").disabled = true;
+  $("state").textContent = "negotiating";
+  const c = createLoopback();
+  try {
+    c.pcA.addEventListener("connectionstatechange", () => { refresh(); setButtons(); });
+    await c.negotiate();
+    call = c;
+    refresh(); setButtons();
+    $("running").textContent = "Connected. Experiments 1–6 are now enabled.";
+  } catch (error) {
+    c.close();
+    $("state").textContent = `failed: ${describeError(error)}`;
+    $("connect").disabled = false;
+  }
+});
+setButtons();
+</script>
+</body>
+</html>

@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IVR keypad — Deprecate and remove WebRTC peer connection method — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../dtmf-lab.css">
+  <style>
+    .phone { display: grid; gap: var(--space-3); grid-template-columns: 1fr; min-width: 0; }
+    @media (min-width: 860px) { .phone { grid-template-columns: minmax(0, 20rem) minmax(0, 1fr); } }
+    .keypad { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); }
+    .lab .keypad button { text-align: center; font-family: var(--font-mono); font-size: 1.25rem; min-height: 52px; padding: var(--space-2) 0; }
+    .lab .keypad button.letter { background: var(--bg-ivory); color: var(--text-black); }
+    .lab .keypad button.sent { background: var(--accent-emerald-dark); color: var(--bg-ivory); }
+    .now { font-family: var(--font-mono); font-size: 2.5rem; font-weight: 700; text-align: center; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); min-height: 3.5rem; }
+    .controls { display: grid; gap: var(--space-3); min-width: 0; }
+  </style>
+</head>
+<body>
+<main class="lab">
+  <p class="crumbs"><a href="../">&larr; Deprecate and remove WebRTC peer connection method</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · practical: phone menu keypad</p>
+    <h1>An IVR keypad on <code>sender.dtmf</code></h1>
+    <p class="lede">The product job DTMF exists for: pressing keys during a call to drive a phone menu, enter a conference PIN or dial an extension. This keypad is wired to a real negotiated loopback call. Every key calls <code>insertDTMF()</code> on the standard <code>RTCDTMFSender</code>, appending to whatever is still queued, and every <code>tonechange</code> event is reported as it happens.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="call-h">
+    <h2 id="call-h">Call</h2>
+    <div class="row">
+      <button type="button" id="connect">Connect call</button>
+      <button type="button" id="hangup" class="secondary" disabled>Hang up</button>
+    </div>
+    <dl class="meters">
+      <div class="meter"><dt>connectionState</dt><dd id="state">idle</dd></div>
+      <div class="meter"><dt>canInsertDTMF</dt><dd id="can">—</dd></div>
+      <div class="meter"><dt>toneBuffer (still queued)</dt><dd id="buf" aria-live="off">—</dd></div>
+    </dl>
+    <p id="gate" class="hint">Keys are disabled until the call is connected: before that, <code>canInsertDTMF</code> is false and <code>insertDTMF()</code> would throw <code>InvalidStateError</code>.</p>
+  </section>
+
+  <div class="phone">
+    <section class="stage" aria-labelledby="pad-h">
+      <h2 id="pad-h">Keypad</h2>
+      <div class="now" id="now" aria-hidden="true">·</div>
+      <div class="keypad" role="group" aria-label="DTMF keypad" id="keypad"></div>
+      <div class="row">
+        <button type="button" id="clear" class="secondary" disabled>Cancel queued tones</button>
+      </div>
+    </section>
+
+    <section class="stage controls" aria-labelledby="opt-h">
+      <h2 id="opt-h">Dial string and timing</h2>
+      <div class="field">
+        <label for="dial">Dial string</label>
+        <input type="text" id="dial" value="1,4521#" autocomplete="off" spellcheck="false" inputmode="tel" aria-describedby="dial-hint" aria-errormessage="dial-error">
+        <p class="hint" id="dial-hint">Allowed: 0–9, A–D (a–d are normalised to upper case), #, * and comma (a 2-second pause). Anything else makes <code>insertDTMF()</code> throw <code>InvalidCharacterError</code> — try it, the real call runs either way.</p>
+        <p class="error-msg" id="dial-error" hidden></p>
+      </div>
+      <div class="row">
+        <button type="button" id="send" disabled>Send dial string</button>
+        <button type="button" id="preset-pin" class="secondary" disabled>Conference PIN: 8472#</button>
+        <button type="button" id="preset-ext" class="secondary" disabled>Main line, pause, ext 0,,305</button>
+      </div>
+      <div class="field">
+        <label for="duration">Tone duration</label>
+        <input type="range" id="duration" min="20" max="1000" step="10" value="120" aria-describedby="duration-out">
+        <output id="duration-out" for="duration">120 ms</output>
+      </div>
+      <div class="field">
+        <label for="gap">Inter-tone gap</label>
+        <input type="range" id="gap" min="10" max="1000" step="10" value="70" aria-describedby="gap-out">
+        <output id="gap-out" for="gap">70 ms</output>
+      </div>
+      <label class="check"><input type="checkbox" id="sidetone"> Play a quiet local sidetone for each tone (off by default)</label>
+    </section>
+  </div>
+
+  <section class="stage" aria-labelledby="log-h">
+    <h2 id="log-h">tonechange events</h2>
+    <div class="log" id="log" role="log" aria-live="polite" aria-label="DTMF tone events"><p>Connect the call, then press keys.</p></div>
+  </section>
+
+  <section><h2>why the keypad appends</h2>
+    <p><code>insertDTMF()</code> <em>replaces</em> the tone buffer. The spec says that to add tones while others are still queued, call it with the remaining <code>toneBuffer</code> plus the new tones — which is exactly what each key does here (<code>dtmf.insertDTMF(dtmf.toneBuffer + key, …)</code>). Hammer a few keys quickly and watch the buffer grow, then drain one tone per <code>tonechange</code>. “Cancel queued tones” calls <code>insertDTMF("")</code>: the tone already playing finishes, the rest are dropped.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5160724576993280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webrtc-pc/#dom-rtcdtmfsender-insertdtmf" target="_blank" rel="noopener">webrtc-pc: insertDTMF()</a></li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc4733" target="_blank" rel="noopener">RFC 4733: RTP payload for DTMF (telephone-event)</a></li>
+    <li><a href="../tone-buffer-edge-lab/">Tone buffer edge lab</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { describeError, createLoopback, invalidCharacters, sidetone, tele } from "../dtmf-lab.js";
+
+const $ = (id) => document.getElementById(id);
+const KEYS = ["1", "2", "3", "A", "4", "5", "6", "B", "7", "8", "9", "C", "*", "0", "#", "D"];
+const NAMES = { "*": "star", "#": "pound" };
+const keyButtons = new Map();
+for (const k of KEYS) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.textContent = k;
+  b.dataset.key = k;
+  b.disabled = true;
+  if (/[A-D]/.test(k)) b.className = "letter";
+  b.setAttribute("aria-label", `Send tone ${NAMES[k] || k}`);
+  $("keypad").append(b);
+  keyButtons.set(k, b);
+}
+
+let call = null;
+let lastTone = null;
+let sentCount = 0;
+
+function line(text, cls) {
+  const log = $("log");
+  if (log.dataset.fresh !== "1") { log.textContent = ""; log.dataset.fresh = "1"; }
+  const p = document.createElement("p");
+  if (cls) p.className = cls;
+  p.textContent = text;
+  log.append(p);
+  while (log.childElementCount > 200) log.firstElementChild.remove();
+  log.scrollTop = log.scrollHeight;
+}
+const dur = () => Number($("duration").value);
+const gap = () => Number($("gap").value);
+
+function syncOutputs() {
+  const d = dur(), g = gap();
+  const dNote = d < 40 ? ` (spec clamps to 40 ms)` : "";
+  const gNote = g < 30 ? ` (spec clamps to 30 ms)` : "";
+  $("duration-out").textContent = `${d} ms${dNote}`;
+  $("gap-out").textContent = `${g} ms${gNote}`;
+  $("duration").setAttribute("aria-valuetext", `${d} milliseconds${dNote}`);
+  $("gap").setAttribute("aria-valuetext", `${g} milliseconds${gNote}`);
+}
+$("duration").addEventListener("input", syncOutputs);
+$("gap").addEventListener("input", syncOutputs);
+syncOutputs();
+
+function setEnabled(on) {
+  for (const b of keyButtons.values()) b.disabled = !on;
+  for (const id of ["send", "clear", "preset-pin", "preset-ext"]) $(id).disabled = !on;
+  $("gate").hidden = on;
+}
+function refresh() {
+  const dtmf = call?.sender.dtmf;
+  $("state").textContent = call ? call.pcA.connectionState : "idle";
+  $("can").textContent = dtmf ? String(dtmf.canInsertDTMF) : "—";
+  $("buf").textContent = dtmf ? (dtmf.toneBuffer ? `"${dtmf.toneBuffer}"` : '"" (empty)') : "—";
+  $("can").className = dtmf?.canInsertDTMF ? "on" : "";
+}
+
+function onTone(e) {
+  const dtmf = call?.sender.dtmf;
+  if (!dtmf) return;
+  refresh();
+  if (lastTone) keyButtons.get(lastTone)?.classList.remove("sent");
+  if (e.tone === "") {
+    $("now").textContent = "·";
+    line(`tone="" — queue drained (toneBuffer empty)`, "ok");
+    lastTone = null;
+    return;
+  }
+  sentCount++;
+  $("now").textContent = e.tone === "," ? "⏸" : e.tone;
+  keyButtons.get(e.tone)?.classList.add("sent");
+  lastTone = e.tone;
+  line(e.tone === "," ? `tone="," — 2-second pause, toneBuffer="${dtmf.toneBuffer}"` : `tone="${e.tone}" sent, toneBuffer="${dtmf.toneBuffer}"`);
+  if ($("sidetone").checked && e.tone !== ",") {
+    call.audio.ac.resume().catch(() => {});
+    sidetone(call.audio.ac, e.tone, Math.max(40, dur()));
+  }
+  if (sentCount === 1) tele("dtmf-keypad-first-tonechange", true, { tone: e.tone });
+}
+
+function send(tones, label) {
+  const dtmf = call?.sender.dtmf;
+  if (!dtmf) return;
+  try {
+    dtmf.insertDTMF(tones, dur(), gap());
+    line(`${label}: insertDTMF(${JSON.stringify(tones)}, ${dur()}, ${gap()}) → toneBuffer="${dtmf.toneBuffer}"`);
+  } catch (error) {
+    line(`${label}: insertDTMF(${JSON.stringify(tones)}) threw ${describeError(error)}`, "err");
+    tele("dtmf-keypad-insert-error", error.name === "InvalidCharacterError" && invalidCharacters(tones).length > 0, { tones, error: describeError(error) });
+  }
+  refresh();
+}
+
+$("keypad").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-key]");
+  if (!b || b.disabled || !call) return;
+  const dtmf = call.sender.dtmf;
+  send(dtmf.toneBuffer + b.dataset.key, `key ${b.dataset.key}`);
+});
+
+function validateDial(showNow) {
+  const input = $("dial");
+  const bad = invalidCharacters(input.value);
+  const err = $("dial-error");
+  if (bad.length && showNow) {
+    err.textContent = `Not a DTMF character: ${bad.map((c) => JSON.stringify(c)).join(", ")}. insertDTMF() will throw InvalidCharacterError.`;
+    err.hidden = false;
+    input.setAttribute("aria-invalid", "true");
+  } else if (!bad.length) {
+    err.hidden = true;
+    input.removeAttribute("aria-invalid");
+  }
+  return bad;
+}
+$("dial").addEventListener("input", () => validateDial(true));
+$("dial").addEventListener("blur", () => validateDial(true));
+
+$("send").addEventListener("click", () => { validateDial(true); send($("dial").value, "dial string"); });
+$("preset-pin").addEventListener("click", () => send("8472#", "PIN preset"));
+$("preset-ext").addEventListener("click", () => send("0,,305", "extension preset"));
+$("clear").addEventListener("click", () => {
+  const dtmf = call?.sender.dtmf;
+  if (!dtmf) return;
+  const before = dtmf.toneBuffer;
+  dtmf.insertDTMF("");
+  line(`cancel: insertDTMF("") — dropped "${before}", toneBuffer now "${dtmf.toneBuffer}"`, "ok");
+  tele("dtmf-keypad-cancel-clears-buffer", dtmf.toneBuffer === "", { before });
+  refresh();
+});
+
+$("connect").addEventListener("click", async () => {
+  if (call) return;
+  $("connect").disabled = true;
+  $("state").textContent = "negotiating";
+  const pending = createLoopback();
+  try {
+    call = pending;
+    pending.pcA.addEventListener("connectionstatechange", refresh);
+    pending.sender.dtmf.addEventListener("tonechange", onTone);
+    await pending.negotiate();
+    if (call !== pending) return;
+    refresh();
+    setEnabled(true);
+    $("hangup").disabled = false;
+    $("log").dataset.fresh = "0";
+    line(`Call connected; canInsertDTMF=${pending.sender.dtmf.canInsertDTMF}. Press keys.`, "ok");
+    tele("dtmf-keypad-connected", pending.sender.dtmf.canInsertDTMF === true, {});
+  } catch (error) {
+    line(`Could not connect: ${describeError(error)}`, "err");
+    tele("dtmf-keypad-connected", false, { error: describeError(error) });
+    pending.close();
+    if (call === pending) call = null;
+    $("connect").disabled = false;
+    refresh();
+  }
+});
+
+$("hangup").addEventListener("click", () => {
+  if (!call) return;
+  const c = call;
+  c.sender.dtmf.removeEventListener("tonechange", onTone);
+  c.close();
+  refresh();
+  call = null;
+  setEnabled(false);
+  $("state").textContent = "closed";
+  $("can").textContent = "—";
+  $("buf").textContent = "—";
+  $("now").textContent = "·";
+  if (lastTone) keyButtons.get(lastTone)?.classList.remove("sent");
+  lastTone = null;
+  $("hangup").disabled = true;
+  $("connect").disabled = false;
+  line("Hung up: both peer connections closed.");
+});
+</script>
+</body>
+</html>
