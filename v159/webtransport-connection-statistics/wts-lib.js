@@ -33,9 +33,18 @@
   ];
 
   const ECHO_SERVERS = [
-    { url: "https://wt-ord.akaleapi.net:6161/echo", label: "Microsoft Edge sample echo server, Chicago (public)" },
-    { url: "https://wt-ams.akaleapi.net:6161/echo", label: "Microsoft Edge sample echo server, Amsterdam (public)" },
-    { url: "https://127.0.0.1:4433/echo", label: "Your own local echo server (see the feature page)" },
+    {
+      url: "https://wt-ord.akaleapi.net:6161/echo",
+      label: "Microsoft Edge sample echo server, Chicago (public)",
+    },
+    {
+      url: "https://wt-ams.akaleapi.net:6161/echo",
+      label: "Microsoft Edge sample echo server, Amsterdam (public)",
+    },
+    {
+      url: "https://127.0.0.1:4433/echo",
+      label: "Your own local echo server (see the feature page)",
+    },
   ];
 
   function hasWebTransport() {
@@ -69,13 +78,17 @@
     } catch {
       throw new TypeError("Certificate hash must be base64 or 64 hex digits.");
     }
-    if (bin.length !== 32) throw new TypeError(`Certificate hash must be 32 bytes (SHA-256); got ${bin.length}.`);
+    if (bin.length !== 32) {
+      throw new TypeError(`Certificate hash must be 32 bytes (SHA-256); got ${bin.length}.`);
+    }
     return Uint8Array.from(bin, (c) => c.charCodeAt(0));
   }
 
   function open(url, hashText) {
     const hash = parseHash(hashText);
-    const options = hash ? { serverCertificateHashes: [{ algorithm: "sha-256", value: hash }] } : {};
+    const options = hash
+      ? { serverCertificateHashes: [{ algorithm: "sha-256", value: hash }] }
+      : {};
     return new WebTransport(url, options);
   }
 
@@ -115,18 +128,26 @@
     const sup = supported();
 
     function sync() {
-      connectBtn.disabled = !sup || phase === "connecting" || phase === "connected" || phase === "closing";
+      connectBtn.disabled = !sup || phase === "connecting" || phase === "connected" ||
+        phase === "closing";
       closeBtn.disabled = phase !== "connected";
-      urlEl.disabled = hashEl.disabled = phase === "connecting" || phase === "connected" || phase === "closing";
+      urlEl.disabled = hashEl.disabled = phase === "connecting" || phase === "connected" ||
+        phase === "closing";
     }
     function say(text, cls) {
       stateEl.textContent = text;
       stateEl.className = "status" + (cls ? " " + cls : "");
     }
     if (!hasWebTransport()) {
-      say("WebTransport itself is not exposed here (it needs a secure context: https or localhost). Nothing can connect.", "fallback");
+      say(
+        "WebTransport itself is not exposed here (it needs a secure context: https or localhost). Nothing can connect.",
+        "fallback",
+      );
     } else if (!sup) {
-      say("WebTransport exists, but WebTransport.prototype.getStats is undefined in this browser — enable the flag in the banner above. Connecting is disabled because there would be nothing to read.", "fallback");
+      say(
+        "WebTransport exists, but WebTransport.prototype.getStats is undefined in this browser — enable the flag in the banner above. Connecting is disabled because there would be nothing to read.",
+        "fallback",
+      );
     } else {
       say("Not connected. Enter a WebTransport (HTTP/3) URL and connect.");
     }
@@ -148,7 +169,15 @@
       sync();
       hooks.onCreate?.(wt);
       wt.closed.then(
-        (info) => finish(wt, `Closed cleanly (closeCode ${info?.closeCode ?? "—"}, reason "${info?.reason ?? ""}"). Stats stay readable.`, "", info),
+        (info) =>
+          finish(
+            wt,
+            `Closed cleanly (closeCode ${info?.closeCode ?? "—"}, reason "${
+              info?.reason ?? ""
+            }"). Stats stay readable.`,
+            "",
+            info,
+          ),
         (e) => finish(wt, "Connection ended with an error: " + err(e), "fallback", e),
       );
       try {
@@ -178,7 +207,8 @@
       const was = phase;
       phase = "ended";
       if (was === "connecting") {
-        text = "Connection failed: " + err(info) + ". The handshake never completed, so getStats() has no snapshot to return.";
+        text = "Connection failed: " + err(info) +
+          ". The handshake never completed, so getStats() has no snapshot to return.";
         cls = "fallback";
       }
       say(text, cls);

@@ -6,19 +6,23 @@ let timer = 0, seq = 0;
 
 self.onmessage = (e) => {
   const d = e.data || {};
-  if (d.type === 'config') {
+  if (d.type === "config") {
     if (target) target.close();
-    target = d.mode === 'direct' ? e.ports[0] : null;
+    target = d.mode === "direct" ? e.ports[0] : null;
     seq = 0;
     clearInterval(timer);
     timer = setInterval(() => {
       seq++;
-      const msg = { type: 'tick', seq, sentAt: Date.now() };
-      if (target) target.postMessage(msg); else self.postMessage(msg);
+      const msg = { type: "tick", seq, sentAt: Date.now() };
+      if (target) target.postMessage(msg);
+      else self.postMessage(msg);
     }, 20);
-    self.postMessage({ type: 'configured', mode: d.mode });
-  } else if (d.type === 'stop') {
+    self.postMessage({ type: "configured", mode: d.mode });
+  } else if (d.type === "stop") {
     clearInterval(timer);
-    if (target) { target.close(); target = null; }
+    if (target) {
+      target.close();
+      target = null;
+    }
   }
 };
