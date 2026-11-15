@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Request edge cases — Web Authentication Conditional UI Passive Mode — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../ambient.css">
+  <style>
+    .case { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-3); display: grid; gap: var(--space-2); min-width: 0; }
+    .case h3 { margin: 0; font-size: 1.05rem; overflow-wrap: anywhere; }
+    .case p { margin: 0; color: var(--text-charcoal); }
+    .cases { display: grid; gap: var(--space-3); min-width: 0; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Web Authentication Conditional UI Passive Mode</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v157 · webauthn · edge, failure &amp; migration</p>
+    <h1>Request edge cases</h1>
+    <p class="lede">Seven real calls at the edges of the passive-mode contract — invalid values, missing <code>publicKey</code>, unsupported credential mixes, cancellation before and during the request, two requests at once, and the migration question every team asks: <em>is it safe to add <code>uiMode: 'passive'</code> to the conditional call we already ship?</em> Each card prints what the spec or Chromium source predicts next to what this browser actually did. No request is left pending: every probe aborts its own request within a second.</p>
+  </header>
+
+  <p class="note"><strong>Behind a flag — no shipping milestone yet.</strong> Cases 3 and 7 change outcome when <code>chrome://flags/#web-authentication-ambient-signin</code> is enabled (or Chrome is launched with <code>--enable-features=WebAuthenticationAmbientSignin</code>); the rest describe behaviour that is already observable. One edge is described but deliberately not run: <code>uiMode: 'passive'</code> <em>without</em> <code>mediation: 'conditional'</code> is not passive at all — Chromium only takes the passive path for the conditional + passive pair, so it would open the ordinary modal passkey dialog.</p>
+
+  <section class="stage" aria-labelledby="all-title">
+    <h2 id="all-title">Run them</h2>
+    <div class="row">
+      <button type="button" id="run-all">Run all seven</button>
+    </div>
+    <p class="verdict wait" id="summary" role="status">Not run yet.</p>
+  </section>
+
+  <section class="cases" aria-label="Edge cases" id="cases"></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5068149209825280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/w3c/webauthn/pull/2485" target="_blank" rel="noopener">Spec PR w3c/webauthn#2485</a></li>
+    <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/modules/credentialmanagement/authentication_credentials_container.cc" target="_blank" rel="noopener">Chromium: authentication_credentials_container.cc</a></li>
+    <li><a href="../capability-inspector/">Capability inspector</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { settleWithin, outcomeText, randomChallenge, hasWebAuthn, readCapabilities } from "../ambient.js";
+
+const LOG = "[wa-passive:edges]";
+const tel = (id, ok, d = {}) => globalThis.showcaseTelemetry?.assert(id, ok, d);
+const pk = () => ({ challenge: randomChallenge() });
+let busy = false;
+let caps = null;
+
+const CASES = [
+  {
+    id: "invalid-uimode",
+    title: "1 · An invalid uiMode value",
+    blurb: "uiMode: 'quiet' is not a CredentialUiModeRequirement value.",
+    expect: "Rejects with TypeError before any UI — WebIDL enum conversion.",
+    async run() {
+      const o = await settleWithin({ mediation: "conditional", uiMode: "quiet", publicKey: pk() }, 500);
+      return { o, ok: o.name === "TypeError" };
+    },
+  },
+  {
+    id: "no-publickey",
+    title: "2 · Passive without a publicKey",
+    blurb: "{ mediation: 'conditional', uiMode: 'passive', password: true } — passwords alone.",
+    expect: "Rejects with NotSupportedError: conditional mediation needs a publicKey request; passwords only ride along with one.",
+    async run() {
+      const o = await settleWithin({ mediation: "conditional", uiMode: "passive", password: true }, 500);
+      return { o, ok: o.name === "NotSupportedError" };
+    },
+  },
+  {
+    id: "unsupported-mix",
+    title: "3 · Passive with a federated credential",
+    blurb: "publicKey + federated, sent with and without uiMode: 'passive'.",
+    expect: "With passive mode enabled: the passive request rejects NotSupportedError (\"Unsupported combination of credential types\") while the plain conditional request does not. Disabled: both behave the same.",
+    async run() {
+      const base = () => ({ mediation: "conditional", publicKey: pk(), federated: { providers: ["https://idp.example"] } });
+      const control = await settleWithin(base(), 600);
+      const o = await settleWithin({ ...base(), uiMode: "passive" }, 600);
+      const differs = `${control.state}${control.name}${control.message}` !== `${o.state}${o.name}${o.message}`;
+      return {
+        o,
+        extra: `control (no uiMode): ${outcomeText(control)}\nbehaviour differs: ${differs}`,
+        ok: caps?.passive ? differs && o.name === "NotSupportedError" : !differs,
+      };
+    },
+  },
+  {
+    id: "pre-aborted",
+    title: "4 · Signal already aborted",
+    blurb: "controller.abort() before calling get().",
+    expect: "Rejects immediately with the signal's abort reason (AbortError) — no request reaches the authenticator.",
+    async run() {
+      const c = new AbortController();
+      c.abort();
+      const t = performance.now();
+      let o;
+      try {
+        await navigator.credentials.get({ mediation: "conditional", uiMode: "passive", publicKey: pk(), signal: c.signal });
+        o = { state: "resolved" };
+      } catch (e) {
+        o = { state: "rejected", name: e.name, message: e.message };
+      }
+      o.ms = Math.round(performance.now() - t);
+      return { o, ok: o.name === "AbortError" };
+    },
+  },
+  {
+    id: "abort-mid-flight",
+    title: "5 · Abort while pending",
+    blurb: "Start a passive request, abort it 300 ms later — what a site does when the user starts a different sign-in.",
+    expect: "Rejects with AbortError (unless the environment had already rejected it, which is printed).",
+    async run() {
+      const c = new AbortController();
+      const t = performance.now();
+      const p = navigator.credentials.get({ mediation: "conditional", uiMode: "passive", publicKey: pk(), signal: c.signal })
+        .then((v) => ({ state: "resolved", value: v }), (e) => ({ state: "rejected", name: e.name, message: e.message }));
+      const early = await Promise.race([p, new Promise((r) => setTimeout(() => r(null), 300))]);
+      c.abort();
+      const o = early ?? await p;
+      o.ms = Math.round(performance.now() - t);
+      return { o, extra: early ? "settled BEFORE the abort — see the raw outcome" : "aborted while pending", ok: early ? true : o.name === "AbortError" };
+    },
+  },
+  {
+    id: "two-at-once",
+    title: "6 · Two passive requests at once",
+    blurb: "Start request A, then request B on the same page without cancelling A.",
+    expect: "Only one WebAuthn request can be in flight per frame. Chromium's rule is printed verbatim — sites should keep a single AbortController and cancel before re-arming.",
+    async run() {
+      const ca = new AbortController();
+      const cb = new AbortController();
+      const wrap = (p) => p.then((v) => ({ state: "resolved", value: v }), (e) => ({ state: "rejected", name: e.name, message: e.message }));
+      const a = wrap(navigator.credentials.get({ mediation: "conditional", uiMode: "passive", publicKey: pk(), signal: ca.signal }));
+      await new Promise((r) => setTimeout(r, 100));
+      const b = wrap(navigator.credentials.get({ mediation: "conditional", uiMode: "passive", publicKey: pk(), signal: cb.signal }));
+      const pend = { state: "pending", ms: 700 };
+      const timeout = () => new Promise((r) => setTimeout(() => r(pend), 700));
+      const [ra, rb] = await Promise.all([Promise.race([a, timeout()]), Promise.race([b, timeout()])]);
+      ca.abort();
+      cb.abort();
+      await Promise.all([a, b]);
+      const fmt = (o) => o.state === "pending" ? "still pending at 700 ms" : outcomeText({ ...o, ms: "≤700" });
+      return { o: { ...rb, ms: rb.ms ?? "≤700" }, extra: `request A: ${fmt(ra)}\nrequest B: ${fmt(rb)}`, ok: true, observational: true };
+    },
+  },
+  {
+    id: "migration",
+    title: "7 · Migration: add uiMode to an existing conditional call",
+    blurb: "Your shipped autofill call vs the same call with uiMode: 'passive' added.",
+    expect: "Without passive support the two behave identically (passive silently degrades to autofill conditional), so the change is safe to ship ahead of support. With support, the passive one additionally shows the non-autofill suggestion.",
+    async run() {
+      const before = await settleWithin({ mediation: "conditional", publicKey: pk() }, 600);
+      const o = await settleWithin({ mediation: "conditional", uiMode: "passive", publicKey: pk() }, 600);
+      const same = before.state === o.state && before.name === o.name;
+      return {
+        o,
+        extra: `existing call (no uiMode): ${outcomeText(before)}\nsame outcome class: ${same}`,
+        ok: caps?.passive ? true : same,
+        observational: Boolean(caps?.passive),
+      };
+    },
+  },
+];
+
+const container = document.getElementById("cases");
+for (const c of CASES) {
+  const card = document.createElement("article");
+  card.className = "case";
+  card.setAttribute("aria-labelledby", `${c.id}-t`);
+  const h = document.createElement("h3");
+  h.id = `${c.id}-t`;
+  h.textContent = c.title;
+  const p1 = document.createElement("p");
+  p1.textContent = c.blurb;
+  const p2 = document.createElement("p");
+  p2.innerHTML = "<strong>Predicted:</strong> ";
+  p2.append(c.expect);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "Run this case";
+  btn.dataset.case = c.id;
+  const out = document.createElement("output");
+  out.id = `${c.id}-out`;
+  out.setAttribute("aria-live", "polite");
+  out.textContent = "Not run yet.";
+  const row = document.createElement("div");
+  row.className = "row";
+  row.append(btn);
+  card.append(h, p1, p2, row, out);
+  container.append(card);
+  c.out = out;
+}
+
+function setBusy(on) {
+  busy = on;
+  for (const b of document.querySelectorAll("button")) b.disabled = on;
+}
+
+async function runCase(c) {
+  c.out.textContent = "Running…";
+  try {
+    const r = await c.run();
+    const mark = r.observational ? "OBSERVED" : r.ok ? "MATCHES PREDICTION" : "DIFFERS FROM PREDICTION";
+    c.out.textContent = `${mark}\n${outcomeText(r.o)}${r.extra ? `\n${r.extra}` : ""}`;
+    tel(`wa-passive-edge-${c.id}`, r.ok, { state: r.o.state, name: r.o.name ?? null, passive: caps?.passive ?? null });
+    return r;
+  } catch (error) {
+    c.out.textContent = `Probe itself failed: ${error.name}: ${error.message}`;
+    tel(`wa-passive-edge-${c.id}`, false, { probeError: error.name });
+    return { ok: false };
+  }
+}
+
+async function guarded(fn) {
+  if (busy) return;
+  if (!hasWebAuthn()) {
+    document.getElementById("summary").className = "verdict no";
+    document.getElementById("summary").textContent = "WebAuthn is not available here (PublicKeyCredential missing) — none of the cases can run.";
+    return;
+  }
+  setBusy(true);
+  try {
+    caps ??= await readCapabilities();
+    await fn();
+  } finally {
+    setBusy(false);
+  }
+}
+
+container.addEventListener("click", (e) => {
+  const id = e.target.closest("button")?.dataset.case;
+  if (!id) return;
+  const c = CASES.find((x) => x.id === id);
+  guarded(() => runCase(c)).then(() => e.target.focus());
+});
+
+document.getElementById("run-all").addEventListener("click", () => guarded(async () => {
+  const s = document.getElementById("summary");
+  s.className = "verdict wait";
+  s.textContent = "Running all seven cases…";
+  let matched = 0, predicted = 0;
+  for (const c of CASES) {
+    const r = await runCase(c);
+    if (!r.observational) {
+      predicted++;
+      if (r.ok) matched++;
+    }
+  }
+  s.className = `verdict ${matched === predicted ? "yes" : "no"}`;
+  s.textContent = `${matched} of ${predicted} predicted outcomes matched (passive capability: ${caps?.passive ? caps.passiveKey : "not reported"}). Observational cases are printed without a pass/fail.`;
+  console.log(`${LOG} run-all matched=${matched}/${predicted}`);
+}).then(() => document.getElementById("run-all").focus()));
+
+console.log(`${LOG} ready`);
+</script>
+</body>
+</html>

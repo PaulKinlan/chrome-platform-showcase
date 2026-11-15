@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Capability inspector — Web Authentication Conditional UI Passive Mode — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../ambient.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Web Authentication Conditional UI Passive Mode</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v157 · webauthn · inspection tool</p>
+    <h1>Capability inspector</h1>
+    <p class="lede">Three independent, real observations of whether passive mode is live — the capability map, the <code>uiMode</code> dictionary member, and a behavioural differential that only the passive code path can produce — combined into one verdict that can say <em>no</em>. Use it to check a flag, a Canary build, or a customer's browser before shipping <code>uiMode: 'passive'</code>.</p>
+  </header>
+
+  <p class="note"><strong>Behind a flag — no shipping milestone yet.</strong> Enable <code>chrome://flags/#web-authentication-ambient-signin</code> and relaunch, or launch with <code>--enable-features=WebAuthenticationAmbientSignin</code>. Launching with only <code>--enable-blink-features=WebAuthenticationAmbient</code> turns on the renderer half without the browser half — this page detects exactly that split.</p>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">Run the inspection</h2>
+    <div class="row">
+      <button type="button" id="run">Re-run all three probes</button>
+    </div>
+    <p class="verdict wait" id="overall" role="status">Running…</p>
+  </section>
+
+  <section class="stage" aria-labelledby="caps-title">
+    <h2 id="caps-title">Probe A · getClientCapabilities()</h2>
+    <p>Every key this browser reports, with the passive-mode rows highlighted. The spec PR adds <code>conditionalPassiveGet</code> and <code>conditionalActiveGet</code>; Chromium's prototype has shipped the passive key as <code>ambientGet</code>. Keys that are absent are listed as absent rather than treated as false.</p>
+    <dl class="meters">
+      <div class="meter"><dt>conditionalPassiveGet</dt><dd id="k-cpg">—</dd></div>
+      <div class="meter"><dt>ambientGet (Chromium prototype name)</dt><dd id="k-amb">—</dd></div>
+      <div class="meter"><dt>conditionalActiveGet</dt><dd id="k-cag">—</dd></div>
+      <div class="meter"><dt>conditionalGet (autofill)</dt><dd id="k-cg">—</dd></div>
+      <div class="meter"><dt>immediateGet</dt><dd id="k-ig">—</dd></div>
+      <div class="meter"><dt>isConditionalMediationAvailable()</dt><dd id="k-icma">—</dd></div>
+    </dl>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="All client capabilities">
+      <table class="caps"><thead><tr><th scope="col">capability</th><th scope="col">value</th></tr></thead><tbody id="caps-body"><tr><td colspan="2">Not read yet.</td></tr></tbody></table>
+    </div>
+  </section>
+
+  <section class="stage" aria-labelledby="enum-title">
+    <h2 id="enum-title">Probe B · does <code>uiMode</code> validate?</h2>
+    <p>An unknown dictionary member is silently ignored, so "passing <code>uiMode: 'passive'</code> did not throw" proves nothing. Instead this sends a deliberately invalid value: a browser that knows the <code>uiMode</code> member must reject with <code>TypeError</code>. It shows the member exists — <strong>not</strong> that passive mode is on (Chromium shares the enum with <code>'immediate'</code>).</p>
+    <output id="enum-out">Not run yet.</output>
+  </section>
+
+  <section class="stage" aria-labelledby="diff-title">
+    <h2 id="diff-title">Probe C · behavioural differential</h2>
+    <p>The passive path refuses credential types it cannot show in its non-autofill surface. The same request — <code>publicKey</code> plus <code>federated</code>, <code>mediation: 'conditional'</code> — is sent twice, once with <code>uiMode: 'passive'</code> and once without. Different outcomes mean the passive branch really ran; identical outcomes mean the value was accepted and ignored. Each request is aborted after 0.7&nbsp;s, so nothing is left pending.</p>
+    <output id="diff-out">Not run yet.</output>
+  </section>
+
+  <section><h2>reading the verdict</h2>
+    <ul>
+      <li><strong>Fully enabled:</strong> a passive capability key is <code>true</code> <em>and</em> the differential shows the passive branch.</li>
+      <li><strong>Renderer only:</strong> the differential fires but no capability key is reported — typical of <code>--enable-blink-features=WebAuthenticationAmbient</code> without the browser feature.</li>
+      <li><strong>Not enabled:</strong> no key and no behavioural difference. Ship your normal sign-in UI; adding <code>uiMode: 'passive'</code> to an existing conditional call is still harmless.</li>
+    </ul>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5068149209825280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/w3c/webauthn/pull/2485" target="_blank" rel="noopener">Spec PR w3c/webauthn#2485 (ClientCapability additions)</a></li>
+    <li><a href="https://w3c.github.io/webauthn/#enumdef-clientcapability" target="_blank" rel="noopener">WebAuthn: ClientCapability enum</a></li>
+    <li><a href="../request-edge-cases/">Request edge cases</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { readCapabilities, settleWithin, differentialProbe, outcomeText, hasWebAuthn, randomChallenge } from "../ambient.js";
+
+const LOG = "[wa-passive:inspector]";
+const $ = (id) => document.getElementById(id);
+const tel = (id, ok, d = {}) => globalThis.showcaseTelemetry?.assert(id, ok, d);
+const PASSIVE_ROWS = new Set(["conditionalPassiveGet", "ambientGet", "conditionalActiveGet"]);
+let running = false;
+
+function meter(id, caps, key) {
+  const el = $(id);
+  if (!caps || !Object.hasOwn(caps, key)) {
+    el.textContent = "absent";
+    el.className = "";
+    return;
+  }
+  el.textContent = String(caps[key]);
+  el.className = caps[key] === true ? "on" : "off";
+}
+
+function renderTable(caps) {
+  const body = $("caps-body");
+  body.replaceChildren();
+  const keys = Object.keys(caps).sort((a, b) => (PASSIVE_ROWS.has(b) - PASSIVE_ROWS.has(a)) || a.localeCompare(b));
+  for (const key of keys) {
+    const tr = document.createElement("tr");
+    if (PASSIVE_ROWS.has(key)) tr.className = "hl";
+    const th = document.createElement("th");
+    th.scope = "row";
+    th.textContent = key;
+    const td = document.createElement("td");
+    td.textContent = String(caps[key]);
+    td.className = caps[key] === true ? "t" : "f";
+    tr.append(th, td);
+    body.append(tr);
+  }
+}
+
+async function run() {
+  if (running) return;
+  running = true;
+  $("run").disabled = true;
+  const overall = $("overall");
+  overall.className = "verdict wait";
+  overall.textContent = "Running the three probes…";
+  if (!hasWebAuthn()) {
+    overall.className = "verdict no";
+    overall.textContent = "PublicKeyCredential is missing here (insecure context or no WebAuthn) — none of the probes can run.";
+    running = false;
+    $("run").disabled = false;
+    return;
+  }
+
+  // A — capabilities
+  const c = await readCapabilities();
+  for (const [id, key] of [["k-cpg", "conditionalPassiveGet"], ["k-amb", "ambientGet"], ["k-cag", "conditionalActiveGet"], ["k-cg", "conditionalGet"], ["k-ig", "immediateGet"]]) meter(id, c.caps, key);
+  if (c.caps) renderTable(c.caps);
+  else {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 2;
+    td.textContent = c.error;
+    tr.append(td);
+    $("caps-body").replaceChildren(tr);
+  }
+  try {
+    const icma = await PublicKeyCredential.isConditionalMediationAvailable?.();
+    $("k-icma").textContent = String(icma);
+    $("k-icma").className = icma ? "on" : "off";
+  } catch (e) {
+    $("k-icma").textContent = `${e.name}`;
+  }
+
+  // B — enum validation
+  const bogus = await settleWithin({ mediation: "conditional", uiMode: "not-a-ui-mode", publicKey: { challenge: randomChallenge() } }, 500);
+  const memberKnown = (bogus.state === "rejected" || bogus.state === "threw-sync") && bogus.name === "TypeError";
+  $("enum-out").textContent = `uiMode: 'not-a-ui-mode' → ${outcomeText(bogus)}\n\n` + (memberKnown
+    ? "TypeError: this browser knows the uiMode member and validates its enum (CredentialUiModeRequirement)."
+    : "No TypeError: the uiMode member is unknown here and was ignored — passive mode cannot exist in this browser.");
+
+  // C — differential
+  const diff = await differentialProbe();
+  $("diff-out").textContent = [
+    `without uiMode : ${outcomeText(diff.control)}`,
+    `uiMode:'passive': ${outcomeText(diff.passive)}`,
+    "",
+    diff.differs
+      ? "DIFFERENT outcomes → uiMode:'passive' took its own code path (the passive branch rejects credential types it cannot show)."
+      : "IDENTICAL outcomes → 'passive' was accepted but changed nothing: the passive branch is not active.",
+  ].join("\n");
+
+  // Verdict
+  let text, cls, state;
+  if (c.passive && diff.differs) {
+    state = "enabled";
+    cls = "yes";
+    text = `Fully enabled: ${c.passiveKey} is true and the passive request path is live.`;
+  } else if (c.passive) {
+    state = "capability-only";
+    cls = "yes";
+    text = `Capability reported (${c.passiveKey}: true) but the differential showed no difference — the behaviour may have changed upstream; trust the capability and check the raw outcomes below.`;
+  } else if (diff.differs) {
+    state = "renderer-only";
+    cls = "no";
+    text = "Renderer only: the passive branch runs but no capability key is reported — the browser-side feature is off (typical of --enable-blink-features=WebAuthenticationAmbient alone). Enable chrome://flags/#web-authentication-ambient-signin.";
+  } else {
+    state = "off";
+    cls = "no";
+    text = `Not enabled in this browser.${memberKnown ? " The uiMode member exists (shared with 'immediate'), but passive mode does not run." : ""} Enable chrome://flags/#web-authentication-ambient-signin and relaunch to try it.`;
+  }
+  overall.className = `verdict ${cls}`;
+  overall.textContent = text;
+  // Consistency check: the capability map and the behavioural differential should agree.
+  tel("wa-passive-inspector-consistent", Boolean(c.passive) === diff.differs, { state, key: c.passiveKey, differs: diff.differs, memberKnown });
+  tel("wa-passive-inspector-enum-validates", memberKnown, { outcome: bogus.state, name: bogus.name });
+  console.log(`${LOG} verdict=${state} key=${c.passiveKey} differs=${diff.differs} memberKnown=${memberKnown}`);
+  running = false;
+  $("run").disabled = false;
+}
+
+$("run").addEventListener("click", run);
+run();
+</script>
+</body>
+</html>
