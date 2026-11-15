@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shared MessagePort for AudioWorklet — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); overflow-wrap: anywhere; }
+    .probe { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; overflow-wrap: anywhere; }
+    .probe .yes { color: var(--accent-emerald-dark); font-weight: 700; }
+    .probe .no { color: var(--accent-rose); font-weight: 700; }
+    pre { overflow-x: auto; max-width: 100%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v160/">&larr; Chrome 160</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · multimedia · Web Audio · Chromium catches up</p>
+    <h1>Shared MessagePort for AudioWorklet</h1>
+    <p class="lede">The Web Audio spec defines a pair of entangled <code>MessagePort</code>s: <code>audioContext.audioWorklet.port</code> on the main thread and <code>port</code> on the <code>AudioWorkletGlobalScope</code>. With them, a page can talk to the audio rendering scope itself, rather than to one processor, without the dummy "bootstrap" <code>AudioWorkletNode</code> that Emscripten output and other WebAssembly audio engines have needed until now. Firefox shipped this in version&nbsp;138, and Chromium is catching up.</p>
+  </header>
+
+  <div class="note" role="note">
+    <strong>Enabling it.</strong> The Blink runtime feature is <code>AudioWorkletSharedPort</code>. Its status in <code>runtime_enabled_features.json5</code> is <code>stable</code>, so it is on by default in any build that includes the implementation (ChromeStatus targets Chrome&nbsp;160). For builds where it was still gated, ChromeStatus lists <code>chrome://flags/#enable-experimental-web-platform-features</code>, and <code>--enable-blink-features=AudioWorkletSharedPort</code> enables it explicitly. A build older than the implementation has nothing to enable: the attribute is simply missing, and every page here reports that. <code>AudioWorklet</code> also requires a secure context (https or localhost).
+  </div>
+
+  <p class="probe" id="probe" role="status">Probing…</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./port-handshake/">Port handshake</a></h3>
+      <p>The basic surface and a scope inspector. After <code>addModule()</code>, a ping on <code>audioWorklet.port</code> is answered by top-level module code, with no processor involved, reporting <code>sampleRate</code>, <code>currentFrame</code>, <code>renderQuantumSize</code> and <code>port instanceof MessagePort</code> from inside the scope. The page also measures the round trip, checks that a 64&nbsp;KiB <code>ArrayBuffer</code> is transferred rather than copied, and covers the <code>close()</code> edge case.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./bootstrap-migration/">Bootstrap-processor migration</a></h3>
+      <p>The legacy "bootstrap processor" workaround and the shared port run side by side, followed by the production pattern that detects <code>'port' in AudioWorklet.prototype</code> and picks one. A separate reader processor confirms which route delivered the config. The page also lists the workaround's failure modes: graph overhead, no transfer list, and ordering races.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./shared-config-synth/">Shared wavetable synth</a></h3>
+      <p>A practical product: three voices read one wavetable stored in the global scope. A sound change is one message on the shared port, compared with one per voice on the fallback, and each voice reports which table version it is rendering.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./worker-direct-pipe/">Worker → worklet pipe</a></h3>
+      <p>An advanced composition. A <code>MessageChannel</code> end is transferred into the scope over the shared port, so a dedicated <code>Worker</code> drives a tremolo LFO straight on the audio thread. The page then blocks its own main thread for two seconds and counts the messages that still arrive.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it exists</h2>
+    <p>Until now, only <code>AudioWorkletNode.port</code> and <code>AudioWorkletProcessor.port</code> existed, and each pair connects one node to its processor. Anything that belongs to the whole scope, such as a compiled WebAssembly module, a shared sample bank, tuning tables, or a control channel from a worker, had to arrive through some processor's constructor or port. That meant creating a processor whose only job was carrying messages (web-audio-api#2456, resolved by PR #2507). Emscripten's AudioWorklet support had to keep that hack (emscripten#25354), and real-world players that call <code>audioContext.audioWorklet.port</code> broke in Chromium. The spec notes that if you add a <code>message</code> listener, you should <code>close()</code> one end when you are done so it can be garbage-collected.</p>
+  </section>
+
+  <section><h2>the surface</h2>
+    <pre tabindex="0"><code>[Exposed=Window, SecureContext]
+interface AudioWorklet : Worklet {
+  readonly attribute MessagePort port;
+};
+[Global=(Worklet, AudioWorklet), Exposed=AudioWorklet]
+interface AudioWorkletGlobalScope : WorkletGlobalScope {
+  readonly attribute MessagePort port;
+  // registerProcessor, currentFrame, currentTime, sampleRate, renderQuantumSize…
+};
+
+// main thread
+await ctx.audioWorklet.addModule('engine.js');
+ctx.audioWorklet.port.postMessage({ wasm: module }, [/* transferables */]);
+
+// engine.js — top level, no processor needed
+port.onmessage = (e) =&gt; { /* initialise shared state */ };</code></pre>
+  </section>
+
+  <section><h2>use-case portfolio</h2>
+    <ul>
+      <li><strong>Basic / canonical:</strong> <a href="./port-handshake/">port handshake</a>.</li>
+      <li><strong>Configuration / inspection tooling:</strong> <a href="./port-handshake/">port handshake</a>, whose scope inspector reports facts from inside <code>AudioWorkletGlobalScope</code>.</li>
+      <li><strong>Practical product:</strong> <a href="./shared-config-synth/">shared wavetable synth</a>.</li>
+      <li><strong>Edge / failure / migration:</strong> <a href="./bootstrap-migration/">bootstrap-processor migration</a>, plus the <code>close()</code> and transfer edge cases in <a href="./port-handshake/">port handshake</a>.</li>
+      <li><strong>Novel / advanced composition:</strong> <a href="./worker-direct-pipe/">worker → worklet pipe</a>.</li>
+    </ul>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id 5079784523694080, listing name "Shared MessagePort for AudioWorklet" (v160).
+    chromestatus: category Multimedia, type "Chromium catches up", finch_name
+    AudioWorkletSharedPort, flag_name enable-experimental-web-platform-features, owners
+    hocheung@ / kmaheshb@, bug crbug.com/446920095, spec webaudio.github.io/web-audio-api
+    #dom-audioworklet-port, explainer links web-audio-api#2456 + PR #2507, MDN
+    AudioWorkletGlobalScope/port, Firefox shipped 138, WebKit standards-positions#739 (no signal).
+    Spec text read: AudioWorklet.port "A MessagePort connected to the port on the
+    AudioWorkletGlobalScope", AudioWorkletGlobalScope.port the mirror, plus the close() GC note.
+    Chromium IDL: modules/webaudio/audio_worklet.idl has [RuntimeEnabled=AudioWorkletSharedPort]
+    readonly attribute MessagePort port; audio_worklet_global_scope.idl has the same.
+    runtime_enabled_features.json5 lists AudioWorkletSharedPort with status "stable".
+    Verified locally in Chrome for Testing 153.0.8010.12: 'port' in AudioWorklet.prototype is false
+    by default, with --enable-experimental-web-platform-features, and with
+    --enable-blink-features=AudioWorkletSharedPort. The implementation postdates that build, so
+    only the honest fallback branches (bootstrap processor, per-node delivery, node-port pipe)
+    could be exercised for real here. The shared-port branches are written to the spec IDL and
+    still need checking on Chrome 160+ or Firefox 138+. github.com issue pages could not be
+    fetched from this environment (proxy policy); the issue/PR context comes from the
+    chromestatus motivation text.
+    Use-case portfolio: covered above, with no non-applicable angle.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5079784523694080" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://webaudio.github.io/web-audio-api/#dom-audioworklet-port" target="_blank" rel="noopener">Web Audio API: AudioWorklet.port</a></li>
+    <li><a href="https://developer.mozilla.org/docs/Web/API/AudioWorkletGlobalScope/port" target="_blank" rel="noopener">MDN: AudioWorkletGlobalScope.port</a></li>
+    <li><a href="https://github.com/WebAudio/web-audio-api/issues/2456" target="_blank" rel="noopener">web-audio-api#2456</a> · <a href="https://github.com/WebAudio/web-audio-api/pull/2507" target="_blank" rel="noopener">PR #2507</a></li>
+    <li><a href="https://github.com/emscripten-core/emscripten/pull/25354" target="_blank" rel="noopener">emscripten#25354</a></li>
+    <li><a href="https://issues.chromium.org/issues/446920095" target="_blank" rel="noopener">Chromium bug 446920095</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  const el = document.getElementById('probe');
+  const hasWorklet = typeof AudioWorklet === 'function';
+  const ok = hasWorklet && 'port' in AudioWorklet.prototype;
+  el.textContent = '';
+  const s = document.createElement('span');
+  s.className = ok ? 'yes' : 'no';
+  s.textContent = ok ? 'Supported: ' : 'Not available: ';
+  el.append(s, document.createTextNode(ok
+    ? '"port" in AudioWorklet.prototype is true. The concept pages exercise it for real.'
+    : hasWorklet ? '"port" in AudioWorklet.prototype is false. The concept pages run their labelled fallback routes.' : `AudioWorklet is not exposed${isSecureContext ? '' : ' because this is not a secure context'}.`));
+  globalThis.showcaseTelemetry?.assert('awport-index-probe', true, { ok, secure: isSecureContext });
+})();
+</script>
+</body>
+</html>
