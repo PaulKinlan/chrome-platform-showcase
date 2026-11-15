@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Migration patterns — MediaSession Promise&lt;undefined&gt; — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; MediaSession: Promise&lt;undefined&gt; from setMicrophoneActive() / setCameraActive()</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · multimedia · migration + compatibility</p>
+    <h1>Migration patterns</h1>
+    <p class="lede">Changing a return type from <code>undefined</code> to <code>Promise</code> is "web compatible" only if existing calling code keeps working. Most does — but not all of it. This page runs six real calling patterns against this browser's <code>setMicrophoneActive()</code> and shows which survive on the old shape, which survive on the new one, and which are safe on both.</p>
+  </header>
+
+  <p class="note" id="ship-note"></p>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">1 · Run the patterns</h2>
+    <button type="button" id="run">Run all six patterns in this browser</button>
+    <p class="verdict" id="verdict" aria-live="polite">Not run yet.</p>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Pattern results">
+      <table class="results">
+        <thead><tr><th scope="col">pattern</th><th scope="col">observed here</th><th scope="col">old shape (≤158)</th><th scope="col">new shape (159+)</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section><h2>recommendations</h2>
+    <ul>
+      <li><strong>Use <code>await</code></strong> (or <code>Promise.resolve(x).then</code>): it works on both shapes, and on 159+ it surfaces <code>InvalidStateError</code> to your <code>catch</code>.</li>
+      <li><strong>Never chain <code>.then()</code> directly</strong> on the return value while you still support Chrome ≤158 — it throws <code>TypeError</code> there.</li>
+      <li><strong>Audit synchronous <code>try/catch</code></strong>: argument errors moved from a synchronous throw to a rejected promise, so a <code>catch</code> without <code>await</code> no longer sees them and the rejection goes unhandled.</li>
+      <li><strong>Detect the shape by calling</strong>, not by inspecting the function: <code>length</code> and <code>toString()</code> are identical on both.</li>
+    </ul>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5188639100370944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/w3c/mediasession/pull/312" target="_blank" rel="noopener">w3c/mediasession#312 (the spec change)</a></li>
+    <li><a href="https://webidl.spec.whatwg.org/#es-operations" target="_blank" rel="noopener">WebIDL: promise-returning operations convert exceptions to rejections</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { hasMediaSession, SHIP_NOTE } from "../ms.js";
+
+document.getElementById("ship-note").textContent = SHIP_NOTE;
+const ms = navigator.mediaSession;
+const settle = (p) => Promise.race([
+  Promise.resolve(p).then((v) => ({ ok: true, v }), (e) => ({ ok: false, e })),
+  new Promise((r) => setTimeout(() => r({ ok: null }), 1500)),
+]);
+
+// Each pattern returns a one-line description of what really happened.
+const PATTERNS = [
+  {
+    code: "ms.setMicrophoneActive(false);  // fire and forget",
+    old: "works", neu: "works",
+    run: async () => {
+      const r = ms.setMicrophoneActive(false);
+      if (r && typeof r.then === "function") await settle(r);
+      return { pass: true, text: "no exception" };
+    },
+  },
+  {
+    code: "await ms.setMicrophoneActive(false);",
+    old: "works (await undefined)", neu: "works, waits for the UA",
+    run: async () => {
+      await ms.setMicrophoneActive(false);
+      return { pass: true, text: "awaited without error" };
+    },
+  },
+  {
+    code: "ms.setMicrophoneActive(false).then(update);",
+    old: "TypeError: cannot read 'then' of undefined", neu: "works",
+    run: async () => {
+      try {
+        await settle(ms.setMicrophoneActive(false).then(() => "updated"));
+        return { pass: true, text: ".then() chained fine" };
+      } catch (e) {
+        return { pass: false, text: `${e.name}: ${e.message}` };
+      }
+    },
+  },
+  {
+    code: "Promise.resolve(ms.setMicrophoneActive(false)).then(update);",
+    old: "works", neu: "works",
+    run: async () => {
+      const s = await settle(Promise.resolve(ms.setMicrophoneActive(false)).then(() => "updated"));
+      return { pass: s.ok === true, text: s.ok ? "resolved" : `settled: ${s.ok === null ? "pending" : s.e?.name}` };
+    },
+  },
+  {
+    code: "try { ms.setMicrophoneActive(); } catch (e) { report(e); }  // missing argument, no await",
+    old: "catch runs (sync TypeError)", neu: "catch SKIPPED — rejection unhandled",
+    run: async () => {
+      let caught = null, ret;
+      try {
+        ret = ms.setMicrophoneActive();
+      } catch (e) {
+        caught = e;
+      }
+      if (caught) return { pass: true, text: `catch ran: ${caught.name}` };
+      if (ret && typeof ret.then === "function") {
+        // Handle it here so this demo does not itself leave an unhandled rejection.
+        const s = await settle(ret);
+        return { pass: false, text: `catch skipped; returned promise ${s.ok === false ? `rejected with ${s.e.name}: ${s.e.message}` : "did not reject"} — would be an unhandled rejection` };
+      }
+      return { pass: false, text: `no exception and returned ${typeof ret}` };
+    },
+  },
+  {
+    code: "try { await ms.setMicrophoneActive(); } catch (e) { report(e); }",
+    old: "catch runs", neu: "catch runs",
+    run: async () => {
+      try {
+        await ms.setMicrophoneActive();
+        return { pass: false, text: "no error at all" };
+      } catch (e) {
+        return { pass: true, text: `catch ran: ${e.name}` };
+      }
+    },
+  },
+];
+
+document.getElementById("run").addEventListener("click", async () => {
+  const verdict = document.getElementById("verdict");
+  const tbody = document.getElementById("rows");
+  if (!hasMediaSession()) {
+    verdict.className = "verdict no";
+    verdict.textContent = "navigator.mediaSession.setMicrophoneActive is unavailable here; nothing to run.";
+    return;
+  }
+  tbody.textContent = "";
+  const probe = ms.setMicrophoneActive(false);
+  const shape = probe && typeof probe.then === "function" ? "new" : "old";
+  if (shape === "new") await settle(probe);
+  let broken = 0;
+  for (const p of PATTERNS) {
+    let r;
+    try {
+      r = await p.run();
+    } catch (e) {
+      r = { pass: false, text: `${e.name}: ${e.message}` };
+    }
+    if (!r.pass) broken++;
+    const tr = document.createElement("tr");
+    for (const [txt, cls] of [
+      [p.code, "mono"],
+      [`${r.pass ? "OK" : "BROKEN"} — ${r.text}`, r.pass ? "pass" : "fail"],
+      [p.old, shape === "old" ? "mono" : ""],
+      [p.neu, shape === "new" ? "mono" : ""],
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = txt;
+      if (cls) td.className = cls;
+      tr.append(td);
+    }
+    tbody.append(tr);
+  }
+  verdict.className = "verdict";
+  verdict.textContent = `This browser has the ${shape === "new" ? "NEW Promise<undefined>" : "OLD undefined"} shape; ${broken} of ${PATTERNS.length} patterns break here (expected: 1 on either shape — a different one).`;
+  window.showcaseTelemetry?.assert(`ms-migration-${shape}-shape`, broken === 1, { broken });
+});
+</script>
+</body>
+</html>
