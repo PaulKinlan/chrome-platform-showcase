@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Structured clone across every channel — WebTransportError API alignment and serialization — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../kit.css">
+  <style>
+    table.channels { min-width: 620px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransportError API alignment and serialization</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · webtransport · serialization</p>
+    <h1>Structured clone across every channel</h1>
+    <p class="lede">The spec makes <code>WebTransportError</code> a serializable object. It runs the <code>DOMException</code> serialization steps, then copies <code>[[Source]]</code> and <code>[[StreamErrorCode]]</code>. Older Chromium did not, so any attempt to send one to a worker, a <code>MessagePort</code> or IndexedDB threw <code>DataCloneError</code>. This page sends one error through five real channels and checks what arrives at the other end. A plain <code>DOMException</code> is sent the same way as a control, which shows each channel works for errors in general, so a failure on the <code>WebTransportError</code> row must come from that type.</p>
+  </header>
+
+  <p class="note">Chrome 159 serializes by default. ChromeStatus says the writer side has a runtime kill switch (<code>WebTransportErrorSerialization</code>), while <em>reading</em> a serialized error stays permanently enabled so values already stored in IndexedDB can still be read. On a build without serialization, every <code>WebTransportError</code> row reports the real <code>DataCloneError</code>.</p>
+
+  <section class="stage" aria-labelledby="pick-title">
+    <h2 id="pick-title">1 · The error to send</h2>
+    <fieldset class="endpoint">
+      <legend>Error fields</legend>
+      <div class="field">
+        <label for="msg">message</label>
+        <input id="msg" type="text" value="Stream reset by peer" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="src">source</label>
+        <select id="src">
+          <option value="stream">"stream"</option>
+          <option value="session" selected>"session"</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="code">streamErrorCode (empty for null)</label>
+        <input id="code" type="text" inputmode="numeric" value="4096" autocomplete="off">
+      </div>
+    </fieldset>
+    <p id="built" class="hint" aria-live="polite"></p>
+    <button type="button" id="run">Send it through every channel</button>
+  </section>
+
+  <section class="stage" aria-labelledby="res-title">
+    <h2 id="res-title">2 · What arrived</h2>
+    <div class="table-wrap" tabindex="0" role="region" aria-labelledby="res-cap">
+      <table class="channels">
+        <caption id="res-cap">Per channel: WebTransportError result and DOMException control</caption>
+        <thead><tr><th scope="col">channel</th><th scope="col">WebTransportError</th><th scope="col">fields preserved?</th><th scope="col">DOMException control</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="4">Not run yet.</td></tr></tbody>
+      </table>
+    </div>
+    <output id="out" aria-live="polite"></output>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const e = new WebTransportError("reset", { source: "stream", streamErrorCode: 4096 });
+
+structuredClone(e);                    // WebTransportError, fields intact
+worker.postMessage(e);                 // arrives as a WebTransportError
+port.postMessage(e);                   // MessageChannel, same
+new BroadcastChannel("x").postMessage(e);
+idbStore.put(e, "last-error");         // persisted, readable later
+
+// Before Chrome 159, each of these threw DataCloneError.</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5158277221580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#web-transport-error-serialization" target="_blank" rel="noopener">Spec: WebTransportError serialization</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/structured-data.html#serializable-objects" target="_blank" rel="noopener">HTML: serializable objects</a></li>
+    <li><a href="../worker-error-relay/">Worker error relay</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { hasCtor, make, describe, show } from "../wterror-kit.js";
+
+const LOG = "[wterr:clone]";
+const $ = (id) => document.getElementById(id);
+const runBtn = $("run");
+let worker = null;
+
+if (!hasCtor()) {
+  $("built").textContent = "WebTransportError is " + typeof globalThis.WebTransportError + " here" + (globalThis.isSecureContext ? "." : " (not a secure context)") + " There is nothing to send.";
+  runBtn.disabled = true;
+}
+
+function getWorker() {
+  if (!worker) worker = new Worker("../worker.js");
+  return worker;
+}
+
+const withTimeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new DOMException(label + " timed out", "TimeoutError")), ms))]);
+
+const CHANNELS = [
+  ["structuredClone()", async (v) => structuredClone(v)],
+  ["MessageChannel", (v) => withTimeout(new Promise((resolve, reject) => {
+    const mc = new MessageChannel();
+    mc.port2.onmessage = (ev) => {
+      resolve(ev.data);
+      mc.port1.close();
+      mc.port2.close();
+    };
+    mc.port2.onmessageerror = () => reject(new DOMException("messageerror on receive", "DataCloneError"));
+    mc.port1.postMessage(v);
+  }), 3000, "MessageChannel")],
+  ["Worker round trip", (v) => withTimeout(new Promise((resolve, reject) => {
+    const w = getWorker();
+    const onMsg = (ev) => {
+      if (ev.data?.kind !== "echo") return;
+      w.removeEventListener("message", onMsg);
+      resolve(ev.data.value);
+    };
+    w.addEventListener("message", onMsg);
+    try {
+      w.postMessage({ op: "echo", value: v });
+    } catch (e) {
+      w.removeEventListener("message", onMsg);
+      reject(e);
+    }
+  }), 3000, "Worker")],
+  ["BroadcastChannel", (v) => withTimeout(new Promise((resolve, reject) => {
+    const name = "wterr-clone-" + Math.random().toString(36).slice(2);
+    const a = new BroadcastChannel(name);
+    const b = new BroadcastChannel(name);
+    b.onmessage = (ev) => {
+      resolve(ev.data);
+      a.close();
+      b.close();
+    };
+    try {
+      a.postMessage(v);
+    } catch (e) {
+      a.close();
+      b.close();
+      reject(e);
+    }
+  }), 3000, "BroadcastChannel")],
+  ["IndexedDB put + get", (v) => withTimeout(new Promise((resolve, reject) => {
+    const open = indexedDB.open("wterr-clone-demo", 1);
+    open.onupgradeneeded = () => open.result.createObjectStore("errors");
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const db = open.result;
+      let tx;
+      try {
+        tx = db.transaction("errors", "readwrite");
+        tx.objectStore("errors").put(v, "last");
+      } catch (e) {
+        db.close();
+        reject(e);
+        return;
+      }
+      tx.oncomplete = () => {
+        const get = db.transaction("errors").objectStore("errors").get("last");
+        get.onsuccess = () => {
+          db.close();
+          resolve(get.result);
+        };
+        get.onerror = () => {
+          db.close();
+          reject(get.error);
+        };
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+    };
+  }), 5000, "IndexedDB")],
+];
+
+function code() {
+  const raw = $("code").value.trim();
+  return raw === "" ? null : Number(raw);
+}
+
+runBtn.addEventListener("click", async () => {
+  runBtn.disabled = true;
+  const built = make($("msg").value, { source: $("src").value, streamErrorCode: code() });
+  const original = built.error;
+  $("built").textContent = "Built with the " + built.path + " constructor: " + JSON.stringify(describe(original)) + (built.lost.length ? ". The legacy constructor could not carry " + built.lost.join(" and ") + "." : ".");
+  const control = new DOMException("control", "AbortError");
+  const rows = $("rows");
+  rows.replaceChildren();
+  let preservedAll = true;
+  let anyCloneError = false;
+  for (const [label, send] of CHANNELS) {
+    const tr = document.createElement("tr");
+    const th = document.createElement("th");
+    th.scope = "row";
+    th.textContent = label;
+    const tdR = document.createElement("td");
+    const tdF = document.createElement("td");
+    const tdC = document.createElement("td");
+    try {
+      const got = await send(original);
+      const d = describe(got);
+      const same = d.isWebTransportError && got.message === original.message && got.source === original.source && got.streamErrorCode === original.streamErrorCode;
+      tdR.textContent = "arrived as " + d.class;
+      tdR.className = d.isWebTransportError ? "ok" : "err";
+      tdF.textContent = same ? "yes: message, source " + show(got.source) + ", streamErrorCode " + show(got.streamErrorCode) : "no: " + JSON.stringify(d);
+      tdF.className = same ? "ok" : "err";
+      if (!same) preservedAll = false;
+    } catch (e) {
+      preservedAll = false;
+      if (e.name === "DataCloneError") anyCloneError = true;
+      tdR.textContent = "threw " + e.name;
+      tdR.className = "err";
+      tdF.textContent = e.message;
+    }
+    try {
+      const c = await send(control);
+      const ok = c instanceof DOMException && c.name === "AbortError" && c.message === "control";
+      tdC.textContent = ok ? "arrived intact" : "arrived changed: " + JSON.stringify(describe(c));
+      tdC.className = ok ? "ok" : "err";
+    } catch (e) {
+      tdC.textContent = "threw " + e.name + ": " + e.message;
+      tdC.className = "err";
+    }
+    tr.append(th, tdR, tdF, tdC);
+    rows.append(tr);
+  }
+  $("out").textContent = preservedAll
+    ? "Every channel delivered a WebTransportError with message, source and streamErrorCode intact. Serialization works in this browser."
+    : anyCloneError
+    ? "This browser refuses to serialize WebTransportError (DataCloneError), while the DOMException control gets through each channel. That is the gap Chrome 159 closes. Until then, send a plain record and rebuild the error on the other side (see the worker relay page)."
+    : "Some channels changed or lost fields. Compare the rows above.";
+  globalThis.showcaseTelemetry?.assert(preservedAll ? "wterr-clone-all-channels" : "wterr-clone-unsupported-reported", true, { preservedAll, anyCloneError });
+  console.log(LOG, "preservedAll=" + preservedAll, "dataCloneError=" + anyCloneError);
+  runBtn.disabled = false;
+});
+
+console.log(LOG, "ready");
+</script>
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker error relay — WebTransportError API alignment and serialization — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../kit.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransportError API alignment and serialization</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · webtransport · workers</p>
+    <h1>Worker error relay</h1>
+    <p class="lede">A common setup keeps the WebTransport session in a worker, so network work stays off the main thread, and lets the page handle the UI. When the session fails, the page needs the error: was it the whole session (<code>source: "session"</code>, so reconnect) or one stream with an application code (so react to that code)? With serialization, the worker calls <code>postMessage(error)</code> and the page receives a real <code>WebTransportError</code>. Without it, that call throws, and every application has to write its own conversion. This page runs both paths for real and labels which one this browser took.</p>
+  </header>
+
+  <p class="note">Native relay needs Chrome 159 (ChromeStatus also lists <code>chrome://flags/#enable-experimental-web-platform-features</code>). The session failure is real. The default URL points at a port with nothing listening, so <code>ready</code> rejects with a real <code>WebTransportError</code> on any network, and Chrome logs its own "Failed to establish a connection" line in the console. Enter a real server to see the connected case instead.</p>
+
+  <section class="stage" aria-labelledby="sess-title">
+    <h2 id="sess-title">1 · A real session failure, raised in the worker</h2>
+    <div class="field">
+      <label for="url">WebTransport URL the worker connects to</label>
+      <input id="url" type="url" value="https://127.0.0.1:44443/never" spellcheck="false" autocomplete="off">
+    </div>
+    <button type="button" id="connect">Connect from the worker</button>
+  </section>
+
+  <section class="stage" aria-labelledby="app-title">
+    <h2 id="app-title">2 · An application stream error, built in the worker</h2>
+    <p>This is the error a worker would pass to <code>writer.abort(error)</code> to reset a stream with an application code. It is built with the standard constructor when available.</p>
+    <fieldset class="endpoint">
+      <legend>Stream error</legend>
+      <div class="field">
+        <label for="appcode">streamErrorCode</label>
+        <select id="appcode">
+          <option value="4096" selected>4096: quota exceeded</option>
+          <option value="409">409: version conflict</option>
+          <option value="7">7: unknown to the page</option>
+        </select>
+      </div>
+    </fieldset>
+    <button type="button" id="app">Raise it in the worker</button>
+  </section>
+
+  <section class="stage" aria-labelledby="res-title">
+    <h2 id="res-title">3 · What the page received, and what it does next</h2>
+    <dl class="kpis">
+      <div><dt>transport path</dt><dd id="k-path">—</dd></div>
+      <div><dt>received as</dt><dd id="k-class">—</dd></div>
+      <div><dt>source</dt><dd id="k-source">—</dd></div>
+      <div><dt>streamErrorCode</dt><dd id="k-code">—</dd></div>
+    </dl>
+    <output id="decision" aria-live="polite">Nothing relayed yet.</output>
+    <pre class="raw" tabindex="0" aria-label="Raw message from the worker"><code id="raw">—</code></pre>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>// worker.js
+try { await transport.ready; }
+catch (error) {
+  try { postMessage({ error }); }                    // Chrome 159+: native clone
+  catch { postMessage({ record: { message: error.message,
+            source: error.source, streamErrorCode: error.streamErrorCode } }); }
+}
+
+// page
+worker.onmessage = ({ data }) => {
+  const e = data.error ?? rebuild(data.record);      // same shape either way
+  if (e.source === "session") scheduleReconnect();
+  else handleStreamCode(e.streamErrorCode);
+};</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5158277221580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#web-transport-error-serialization" target="_blank" rel="noopener">Spec: serialization steps</a></li>
+    <li><a href="../structured-clone/">Structured clone across every channel</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { hasCtor, fromRecord, describe, show } from "../wterror-kit.js";
+
+const LOG = "[wterr:relay]";
+const $ = (id) => document.getElementById(id);
+const connectBtn = $("connect");
+const appBtn = $("app");
+let worker = null;
+let attempts = 0;
+
+const STREAM_ACTIONS = {
+  4096: "Stop the upload and show the storage-quota message. Retrying would fail the same way.",
+  409: "Fetch the latest version, merge, and resend on a new stream.",
+};
+
+if (typeof Worker !== "function" || !hasCtor()) {
+  $("decision").textContent = "This page needs Worker and WebTransportError; this browser has " + (typeof Worker === "function" ? "" : "no Worker ") + (hasCtor() ? "" : "no WebTransportError") + ".";
+  connectBtn.disabled = true;
+  appBtn.disabled = true;
+}
+
+function getWorker() {
+  if (worker) return worker;
+  worker = new Worker("../worker.js");
+  worker.onmessage = (ev) => handle(ev.data);
+  worker.onerror = (ev) => {
+    $("decision").textContent = "The worker failed: " + ev.message;
+    connectBtn.disabled = false;
+    appBtn.disabled = false;
+  };
+  return worker;
+}
+
+function handle(data) {
+  connectBtn.disabled = false;
+  appBtn.disabled = false;
+  $("raw").textContent = JSON.stringify(data, (k, v) => (v instanceof DOMException ? { "[received object]": describe(v) } : v), 2);
+  if (data.kind === "connected") {
+    $("k-path").textContent = "—";
+    $("decision").textContent = "The worker connected in " + data.ms + " ms, so there was no error to relay. Use the default dead URL to see a failure.";
+    return;
+  }
+  if (data.kind === "unavailable") {
+    $("decision").textContent = data.detail;
+    return;
+  }
+  let error;
+  let path;
+  let source;
+  let code;
+  if (data.kind === "native") {
+    error = data.error;
+    path = "native clone";
+    source = error.source;
+    code = error.streamErrorCode;
+  } else {
+    const rebuilt = fromRecord(data.record);
+    error = rebuilt.error;
+    // Decide from the record, not the rebuilt object: a legacy constructor
+    // cannot set source, so the rebuilt error may say "stream" for a session failure.
+    source = data.record.source;
+    code = data.record.streamErrorCode;
+    path = "plain record (" + data.cloneError + "), rebuilt with the " + rebuilt.path + " constructor";
+    if (rebuilt.lost.length) path += ". The rebuilt object lost " + rebuilt.lost.join(" and ") + ", so the page decides from the record fields instead";
+  }
+  const d = describe(error);
+  $("k-path").textContent = data.kind === "native" ? "native clone" : "fallback record";
+  $("k-class").textContent = d.class;
+  $("k-source").textContent = show(source);
+  $("k-code").textContent = show(code);
+  let action;
+  if (source === "session") {
+    attempts++;
+    const delay = Math.min(30, 2 ** (attempts - 1));
+    action = "Session-level failure (" + error.message + "). Reconnect with backoff: attempt " + attempts + " would wait " + delay + " s. Press Connect again to see the backoff grow.";
+  } else {
+    action = "Stream-level error, code " + show(code) + ". " + (STREAM_ACTIONS[code] ?? "Unrecognised code: log it and retry the stream once.");
+  }
+  if (data.askedCode !== undefined && code !== data.askedCode) {
+    action = "The worker asked its " + data.ctorPath + " constructor for code " + data.askedCode + " and got " + show(code) + ": the code was narrowed before it left the worker. " + action;
+  }
+  $("decision").textContent = "Arrived via " + path + ". " + action;
+  globalThis.showcaseTelemetry?.assert(data.kind === "native" ? "wterr-relay-native" : "wterr-relay-fallback", true, { phase: data.phase, source, code });
+  console.log(LOG, data.kind, data.phase, source, code);
+}
+
+connectBtn.addEventListener("click", () => {
+  connectBtn.disabled = true;
+  $("decision").textContent = "Worker is connecting to " + $("url").value + "…";
+  getWorker().postMessage({ op: "connect", url: $("url").value.trim() });
+});
+
+appBtn.addEventListener("click", () => {
+  appBtn.disabled = true;
+  const code = Number($("appcode").value);
+  $("decision").textContent = "Worker is raising stream error " + code + "…";
+  getWorker().postMessage({ op: "app-error", message: "application stream error", source: "stream", code });
+});
+
+console.log(LOG, "ready");
+</script>
+</body>
+</html>

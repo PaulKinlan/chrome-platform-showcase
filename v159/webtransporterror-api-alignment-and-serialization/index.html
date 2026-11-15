@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransportError API alignment and serialization — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    pre { max-width: 100%; overflow-x: auto; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v159/">&larr; Chrome 159</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · network · webtransport</p>
+    <h1>WebTransportError API alignment and serialization</h1>
+    <p class="lede">Chromium shipped <code>WebTransportError</code> before the spec settled, and it differed from the spec in three ways. Its constructor took a single dictionary instead of <code>(message, options)</code>. It narrowed outgoing <code>streamErrorCode</code> values to 8 bits, although the attribute is an <code>unsigned long</code>. And it could not be structured-cloned, so a worker could not hand the error to the page, and an error could not be stored in IndexedDB. Chrome 159 fixes all three and keeps the old dictionary constructor working for existing code.</p>
+  </header>
+
+  <p class="note">Chrome 159 enables this by default. ChromeStatus lists <code>chrome://flags/#enable-experimental-web-platform-features</code> for the developer trial, and the Finch / runtime feature is <code>WebTransportErrorSerialization</code> (<code>status: "stable"</code> in <code>runtime_enabled_features.json5</code>). That switch only stops new errors from being serialized: reading serialized errors stays enabled, so errors already stored remain readable. None of these concepts need a server, because the constructor, the attributes and structured cloning all work locally.</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./constructor-forms/">Two constructor forms, one error</a></h3>
+      <p>The basic case, plus migration. Probe whether this browser accepts the standard <code>(message, {source, streamErrorCode})</code> form, the legacy <code>({message, streamErrorCode})</code> form, and structured cloning. Then build an error either way and inspect <code>name</code>, <code>code</code>, <code>source</code>, <code>streamErrorCode</code> and the <code>DOMException</code> ancestry. The legacy form cannot set <code>source</code>, and the page shows that.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./stream-error-code-range/">streamErrorCode: all 32 bits, or 8?</a></h3>
+      <p>The edge cases. Fifteen boundary values (null, 255, 256, 2<sup>32</sup>−1, 2<sup>32</sup>, −1, 2.5, NaN and others) go through each constructor and are compared with WebIDL <code>[Clamp] unsigned long?</code> conversion. A legacy build that clamps codes above 255 shows up immediately. Each row also shows the HTTP/3 error code the value maps to on the wire.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./structured-clone/">Structured clone across every channel</a></h3>
+      <p>An inspection tool for serialization. One error goes through <code>structuredClone()</code>, a <code>MessageChannel</code>, a worker round trip, a <code>BroadcastChannel</code> and an IndexedDB put/get, next to a plain <code>DOMException</code> control on each channel. Every row reports what arrived and whether the message, source and code survived, or the real <code>DataCloneError</code>.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./worker-error-relay/">Worker error relay</a></h3>
+      <p>The practical product pattern. A dedicated worker owns the transport, hits a real session failure, and relays the real <code>WebTransportError</code> to the page. It uses native cloning where available and a labelled plain-record fallback where not. The page then picks an action from <code>source</code> and <code>streamErrorCode</code>: reconnect with backoff, or handle that specific application code.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Firefox and Safari already implement the spec shape, so code written for them threw a <code>TypeError</code> in Chromium, and Chromium-only code using the dictionary form failed elsewhere. The 8-bit narrowing caused silent corruption: an application that reset a stream with code 4096 sent 255, and a server branching on the code took the wrong path. Serialization matters because WebTransport is exposed in workers and often lives there, and errors are the values most often posted to the page or logged to IndexedDB.</p>
+    <p>The spec serializes a <code>WebTransportError</code> by running the <code>DOMException</code> steps (name and message) and then copying <code>[[Source]]</code> and <code>[[StreamErrorCode]]</code>, so a clone keeps its type, its source and a nullable code. Chrome ships the writer side behind a kill switch, so it can be turned off if it causes problems, while reading stays permanently on so that values already persisted can always be read back.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>[Exposed=(Window,Worker), Serializable, SecureContext]
+interface WebTransportError : DOMException {
+  constructor(optional DOMString message = "", optional WebTransportErrorOptions options = {});
+  readonly attribute WebTransportErrorSource source;   // "stream" | "session"
+  readonly attribute unsigned long? streamErrorCode;
+};
+dictionary WebTransportErrorOptions {
+  WebTransportErrorSource source = "stream";
+  [Clamp] unsigned long? streamErrorCode = null;
+};
+
+const e = new WebTransportError("quota", { streamErrorCode: 4096 });
+e.name === "WebTransportError"; e.code === 0;
+structuredClone(e).streamErrorCode === 4096;   // Chrome 159+</code></pre>
+  </section>
+
+  <!-- research notes (v159 builder, 2026-11-15)
+    ChromeStatus 5158277221580800 "WebTransportError API alignment and serialization",
+    owner monicach@microsoft.com, bug crbug.com/577073049. Listed in v159 both "Enabled by
+    default" and "In developer trial". Finch WebTransportErrorSerialization;
+    runtime_enabled_features.json5 (main, fetched 2026-11-15): {name:
+    "WebTransportErrorSerialization", status: "stable"}. ChromeStatus flag_name
+    enable-experimental-web-platform-features.
+    Spec (w3c.github.io/webtransport §12, fetched 2026-11-15): constructor(optional DOMString
+    message = "", optional WebTransportErrorOptions options = {}); options {source =
+    "stream", [Clamp] unsigned long? streamErrorCode = null}; serialization = DOMException
+    steps + [[Source]] + [[StreamErrorCode]]. HTTP/3 mapping per draft-ietf-webtrans-http3
+    §4.3: first + n + floor(n / 0x1e), first = 0x52e4a40fa8db (max maps to 0x52e5ac983162).
+    Observed on Chrome for Testing 153.0.8010.12 headless, with and without
+    --enable-experimental-web-platform-features: standard (string, options) form throws
+    TypeError "not of type 'WebTransportErrorInit'"; legacy {message, streamErrorCode}
+    works, source always "stream" ({source:'bogus'} ignored); streamErrorCode 300 -> 255,
+    4294967295 -> 255, -1 -> 0 ([Clamp] octet); structuredClone / MessagePort postMessage
+    throw DataCloneError "WebTransportError object could not be cloned"; ready rejection
+    on a dead port is a real WebTransportError with source "session", streamErrorCode
+    null. The new behaviour is not in any locally available build, so the
+    success paths are verified only by code review against the spec.
+    Portfolio: basic + migration = constructor-forms; edge = stream-error-code-range;
+    inspection = structured-clone (5 channels + DOMException control); practical product +
+    advanced composition = worker-error-relay (worker-owned transport, native vs record
+    relay, source/code-driven retry policy). A wire-level demo of a full 32-bit RESET_STREAM
+    code needs a server that reports received codes back; not built here because the
+    showcase host cannot serve HTTP/3 (recorded instead of simulated).
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5158277221580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#web-transport-error-interface" target="_blank" rel="noopener">WebTransport spec: WebTransportError</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#web-transport-error-serialization" target="_blank" rel="noopener">WebTransport spec: serialization</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md" target="_blank" rel="noopener">WebTransport explainer</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/WebTransportError" target="_blank" rel="noopener">MDN: WebTransportError</a></li>
+    <li><a href="https://developer.chrome.com/docs/capabilities/web-apis/webtransport" target="_blank" rel="noopener">Chrome for Developers: WebTransport</a></li>
+    <li><a href="https://issues.chromium.org/issues/577073049" target="_blank" rel="noopener">Chromium bug 577073049</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
