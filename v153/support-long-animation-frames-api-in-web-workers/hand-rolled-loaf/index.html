@@ -22,6 +22,9 @@
     td.have { color: var(--accent-emerald); font-weight: 700; }
     td.lack { color: var(--accent-rose); font-weight: 700; }
     output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; }
+    .flag-banner { background: var(--bg-stone); border: 2px solid var(--border-black); border-left: 6px solid var(--accent-amber); padding: var(--space-3); margin: var(--space-4) 0; color: var(--text-charcoal); }
+    .flag-banner strong { color: var(--text-black); }
+    .flag-banner code { background: var(--bg-ivory); color: var(--text-black); padding: 0 4px; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -32,6 +35,10 @@
     <h1>The workaround, and what it cannot tell you</h1>
     <p class="lede">There is a way to notice a blocked worker from inside it: reschedule a task continuously and watch for one that runs late. It works, it costs almost nothing, and comparing what it produces against a real Long Animation Frame entry shows exactly what is missing.</p>
   </header>
+
+  <div class="flag-banner" role="note" aria-label="How to enable worker long animation frames">
+    <strong>Worker entries need a launch flag.</strong> <code>LongAnimationFrameWorker</code> has status <code>"test"</code> in Chromium's <code>runtime_enabled_features.json5</code> (Chrome 153 through current main), so there is no <code>chrome://flags</code> entry and <code>--enable-experimental-web-platform-features</code> does <em>not</em> turn it on. Relaunch Chrome or Canary with <code>--enable-blink-features=LongAnimationFrameWorker</code>. Even then, Chromium reports a worker entry only for a <em>congested moment</em>: a task was already waiting while another ran, the backlog lasted at least 200ms, and the worker then went idle for more than 5ms (<code>animation_frame_timing_monitor.cc</code>). A long task with nothing queued behind it produces no entry.
+  </div>
 
   <section class="stage" aria-labelledby="run-title">
     <h2 id="run-title">Block the worker, then compare the two records</h2>
@@ -50,7 +57,7 @@
       </table>
     </div>
     <output id="detail" aria-live="polite">Press the button.</output>
-    <p class="note">The self-timer is nine lines: a <code>setTimeout(…, 0)</code> that reschedules itself and records any gap over 50ms. That is the entire workaround, and its total cost is one task per turn of the loop.</p>
+    <p class="note">The self-timer is nine lines: a <code>setTimeout(…, 16)</code> that reschedules itself and records any gap over 50ms. That is the entire workaround, and its total cost is one small task every 16ms. (A <code>0</code> delay would also work, but its clamped 4ms chain never lets the worker go idle, which in Chromium keeps a congested moment open and delays the real entry.) While the worker is blocked, this page keeps posting it a message every 40ms, as a busy app would; that queued work is what Chromium's worker implementation reports.</p>
   </section>
 
   <section class="stage" aria-labelledby="compare-title">
@@ -74,9 +81,9 @@ const tick = () =&gt; {
   const gap = now - lastTaskEnd;
   if (gap &gt; 50) report({ blockedFor: gap, at: now });
   lastTaskEnd = performance.now();
-  setTimeout(tick, 0);
+  setTimeout(tick, 16);
 };
-setTimeout(tick, 0);</code></pre>
+setTimeout(tick, 16);</code></pre>
     <p>Note what it measures: the gap between one of <em>its own</em> tasks and the next. If a single task blocks for 400ms, the gap is 400ms and the timer is correct. If four tasks each block for 100ms with the timer running in between, the timer reports nothing at all — every individual gap is under the threshold, and the worker was still unresponsive for 400ms.</p>
   </section>
 
@@ -155,6 +162,11 @@ setTimeout(tick, 0);</code></pre>
     document.getElementById('detail').textContent = 'Blocking the worker…';
     const ms = Math.max(60, Math.min(3000, Number(document.getElementById('ms').value) || 350));
 
+    // Ordinary traffic queues up behind the block, the way messages from a busy
+    // page do. Chromium reports a worker entry only for such a backlog; a block
+    // with nothing waiting behind it is not a congested moment.
+    let nextMessage = 1;
+    const traffic = setInterval(() => worker.postMessage({ type: 'ping', id: nextMessage++ }), 40);
     const report = await new Promise((resolve) => {
       const onMessage = (event) => {
         if (event.data?.type !== 'blocked') return;
@@ -163,7 +175,7 @@ setTimeout(tick, 0);</code></pre>
       };
       worker.addEventListener('message', onMessage);
       worker.postMessage({ type: 'block', id: 'block', ms });
-    });
+    }).finally(() => clearInterval(traffic));
 
     const body = document.getElementById('records');
     body.innerHTML = '';
@@ -202,7 +214,9 @@ setTimeout(tick, 0);</code></pre>
         : `The self-timer caught it as a ${longest.toFixed(0)} ms gap — within ${Math.abs(longest - report.actual).toFixed(0)} ms of the real duration, so the number is trustworthy. ` +
           (observed.length > 0
             ? `The worker's PerformanceObserver also reported ${observed.length} entry(ies), so this browser has the feature and the workaround is redundant.`
-            : 'The worker\'s PerformanceObserver reported nothing, so this number is all there is.'));
+            : capabilities?.hasLoAF
+              ? `The worker supports long-animation-frame, but no entry overlapped this block within ${report.waitedForEntryMs ?? 30} ms, so this number is all there is for this run.`
+              : 'The worker\'s PerformanceObserver reported nothing, so this number is all there is.'));
 
     console.log(`${LOG} blocked=${report.actual.toFixed(0)}ms selfTimed=${records.length} observed=${observed.length}`);
     globalThis.showcaseTelemetry?.assert('workaround-compared', true, {
