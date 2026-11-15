@@ -7,8 +7,16 @@ import {
   renderConformanceRunAllPage,
 } from "./conformance-renderers.ts";
 
+// Suites whose assertions construct a JS Self-Profiling `Profiler`, which the
+// browser refuses without `Document-Policy: js-profiling`. Mirrors the header
+// the demo pages themselves get in routes/release-endpoints.ts.
+const JS_PROFILING_SUITES = new Set([
+  "v147/js-profiling-in-dedicated-workers",
+  "v153/js-self-profiling-markers",
+]);
+
 function conformanceHeaders(release: string, featureSlug: string): HeadersInit | undefined {
-  if (release === "v147" && featureSlug === "js-profiling-in-dedicated-workers") {
+  if (JS_PROFILING_SUITES.has(`${release}/${featureSlug}`)) {
     return {
       "document-policy": "js-profiling",
     };
