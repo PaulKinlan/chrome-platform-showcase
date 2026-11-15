@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Migration rewriter — Deprecate and remove WebRTC peer connection method — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Deprecate and remove WebRTC peer connection method</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · migration tooling</p>
+    <h1>Migration rewriter</h1>
+    <p class="lede">Chromium's own implementation of <code>createDTMFSender(track)</code> does nothing more than find the <code>RTCRtpSender</code> whose <code>track</code> is the argument and return its <code>dtmf</code> attribute. So the migration is mechanical. Paste code below to find every call and rewrite it, then prove on a live call that the rewritten expression returns the same object the legacy call did (where the legacy method still exists).</p>
+  </header>
+
+  <section class="stage" aria-labelledby="scan-title">
+    <h2 id="scan-title">1 · Scan and rewrite</h2>
+    <label for="src">Your code</label>
+    <textarea id="src" rows="9" spellcheck="false">const pc = new RTCPeerConnection(config);
+const sender = pc.addTrack(micTrack, stream);
+// later, when the user opens the dial pad:
+const dtmfSender = pc.createDTMFSender(micTrack);
+dtmfSender.ontonechange = onTone;
+peerConnection.createDTMFSender( localStream.getAudioTracks()[0] ).insertDTMF("123");</textarea>
+    <div class="controls">
+      <label for="style">Rewrite style
+        <select id="style">
+          <option value="find">pc.getSenders().find((s) =&gt; s.track === track).dtmf</option>
+          <option value="optional">…find(…)?.dtmf ?? null (never throws)</option>
+        </select>
+      </label>
+      <button type="button" class="demo-btn" id="rewrite">Find and rewrite</button>
+    </div>
+    <p class="verdict" id="scan-verdict" aria-live="polite">Not run yet.</p>
+    <label for="out">Rewritten code</label>
+    <textarea id="out" rows="9" readonly spellcheck="false"></textarea>
+  </section>
+
+  <section class="stage" aria-labelledby="prove-title">
+    <h2 id="prove-title">2 · Prove equivalence on a live call</h2>
+    <button type="button" class="demo-btn" id="prove">Run legacy and rewritten forms</button>
+    <output id="prove-out" aria-live="polite">Not run yet.</output>
+  </section>
+
+  <section><h2>behaviour differences to know</h2>
+    <ul>
+      <li>The legacy call threw <code>SyntaxError</code> for a non-audio track or a track with no sender. The <code>find()</code> form throws <code>TypeError</code> when no sender matches (reading <code>.dtmf</code> of <code>undefined</code>) and returns <code>null</code> for a video sender; the optional-chaining style returns <code>null</code> for both, so check the result.</li>
+      <li>If you kept the <code>RTCRtpSender</code> from <code>addTrack()</code>, skip the search: <code>sender.dtmf</code>.</li>
+      <li>Check <code>dtmf.canInsertDTMF</code> before sending; it stays <code>false</code> until negotiation completes.</li>
+    </ul>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5160724576993280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc" target="_blank" rel="noopener">Chromium: RTCPeerConnection::createDTMFSender</a></li>
+    <li><a href="../dtmf-edge-cases/">DTMF edge cases</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { legacyMethodPresent, makeCall } from "../dtmf.js";
+
+const LOG = "[dtmf-removal:rewriter]";
+const $ = (id) => document.getElementById(id);
+
+// Match <receiver>.createDTMFSender(<argument with balanced parentheses>).
+function rewrite(code, style) {
+  const re = /([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\.\s*createDTMFSender\s*\(/g;
+  let out = "";
+  let last = 0;
+  let count = 0;
+  const unparsed = [];
+  for (let m = re.exec(code); m; m = re.exec(code)) {
+    let depth = 1;
+    let i = re.lastIndex;
+    while (i < code.length && depth > 0) {
+      if (code[i] === "(") depth++;
+      else if (code[i] === ")") depth--;
+      i++;
+    }
+    if (depth !== 0) {
+      unparsed.push(m.index);
+      continue;
+    }
+    const arg = code.slice(re.lastIndex, i - 1).trim();
+    const replacement = style === "optional"
+      ? `(${m[1]}.getSenders().find((s) => s.track === ${arg})?.dtmf ?? null)`
+      : `${m[1]}.getSenders().find((s) => s.track === ${arg}).dtmf`;
+    out += code.slice(last, m.index) + replacement;
+    last = i;
+    re.lastIndex = i;
+    count++;
+  }
+  out += code.slice(last);
+  return { out, count, unparsed };
+}
+
+$("rewrite").addEventListener("click", () => {
+  const { out, count, unparsed } = rewrite($("src").value, $("style").value);
+  $("out").value = out;
+  const v = $("scan-verdict");
+  v.className = count ? "verdict yes" : "verdict";
+  v.textContent = count
+    ? `Rewrote ${count} createDTMFSender call${count === 1 ? "" : "s"}.${unparsed.length ? ` ${unparsed.length} call(s) had unbalanced parentheses and were left alone.` : ""} Review the result; a regex rewrite cannot see aliases such as const f = pc.createDTMFSender.`
+    : "No createDTMFSender calls found.";
+  globalThis.showcaseTelemetry?.assert("dtmf-rewriter-ran", true, { count });
+});
+
+$("prove").addEventListener("click", async () => {
+  const out = $("prove-out");
+  if (typeof RTCPeerConnection !== "function") {
+    out.textContent = "RTCPeerConnection unavailable.";
+    return;
+  }
+  out.textContent = "Connecting a loopback call…";
+  const call = await makeCall();
+  const pc = call.caller;
+  const micTrack = call.audio.track;
+  const lines = [`call connected: ${call.connected}`];
+  const rewritten = pc.getSenders().find((s) => s.track === micTrack).dtmf;
+  lines.push(`rewritten: pc.getSenders().find((s) => s.track === micTrack).dtmf → ${rewritten?.constructor.name}`);
+  if (legacyMethodPresent()) {
+    const legacy = pc.createDTMFSender(micTrack);
+    lines.push(`legacy:    pc.createDTMFSender(micTrack) → ${legacy?.constructor.name}`);
+    lines.push(`identical object: ${legacy === rewritten}`);
+    globalThis.showcaseTelemetry?.assert("dtmf-rewriter-equivalent", legacy === rewritten, {});
+  } else {
+    lines.push("legacy:    pc.createDTMFSender is gone in this browser (Chrome 160+, Firefox, Safari), so only the rewritten form can run. That is the point of migrating.");
+    globalThis.showcaseTelemetry?.assert("dtmf-rewriter-equivalent", Boolean(rewritten), { legacy: false });
+  }
+  try {
+    rewritten.insertDTMF("1");
+    lines.push(`rewritten.insertDTMF("1") → toneBuffer "${rewritten.toneBuffer}"`);
+  } catch (error) {
+    lines.push(`rewritten.insertDTMF("1") threw ${error.name}`);
+  }
+  call.close();
+  lines.push("Call closed.");
+  out.textContent = lines.join("\n");
+  console.log(LOG, lines);
+});
+
+console.log(LOG, "ready");
+</script>
+</body>
+</html>

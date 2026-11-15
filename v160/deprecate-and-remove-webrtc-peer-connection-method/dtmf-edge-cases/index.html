@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DTMF edge cases — Deprecate and remove WebRTC peer connection method — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Deprecate and remove WebRTC peer connection method</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · edge cases</p>
+    <h1>DTMF edge cases</h1>
+    <p class="lede">Migrating from <code>createDTMFSender()</code> to <code>sender.dtmf</code> is a one-line change, but the DTMF sender has rules that code written against the legacy method may never have hit: it is <code>null</code> for video senders, refuses to send before negotiation, validates characters, normalises case and clamps timing. Each row below runs the real call on a real connection and compares the result with the webrtc-pc spec.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">Run every case</h2>
+    <button type="button" class="demo-btn" id="run">Run all edge cases</button>
+    <p class="verdict" id="summary" aria-live="polite">Not run yet.</p>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Results table (scrolls horizontally on narrow screens)"><table class="results">
+      <caption class="visually-hidden">DTMF edge case results</caption>
+      <thead><tr><th scope="col">Case</th><th scope="col">Spec expects</th><th scope="col">Observed</th><th scope="col">Match</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="4">Not run yet.</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5160724576993280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webrtc-pc/#dom-rtcdtmfsender-insertdtmf" target="_blank" rel="noopener">webrtc-pc: insertDTMF() algorithm</a></li>
+    <li><a href="https://w3c.github.io/webrtc-pc/#dom-rtcdtmfsender-caninsertdtmf" target="_blank" rel="noopener">webrtc-pc: canInsertDTMF</a></li>
+    <li><a href="../migration-rewriter/">Migration rewriter</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { makeCall, negotiate } from "../dtmf.js";
+
+const LOG = "[dtmf-removal:edge]";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const tryCall = (fn) => {
+  try {
+    return { value: fn() };
+  } catch (error) {
+    return { error: error.name };
+  }
+};
+
+$("run").addEventListener("click", async () => {
+  if (typeof RTCPeerConnection !== "function") {
+    $("summary").className = "verdict no";
+    $("summary").textContent = "RTCPeerConnection is not available here.";
+    return;
+  }
+  $("run").disabled = true;
+  $("summary").className = "verdict";
+  $("summary").textContent = "Running…";
+  const rows = [];
+  const add = (name, expect, observed, ok) => rows.push({ name, expect, observed, ok });
+
+  // Before negotiation.
+  const call = await makeCall({ negotiateNow: false });
+  const dtmf = call.sender.dtmf;
+  add("sender.dtmf on an audio sender", "an RTCDTMFSender", dtmf ? dtmf.constructor.name : String(dtmf), Boolean(dtmf));
+  add("canInsertDTMF before negotiation", "false", String(dtmf?.canInsertDTMF), dtmf?.canInsertDTMF === false);
+  const early = tryCall(() => dtmf.insertDTMF("1"));
+  add("insertDTMF before negotiation", "throws InvalidStateError", early.error ?? "no throw", early.error === "InvalidStateError");
+
+  // Video sender.
+  const canvas = document.createElement("canvas");
+  const vtrack = canvas.captureStream?.().getVideoTracks()[0];
+  if (vtrack) {
+    const vsender = call.caller.addTrack(vtrack, new MediaStream([vtrack]));
+    add("sender.dtmf on a video sender", "null", String(vsender.dtmf), vsender.dtmf === null);
+  }
+
+  await negotiate(call);
+  add("canInsertDTMF after connecting", "true", String(dtmf.canInsertDTMF), dtmf.canInsertDTMF === true);
+
+  const bad = tryCall(() => dtmf.insertDTMF("12X"));
+  add('insertDTMF("12X")', "throws InvalidCharacterError", bad.error ?? "no throw", bad.error === "InvalidCharacterError");
+
+  dtmf.insertDTMF("abcd", 100, 70);
+  add('insertDTMF("abcd") → toneBuffer', '"ABCD" (uppercased)', JSON.stringify(dtmf.toneBuffer), dtmf.toneBuffer === "ABCD");
+
+  dtmf.insertDTMF("");
+  add('insertDTMF("") → toneBuffer', '"" (cancels remaining tones)', JSON.stringify(dtmf.toneBuffer), dtmf.toneBuffer === "");
+
+  // Duration clamping, observed through tonechange timing.
+  const timing = await new Promise((resolve) => {
+    const stamps = [];
+    const onTone = (e) => {
+      stamps.push({ tone: e.tone, t: performance.now() });
+      if (e.tone === "") {
+        dtmf.removeEventListener("tonechange", onTone);
+        resolve(stamps);
+      }
+    };
+    dtmf.addEventListener("tonechange", onTone);
+    dtmf.insertDTMF("12", 10, 10); // both below the minimums
+    setTimeout(() => resolve(stamps), 3000);
+  });
+  const step = timing.length >= 2 ? Math.round(timing[1].t - timing[0].t) : NaN;
+  add("insertDTMF(\"12\", 10, 10): time between tones", "≥ 70 ms (duration clamped to 40, gap to 30)", Number.isNaN(step) ? "no tonechange events" : `${step} ms`, step >= 65);
+
+  const long = tryCall(() => dtmf.insertDTMF("1", 9000, 70));
+  add("insertDTMF(\"1\", 9000)", "accepted, duration clamped to 6000 ms", long.error ?? "accepted", !long.error);
+  dtmf.insertDTMF("");
+
+  const comma = tryCall(() => dtmf.insertDTMF("1,2"));
+  add('insertDTMF("1,2")', 'accepted (comma = 2 s pause)', comma.error ?? `toneBuffer ${JSON.stringify(dtmf.toneBuffer)}`, !comma.error);
+  dtmf.insertDTMF("");
+
+  call.caller.getTransceivers()[0].direction = "recvonly";
+  await negotiate(call);
+  add("canInsertDTMF after direction → recvonly", "false (sender no longer sends)", String(dtmf.canInsertDTMF), dtmf.canInsertDTMF === false);
+
+  call.close();
+  vtrack?.stop();
+  const closed = tryCall(() => dtmf.insertDTMF("1"));
+  add("insertDTMF after pc.close()", "throws InvalidStateError", closed.error ?? "no throw", closed.error === "InvalidStateError");
+
+  $("rows").innerHTML = rows.map((r) =>
+    `<tr><td><code>${esc(r.name)}</code></td><td>${esc(r.expect)}</td><td><code>${esc(r.observed)}</code></td><td class="${r.ok ? "pass" : "fail"}">${r.ok ? "yes" : "no"}</td></tr>`
+  ).join("");
+  const passed = rows.filter((r) => r.ok).length;
+  $("summary").className = passed === rows.length ? "verdict yes" : "verdict no";
+  $("summary").textContent = `${passed} of ${rows.length} cases match the spec in this browser.`;
+  globalThis.showcaseTelemetry?.assert("dtmf-edge-cases-all-match", passed === rows.length, { passed, total: rows.length });
+  $("run").disabled = false;
+  console.log(LOG, rows);
+});
+
+console.log(LOG, "ready");
+</script>
+</body>
+</html>
