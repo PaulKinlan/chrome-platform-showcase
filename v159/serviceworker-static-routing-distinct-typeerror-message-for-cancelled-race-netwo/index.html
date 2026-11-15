@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ServiceWorker Static Routing: distinct TypeError for cancelled race requests — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v159/">&larr; Chrome 159</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · service worker · behaviour refinement</p>
+    <h1>ServiceWorker Static Routing: Distinct TypeError message for cancelled race-network-and-fetch-handler fetch() requests</h1>
+    <p class="lede">When a service worker's static routing rule uses <code>race-network-and-fetch-handler</code> and its fetch handler calls <code>fetch(event.request)</code>, Chromium deduplicates that call with the racing network request. If the race leg is cancelled before response headers arrive (<code>net::ERR_ABORTED</code>) — because an offline-fallback timer answered <code>respondWith()</code> first, or the client aborted — the handler's <code>fetch()</code> now rejects with <code>TypeError("The service worker race-network-and-fetch-handler request was cancelled before 'fetch()' settled.")</code> instead of the generic <code>TypeError("Failed to fetch")</code>. Apps can finally tell an expected race cancellation from a real network outage, as they already could with Navigation Preload.</p>
+  </header>
+
+  <p class="note" style="background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal);"><strong>How to test it.</strong> Proposed for Chrome 159 behind the base::Feature <code>ServiceWorkerRaceNetworkRequestAbortedErrorMessage</code> (declared in <code>third_party/blink/common/features.cc</code>, disabled by default until it ships). On a build that contains it, launch with <code>--enable-features=ServiceWorkerRaceNetworkRequestAbortedErrorMessage</code>. There is no <code>chrome://flags</code> entry and no Blink runtime flag. Every concept runs a real worker and prints the message this browser actually produced.</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./cancellation-lab/">Cancellation lab</a></h3>
+      <p>The canonical case with sliders: the server holds headers for N ms, the worker's offline-fallback timer fires after M ms. When the timer wins, the race leg is cancelled and you see the verbatim <code>TypeError</code> message, its classification, and the Resource Timing router fields (<code>workerMatchedSourceType</code> / <code>workerFinalSourceType</code>) proving the rule matched.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./scenario-matrix/">Scenario matrix</a></h3>
+      <p>Inspection tool for the boundary: six real scenarios — timer wins, client abort, network wins, fast control, a redirect-loop genuine failure that must keep saying "Failed to fetch", and a passthrough abort recorded as observed — with the exact message each produced.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./telemetry-triage/">Telemetry triage</a></h3>
+      <p>The motivating product use and the migration path: a burst of real requests feeds a naive and a triaging error pipeline. On builds with the change the triage suppresses expected cancellations and alerts only on the genuine failure; on older builds it shows the false-positive spike. Includes a classifier that also handles the Navigation Preload message.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>use-case portfolio</h2>
+    <ul>
+      <li><strong>Basic / canonical</strong> — cancellation-lab.</li>
+      <li><strong>Inspection tooling</strong> — scenario-matrix (plus the Resource Timing router readout in the lab).</li>
+      <li><strong>Practical product use</strong> — telemetry-triage.</li>
+      <li><strong>Edge / failure / migration</strong> — scenario-matrix's genuine-failure and passthrough-abort rows; telemetry-triage's preload-to-static-routing classifier.</li>
+      <li><strong>Advanced composition</strong> — the lab composes static routing with an offline-fallback race and Resource Timing router fields. A navigation-request variant was not built as its own page: in Chrome 153 a navigation whose fallback won did not cancel the race leg (it resolved from the network at ~2 s), so it would not exercise this message; the entry names navigation aborts only as one possible trigger, and the client-abort row covers the same <code>ERR_ABORTED</code> path for subresources.</li>
+    </ul>
+  </section>
+
+  <section><h2>what did not change</h2>
+    <p>No IDL, no spec text, no new property — only the message string of an existing <code>TypeError</code>. It still is a <code>TypeError</code>, so <code>instanceof TypeError</code> checks keep working. Genuine network errors (DNS, connection reset, redirect loops) keep <code>"Failed to fetch"</code>. Requests not routed through a race rule are unaffected.</p>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id 5124748525830144, v159 listing name "ServiceWorker Static Routing: Distinct TypeError
+    message for cancelled race-network-and-fetch-handler fetch() requests". ChromeStatus: Miscellaneous,
+    "New or changed feature", desktop/android/webview 159, owner sisidovski@chromium.org, bug
+    crbug.com/584504247, finch_name ServiceWorkerRaceNetworkRequestAbortedErrorMessage, no flag_name;
+    intent to ship directly (message-only change, no IDL/spec change). Spec link
+    w3c.github.io/ServiceWorker #dom-routersourceenum-race-network-and-fetch-handler.
+    Chromium source (main): third_party/blink/common/features.cc BASE_FEATURE(
+    kServiceWorkerRaceNetworkRequestAbortedErrorMessage, FEATURE_DISABLED_BY_DEFAULT);
+    service_worker_global_scope.cc returns the new message only when net_error == ERR_ABORTED, the
+    request carries ServiceWorkerRaceNetworkRequestToken, and the race loader state is
+    kRaceLoaderUsed, and the feature is enabled — otherwise nullopt (generic "Failed to fetch").
+    Not in runtime_enabled_features.json5 (it is a base::Feature → --enable-features=...).
+    Observed in Chrome for Testing 153.0.8010.12 (predates the change): addRoutes accepted; fallback
+    timer (300 ms) beating a 3000 ms header delay → worker fetch(event.request) rejected
+    "TypeError: Failed to fetch" at ~305 ms, Resource Timing workerMatchedSourceType
+    race-network-and-fetch-handler / workerFinalSourceType fetch-event; client AbortController with no
+    respondWith → "Failed to fetch"; passthrough + client abort → worker promise did not report within
+    5 s; redirect loop → "Failed to fetch"; iframe navigation with fallback → race leg NOT cancelled
+    (resolved from network). The flag-on success path could not be observed: no installed build carries
+    the feature. Pages print whatever message arrives, so the 159 branch needs no code change.
+    Server sidecar: _server.ts serves /race/slow (headers delayed), /race/fast, /race/loop (302 loop).
+    modern-web-guidance consulted (npx modern-web-guidance@latest): accessibility (live regions,
+    progress), form-factor-adaptation (44px targets incl. range inputs), responsive-design,
+    performance (no main-thread work while racing). Recorded per concept.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5124748525830144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://crbug.com/584504247" target="_blank" rel="noopener">crbug 584504247</a></li>
+    <li><a href="https://w3c.github.io/ServiceWorker/#dom-routersourceenum-race-network-and-fetch-handler" target="_blank" rel="noopener">Service Workers spec: race-network-and-fetch-handler</a></li>
+    <li><a href="https://w3c.github.io/ServiceWorker/#dom-installevent-addroutes" target="_blank" rel="noopener">Service Workers spec: InstallEvent.addRoutes()</a></li>
+    <li><a href="https://developer.chrome.com/docs/web-platform/service-worker-static-routing" target="_blank" rel="noopener">Chrome docs: Service Worker Static Routing API</a></li>
+    <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/common/features.cc?q=ServiceWorkerRaceNetworkRequestAbortedErrorMessage" target="_blank" rel="noopener">Chromium: the feature declaration</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

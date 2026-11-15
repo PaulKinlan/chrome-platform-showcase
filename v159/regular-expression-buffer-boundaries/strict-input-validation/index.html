@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Strict input validation — Regular Expression Buffer Boundaries — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Regular Expression Buffer Boundaries</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · javascript · practical product use</p>
+    <h1>Strict input validation</h1>
+    <p class="lede">A bulk-import box accepts one SKU per line. The legacy validator uses <code>/^SKU-\d{4}$/m</code> because it needs <code>m</code> to reason about lines — and that is the bug: with <code>m</code>, <code>^</code> and <code>$</code> match at <em>any</em> line, so one good line smuggles the rest of the paste through. Buffer boundaries pin the check to the whole input while keeping <code>m</code>-style line logic inside it.</p>
+  </header>
+
+  <p class="note" id="mode-note" aria-live="polite">Checking engine support…</p>
+
+  <section class="stage" aria-labelledby="paste-title">
+    <h2 id="paste-title">1 · The paste</h2>
+    <div class="field">
+      <label for="paste">Bulk SKU import (one per line)</label>
+      <textarea id="paste" rows="5" spellcheck="false" aria-describedby="paste-hint">SKU-1234
+SKU-5678</textarea>
+      <p id="paste-hint">Edit freely, or load one of the real-world pastes below.</p>
+    </div>
+    <div class="row" role="group" aria-label="Sample pastes">
+      <button type="button" class="secondary" data-fill="SKU-1234\nSKU-5678">clean list</button>
+      <button type="button" class="secondary" data-fill="SKU-1234\nSKU-5678\n">copied with trailing \n</button>
+      <button type="button" class="secondary" data-fill="SKU-1234\r\nSKU-5678\r\n">Windows CRLF</button>
+      <button type="button" class="secondary" data-fill="DROP TABLE skus;\nSKU-1234">junk first line</button>
+      <button type="button" class="secondary" data-fill="SKU-1234\n&lt;img src=x onerror=alert(1)&gt;">junk last line</button>
+      <button type="button" class="secondary" data-fill="SKU-1234\n\n">two trailing \n</button>
+    </div>
+  </section>
+
+  <section class="stage" aria-labelledby="rules-title">
+    <h2 id="rules-title">2 · Three validators, same paste</h2>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Validator results">
+      <table class="results">
+        <thead><tr><th scope="col">validator</th><th scope="col">compiled as</th><th scope="col">accepts paste?</th><th scope="col">correct?</th></tr></thead>
+        <tbody id="rules"></tbody>
+      </table>
+    </div>
+    <p class="verdict" id="verdict" aria-live="polite"></p>
+  </section>
+
+  <section><h2>the rule of thumb</h2>
+    <ul>
+      <li><strong>Legacy</strong> <code>/^SKU-\d{4}$/m.test()</code> passes if <em>any</em> line is a SKU. It accepts both junk pastes.</li>
+      <li><strong>Strict, tolerant</strong> <code>\A(?:SKU-\d{4}\r?\n)*SKU-\d{4}\Z</code> with <code>u</code>: the whole input must be SKU lines, and a single trailing line terminator from a clipboard copy is forgiven by <code>\Z</code>.</li>
+      <li><strong>Strict, exact</strong> the same with <code>\z</code>: nothing may follow the last SKU — useful for signatures, tokens and checksums where a stray newline changes meaning.</li>
+    </ul>
+    <p>Without the proposal you would write <code>(?-m:^)</code> / <code>(?-m:$)</code> (RegExp modifiers) or a lookbehind soup; <code>\A</code>/<code>\z</code> say the same thing in two characters and read identically in PCRE, Ruby, .NET and Python grammars.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5187917373898752" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/tc39/proposal-regexp-buffer-boundaries#motivations" target="_blank" rel="noopener">Proposal motivations</a></li>
+    <li><a href="../portable-pattern-converter/">Portable pattern converter</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { compileWithFallback, probeSupport, decodeEscapes, FLAG_STEPS } from "../rx.js";
+
+const support = probeSupport();
+document.getElementById("mode-note").textContent = support.all
+  ? "Native: the strict validators below use the real \\A, \\z and \\Z escapes."
+  : `Fallback: this engine rejects \\A/\\z/\\Z (${support.A.error}), so the strict validators are compiled from the proposal's desugaring into RegExp modifiers and labelled "desugared" — same semantics, honest label. ${FLAG_STEPS}`;
+
+const LINE = "SKU-\\d{4}";
+const VALIDATORS = [
+  { id: "legacy", label: "legacy ^…$ with m", src: `^${LINE}$`, flags: "m" },
+  { id: "tolerant", label: "strict \\A…\\Z", src: `\\A(?:${LINE}\\r?\\n)*${LINE}\\Z`, flags: "u" },
+  { id: "exact", label: "strict \\A…\\z", src: `\\A(?:${LINE}\\r?\\n)*${LINE}\\z`, flags: "u" },
+];
+
+// Ground truth, computed without regexes: every non-final line is a SKU, and
+// at most one line terminator may trail the last SKU.
+function truth(text) {
+  const lines = text.split(/\r?\n/);
+  let trailing = 0;
+  while (lines.length && lines[lines.length - 1] === "") {
+    lines.pop();
+    trailing++;
+  }
+  const allSku = lines.length > 0 && lines.every((l) => /^SKU-[0-9]{4}$/.test(l));
+  return { allSku, trailing };
+}
+
+const compiled = VALIDATORS.map((v) => ({ ...v, c: compileWithFallback(v.src, v.flags) }));
+window.showcaseTelemetry?.assert(
+  support.all ? "rx-bb-validation-native" : "rx-bb-validation-desugared",
+  compiled.every((v) => v.c.ok),
+  { via: compiled.map((v) => v.c.via).join(",") },
+);
+
+function render() {
+  const text = document.getElementById("paste").value;
+  const t = truth(text);
+  const expected = {
+    legacy: t.allSku && t.trailing <= 1,
+    tolerant: t.allSku && t.trailing <= 1,
+    exact: t.allSku && t.trailing === 0,
+  };
+  const tbody = document.getElementById("rules");
+  tbody.textContent = "";
+  const lines = [];
+  for (const v of compiled) {
+    const accepted = v.c.ok ? v.c.re.test(text) : null;
+    const correct = accepted === expected[v.id];
+    const tr = document.createElement("tr");
+    const cells = [
+      [`${v.label}: /${v.src}/${v.flags}`, "mono"],
+      [v.c.via === "native" ? "native" : v.c.via === "desugared" ? `desugared: ${v.c.compiledSource}` : `error: ${v.c.error}`, "mono"],
+      [accepted === null ? "did not compile" : accepted ? "ACCEPTS" : "rejects", ""],
+      [correct ? "yes" : "no — wrong answer", correct ? "pass" : "fail"],
+    ];
+    for (const [txt, cls] of cells) {
+      const td = document.createElement("td");
+      td.textContent = txt;
+      if (cls) td.className = cls;
+      tr.append(td);
+    }
+    tbody.append(tr);
+    lines.push(`${v.label} ${accepted ? "accepts" : "rejects"}${correct ? "" : " (wrong)"}`);
+  }
+  const verdict = document.getElementById("verdict");
+  const legacyWrong = (compiled[0].c.re.test(text)) !== expected.legacy;
+  verdict.className = legacyWrong ? "verdict no" : "verdict";
+  verdict.textContent = `${lines.join("; ")}.${legacyWrong ? " The legacy m-flag validator let invalid input through." : ""}`;
+}
+
+for (const b of document.querySelectorAll("[data-fill]")) {
+  b.addEventListener("click", () => {
+    document.getElementById("paste").value = decodeEscapes(b.dataset.fill);
+    render();
+  });
+}
+document.getElementById("paste").addEventListener("input", render);
+render();
+</script>
+</body>
+</html>

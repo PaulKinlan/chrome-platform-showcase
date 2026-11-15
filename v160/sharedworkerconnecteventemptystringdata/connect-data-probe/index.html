@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect data probe — SharedWorkerConnectEventEmptyStringData — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; SharedWorkerConnectEventEmptyStringData</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · workers · probe &amp; inspector</p>
+    <h1>Connect data probe</h1>
+    <p class="lede">When a page calls <code>new SharedWorker()</code>, the worker receives a <code>connect</code> event: a <code>MessageEvent</code> whose <code>ports[0]</code> talks back to that page. The HTML spec's <em>run a worker</em> and <code>SharedWorker</code> constructor steps fire it with <code>data</code> initialised to the empty string. Chromium used to leave it <code>null</code>; Chrome 160 changes it to <code>""</code>, matching Firefox and Safari. This page starts a real shared worker and prints every field of the event it actually received.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="probe-title">
+    <h2 id="probe-title">1 · Start a fresh shared worker and read its connect event</h2>
+    <p>Each click uses a new worker <code>name</code>, so a brand-new instance starts and fires a brand-new <code>connect</code> event. The worker snapshots the event synchronously in its listener and posts the snapshot back over <code>e.ports[0]</code>.</p>
+    <button type="button" class="demo-btn" id="probe">Connect to a new SharedWorker</button>
+    <p class="verdict" id="verdict" aria-live="polite">Not run yet.</p>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Results table (scrolls horizontally on narrow screens)"><table class="results">
+      <caption class="visually-hidden">Fields of the received connect event</caption>
+      <thead><tr><th scope="col">Field (inside the worker)</th><th scope="col">Observed value</th><th scope="col">Spec expects</th></tr></thead>
+      <tbody id="fields"><tr><td colspan="3">Not run yet.</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section class="stage" aria-labelledby="contrast-title">
+    <h2 id="contrast-title">2 · Why "" and not the MessageEvent default?</h2>
+    <p>The <code>MessageEventInit</code> dictionary defaults <code>data</code> to <code>null</code>, so a script-constructed <code>new MessageEvent("connect")</code> has <code>data === null</code>. The empty string comes specifically from the browser-fired event's initialisation. This button constructs one in this page and one inside the worker for comparison.</p>
+    <button type="button" class="demo-btn" id="contrast">Compare with new MessageEvent("connect")</button>
+    <output id="contrast-out" aria-live="polite">Not run yet.</output>
+  </section>
+
+  <section><h2>what to do in your code</h2>
+    <p>Do not read <code>e.data</code> in a <code>connect</code> handler at all: it carries no payload. Branch on <code>e.type</code> (or use separate <code>connect</code> and <code>message</code> listeners) and take the port from <code>e.ports[0]</code>. Code that used <code>e.data === null</code> to tell connects from messages will stop matching in Chrome 160; the <a href="../legacy-sniffing-audit/">legacy sniffing audit</a> runs ten such patterns against the real event.</p>
+    <pre tabindex="0"><code>// worker.js
+self.addEventListener("connect", (e) =&gt; {
+  const port = e.ports[0];      // always present
+  // e.data === "" in Chrome 160+, Firefox, Safari; null in older Chromium
+  port.onmessage = (m) =&gt; handle(m.data);
+});</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5142074717503488" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/workers.html#dom-sharedworker" target="_blank" rel="noopener">HTML: the SharedWorker constructor (fire connect)</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/workers.html#run-a-worker" target="_blank" rel="noopener">HTML: run a worker</a></li>
+    <li><a href="../tab-presence-hub/">Tab presence hub</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  "use strict";
+  const LOG = "[sw-connect-data:probe]";
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const supported = typeof SharedWorker === "function";
+  let lastPort = null;
+
+  function unsupported(el) {
+    el.className = "verdict no";
+    el.textContent = "SharedWorker is not available in this browser or context (some mobile browsers and WebViews omit it), so there is no connect event to observe. Try desktop Chrome, Firefox or Safari.";
+    globalThis.showcaseTelemetry?.assert("sw-connect-data-no-sharedworker", true, {});
+  }
+
+  function connect(name) {
+    return new Promise((resolve, reject) => {
+      const worker = new SharedWorker("../worker.js", { name });
+      const timer = setTimeout(() => reject(new Error("no reply from the worker within 5 s")), 5000);
+      worker.onerror = (e) => {
+        clearTimeout(timer);
+        reject(new Error(`worker error: ${e.message || "failed to load"}`));
+      };
+      worker.port.onmessage = (m) => {
+        if (m.data?.type === "connected") {
+          clearTimeout(timer);
+          resolve({ port: worker.port, report: m.data });
+        }
+      };
+      worker.port.start();
+    });
+  }
+
+  $("probe").addEventListener("click", async () => {
+    const verdict = $("verdict");
+    if (!supported) return unsupported(verdict);
+    verdict.className = "verdict";
+    verdict.textContent = "Starting a shared worker…";
+    try {
+      lastPort?.postMessage({ type: "bye" });
+      const { port, report } = await connect(`connect-probe-${Date.now()}`);
+      lastPort = port;
+      const s = report.snapshot;
+      const rows = [
+        ["e.type", s.type, "connect"],
+        ["e instanceof MessageEvent", s.isMessageEvent, "true"],
+        ["typeof e.data", s.dataTypeof, "string"],
+        ["JSON.stringify(e.data)", s.dataJSON, '""'],
+        ["e.data === null", s.dataIsNull, "false"],
+        ['e.data === ""', s.dataIsEmptyString, "true"],
+        ["e.origin", JSON.stringify(s.origin), '""'],
+        ["e.lastEventId", JSON.stringify(s.lastEventId), '""'],
+        ["e.ports.length", s.portsLength, "1"],
+        ["e.source === e.ports[0]", s.sourceIsPort0, "true"],
+        ["e.isTrusted", s.isTrusted, "true"],
+        ["e.bubbles / e.cancelable", `${s.bubbles} / ${s.cancelable}`, "false / false"],
+      ];
+      $("fields").innerHTML = rows.map(([k, v, exp]) => {
+        const ok = String(v) === exp;
+        return `<tr><td><code>${esc(k)}</code></td><td><code>${esc(v)}</code></td><td><code>${esc(exp)}</code> <span class="${ok ? "pass" : "fail"}">${ok ? "match" : "differs"}</span></td></tr>`;
+      }).join("");
+      if (s.dataIsEmptyString) {
+        verdict.className = "verdict yes";
+        verdict.textContent = 'e.data is "" (empty string): this browser follows the HTML spec, as Chrome 160+, Firefox and Safari do.';
+      } else if (s.dataIsNull) {
+        verdict.className = "verdict no";
+        verdict.textContent = "e.data is null: this is the legacy Chromium behaviour the feature removes (Chrome before 160). Nothing to enable: the fix ships by default in 160.";
+      } else {
+        verdict.className = "verdict no";
+        verdict.textContent = `e.data is ${s.dataJSON} (${s.dataTypeof}), which is neither the spec value nor the legacy one.`;
+      }
+      globalThis.showcaseTelemetry?.assert("sw-connect-data-empty-string", s.dataIsEmptyString, { dataJSON: s.dataJSON });
+      console.log(LOG, s);
+    } catch (error) {
+      verdict.className = "verdict no";
+      verdict.textContent = `Could not start the shared worker: ${error.message}`;
+      globalThis.showcaseTelemetry?.assert("sw-connect-data-worker-failed", false, { error: error.message });
+    }
+  });
+
+  $("contrast").addEventListener("click", async () => {
+    const out = $("contrast-out");
+    const pageDefault = JSON.stringify(new MessageEvent("connect").data);
+    if (!supported) {
+      out.textContent = `Page: new MessageEvent("connect").data → ${pageDefault}\n(SharedWorker unavailable, so the worker-side comparison cannot run.)`;
+      return;
+    }
+    try {
+      const { port } = lastPort ? { port: lastPort } : await connect(`connect-probe-${Date.now()}`);
+      lastPort = port;
+      const reply = await new Promise((resolve) => {
+        const listener = (m) => {
+          if (m.data?.type === "constructor-default") {
+            port.removeEventListener("message", listener);
+            resolve(m.data);
+          }
+        };
+        port.addEventListener("message", listener);
+        port.postMessage({ type: "constructor-default" });
+      });
+      out.textContent = `Page:   new MessageEvent("connect").data → ${pageDefault}\n` +
+        `Worker: new MessageEvent("connect").data → ${reply.dataJSON}\n\n` +
+        `Both are null: that is the MessageEventInit default. Only the browser-fired connect event is initialised with "" by the HTML spec.`;
+      globalThis.showcaseTelemetry?.assert("sw-connect-data-constructor-default-null", pageDefault === "null" && reply.dataJSON === "null", {});
+    } catch (error) {
+      out.textContent = `Comparison failed: ${error.message}`;
+    }
+  });
+
+  addEventListener("pagehide", () => lastPort?.postMessage({ type: "bye" }));
+  console.log(LOG, "ready", { supported });
+})();
+</script>
+</body>
+</html>

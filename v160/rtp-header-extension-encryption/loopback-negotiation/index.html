@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Loopback negotiation — RTP Header Extension Encryption — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; RTP Header Extension Encryption</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · canonical usage</p>
+    <h1>Loopback negotiation lab</h1>
+    <p class="lede">Two real <code>RTCPeerConnection</code>s in this tab, a real audio track flowing between them, and a policy picker for each side. Connect and read the actual offer and answer: cryptex is in use only when <em>both</em> carry <code>a=cryptex</code>. Then run the full matrix to see every pairing the spec describes, including the one that refuses to connect.</p>
+  </header>
+
+  <p class="note"><strong>Flag.</strong> <code>RtcRtpHeaderEncryptionPolicy</code> (Blink runtime feature, <em>experimental</em>). To try it before it is on by default: <code>chrome://flags/#enable-experimental-web-platform-features</code>, or launch with <code>--enable-blink-features=RtcRtpHeaderEncryptionPolicy</code>, <code>--enable-features=RtcRtpHeaderEncryptionPolicy</code> or <code>--enable-experimental-web-platform-features</code>. Without it the policy member is ignored and no <code>a=cryptex</code> appears: the page reports that rather than pretending.</p>
+
+  <section class="stage" aria-labelledby="pair-title">
+    <h2 id="pair-title">1 · Configure and connect one pair</h2>
+    <div class="controls">
+      <label for="caller-policy">Caller (offerer) policy
+        <select id="caller-policy"><option value="default">(default)</option><option value="negotiate">negotiate</option><option value="require">require</option><option value="disable">disable</option></select>
+      </label>
+      <label for="callee-policy">Callee (answerer) policy
+        <select id="callee-policy"><option value="default">(default)</option><option value="negotiate">negotiate</option><option value="require">require</option><option value="disable">disable</option></select>
+      </label>
+      <button type="button" class="demo-btn" id="connect">Connect</button>
+      <button type="button" class="demo-btn secondary" id="hangup" disabled>Hang up</button>
+    </div>
+    <p class="verdict" id="pair-verdict" aria-live="polite">Not connected.</p>
+    <div class="grid-2">
+      <div><h3>Offer (caller)</h3><pre class="log sdp" id="offer-sdp" tabindex="0" aria-label="Offer SDP">No offer yet.</pre></div>
+      <div><h3>Answer (callee)</h3><pre class="log sdp" id="answer-sdp" tabindex="0" aria-label="Answer SDP">No answer yet.</pre></div>
+    </div>
+    <output id="pair-stats" aria-live="polite">Transport stats and negotiated header extensions will appear after connecting.</output>
+  </section>
+
+  <section class="stage" aria-labelledby="matrix-title">
+    <h2 id="matrix-title">2 · The full policy matrix</h2>
+    <p>Runs every caller × callee pairing as a real offer/answer exchange (no media needed) and records whether it connected and whether cryptex was agreed. Values this build rejects are reported as such.</p>
+    <button type="button" class="demo-btn" id="matrix">Run the matrix</button>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Results table (scrolls horizontally on narrow screens)"><table class="results">
+      <caption class="visually-hidden">Caller policy by callee policy outcome</caption>
+      <thead><tr><th scope="col">Caller</th><th scope="col">Callee</th><th scope="col">Offer a=cryptex</th><th scope="col">Answer a=cryptex</th><th scope="col">Outcome</th></tr></thead>
+      <tbody id="matrix-rows"><tr><td colspan="5">Not run yet.</td></tr></tbody>
+    </table></div>
+    <output id="matrix-status" aria-live="polite">Waiting.</output>
+  </section>
+
+  <section><h2>reading the result</h2>
+    <p>RFC 9335 makes the attribute a capability statement: "I can receive cryptex". When both sides state it, SRTP additionally encrypts the RTP header extensions (audio level, mid, transport-wide sequence numbers…) and the CSRC list. The <code>srtpCipher</code> in the transport stats does not change: cryptex reuses the same SRTP keys and cipher, it just covers more of the packet. That is why the outcome is read from the SDP, not from a different cipher name.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5177732519559168" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/fippo/webrtc-explainers/blob/gh-pages/rtp-header-extension-encryption/index.md" target="_blank" rel="noopener">Explainer</a></li>
+    <li><a href="https://datatracker.ietf.org/doc/html/rfc9335#section-5" target="_blank" rel="noopener">RFC 9335 §5: negotiation</a></li>
+    <li><a href="../require-gate/">Require gate (failure modes)</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { configFor, cryptexInfo, highlightSdp, makeToneTrack, negotiate, transportStats, waitForConnected } from "../rtc.js";
+
+const LOG = "[rtp-hdr-enc:loopback]";
+const $ = (id) => document.getElementById(id);
+let session = null;
+
+function teardown() {
+  if (!session) return;
+  session.caller?.close();
+  session.callee?.close();
+  session.tone?.osc.stop();
+  session.tone?.ctx.close().catch(() => {});
+  session = null;
+  $("hangup").disabled = true;
+  $("connect").disabled = false;
+}
+
+$("connect").addEventListener("click", async () => {
+  if (typeof RTCPeerConnection !== "function") {
+    $("pair-verdict").className = "verdict no";
+    $("pair-verdict").textContent = "RTCPeerConnection is not available here.";
+    return;
+  }
+  teardown();
+  const verdict = $("pair-verdict");
+  const callerPolicy = $("caller-policy").value;
+  const calleePolicy = $("callee-policy").value;
+  verdict.className = "verdict";
+  verdict.textContent = "Connecting…";
+  $("connect").disabled = true;
+  session = {};
+  try {
+    session.caller = new RTCPeerConnection(configFor(callerPolicy));
+    session.callee = new RTCPeerConnection(configFor(calleePolicy));
+  } catch (error) {
+    verdict.className = "verdict no";
+    verdict.textContent = `Constructor threw ${error.name}: ${error.message} (this build does not accept that policy value).`;
+    teardown();
+    return;
+  }
+  $("hangup").disabled = false;
+  const implemented = session.caller.getConfiguration().rtpHeaderEncryptionPolicy !== undefined;
+  session.tone = await makeToneTrack();
+  session.caller.addTrack(session.tone.track, session.tone.stream);
+  let step;
+  try {
+    step = await negotiate(session.caller, session.callee);
+  } catch (error) {
+    verdict.className = "verdict no";
+    verdict.textContent = `Negotiation refused: ${error.name}: ${error.message}. This is the "require" policy doing its job when the other side did not offer cryptex.`;
+    $("offer-sdp").innerHTML = highlightSdp(session.caller.localDescription?.sdp);
+    $("answer-sdp").textContent = "No answer: the callee rejected the offer.";
+    globalThis.showcaseTelemetry?.assert("rtp-hdr-enc-loopback-refused", error.name === "InvalidAccessError", { callerPolicy, calleePolicy, error: error.name });
+    return;
+  }
+  $("offer-sdp").innerHTML = highlightSdp(step.offerSdp);
+  $("answer-sdp").innerHTML = highlightSdp(step.answerSdp);
+  const connected = await waitForConnected(session.caller);
+  if (!session) return; // hung up meanwhile
+  const o = cryptexInfo(step.offerSdp);
+  const a = cryptexInfo(step.answerSdp);
+  const agreed = o.count > 0 && a.count > 0;
+  if (!connected) {
+    verdict.className = "verdict no";
+    verdict.textContent = `SDP exchanged but ICE/DTLS did not reach "connected" (state: ${session.caller.connectionState}).`;
+  } else if (agreed) {
+    verdict.className = "verdict yes";
+    verdict.textContent = "Connected with cryptex: offer and answer both carry a=cryptex, so RTP header extensions and CSRCs are encrypted on the wire.";
+  } else {
+    verdict.className = "verdict no";
+    verdict.textContent = implemented
+      ? `Connected WITHOUT cryptex (offer ${o.count}, answer ${a.count} a=cryptex lines): header extensions travel in the clear.`
+      : "Connected WITHOUT cryptex: this browser ignored rtpHeaderEncryptionPolicy (not implemented, see the flag note), so header extensions travel in the clear.";
+  }
+  const stats = await transportStats(session.caller);
+  const negotiated = session.caller.getTransceivers()[0].getNegotiatedHeaderExtensions?.()
+    .filter((x) => x.direction !== "stopped").map((x) => `  ${x.uri}`) ?? ["  (getNegotiatedHeaderExtensions not available)"];
+  $("pair-stats").textContent = `connectionState: ${session.caller.connectionState}\n` +
+    `caller getConfiguration().rtpHeaderEncryptionPolicy: ${session.caller.getConfiguration().rtpHeaderEncryptionPolicy ?? "(absent)"}\n` +
+    `callee getConfiguration().rtpHeaderEncryptionPolicy: ${session.callee.getConfiguration().rtpHeaderEncryptionPolicy ?? "(absent)"}\n` +
+    `transport stats: ${JSON.stringify(stats)}\n` +
+    `header extensions in use (${agreed ? "ENCRYPTED by cryptex" : "sent in the CLEAR"}):\n${negotiated.join("\n")}`;
+  globalThis.showcaseTelemetry?.assert("rtp-hdr-enc-loopback-connected", connected, { callerPolicy, calleePolicy, agreed, implemented });
+  console.log(LOG, { callerPolicy, calleePolicy, connected, agreed });
+});
+
+$("hangup").addEventListener("click", () => {
+  teardown();
+  $("pair-verdict").className = "verdict";
+  $("pair-verdict").textContent = "Hung up. Both connections closed and the tone stopped.";
+  $("pair-stats").textContent = "Not connected.";
+});
+
+$("matrix").addEventListener("click", async () => {
+  if (typeof RTCPeerConnection !== "function") return;
+  const values = ["default", "negotiate", "require", "disable"];
+  const rows = [];
+  $("matrix").disabled = true;
+  $("matrix-status").textContent = "Running 16 real offer/answer exchanges…";
+  for (const cp of values) {
+    for (const ep of values) {
+      let caller, callee;
+      try {
+        caller = new RTCPeerConnection(configFor(cp));
+        callee = new RTCPeerConnection(configFor(ep));
+      } catch (error) {
+        rows.push(`<tr><td>${cp}</td><td>${ep}</td><td colspan="3">value rejected by this build (${error.name})</td></tr>`);
+        caller?.close();
+        continue;
+      }
+      caller.addTransceiver("audio");
+      let outcome, oc = "-", ac = "-";
+      try {
+        const s = await negotiate(caller, callee);
+        oc = cryptexInfo(s.offerSdp).count;
+        ac = cryptexInfo(s.answerSdp).count;
+        outcome = oc && ac ? '<span class="pass">cryptex agreed</span>' : "cleartext header extensions";
+      } catch (error) {
+        outcome = `<span class="fail">refused at ${error.name}</span>`;
+        oc = cryptexInfo(caller.localDescription?.sdp).count;
+      }
+      rows.push(`<tr><td>${cp}</td><td>${ep}</td><td>${oc}</td><td>${ac}</td><td>${outcome}</td></tr>`);
+      caller.close();
+      callee.close();
+    }
+  }
+  $("matrix-rows").innerHTML = rows.join("");
+  $("matrix-status").textContent = "Done. Every row above came from a real createOffer/setRemoteDescription/createAnswer exchange in this tab.";
+  $("matrix").disabled = false;
+  globalThis.showcaseTelemetry?.assert("rtp-hdr-enc-matrix-ran", rows.length === 16, {});
+});
+
+console.log(LOG, "ready");
+</script>
+</body>
+</html>

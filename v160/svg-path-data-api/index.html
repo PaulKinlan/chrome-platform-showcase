@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SVG Path Data API — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); overflow-wrap: anywhere; }
+    .note code { overflow-wrap: anywhere; }
+    .probe { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; overflow-wrap: anywhere; }
+    .probe .yes { color: var(--accent-emerald-dark); font-weight: 700; }
+    .probe .no { color: var(--accent-rose); font-weight: 700; }
+    pre { overflow-x: auto; max-width: 100%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v160/">&larr; Chrome 160</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · DOM · SVG · Chromium catches up</p>
+    <h1>SVG Path Data API</h1>
+    <p class="lede">Three methods on <code>SVGPathElement</code> give structured access to path geometry without parsing the <code>d</code> string: <code>getPathData()</code> returns an array of <code>{type, values}</code> segments (with <code>{normalize: true}</code> reducing everything to absolute <code>M</code>, <code>L</code>, <code>C</code>, <code>Z</code>), <code>setPathData()</code> writes such an array back, and <code>getPathSegmentAtLength()</code> tells you which segment sits at a distance along the path. It replaces the <code>SVGPathSegList</code> API Chromium removed in Chrome&nbsp;48, and matches what Firefox has shipped since version&nbsp;137.</p>
+  </header>
+
+  <div class="note" role="note">
+    <strong>Behind a flag in builds where it is not yet on by default.</strong> The runtime feature is <code>SVGPathDataAPI</code> (status <code>experimental</code> in <code>runtime_enabled_features.json5</code>). To try it: open <code>chrome://flags/#enable-experimental-web-platform-features</code>, set it to Enabled and relaunch, or start Chrome with <code>--enable-blink-features=SVGPathDataAPI</code> (or <code>--enable-experimental-web-platform-features</code>). There is no dedicated <code>chrome://flags</code> entry for this feature.
+  </div>
+
+  <p class="probe" id="probe" role="status">Checking <code>SVGPathElement.prototype.getPathData</code>…</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./segment-inspector/">Segment inspector</a></h3>
+      <p>The basic surface and an inspection tool. Type or pick any <code>d</code> string and see the browser's own <code>getPathData()</code> result as a table, next to <code>getPathData({normalize: true})</code>: relative commands become absolute, <code>H</code>/<code>V</code> become <code>L</code>, quadratics and arcs become cubics.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./node-editor/">Node editor</a></h3>
+      <p>The product use case: a small path editor. Drag the anchor and control-point handles with a pointer, or focus one and use the arrow keys. Each move reads the segments with <code>getPathData()</code>, changes one number and writes them back with <code>setPathData()</code>, so no string parsing is involved. Add and remove segments, then copy the serialized <code>d</code>.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./length-scrubber/">Route scrubber</a></h3>
+      <p><code>getPathSegmentAtLength()</code> on a delivery route made of several legs. Move the slider to see which leg covers that distance; the marker uses <code>getPointAtLength()</code> for the same distance. Buttons test the documented edge inputs: negative distances, <code>NaN</code>, distances past the end, an empty path and a path of zero length.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./edge-cases/">Validation and migration lab</a></h3>
+      <p>Edge and failure behaviour. <code>setPathData([{}])</code> throws a <code>TypeError</code>. Unknown segment types and wrong value counts are skipped without an error. <code>setPathData([])</code> leaves an empty <code>d=""</code>. <code>NaN</code> values are accepted. <code>getPathData()</code> returns the base value while a SMIL animation is running. For migration, the page checks that <code>pathSegList</code> is gone and that polyfills give way to the native methods. Each check shows the expected and observed results side by side.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./shape-morph/">Shape morph</a></h3>
+      <p>A more advanced composition. Two very different shapes, each with its own mix of arcs, quadratics and lines, are reduced to absolute <code>M/L/C/Z</code> with <code>getPathData({normalize: true})</code>. Lines are then turned into cubics, and the longest curves are split until both shapes have the same number of segments. A slider or animation interpolates between them with <code>setPathData()</code> on every frame. This is the D3-style path tween the explainer cites, built without a parser.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it exists</h2>
+    <p>Path editors such as Boxy SVG and SVG-Edit, D3 path morphing, and animation tools all need the segments of a path. Since <code>SVGPathSegList</code> was removed from Chrome&nbsp;48 in January 2016, the only option in Chromium has been to parse and re-serialize the <code>d</code> string, usually with <code>path-data-polyfill</code>. The SVG Working Group's replacement is deliberately simple. Segments are plain dictionaries, so <code>setPathData()</code> accepts ordinary object literals (resolved in w3c/svgwg#1082). Values are <code>unrestricted float</code>, so <code>NaN</code> does not throw. Validation has two levels: a structurally broken segment throws a <code>TypeError</code>, while a semantically invalid one is skipped, following SVG's "render what you can" error model. The methods return the base value of <code>d</code>, never the animated value.</p>
+  </section>
+
+  <section><h2>the surface</h2>
+    <pre tabindex="0"><code>dictionary SVGPathSegment {
+  required DOMString type;
+  required sequence&lt;unrestricted float&gt; values;
+};
+dictionary SVGPathDataSettings { boolean normalize = false; };
+
+interface mixin SVGPathData {
+  sequence&lt;SVGPathSegment&gt; getPathData(optional SVGPathDataSettings settings = {});
+  undefined setPathData(sequence&lt;SVGPathSegment&gt; pathData);
+  SVGPathSegment? getPathSegmentAtLength(float distance);
+};
+SVGPathElement includes SVGPathData;
+
+const segs = path.getPathData();          // [{type:"M", values:[10,80]}, ...]
+segs[1].values[0] = 50;
+path.setPathData(segs);                    // no parse, no serialize
+path.getPathSegmentAtLength(42);           // {type:"C", values:[...]} or null</code></pre>
+  </section>
+
+  <section><h2>use-case portfolio</h2>
+    <ul>
+      <li><strong>Basic / canonical:</strong> <a href="./segment-inspector/">segment inspector</a>, which reads segments in both raw and normalized form.</li>
+      <li><strong>Configuration / inspection tooling:</strong> <a href="./segment-inspector/">segment inspector</a>, which compares <code>normalize</code> on and off for any <code>d</code>, with presets covering all 20 commands.</li>
+      <li><strong>Practical product:</strong> <a href="./node-editor/">node editor</a> (round trip through <code>setPathData()</code>) and <a href="./length-scrubber/">route scrubber</a> (progress along a route).</li>
+      <li><strong>Edge / failure / migration:</strong> <a href="./edge-cases/">validation and migration lab</a>.</li>
+      <li><strong>Novel / advanced composition:</strong> <a href="./shape-morph/">shape morph</a>, which normalizes, equalizes and interpolates segments every frame.</li>
+    </ul>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id 4787972240179200, listing name "SVG Path Data API" (v160 listing).
+    chromestatus: category DOM, type "Chromium catches up", finch_name SVGPathDataAPI,
+    owners viralipurbey@ / stevebe@microsoft.com, bug crbug.com/40441025, TAG
+    w3ctag/design-reviews#1292. Firefox shipped 137 (bug 1934525, POJO fix 1954044 in 138).
+    Spec: w3c.github.io/svgwg/specs/paths/#InterfaceSVGPathData. Explainer read in full:
+    MicrosoftEdge/MSEdgeExplainers SVG/SVGPathDataAPI/explainer.md. Its documented contract
+    (used verbatim as the expected values here): empty or missing d gives [] and
+    getPathSegmentAtLength gives null; negative distance clamps to 0 (first segment); NaN
+    gives null; a distance past the end clamps to the last segment; setPathData([]) sets
+    d="" (the attribute stays present); [{}] or a segment missing type or values throws a
+    TypeError; unknown types or wrong value counts are skipped silently; NaN/Infinity are
+    accepted; the base value is used, not the animated value; normalize gives absolute
+    M/L/C/Z only (A to C is approximate, Q to C exact).
+    Chromium: third_party/blink/renderer/core/svg/svg_path_data.idl has all three methods
+    [RuntimeEnabled=SVGPathDataAPI] and
+    getPathSegmentAtLength(float distance); runtime_enabled_features.json5 lists
+    SVGPathDataAPI with status "experimental". Verified locally: Chrome for Testing
+    153.0.8010.12 has typeof getPathData === "undefined" by default and "function" with
+    --enable-experimental-web-platform-features.
+    Use-case portfolio: covered in full above; there is no non-applicable angle.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/4787972240179200" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/svgwg/specs/paths/#InterfaceSVGPathData" target="_blank" rel="noopener">SVG Paths — SVGPathData interface</a></li>
+    <li><a href="https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/SVG/SVGPathDataAPI/explainer.md" target="_blank" rel="noopener">Explainer (Microsoft Edge)</a></li>
+    <li><a href="https://issues.chromium.org/issues/40441025" target="_blank" rel="noopener">Chromium bug 40441025</a></li>
+    <li><a href="https://github.com/w3ctag/design-reviews/issues/1292" target="_blank" rel="noopener">TAG review</a></li>
+    <li><a href="https://github.com/jarek-foksa/path-data-polyfill" target="_blank" rel="noopener">path-data-polyfill</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  const el = document.getElementById('probe');
+  const fn = typeof SVGPathElement !== 'undefined' && typeof SVGPathElement.prototype.getPathData === 'function';
+  let shape = 'not run';
+  if (fn) {
+    try {
+      const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      p.setAttribute('d', 'M0 0 l10 0');
+      const s = p.getPathData();
+      shape = Array.isArray(s) && s.length === 2 && s[1].type === 'l' && s[1].values[0] === 10 ? 'ok' : 'unexpected: ' + JSON.stringify(s);
+    } catch (e) { shape = 'threw ' + e.name; }
+  }
+  const ok = fn && shape === 'ok';
+  const methods = ['getPathData', 'setPathData', 'getPathSegmentAtLength'].map((m) => `${m}: ${typeof SVGPathElement !== 'undefined' ? typeof SVGPathElement.prototype[m] : 'n/a'}`).join(' · ');
+  el.innerHTML = '';
+  const s = document.createElement('span');
+  s.className = ok ? 'yes' : 'no';
+  s.textContent = ok ? 'Supported: ' : 'Not available: ';
+  el.append(s, document.createTextNode(ok
+    ? 'getPathData("M0 0 l10 0") returned 2 segments with the relative "l" kept, so the native API is live in this browser. '
+    : (fn ? `getPathData exists but the round trip was ${shape}. ` : 'getPathData is missing. Enable the flag above; the concept pages say so plainly rather than faking results. ')));
+  const m = document.createElement('span');
+  m.textContent = `Per method: ${methods}.`;
+  el.append(document.createElement('br'), m);
+  globalThis.showcaseTelemetry?.assert('svgpathdata-index-probe', true, { supported: ok, shape });
+})();
+</script>
+</body>
+</html>

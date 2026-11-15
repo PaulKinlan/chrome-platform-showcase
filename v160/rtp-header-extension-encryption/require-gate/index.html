@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Require gate — RTP Header Extension Encryption — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; RTP Header Extension Encryption</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · failure modes &amp; downgrade</p>
+    <h1>Require gate</h1>
+    <p class="lede"><code>"negotiate"</code> quietly falls back to cleartext header extensions when the other side does not say <code>a=cryptex</code>. That fallback is also what a tampering signalling server would exploit: delete one SDP line and the call still connects, just less private. <code>"require"</code> closes that gap: the spec adds a check to <code>setRemoteDescription()</code> that rejects with <code>InvalidAccessError</code> when the remote description does not offer cryptex. Tamper with the SDP below and watch where each policy stops.</p>
+  </header>
+
+  <p class="note"><strong>Flag.</strong> <code>RtcRtpHeaderEncryptionPolicy</code> (experimental Blink runtime feature). Enable via <code>chrome://flags/#enable-experimental-web-platform-features</code> or launch with <code>--enable-blink-features=RtcRtpHeaderEncryptionPolicy</code> / <code>--enable-features=RtcRtpHeaderEncryptionPolicy</code> / <code>--enable-experimental-web-platform-features</code>. Without it, <code>"require"</code> is ignored and every tampered call below connects: the page says so.</p>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">1 · Run a tampered negotiation</h2>
+    <p>The "legacy peer" options strip <code>a=cryptex</code> with SDP munging. That is a faithful stand-in for an endpoint without RFC 9335 support (it simply never writes the line), and it works even where <code>"disable"</code> is not accepted yet.</p>
+    <div class="controls">
+      <label for="caller-policy">Caller policy
+        <select id="caller-policy"><option value="negotiate">negotiate</option><option value="require">require</option></select>
+      </label>
+      <label for="callee-policy">Callee policy
+        <select id="callee-policy"><option value="require">require</option><option value="negotiate">negotiate</option></select>
+      </label>
+      <label for="tamper">Signalling tamper
+        <select id="tamper">
+          <option value="offer">strip a=cryptex from the offer (downgrade attack / legacy caller)</option>
+          <option value="answer">strip a=cryptex from the answer (legacy callee)</option>
+          <option value="none">no tampering</option>
+        </select>
+      </label>
+      <button type="button" class="demo-btn" id="run">Run it</button>
+    </div>
+    <p class="verdict" id="verdict" aria-live="polite">Not run yet.</p>
+    <output id="steps">Step log will appear here.</output>
+  </section>
+
+  <section class="stage" aria-labelledby="preset-title">
+    <h2 id="preset-title">2 · The two outcomes side by side</h2>
+    <p>Same attack (offer stripped in transit), two callee policies. With <code>negotiate</code> the call connects in cleartext and nothing in the API tells the app; with <code>require</code> it is refused.</p>
+    <button type="button" class="demo-btn" id="compare">Compare negotiate vs require under attack</button>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Results table (scrolls horizontally on narrow screens)"><table class="results">
+      <caption class="visually-hidden">Downgrade attack outcome by callee policy</caption>
+      <thead><tr><th scope="col">Callee policy</th><th scope="col">Outcome</th></tr></thead>
+      <tbody id="compare-rows"><tr><td colspan="2">Not run yet.</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section><h2>when to use require</h2>
+    <p>Only when every endpoint you talk to is known to support cryptex: your own SFU, or browsers you control. Against the general WebRTC ecosystem it turns a privacy improvement into a connection failure. A middle path is to keep <code>"negotiate"</code> and check the remote description for <code>a=cryptex</code> yourself, warning the user (or refusing in app logic) when it is missing.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5177732519559168" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webrtc-extensions/#rtp-header-extension-encryption" target="_blank" rel="noopener">Spec: the require check in setRemoteDescription</a></li>
+    <li><a href="https://datatracker.ietf.org/doc/html/rfc9335#section-5.2" target="_blank" rel="noopener">RFC 9335 §5.2: mandatory use</a></li>
+    <li><a href="../voice-activity-leak/">What leaks without it</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { cryptexInfo } from "../rtc.js";
+
+const LOG = "[rtp-hdr-enc:require]";
+const $ = (id) => document.getElementById(id);
+const strip = (sdp) => sdp.replace(/^a=cryptex\r?\n/gm, "");
+
+async function run(callerPolicy, calleePolicy, tamper) {
+  const log = [];
+  const caller = new RTCPeerConnection({ rtpHeaderEncryptionPolicy: callerPolicy });
+  const callee = new RTCPeerConnection({ rtpHeaderEncryptionPolicy: calleePolicy });
+  const implemented = caller.getConfiguration().rtpHeaderEncryptionPolicy === callerPolicy;
+  caller.addTransceiver("audio");
+  const result = { implemented, refused: null, connectedClear: false, cryptex: false, log };
+  try {
+    const offer = await caller.createOffer();
+    await caller.setLocalDescription(offer);
+    log.push(`caller.createOffer(): ${cryptexInfo(offer.sdp).count} a=cryptex line(s)`);
+    let offerSdp = caller.localDescription.sdp;
+    if (tamper === "offer") {
+      offerSdp = strip(offerSdp);
+      log.push("signalling: a=cryptex removed from the offer in transit");
+    }
+    await callee.setRemoteDescription({ type: "offer", sdp: offerSdp });
+    log.push("callee.setRemoteDescription(offer): resolved");
+    const answer = await callee.createAnswer();
+    await callee.setLocalDescription(answer);
+    log.push(`callee.createAnswer(): ${cryptexInfo(answer.sdp).count} a=cryptex line(s)`);
+    let answerSdp = callee.localDescription.sdp;
+    if (tamper === "answer") {
+      answerSdp = strip(answerSdp);
+      log.push("signalling: a=cryptex removed from the answer (legacy callee)");
+    }
+    await caller.setRemoteDescription({ type: "answer", sdp: answerSdp });
+    log.push("caller.setRemoteDescription(answer): resolved");
+    result.cryptex = cryptexInfo(offerSdp).count > 0 && cryptexInfo(answerSdp).count > 0;
+    result.connectedClear = !result.cryptex;
+  } catch (error) {
+    result.refused = `${error.name}: ${error.message}`;
+    log.push(`REJECTED: ${error.name}: ${error.message}`);
+  }
+  caller.close();
+  callee.close();
+  return result;
+}
+
+$("run").addEventListener("click", async () => {
+  if (typeof RTCPeerConnection !== "function") return;
+  const cp = $("caller-policy").value, ep = $("callee-policy").value, tamper = $("tamper").value;
+  const verdict = $("verdict");
+  verdict.className = "verdict";
+  verdict.textContent = "Running…";
+  const r = await run(cp, ep, tamper);
+  $("steps").textContent = r.log.join("\n") + (r.implemented ? "" : "\n\nNote: getConfiguration() did not reflect the policy, so this browser ignored it (not implemented).");
+  if (r.refused) {
+    verdict.className = "verdict yes";
+    verdict.textContent = `Refused with ${r.refused.split(":")[0]}: the require policy blocked a description without cryptex. No cleartext call was set up.`;
+  } else if (r.cryptex) {
+    verdict.className = "verdict yes";
+    verdict.textContent = "Negotiated with cryptex on both sides. Header extensions are encrypted.";
+  } else {
+    verdict.className = "verdict no";
+    verdict.textContent = r.implemented
+      ? "Negotiation succeeded WITHOUT cryptex: header extensions will be sent in the clear and the application was not told."
+      : "Negotiation succeeded without cryptex because this browser ignores rtpHeaderEncryptionPolicy (see the flag note).";
+  }
+  const expectRefusal = tamper !== "none" && ((tamper === "offer" && ep === "require") || (tamper === "answer" && cp === "require"));
+  if (r.implemented) {
+    globalThis.showcaseTelemetry?.assert("rtp-hdr-enc-require-gate", expectRefusal === Boolean(r.refused), { cp, ep, tamper, refused: r.refused });
+  } else {
+    globalThis.showcaseTelemetry?.assert("rtp-hdr-enc-require-unsupported", true, { cp, ep, tamper });
+  }
+  console.log(LOG, { cp, ep, tamper, refused: r.refused, cryptex: r.cryptex });
+});
+
+$("compare").addEventListener("click", async () => {
+  if (typeof RTCPeerConnection !== "function") return;
+  const rows = [];
+  for (const ep of ["negotiate", "require"]) {
+    const r = await run("negotiate", ep, "offer");
+    const text = r.refused
+      ? `<span class="pass">refused</span> (${r.refused.split(":")[0]})`
+      : `<span class="fail">connected in cleartext</span>${r.implemented ? "" : " (policy ignored: not implemented here)"}`;
+    rows.push(`<tr><td><code>${ep}</code></td><td>${text}</td></tr>`);
+  }
+  $("compare-rows").innerHTML = rows.join("");
+});
+
+console.log(LOG, "ready");
+</script>
+</body>
+</html>

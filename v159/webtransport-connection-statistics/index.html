@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransport connection statistics — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    pre { max-width: 100%; overflow-x: auto; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v159/">&larr; Chrome 159</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · network · webtransport</p>
+    <h1>WebTransport connection statistics</h1>
+    <p class="lede">A video call stutters. Was it the network, the congestion controller, or your own code not reading fast enough? <code>transport.getStats()</code> answers that for a WebTransport session. It resolves to a <code>WebTransportConnectionStats</code> snapshot: round-trip times (<code>smoothedRtt</code>, <code>rttVariation</code>, <code>minRtt</code>), the congestion controller's <code>estimatedSendRate</code> when it has one, and datagram counters that separate datagrams the network lost from ones that expired in a queue or that your page never read. The snapshot is still available after the session closes. Chromium's ChromeStatus entry says it does not expose byte or packet totals; the snapshot page lets you check that against your own browser.</p>
+  </header>
+
+  <p class="note">Chrome 159 enables this by default. On earlier builds, enable <code>chrome://flags/#enable-experimental-web-platform-features</code>, or launch with <code>--enable-blink-features=WebTransportStats</code>. The runtime feature is <code>WebTransportStats</code> in <code>runtime_enabled_features.json5</code>, with Finch feature <code>WebTransportStats</code>. Every concept also needs an HTTP/3 WebTransport server reachable over UDP. This showcase cannot host one (its host serves HTTP over TCP only), so the pages default to a public echo server and accept any URL. <a href="#own-endpoint">Run your own in 30 lines</a>. When no session opens, the pages show the real error and the missing prerequisite. They never show invented numbers.</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./stats-snapshot/">Stats snapshot and member inventory</a></h3>
+      <p>The basic call, as an inspection tool. Open a session, call <code>getStats()</code>, and compare the result against all 17 spec members, each marked exposed or absent, with its unit and whether it is a pooled stat. Call it again to check the spec rule that a member, once exposed, never disappears later in the same session. An <code>allowPooling</code> switch shows how pooled sessions are limited to pooled stats.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./lifecycle-states/">getStats() across connecting, failed and closed</a></h3>
+      <p>The edge cases, run for real. While connecting, the promise waits and then rejects with <code>InvalidStateError</code> if the handshake fails. Once failed, it rejects immediately. Once closed, it still resolves with the last stats. The first two runs need no server, because a port with nothing listening produces a real failure.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./health-monitor/">Connection health monitor</a></h3>
+      <p>The product use case: poll <code>getStats()</code> on a timer with an adjustable datagram load, plot <code>smoothedRtt</code>, and choose a video bitrate tier from <code>estimatedSendRate</code>, stepping down when latency is high. When the estimate is <code>null</code> the monitor holds the current tier. It reads <code>atSendCapacity</code> to tell whether the estimate is a ceiling or only a floor.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./datagram-drop-lab/">Datagram drop lab</a></h3>
+      <p>Combines the stats with the datagram queue settings. Shrink the receive queue (<code>incomingMaxBufferedDatagrams</code>) and stop reading, and <code>droppedIncoming</code> goes up. Run the same burst with a reader as a control. Set <code>outgoingMaxAge</code> or <code>incomingMaxAge</code> to 1&nbsp;ms and watch the expiry counters. Each experiment reports a real before/after delta, including zero.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it shipped</h2>
+    <p>Before <code>getStats()</code>, a WebTransport application could only infer network health from the timing of its own reads and writes. A slow write might mean congestion, a slow server, or a busy main thread, and the application could not tell which. Adaptive media, cloud gaming and real-time collaboration need to know which one, because each calls for a different fix: send less, read faster, or tolerate jitter. The stats come from the QUIC connection itself. RTT follows RFC 9002, the send-rate estimate comes from the congestion controller (BBR in Chromium), and loss follows RFC 9002 §6.1. Calling <code>getStats()</code> does not open a connection and does not change how data is sent.</p>
+    <p>Privacy shapes the dictionary. A browser may withhold members, but must decide once per session, so a member never disappears between calls. When a session shares a pooled connection with other sessions, only the stats marked "pooled connection stats" are revealed, because the others would leak information about the other sessions on that connection.</p>
+  </section>
+
+  <section><h2>the API</h2>
+    <pre tabindex="0"><code>const transport = new WebTransport("https://example.com:4433/live");
+await transport.ready;
+
+const s = await transport.getStats();
+s.smoothedRtt;          // ms (RFC 9002 §5.3)
+s.rttVariation;         // ms
+s.minRtt;               // ms (RFC 9002 §5.2)
+s.estimatedSendRate;    // bit/s, or null when there is no estimate
+s.atSendCapacity;       // true → estimate is a ceiling; false → may be app-limited
+s.datagrams.droppedIncoming;   // your page did not read fast enough
+s.datagrams.expiredOutgoing;   // older than outgoingMaxAge before it could be sent
+s.datagrams.lostOutgoing;      // declared lost by the network (RFC 9002 §6.1)
+
+// Spec-defined but optional: bytesSent, bytesReceived, packetsLost, …
+// A member the browser does not expose is ABSENT, not 0.</code></pre>
+    <p>The promise rejects with <code>InvalidStateError</code> when the session has failed. While connecting it waits for the outcome. After <code>close()</code> it resolves with the most recent stats.</p>
+  </section>
+
+  <section id="own-endpoint"><h2>run your own echo endpoint</h2>
+    <p>Any HTTP/3 WebTransport server works. This one uses Deno's unstable QUIC API (Deno 2.2 or later) and echoes datagrams and bidirectional streams. Chrome only accepts a self-signed certificate through <code>serverCertificateHashes</code> when it is ECDSA and valid for 14 days or less, so generate one, print its SHA-256, and paste that hex into the concept pages together with <code>https://127.0.0.1:4433/echo</code>. This server was used to check the success path of every concept here.</p>
+    <pre tabindex="0"><code>openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -keyout key.pem -out cert.pem -days 10 -nodes -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+openssl x509 -in cert.pem -outform der | openssl dgst -sha256   # paste this hex
+
+// echo.ts — deno run --unstable-net --allow-net --allow-read echo.ts
+const cert = Deno.readTextFileSync("cert.pem");
+const key = Deno.readTextFileSync("key.pem");
+const endpoint = new Deno.QuicEndpoint({ hostname: "127.0.0.1", port: 4433 });
+for await (const incoming of endpoint.listen({ cert, key, alpnProtocols: ["h3"] })) {
+  (async () =&gt; {
+    const wt = await Deno.upgradeWebTransport(await incoming.accept());
+    await wt.ready;
+    wt.datagrams.readable.pipeTo(wt.datagrams.writable).catch(() =&gt; {});
+    for await (const bidi of wt.incomingBidirectionalStreams) {
+      bidi.readable.pipeTo(bidi.writable).catch(() =&gt; {});
+    }
+  })().catch(console.error);
+}</code></pre>
+  </section>
+
+  <!-- research notes (v159 builder, 2026-11-15)
+    ChromeStatus 5120203192139776, listing name "WebTransport connection statistics",
+    Blink>Network>WebTransport, owner vbryhider@microsoft.com, bug crbug.com/573538454.
+    Flag: runtime_enabled_features.json5 has {name: "WebTransportStats", status: "stable"}
+    on main (fetched 2026-11-15), with a comment noting enabling it without BBR
+    congestion control yields poor bandwidth estimates. ChromeStatus flag_name
+    enable-experimental-web-platform-features, finch_name WebTransportStats.
+    Spec surface (w3c.github.io/webtransport, fetched 2026-11-15):
+      Promise<WebTransportConnectionStats> getStats();
+      dictionary WebTransportConnectionStats { bytesSent, bytesSentOverhead,
+        bytesAcknowledged, packetsSent, bytesLost, packetsLost, bytesReceived,
+        packetsReceived, smoothedRtt, rttVariation, minRtt,
+        required WebTransportDatagramStats datagrams,
+        unsigned long long? estimatedSendRate = null, boolean atSendCapacity = false };
+      dictionary WebTransportDatagramStats { droppedIncoming, expiredIncoming,
+        expiredOutgoing, lostOutgoing };
+      getStats steps: failed -> reject InvalidStateError; connecting -> wait;
+      closed -> resolve most recent stats; [[NewConnection]] "no" -> pooled stats only;
+      member exposure chosen once per session.
+    Verified on Chrome for Testing 153.0.8010.12 headless: getStats is undefined by
+    default and a function with --enable-experimental-web-platform-features. Against a
+    real local Deno 2.9.8 QUIC echo server (serverCertificateHashes), getStats() resolved
+    with smoothedRtt, rttVariation, minRtt, estimatedSendRate and datagrams.{droppedIncoming,
+    expiredOutgoing, lostOutgoing}. No byte/packet totals, no expiredIncoming and no
+    atSendCapacity, which matches the ChromeStatus summary. After close() the same values
+    resolved; on a failed session it rejected InvalidStateError. Public echo server
+    echo.webtransport.day:4433 is unreachable from the build sandbox (no UDP egress); the
+    pages report that as the real handshake failure.
+    Portfolio: basic + inspection = stats-snapshot; edge/failure = lifecycle-states;
+    practical product = health-monitor; advanced composition = datagram-drop-lab
+    (datagram queue attributes x datagram stats). Migration angle not applicable: this
+    is a new method with no predecessor API to migrate from (source: ChromeStatus
+    motivation, "a single asynchronous call exposes a snapshot"), and the per-stream
+    WebTransportSendStream/ReceiveStream getStats() belong to other features.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5120203192139776" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#web-transport-connection-stats" target="_blank" rel="noopener">WebTransport spec: WebTransportConnectionStats</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dom-webtransport-getstats" target="_blank" rel="noopener">WebTransport spec: getStats()</a></li>
+    <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md#stats" target="_blank" rel="noopener">WebTransport explainer: stats</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/WebTransport/getStats" target="_blank" rel="noopener">MDN: WebTransport.getStats()</a></li>
+    <li><a href="https://microsoftedge.github.io/Demos/webtransport-getstats" target="_blank" rel="noopener">Microsoft Edge sample</a></li>
+    <li><a href="https://www.rfc-editor.org/rfc/rfc9002" target="_blank" rel="noopener">RFC 9002: QUIC loss detection and congestion control</a></li>
+    <li><a href="https://issues.chromium.org/issues/573538454" target="_blank" rel="noopener">Chromium bug 573538454</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

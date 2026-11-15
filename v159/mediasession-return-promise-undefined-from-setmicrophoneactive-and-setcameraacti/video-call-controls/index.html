@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video-call controls — MediaSession Promise&lt;undefined&gt; — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; MediaSession: Promise&lt;undefined&gt; from setMicrophoneActive() / setCameraActive()</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · multimedia · practical product use</p>
+    <h1>Video-call controls</h1>
+    <p class="lede">The reason these methods exist: a conferencing app tells the browser whether its mic and camera are live, and the browser's own UI (Picture-in-Picture window, media controls) can toggle them through the <code>togglemicrophone</code>, <code>togglecamera</code> and <code>hangup</code> action handlers. With <code>Promise&lt;undefined&gt;</code> the app can finally <em>await</em> the browser accepting the new state — and catch it refusing — before updating its own buttons.</p>
+  </header>
+
+  <p class="note" id="ship-note"></p>
+
+  <section class="stage" aria-labelledby="call-title">
+    <h2 id="call-title">1 · The call</h2>
+    <div class="call">
+      <video id="self" playsinline muted autoplay aria-label="Your camera preview"></video>
+      <div class="field">
+        <dl class="state">
+          <dt>capture</dt><dd id="st-capture">not joined</dd>
+          <dt>mic track</dt><dd id="st-mic">—</dd>
+          <dt>camera track</dt><dd id="st-cam">—</dd>
+          <dt>action handlers</dt><dd id="st-handlers">—</dd>
+        </dl>
+      </div>
+    </div>
+    <div class="row" role="group" aria-label="Call controls">
+      <button type="button" id="join">Join call (asks for camera + mic)</button>
+      <button type="button" id="mic" aria-pressed="false" disabled>Microphone on</button>
+      <button type="button" id="cam" aria-pressed="false" disabled>Camera on</button>
+      <button type="button" id="hangup" class="secondary" disabled>Hang up</button>
+    </div>
+    <p class="verdict" id="status" aria-live="polite">Not in a call.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="log-title">
+    <h2 id="log-title">2 · What the browser answered</h2>
+    <p>Every toggle (from these buttons <em>or</em> from the browser's own media UI) runs the same function and logs exactly what <code>setMicrophoneActive()</code> / <code>setCameraActive()</code> returned.</p>
+    <ol class="log" id="log" aria-live="polite" aria-label="MediaSession call log"></ol>
+  </section>
+
+  <section><h2>the pattern</h2>
+    <pre tabindex="0"><code>async function setMic(on) {
+  micTrack.enabled = on;
+  try {
+    // Promise in Chrome 159+/Safari 18.4+, undefined before — await handles both.
+    await navigator.mediaSession.setMicrophoneActive(on);
+  } catch (e) {
+    // InvalidStateError: document not fully active (e.g. bfcache / detached).
+    micTrack.enabled = !on;           // roll back; the UI must not lie
+    throw e;
+  }
+  micButton.ariaPressed = String(on);
+}
+navigator.mediaSession.setActionHandler('togglemicrophone', () =&gt; setMic(!micTrack.enabled));</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5188639100370944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/mediasession/#video-conferencing-actions" target="_blank" rel="noopener">Spec: video conferencing actions</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaSession/setMicrophoneActive" target="_blank" rel="noopener">MDN: setMicrophoneActive()</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { observeCall, summarize, hasMediaSession, SHIP_NOTE } from "../ms.js";
+
+document.getElementById("ship-note").textContent = SHIP_NOTE;
+const $ = (id) => document.getElementById(id);
+const status = $("status");
+let stream = null;
+
+function log(text) {
+  const li = document.createElement("li");
+  li.textContent = `${new Date().toLocaleTimeString()} ${text}`;
+  $("log").prepend(li);
+}
+
+function track(kind) {
+  return stream?.getTracks().find((t) => t.kind === kind) ?? null;
+}
+
+function renderState() {
+  const mic = track("audio"), cam = track("video");
+  $("st-capture").textContent = stream ? "live" : "not joined";
+  $("st-mic").textContent = mic ? `${mic.label || "audio"} · enabled=${mic.enabled}` : "—";
+  $("st-cam").textContent = cam ? `${cam.label || "video"} · enabled=${cam.enabled}` : "—";
+  for (const [id, t, noun] of [["mic", mic, "Microphone"], ["cam", cam, "Camera"]]) {
+    const b = $(id);
+    b.disabled = !t;
+    b.setAttribute("aria-pressed", String(!!t?.enabled));
+    b.textContent = `${noun} ${t?.enabled ? "on" : "off"}`;
+  }
+  $("hangup").disabled = !stream;
+  $("join").disabled = !!stream;
+}
+
+// The one function every path goes through.
+async function setActive(kind, on, source) {
+  const t = track(kind === "mic" ? "audio" : "video");
+  if (!t) return;
+  const method = kind === "mic" ? "setMicrophoneActive" : "setCameraActive";
+  const previous = t.enabled;
+  t.enabled = on;
+  if (!hasMediaSession()) {
+    log(`${source}: ${kind} ${on ? "on" : "off"} — MediaSession unavailable, track toggled only.`);
+    renderState();
+    return;
+  }
+  const rec = await observeCall(() => navigator.mediaSession[method](on));
+  if (rec.threwSync || rec.settled === "rejected") {
+    t.enabled = previous; // roll back so the UI never claims a state the browser refused
+    const err = rec.syncError ?? rec.reason;
+    log(`${source}: ${method}(${on}) failed — ${err.name}: ${err.message}. Rolled back.`);
+    status.className = "verdict no";
+    status.textContent = `The browser refused ${method}(${on}): ${err.name}. The ${kind} was restored to ${previous ? "on" : "off"}.`;
+    window.showcaseTelemetry?.assert("ms-call-toggle-rejected", false, { method, error: err.name });
+  } else {
+    log(`${source}: ${method}(${on}) ${summarize(rec)}`);
+    status.className = "verdict yes";
+    status.textContent = rec.isThenable
+      ? `${kind === "mic" ? "Microphone" : "Camera"} ${on ? "on" : "off"} — awaited the browser's Promise (fulfilled with undefined) before updating the button.`
+      : `${kind === "mic" ? "Microphone" : "Camera"} ${on ? "on" : "off"} — this browser returned undefined (pre-159 IDL), so there was nothing to wait for; await still worked.`;
+    window.showcaseTelemetry?.assert(rec.isThenable ? "ms-call-toggle-promise" : "ms-call-toggle-legacy-undefined", true, { method });
+  }
+  renderState();
+}
+
+function installHandlers() {
+  if (!("mediaSession" in navigator)) {
+    $("st-handlers").textContent = "navigator.mediaSession missing";
+    return;
+  }
+  const installed = [];
+  for (const [action, fn] of [
+    ["togglemicrophone", () => setActive("mic", !track("audio")?.enabled, "browser UI")],
+    ["togglecamera", () => setActive("cam", !track("video")?.enabled, "browser UI")],
+    ["hangup", () => hangup("browser UI")],
+  ]) {
+    try {
+      navigator.mediaSession.setActionHandler(action, fn);
+      installed.push(action);
+    } catch (e) {
+      log(`setActionHandler('${action}') threw ${e.name}: ${e.message}`);
+    }
+  }
+  $("st-handlers").textContent = installed.length ? installed.join(", ") : "none accepted";
+}
+
+async function hangup(source) {
+  if (!stream) return;
+  for (const t of stream.getTracks()) t.stop();
+  stream = null;
+  $("self").srcObject = null;
+  if (hasMediaSession()) {
+    const a = await observeCall(() => navigator.mediaSession.setMicrophoneActive(false));
+    const b = await observeCall(() => navigator.mediaSession.setCameraActive(false));
+    log(`${source}: hang up — setMicrophoneActive(false) ${summarize(a)}; setCameraActive(false) ${summarize(b)}`);
+  }
+  status.className = "verdict";
+  status.textContent = "Call ended. Tracks stopped; the browser was told mic and camera are inactive.";
+  renderState();
+}
+
+$("join").addEventListener("click", async () => {
+  status.className = "verdict";
+  status.textContent = "Asking for camera and microphone…";
+  if (!navigator.mediaDevices?.getUserMedia) {
+    status.className = "verdict no";
+    status.textContent = "getUserMedia is unavailable here (insecure context?). The return-shape probe page still demonstrates the API without capture.";
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+  } catch (e) {
+    status.className = "verdict no";
+    status.textContent = `Capture was not started: ${e.name}: ${e.message}. Press "Join call" to retry; nothing is faked.`;
+    window.showcaseTelemetry?.assert("ms-call-gum-failed", true, { error: e.name });
+    return;
+  }
+  $("self").srcObject = stream;
+  installHandlers();
+  log("joined: tracks live");
+  await setActive("mic", true, "join");
+  await setActive("cam", true, "join");
+});
+$("mic").addEventListener("click", () => setActive("mic", !track("audio")?.enabled, "page button"));
+$("cam").addEventListener("click", () => setActive("cam", !track("video")?.enabled, "page button"));
+$("hangup").addEventListener("click", () => hangup("page button"));
+renderState();
+</script>
+</body>
+</html>

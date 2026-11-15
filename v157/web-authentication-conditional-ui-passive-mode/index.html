@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Web Authentication Conditional UI Passive Mode — Chrome 157 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); overflow-wrap: anywhere; }
+    pre { max-width: 100%; overflow-x: auto; }
+    pre:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v157/">&larr; Chrome 157</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v157 · webauthn · proposed · behind a flag</p>
+    <h1>Web Authentication Conditional UI Passive Mode</h1>
+    <p class="lede">Conditional mediation today only surfaces passkeys through a sign-in form's autofill. Passive mode — prototyped in Chrome as "ambient" sign-in — adds <code>uiMode: 'passive'</code> to <code>navigator.credentials.get({ mediation: 'conditional' })</code>: on <em>any</em> page, with no form, the browser shows a quiet, non-modal suggestion of the user's passkeys for the site. No credentials, no UI, and the promise never resolves — so sites can call it on page load without user activation and without leaking whether the visitor has an account. Feature detection is the new <code>conditionalPassiveGet</code> client capability.</p>
+  </header>
+
+  <p class="note"><strong>Not shipping yet.</strong> ChromeStatus: <em>Proposed</em>, no milestone. To run the real thing: <code>chrome://flags/#web-authentication-ambient-signin</code> → <em>Enabled</em> → relaunch; or launch Chrome/Canary with <code>--enable-features=WebAuthenticationAmbientSignin</code> (the browser feature <code>device::kWebAuthnAmbientSignin</code>, which also turns on the Blink runtime feature <code>WebAuthenticationAmbient</code>). <code>--enable-blink-features=WebAuthenticationAmbient</code> or <code>--enable-experimental-web-platform-features</code> alone enables only the renderer half (observed in Chromium 153): the capability key never appears. Chromium source names a <code>WebAuthenticationAmbient</code> origin trial for Windows, macOS, Linux and ChromeOS, but ChromeStatus lists no trial, and Android is not among the prototype's platforms.</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./passive-sign-in-request/">Passive sign-in request</a></h3>
+      <p><strong>Basic.</strong> The canonical call on a page with no form: reads the capability, starts the real passive request on load when supported, shows the live pending state and elapsed time, and lets you abort it. Create a real demo passkey to see the success path; the resolved assertion's <code>clientDataJSON</code>, challenge echo and authenticator flags are decoded in the page.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./capability-inspector/">Capability inspector</a></h3>
+      <p><strong>Inspection tool.</strong> Three independent probes — the full <code>getClientCapabilities()</code> map (spec <code>conditionalPassiveGet</code> and Chromium's prototype <code>ambientGet</code>), a <code>TypeError</code> enum probe for the <code>uiMode</code> member, and a with/without differential only the passive code path can produce — combined into a verdict that tells "fully on", "renderer only" and "off" apart.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./paywall-unlock/">Paywall unlock</a></h3>
+      <p><strong>Practical product use.</strong> The explainer's own example: a paywalled article that fires a passive request on load and unlocks in place when the reader takes the suggestion, with focus moved and the change announced. The header "Sign in" button cancels the quiet request before opening the explicit prompt and re-arms it if dismissed; unsupported browsers get only the normal path.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./request-edge-cases/">Request edge cases</a></h3>
+      <p><strong>Edge, failure &amp; migration.</strong> Seven real calls, each with the predicted outcome beside the observed one: an invalid <code>uiMode</code>, passive without <code>publicKey</code>, passive plus <code>federated</code>, an already-aborted signal, aborting mid-flight, two requests at once, and whether adding <code>uiMode: 'passive'</code> to a shipped conditional call is safe before browsers support it.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./passive-plus-autofill/">Passive + autofill on one page</a></h3>
+      <p><strong>Advanced composition.</strong> One <code>get()</code> call driving two surfaces — the passive suggestion and <code>autocomplete="username webauthn"</code> autofill — with optional <code>password: true</code>. Toggle the parts, arm and cancel the request, and watch a typed password submission abort it cleanly. Results branch on <code>cred.type</code>.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it is proposed</h2>
+    <p>Sites where signing in is optional but makes things better — news, shopping, social — lose users who never notice they are signed out, or who expect signing in to be a chore. Autofill conditional UI cannot help on a page without a sign-in form, and a modal <code>get()</code> on page load is hostile to visitors who have no passkey. Passive mode fills the gap with a suggestion that is easy to take and easy to ignore. Unlike <a href="https://github.com/w3c/webauthn/blob/main/explainers/immediate-mediation.md" target="_blank" rel="noopener">immediate mode</a> it needs no user activation and never rejects to say "no credentials", which is what makes it safe to call on load. The October 2026 explainer revision adds a louder sibling, <code>uiMode: 'active'</code> (capability <code>conditionalActiveGet</code>), for flows where sign-in is a necessary step.</p>
+  </section>
+
+  <section><h2>the proposed surface</h2>
+    <pre tabindex="0"><code>// Credential Management: CredentialRequestOptions gains a uiMode member
+enum CredentialUiModeRequirement { "active", "immediate", "passive" };   // Chromium IDL
+dictionary CredentialRequestOptions {
+  CredentialMediationRequirement mediation = "optional";
+  CredentialUiModeRequirement uiMode = "active";
+  PublicKeyCredentialRequestOptions publicKey;
+  boolean password = false;
+  AbortSignal signal;
+  // …
+};
+// WebAuthn: two new ClientCapability values (w3c/webauthn#2485)
+enum ClientCapability { …, "conditionalActiveGet", "conditionalPassiveGet", … };
+
+const caps = await PublicKeyCredential.getClientCapabilities();
+if (caps.conditionalPassiveGet) {
+  const cred = await navigator.credentials.get({
+    mediation: 'conditional', uiMode: 'passive', publicKey, signal,
+  });
+}</code></pre>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id: 5068149209825280 — listing name "Web Authentication Conditional UI Passive
+    Mode"; listed in v157 AND v159. Placement: chromestatus detail browsers.chrome.desktop is
+    null (status "Proposed", no milestone), so it does NOT ship in 159 or later → built ONCE
+    under v157 (the earlier listing). No v159 folder is created (one folder per feature).
+    chromestatus: blink component Blink>WebAuthentication; owner kenrb@chromium.org; bug
+    issues.chromium.org/issues/532206357; flag_name chrome://flags/#web-authentication-ambient-signin;
+    finch_name WebAuthenticationAmbientSignin; origintrial false; spec w3c/webauthn PR #2485;
+    explainer w3c/webauthn explainers/conditional-ui-without-autofill.md (read in full, last
+    updated 26-Oct-2026, adds uiMode 'active'); sample kenrb.github.io/test/ambient (read:
+    uses --enable-features=WebAuthenticationAmbientSignin); positions: Firefox/Safari no
+    signal, web developers positive (w3c/webauthn#2144).
+    Spec PR #2485 diff read: conditionalNonAutofillTriggered flag; non-autofill prompt fires
+    once when options.uiMode is passive/active and silentlyDiscoveredCredentials non-empty;
+    passive prompt SHOULD be minimally disruptive; autofill branch retained; "either of the
+    above prompts" continues the assertion; ClientCapability adds conditionalActiveGet and
+    conditionalPassiveGet. uiMode lives on CredentialRequestOptions (top level), not
+    PublicKeyCredentialRequestOptions.
+    Chromium source read: credential_request_options.idl — enum CredentialUiModeRequirement
+    {active, immediate, passive}, uiMode default "active" (NOT runtime-gated: shared with
+    immediate mediation). authentication_credentials_container.cc ForwardRequestToAuthenticator:
+    Mediation::AMBIENT only when RuntimeEnabledFeatures::WebAuthenticationAmbientEnabled &&
+    uiMode==passive && mediation==conditional; otp/identity/federated/payment-extension →
+    NotSupportedError "Unsupported combination of credential types requested."; otherwise
+    conditional falls through to Mediation::CONDITIONAL (autofill). get() rejects conditional
+    without publicKey: "Conditional mediation is not supported for this credential type".
+    public_key_credential.cc getClientCapabilities erases "conditionalPassiveGet" when the
+    Blink feature is off. runtime_enabled_features.json5: WebAuthenticationAmbient, status
+    experimental, origin_trial_feature_name WebAuthenticationAmbient, origin_trial_os
+    [win, mac, linux, chromeos], base_feature none. content/child/runtime_features.cc maps
+    EnableWebAuthenticationAmbient ← device::kWebAuthnAmbientSignin (kSetOnlyIfOverridden).
+    Observed (headless Chromium 153.0.8010.12 via Playwright): default — no passive key;
+    uiMode:'zzz' → TypeError; passive and control both NotSupportedError "Resident credentials
+    or empty allowCredentials lists are not supported" (no platform authenticator headless).
+    With --enable-features=WebAuthenticationAmbientSignin — capability key reported as
+    "ambientGet": true (Chromium 153 still uses the prototype name; main uses
+    conditionalPassiveGet), passive+federated → "Unsupported combination…" while control is
+    unchanged. With --enable-blink-features=WebAuthenticationAmbient only — differential fires
+    but NO capability key (renderer-only split, which the inspector reports). With a CDP
+    virtual authenticator (ctap2/internal, resident keys, automatic presence) a real created
+    passkey makes the passive request RESOLVE with a real assertion (virtual authenticators
+    bypass the browser UI, so this verifies the resolve/decode path, not the bubble).
+    Use-case portfolio: basic = passive-sign-in-request; inspection = capability-inspector;
+    practical = paywall-unlock (explainer example 1); edge/failure/migration =
+    request-edge-cases; advanced composition = passive-plus-autofill (one request, two
+    surfaces, password:true). Not built: uiMode 'active' as its own concept — the explainer
+    added it on 26-Oct-2026, but neither Chromium main's IDL behaviour nor the capability
+    path distinguishes it yet (active is the dictionary default and runs as plain conditional),
+    so a demo would show nothing observable; the inspector reports conditionalActiveGet when it
+    appears. FedCM passive-mode integration (explainer "Other Credential Types") is rejected by
+    Chromium's ambient path today (NotSupportedError), demonstrated in request-edge-cases case 3.
+    modern-web-guidance consulted (npx modern-web-guidance@latest): passkey-authentication,
+    quick-sign-ins, passkeys, autofill-sign-in-form, accessibility, dialog — recorded per
+    concept in guidanceConsulted.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5068149209825280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/w3c/webauthn/blob/main/explainers/conditional-ui-without-autofill.md" target="_blank" rel="noopener">Explainer: Conditional UI without Autofill</a></li>
+    <li><a href="https://github.com/w3c/webauthn/pull/2485" target="_blank" rel="noopener">Spec PR w3c/webauthn#2485</a></li>
+    <li><a href="https://github.com/w3c/webauthn/issues/2144" target="_blank" rel="noopener">Design issue w3c/webauthn#2144</a></li>
+    <li><a href="https://kenrb.github.io/test/ambient/index.html" target="_blank" rel="noopener">Chrome engineer's sample page</a></li>
+    <li><a href="https://issues.chromium.org/issues/532206357" target="_blank" rel="noopener">Tracking bug 532206357</a></li>
+    <li><a href="https://github.com/mozilla/standards-positions/issues/1475" target="_blank" rel="noopener">Mozilla standards position request</a> · <a href="https://github.com/WebKit/standards-positions/issues/729" target="_blank" rel="noopener">WebKit standards position request</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

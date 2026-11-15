@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice activity leak — RTP Header Extension Encryption — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; RTP Header Extension Encryption</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · practical privacy + composition</p>
+    <h1>Voice activity leak</h1>
+    <p class="lede">Every outgoing audio packet in a WebRTC call carries the <code>ssrc-audio-level</code> header extension (RFC 6464): how loud you are, per packet. SFUs use it to pick the active speaker. Without cryptex it sits in the RTP header in plaintext, so anyone on the network path can chart when you talk, even though the audio itself is encrypted. This page runs a real call, "talks" with a tone, and shows the per-packet level the receiver reads. Then it compares three protections: cryptex, nothing, and dropping the extension with <code>setHeaderExtensionsToNegotiate()</code>.</p>
+  </header>
+
+  <p class="note"><strong>Flag.</strong> Cryptex needs the <code>RtcRtpHeaderEncryptionPolicy</code> feature: <code>chrome://flags/#enable-experimental-web-platform-features</code>, or launch with <code>--enable-blink-features=RtcRtpHeaderEncryptionPolicy</code>, <code>--enable-features=RtcRtpHeaderEncryptionPolicy</code> or <code>--enable-experimental-web-platform-features</code>. The meter shows what the <em>receiving app</em> decodes after decryption; whether an on-path observer could read the same numbers comes from the negotiated SDP, which the wire-status line reports.</p>
+
+  <section class="stage" aria-labelledby="call-title">
+    <h2 id="call-title">1 · Start a call</h2>
+    <div class="controls">
+      <label for="mode">Protection
+        <select id="mode">
+          <option value="cryptex">cryptex: rtpHeaderEncryptionPolicy "negotiate" on both sides</option>
+          <option value="clear">none: callee is a legacy peer (no a=cryptex)</option>
+          <option value="drop">drop ssrc-audio-level via setHeaderExtensionsToNegotiate()</option>
+        </select>
+      </label>
+      <button type="button" class="demo-btn" id="start">Start call</button>
+      <button type="button" class="demo-btn secondary" id="talk" aria-pressed="false" disabled>Talk (hold a tone)</button>
+      <button type="button" class="demo-btn secondary" id="stop" disabled>End call</button>
+    </div>
+    <p class="verdict" id="wire" aria-live="polite">No call.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="meter-title">
+    <h2 id="meter-title">2 · The per-packet level the receiver decodes</h2>
+    <label for="level">audioLevel from <code>receiver.getSynchronizationSources()</code> (0 = silence, 1 = full scale)</label>
+    <meter id="level" min="0" max="1" low="0.05" high="0.5" optimum="0" value="0"></meter>
+    <p id="level-text" aria-live="off">No data.</p>
+    <p id="speaking" class="verdict" aria-live="polite">Speaking indicator: no data.</p>
+    <output id="timeline" aria-label="Recent activity timeline">Timeline of the last 40 samples (█ speaking, · silent) appears here.</output>
+  </section>
+
+  <section class="stage" aria-labelledby="ext-title">
+    <h2 id="ext-title">3 · Negotiated header extensions and their exposure</h2>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Results table (scrolls horizontally on narrow screens)"><table class="results">
+      <caption class="visually-hidden">Header extensions in use and whether they are encrypted</caption>
+      <thead><tr><th scope="col">Extension URI</th><th scope="col">Direction</th><th scope="col">On the wire</th></tr></thead>
+      <tbody id="ext-rows"><tr><td colspan="3">Start a call.</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section><h2>the trade-off</h2>
+    <p>Dropping the extension hides the level from observers but also from your SFU and your own speaker UI (the meter goes blank). Cryptex keeps the feature and hides it: the SFU, which terminates SRTP, still decrypts it, but a passive observer of the UDP flow does not. That is the design goal of RFC 9335 and why the explainer offers it by default. Combining both is the belt-and-braces path for apps that do not need audio levels at all.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5177732519559168" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://datatracker.ietf.org/doc/html/rfc6464#section-5" target="_blank" rel="noopener">RFC 6464 §5: security considerations of audio levels</a></li>
+    <li><a href="https://w3c.github.io/webrtc-extensions/#rtcrtptransceiver-interface" target="_blank" rel="noopener">setHeaderExtensionsToNegotiate()</a></li>
+    <li><a href="../loopback-negotiation/">Loopback negotiation lab</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { cryptexInfo, makeToneTrack, waitForConnected } from "../rtc.js";
+
+const LOG = "[rtp-hdr-enc:leak]";
+const $ = (id) => document.getElementById(id);
+const AUDIO_LEVEL = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
+let call = null;
+const samples = [];
+
+function endCall() {
+  if (!call) return;
+  clearInterval(call.poll);
+  call.caller.close();
+  call.callee.close();
+  call.tone.osc.stop();
+  call.tone.ctx.close().catch(() => {});
+  call.audio.srcObject = null;
+  call = null;
+  $("start").disabled = false;
+  $("talk").disabled = true;
+  $("stop").disabled = true;
+  $("talk").setAttribute("aria-pressed", "false");
+}
+
+$("start").addEventListener("click", async () => {
+  if (typeof RTCPeerConnection !== "function") {
+    $("wire").className = "verdict no";
+    $("wire").textContent = "RTCPeerConnection is not available here.";
+    return;
+  }
+  endCall();
+  const mode = $("mode").value;
+  $("start").disabled = true;
+  $("wire").className = "verdict";
+  $("wire").textContent = "Connecting…";
+  const caller = new RTCPeerConnection({ rtpHeaderEncryptionPolicy: "negotiate" });
+  const callee = new RTCPeerConnection({ rtpHeaderEncryptionPolicy: "negotiate" });
+  const implemented = caller.getConfiguration().rtpHeaderEncryptionPolicy === "negotiate";
+  const tone = await makeToneTrack({ frequency: 300, level: 0 });
+  const audio = new Audio();
+  audio.muted = true; // the receiver must play the track for SSRC info to update; muted keeps the page silent
+  call = { caller, callee, tone, audio, mode, implemented, cryptex: false };
+  const tx = caller.addTransceiver(tone.track, { direction: "sendonly", streams: [tone.stream] });
+  let dropError = null;
+  if (mode === "drop") {
+    try {
+      const exts = tx.getHeaderExtensionsToNegotiate();
+      tx.setHeaderExtensionsToNegotiate(exts.map((x) => x.uri === AUDIO_LEVEL ? { ...x, direction: "stopped" } : x));
+    } catch (error) {
+      dropError = `${error.name}: ${error.message}`;
+    }
+  }
+  callee.ontrack = (e) => {
+    audio.srcObject = e.streams[0] || new MediaStream([e.track]);
+    audio.play().catch(() => {});
+  };
+  caller.onicecandidate = (e) => e.candidate && callee.addIceCandidate(e.candidate).catch(() => {});
+  callee.onicecandidate = (e) => e.candidate && caller.addIceCandidate(e.candidate).catch(() => {});
+  await caller.setLocalDescription();
+  const stripCryptex = (sdp) => sdp.replace(/^a=cryptex\r?\n/gm, "");
+  // "clear" emulates a legacy callee: it never sees nor writes a=cryptex.
+  await callee.setRemoteDescription(mode === "clear" ? { type: "offer", sdp: stripCryptex(caller.localDescription.sdp) } : caller.localDescription);
+  await callee.setLocalDescription();
+  const answerSdp = callee.localDescription.sdp;
+  await caller.setRemoteDescription({ type: "answer", sdp: answerSdp });
+  call.cryptex = cryptexInfo(caller.localDescription.sdp).count > 0 && cryptexInfo(answerSdp).count > 0;
+  const ok = await waitForConnected(caller);
+  if (!call) return;
+  $("stop").disabled = false;
+  $("talk").disabled = false;
+  const negotiated = tx.getNegotiatedHeaderExtensions().filter((x) => x.direction !== "stopped");
+  const levelExposed = negotiated.some((x) => x.uri === AUDIO_LEVEL) && !call.cryptex;
+  $("ext-rows").innerHTML = tx.getNegotiatedHeaderExtensions().map((x) => {
+    const wire = x.direction === "stopped" ? "not sent" : call.cryptex ? '<span class="pass">encrypted (cryptex)</span>' : '<span class="fail">plaintext</span>';
+    return `<tr><td><code>${x.uri}</code></td><td>${x.direction}</td><td>${wire}</td></tr>`;
+  }).join("");
+  const wire = $("wire");
+  if (!ok) {
+    wire.className = "verdict no";
+    wire.textContent = `Call did not connect (state ${caller.connectionState}).`;
+  } else if (dropError) {
+    wire.className = "verdict no";
+    wire.textContent = `setHeaderExtensionsToNegotiate threw ${dropError}; the audio level extension is still in use.`;
+  } else if (call.cryptex) {
+    wire.className = "verdict yes";
+    wire.textContent = "Connected with cryptex. The audio level is in every packet, but encrypted: an on-path observer sees ciphertext.";
+  } else if (mode === "drop") {
+    wire.className = "verdict yes";
+    wire.textContent = "Connected with ssrc-audio-level removed from negotiation. Nothing to leak, and nothing for the receiver to read either.";
+  } else {
+    wire.className = "verdict no";
+    wire.textContent = implemented
+      ? "Connected WITHOUT cryptex (legacy callee). Each packet's audio level is readable by anyone on the path."
+      : "Connected WITHOUT cryptex: this browser ignores rtpHeaderEncryptionPolicy (see the flag note), so audio levels are plaintext.";
+  }
+  globalThis.showcaseTelemetry?.assert("rtp-hdr-enc-leak-call", ok, { mode, cryptex: call.cryptex, implemented, levelExposed });
+
+  call.poll = setInterval(() => {
+    if (!call) return;
+    const src = callee.getReceivers()[0]?.getSynchronizationSources()[0];
+    const level = src?.audioLevel;
+    if (level === undefined) {
+      $("level").value = 0;
+      $("level-text").textContent = src ? "Packets arriving, but they carry no audioLevel (extension not negotiated)." : "No packets decoded yet.";
+      $("speaking").textContent = "Speaking indicator: no data.";
+      return;
+    }
+    $("level").value = level;
+    $("level-text").textContent = `audioLevel ${level.toFixed(3)}`;
+    const speaking = level > 0.05;
+    const label = `Speaking indicator: ${speaking ? "SPEAKING" : "silent"}`;
+    if ($("speaking").textContent !== label) $("speaking").textContent = label;
+    samples.push(speaking ? "█" : "·");
+    if (samples.length > 40) samples.shift();
+    $("timeline").textContent = samples.join("") + (call.cryptex ? "\n(receiver view; on the wire this is encrypted)" : mode === "drop" ? "" : "\n(an on-path observer can draw this exact timeline)");
+  }, 150);
+});
+
+$("talk").addEventListener("click", () => {
+  if (!call) return;
+  const on = $("talk").getAttribute("aria-pressed") !== "true";
+  $("talk").setAttribute("aria-pressed", String(on));
+  $("talk").textContent = on ? "Stop talking" : "Talk (hold a tone)";
+  call.tone.gain.gain.setTargetAtTime(on ? 0.6 : 0, call.tone.ctx.currentTime, 0.02);
+});
+
+$("stop").addEventListener("click", () => {
+  endCall();
+  $("wire").className = "verdict";
+  $("wire").textContent = "Call ended; both connections closed.";
+  $("level").value = 0;
+  $("level-text").textContent = "No data.";
+});
+
+console.log(LOG, "ready");
+</script>
+</body>
+</html>

@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Re-entrancy hazard — Deprecate and stop firing events during subframe removal — Chrome 156 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    [hidden] { display: none !important; }
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); min-width: 0; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    code { overflow-wrap: anywhere; }
+    fieldset { border: 2px solid var(--border-black); padding: var(--space-3); margin: 0; min-width: 0; display: grid; gap: var(--space-1); }
+    legend { font-weight: 700; padding: 0 var(--space-1); }
+    .opt { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; }
+    .opt input { width: 22px; height: 22px; flex: none; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; text-align: left; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    button:focus-visible, input:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    .grid2 { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); }
+    .list { border: 2px dashed var(--border-black); background: var(--bg-ivory); padding: var(--space-2); display: grid; gap: var(--space-2); min-height: 80px; color: var(--text-charcoal); }
+    .list iframe { width: 100%; height: 72px; border: 2px solid var(--border-black); background: var(--bg-paper); }
+    .list p { margin: 0; border: 2px solid var(--accent-rose); padding: var(--space-1) var(--space-2); color: var(--accent-rose); font-weight: 700; background: var(--bg-paper); }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); margin: 0; overflow-wrap: anywhere; }
+    .verdict.legacy { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .verdict.standard { color: var(--accent-emerald-dark); border-color: var(--accent-emerald-dark); }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.8rem; overflow-wrap: anywhere; white-space: pre-wrap; font-family: var(--font-mono); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Deprecate and stop firing events during subframe removal</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v156 · DOM · failure mode</p>
+    <h1>Re-entrancy hazard</h1>
+    <p class="lede">The deprecation exists because a synchronous <code>pagehide</code> in a same-origin subframe lets that frame's code run <em>in the middle of</em> the parent's DOM mutation. In the compat study, Google Publisher Tags' friendly ad iframes ran slot clean-up from <code>pagehide</code> while a host cleared the ad container with <code>innerHTML = ''</code>. Here, a host clears a list of three widgets with ordinary code, and you choose what each widget's teardown handler does. Watch whether the host's invariant ("the list is empty afterwards, and the loop did not throw") survives.</p>
+  </header>
+
+  <p class="note">This browser decides the outcome. With the deprecated behaviour (Chrome today) the handlers run inside the host's loop. With <code>--enable-blink-features=OmitSubframeDetachmentEventsOnRemoval</code> they never run on removal, and every scenario below stays clean. The handlers are attached by this page to each widget's window, the way a same-origin "friendly iframe" script would.</p>
+
+  <section class="stage" aria-labelledby="cfg-title">
+    <h2 id="cfg-title">1 · Configure</h2>
+    <div class="grid2">
+      <fieldset>
+        <legend>Widget's pagehide handler does…</legend>
+        <label class="opt"><input type="radio" name="handler" value="tidy" checked> Tidy its slot: <code>list.lastElementChild.remove()</code></label>
+        <label class="opt"><input type="radio" name="handler" value="append"> Leave a "goodbye" notice: <code>list.append(p)</code></label>
+        <label class="opt"><input type="radio" name="handler" value="count"> Read <code>list.children.length</code> (half-torn tree)</label>
+        <label class="opt"><input type="radio" name="handler" value="none"> Nothing (control)</label>
+      </fieldset>
+      <fieldset>
+        <legend>Host clears the list with…</legend>
+        <label class="opt"><input type="radio" name="host" value="loop" checked> <code>for (const w of [...list.children]) list.removeChild(w)</code></label>
+        <label class="opt"><input type="radio" name="host" value="replace"> <code>list.replaceChildren()</code></label>
+        <label class="opt"><input type="radio" name="host" value="single"> <code>list.firstElementChild.remove()</code>, then check <code>childElementCount === 2</code></label>
+      </fieldset>
+    </div>
+    <button type="button" id="run" disabled>Build three widgets, then clear the list</button>
+  </section>
+
+  <section class="stage" aria-labelledby="out-title">
+    <h2 id="out-title">2 · What happened</h2>
+    <div class="list" id="list" aria-label="Widget list"></div>
+    <p class="verdict" id="verdict" role="status" aria-live="polite">Loading…</p>
+    <output id="log">The host's view of the operation will appear here.</output>
+  </section>
+
+  <section><h2>why this matters</h2>
+    <p>DOM removal algorithms are written assuming the tree they are walking does not change underneath them. A synchronous event dispatched mid-removal breaks that assumption. Engines have to defend against re-entrancy with scattered special cases, and app code that iterates a snapshot (<code>[...children]</code>) gets <code>NotFoundError</code> when a handler has already removed the next node. The HTML Standard removed these events for exactly this reason, and Chromium follows by omitting them when the removed frame can script an ancestor.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5754395122860032" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/whatwg/html/issues/10194" target="_blank" rel="noopener">whatwg/html#10194</a></li>
+    <li><a href="../widget-teardown-migration/">Widget teardown migration (the safe alternative)</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script src="../harness.js"></script>
+<script>
+(() => {
+  "use strict";
+  const H = globalThis.SubframeRemovalHarness;
+  const list = document.getElementById("list");
+  const verdict = document.getElementById("verdict");
+  const log = document.getElementById("log");
+  const runBtn = document.getElementById("run");
+
+  async function buildWidgets() {
+    list.replaceChildren();
+    const frames = [1, 2, 3].map((n) => H.createFrame({ parent: list, prefix: `reentry-w${n}`, title: `Widget ${n}` }));
+    await Promise.all(frames.map((f) => f.ready));
+    return frames;
+  }
+
+  runBtn.addEventListener("click", async () => {
+    runBtn.disabled = true;
+    const handler = document.querySelector("input[name=handler]:checked").value;
+    const hostMode = document.querySelector("input[name=host]:checked").value;
+    verdict.className = "verdict";
+    verdict.textContent = "Building three widgets…";
+    let frames;
+    try {
+      frames = await buildWidgets();
+    } catch (e) {
+      verdict.textContent = `Widgets failed to load: ${e.message}. Press the button to retry.`;
+      runBtn.disabled = false;
+      return;
+    }
+    const events = [];
+    const counts = [];
+    let handlerErrors = 0;
+    frames.forEach((f, i) => {
+      f.el.contentWindow.addEventListener("pagehide", () => {
+        events.push(`widget ${i + 1} pagehide ran (list had ${list.children.length} children at that moment)`);
+        try {
+          if (handler === "tidy") list.lastElementChild?.remove();
+          else if (handler === "append") {
+            const p = document.createElement("p");
+            p.textContent = `Goodbye notice left by widget ${i + 1} during teardown`;
+            list.append(p);
+          } else if (handler === "count") counts.push(list.children.length);
+        } catch (e) {
+          // A real third-party handler would throw uncaught here; we record it instead.
+          events.push(`widget ${i + 1} handler itself threw ${e.name}: ${e.message}`);
+          handlerErrors++;
+        }
+      });
+    });
+
+    const thrown = [];
+    let removedOk = 0;
+    const res = await H.observe(() => {
+      if (hostMode === "loop") {
+        for (const w of [...list.children]) {
+          try {
+            list.removeChild(w);
+            removedOk++;
+          } catch (e) {
+            thrown.push(`${e.name}: ${e.message}`);
+          }
+        }
+      } else if (hostMode === "replace") {
+        list.replaceChildren();
+        removedOk = 3;
+      } else {
+        list.firstElementChild.remove();
+        removedOk = 1;
+      }
+    });
+
+    const expectedLeft = hostMode === "single" ? 2 : 0;
+    const left = list.childElementCount;
+    const handlersRan = events.length - handlerErrors;
+    const lines = [
+      `host mode: ${hostMode}; widget handler: ${handler}`,
+      `lifecycle events delivered during the operation: ${res.lifecycle.length} (${res.syncLifecycle.length} synchronous)`,
+      ...events,
+      ...(counts.length ? [`children counted by handlers mid-removal: ${counts.join(", ")}`] : []),
+      `removeChild calls that succeeded: ${removedOk}`,
+      ...thrown.map((t) => `host loop threw → ${t}`),
+      `childElementCount afterwards: ${left} (host expects ${expectedLeft})`,
+    ];
+    log.textContent = lines.join("\n");
+
+    const invariantHeld = thrown.length === 0 && handlerErrors === 0 && left === expectedLeft && (handler !== "count" || counts.length === 0);
+    if (!handlersRan) {
+      verdict.className = "verdict standard";
+      verdict.textContent = handler === "none"
+        ? "Control: no handler logic, nothing to interfere. (Pick a handler to see the hazard.)"
+        : "No teardown handler ran during the removal, so the host's invariant held. This browser omits subframe detachment events (the deprecation is active).";
+      globalThis.showcaseTelemetry?.assert("subframe-reentrancy-omitted", invariantHeld, { hostMode, handler });
+    } else if (invariantHeld) {
+      verdict.className = "verdict legacy";
+      verdict.textContent = `The handlers ran synchronously inside the host's operation (${handlersRan}×), and this particular combination happened to leave the invariant intact. Try "Tidy its slot" with the loop.`;
+      globalThis.showcaseTelemetry?.assert("subframe-reentrancy-legacy-benign", true, { hostMode, handler });
+    } else {
+      verdict.className = "verdict legacy";
+      verdict.textContent = `Re-entrancy broke the host: ${handlerErrors ? `${handlerErrors} handler(s) threw mid-removal; ` : ""}${thrown.length ? `${thrown.length} NotFoundError(s) from the loop` : ""}${thrown.length && left !== expectedLeft ? "; " : ""}${left !== expectedLeft ? `${left} node(s) left where ${expectedLeft} were expected` : ""}${counts.length ? `${thrown.length || left !== expectedLeft ? "; " : ""}handlers read the list while the host was still removing it (${counts.join(", ")})` : ""}. This is the deprecated behaviour.`;
+      globalThis.showcaseTelemetry?.assert("subframe-reentrancy-legacy-broken", true, { hostMode, handler, thrown: thrown.length, left });
+    }
+    runBtn.disabled = false;
+  });
+
+  if (!H) {
+    verdict.textContent = "The shared harness failed to load.";
+    return;
+  }
+  runBtn.disabled = false;
+  verdict.textContent = "Ready. Pick a handler and a host mode, then run.";
+})();
+</script>
+</body>
+</html>

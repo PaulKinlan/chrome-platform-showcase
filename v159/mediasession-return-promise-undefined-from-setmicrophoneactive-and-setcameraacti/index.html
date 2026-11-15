@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediaSession: Promise&lt;undefined&gt; from setMicrophoneActive() and setCameraActive() — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v159/">&larr; Chrome 159</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · multimedia · spec alignment</p>
+    <h1>MediaSession: Return Promise&lt;undefined&gt; from setMicrophoneActive() and setCameraActive()</h1>
+    <p class="lede"><code>navigator.mediaSession.setMicrophoneActive()</code> and <code>setCameraActive()</code> — the calls a video-conferencing page uses to tell the browser whether its mic and camera are live — now return a <code>Promise&lt;undefined&gt;</code> instead of <code>undefined</code>, matching the W3C Media Session spec. In a fully active document the promise resolves with <code>undefined</code>; if the document is not fully active it is rejected with an <code>InvalidStateError</code>. The change lets user agents apply capture-pause policies or ask the user asynchronously, and fixes four WPT idlharness subtests.</p>
+  </header>
+
+  <p class="note" style="background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal);"><strong>No flag to flip.</strong> The IDL change in <code>media_session.idl</code> is unconditional (no <code>runtime_enabled_features.json5</code> entry, no Finch name): Chrome 158 and earlier return <code>undefined</code>, Chrome 159+ returns a promise. Safari 18.4+ already ships the promise; Firefox is positive. Every concept below calls the real methods and labels which shape it observed.</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./return-shape-probe/">Return-shape probe</a></h3>
+      <p>The exact contract: call both methods for real and inspect the return value — <code>typeof</code>, thenable or not, and how it settles. Also shows why a property check cannot tell (<code>length</code> and <code>toString()</code> are unchanged).</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./video-call-controls/">Video-call controls</a></h3>
+      <p>The practical product: a real <code>getUserMedia</code> call with mute/camera toggles and <code>togglemicrophone</code> / <code>togglecamera</code> / <code>hangup</code> action handlers. Every toggle awaits the browser's promise, rolls back the track on rejection, and logs the raw outcome.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./detached-document/">Detached-document rejection</a></h3>
+      <p>The failure path the new return type makes observable: keep an iframe's <code>navigator.mediaSession</code>, remove or navigate the iframe, and call again. The spec requires a promise rejected with <code>InvalidStateError</code>; older Chrome silently returns <code>undefined</code>.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./migration-patterns/">Migration patterns</a></h3>
+      <p>Compatibility audit: six real calling patterns — fire-and-forget, <code>await</code>, direct <code>.then()</code>, <code>Promise.resolve()</code> wrapping, and synchronous vs awaited <code>try/catch</code> around an argument error — run against this browser, with which break on the old and new shapes.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it changed</h2>
+    <p>The methods shipped in Chrome 93 with a <code>void</code> return. The spec was later changed (<a href="https://github.com/w3c/mediasession/pull/312" target="_blank" rel="noopener">w3c/mediasession#312</a>) so that a user agent can take time to apply the new state — for example a capture-pause policy, or prompting the user before un-muting — and tell the page when it is done, or that it failed. Chromium's implementation still resolves immediately after forwarding the state to the browser process; what changes for pages is the return shape, the <code>InvalidStateError</code> rejection, and that argument errors now arrive as rejections rather than synchronous throws.</p>
+  </section>
+
+  <section><h2>use-case portfolio</h2>
+    <ul>
+      <li><strong>Basic / canonical</strong> and <strong>inspection</strong> — return-shape-probe.</li>
+      <li><strong>Practical product use</strong> — video-call-controls.</li>
+      <li><strong>Edge / failure</strong> — detached-document (removed and navigated iframes).</li>
+      <li><strong>Migration</strong> — migration-patterns.</li>
+      <li><strong>Advanced composition</strong> — video-call-controls composes the promise with <code>getUserMedia</code> track state and browser-UI action handlers. No separate page: the change adds no new capability beyond the return value, and the remaining composition (Document Picture-in-Picture call windows) would exercise the same two calls from another document.</li>
+    </ul>
+  </section>
+
+  <section><h2>the surface</h2>
+    <pre tabindex="0"><code>partial interface MediaSession {
+  Promise&lt;undefined&gt; setMicrophoneActive(boolean active);
+  Promise&lt;undefined&gt; setCameraActive(boolean active);
+};
+
+try {
+  await navigator.mediaSession.setMicrophoneActive(false);   // works on old and new
+} catch (e) {
+  if (e.name === 'InvalidStateError') { /* document not fully active */ }
+}</code></pre>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id 5188639100370944, v159 listing name "MediaSession: Return Promise<undefined> from
+    setMicrophoneActive() and setCameraActive()". ChromeStatus: Multimedia, "Chromium catches up",
+    desktop/android 159, owner steimel@chromium.org, bug crbug.com/576328036, no flag_name / finch_name.
+    Spec read: w3c.github.io/mediasession #dom-mediasession-setmicrophoneactive (Promise<undefined>;
+    not fully active → rejected InvalidStateError). Explainer link = w3c/mediasession PR 312.
+    Chromium source (main): third_party/blink/renderer/modules/mediasession/media_session.idl now
+    declares [Measure, CallWith=ScriptState, RaisesException] Promise<undefined> for both;
+    media_session.cc throws kInvalidStateError "The document is not fully active." when
+    !window || !document->IsActive(), else forwards Set{Microphone,Camera}State over mojo and returns
+    ToResolvedUndefinedPromise. No RuntimeEnabled guard → nothing to flag-enable.
+    runtime_enabled_features.json5 has only MediaSession / MediaSessionChapterInformation.
+    Observed in Chrome for Testing 153.0.8010.12 (pre-change): returns undefined; detached-iframe call
+    returns undefined silently; missing argument throws TypeError synchronously ("1 argument required").
+    togglemicrophone/togglecamera/hangup setActionHandler accepted.
+    WebIDL: exceptions in promise-returning operations become rejections → migration hazard for
+    synchronous try/catch, recorded on migration-patterns.
+    modern-web-guidance consulted (npx modern-web-guidance@latest): accessibility (aria-pressed
+    toggles, live regions), form-factor-adaptation (44px targets), responsive-design, custom-button-actions.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5188639100370944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/mediasession/#dom-mediasession-setmicrophoneactive" target="_blank" rel="noopener">Media Session spec: setMicrophoneActive()</a></li>
+    <li><a href="https://github.com/w3c/mediasession/pull/312" target="_blank" rel="noopener">w3c/mediasession#312</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaSession/setMicrophoneActive" target="_blank" rel="noopener">MDN: setMicrophoneActive()</a></li>
+    <li><a href="https://crbug.com/576328036" target="_blank" rel="noopener">Chromium bug 576328036</a></li>
+    <li><a href="https://bugs.webkit.org/show_bug.cgi?id=277421" target="_blank" rel="noopener">WebKit bug 277421 (shipped in Safari 18.4)</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

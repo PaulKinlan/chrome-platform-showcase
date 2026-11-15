@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Detached-document rejection — MediaSession Promise&lt;undefined&gt; — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; MediaSession: Promise&lt;undefined&gt; from setMicrophoneActive() / setCameraActive()</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · multimedia · failure path</p>
+    <h1>Detached-document rejection</h1>
+    <p class="lede">The new IDL gives the methods a way to fail. Per spec, if the <code>MediaSession</code>'s document is not <em>fully active</em> the call returns a promise <strong>rejected with <code>InvalidStateError</code></strong>. Before Chrome 159 the same call returned <code>undefined</code> and silently did nothing. This page builds that state for real: it keeps a reference to an iframe's <code>navigator.mediaSession</code>, then removes or navigates the iframe and calls again.</p>
+  </header>
+
+  <p class="note" id="ship-note"></p>
+
+  <section class="stage" aria-labelledby="sc-title">
+    <h2 id="sc-title">1 · Scenarios</h2>
+    <div class="row" role="group" aria-label="Scenarios">
+      <button type="button" id="attached">Control: iframe attached</button>
+      <button type="button" id="removed">iframe removed from the DOM</button>
+      <button type="button" id="navigated">iframe navigated away</button>
+    </div>
+    <p class="verdict" id="verdict" aria-live="polite">Pick a scenario.</p>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Scenario results">
+      <table class="results">
+        <thead><tr><th scope="col">scenario</th><th scope="col">document fully active?</th><th scope="col">setMicrophoneActive(false)</th><th scope="col">setCameraActive(false)</th><th scope="col">spec says</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="5">No scenarios run yet.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section><h2>why this matters</h2>
+    <p>Conferencing apps often host the call UI in an iframe (an embedded meeting widget, a third-party SDK). If that frame is torn down or navigates while a toggle is in flight, the old IDL dropped the update on the floor; the app's button and the browser's indicator could disagree with no signal. With a rejected promise the app can catch <code>InvalidStateError</code>, roll back its UI, and re-issue the state from the live document.</p>
+    <pre tabindex="0"><code>const ms = frame.contentWindow.navigator.mediaSession;
+frame.remove();
+try {
+  await ms.setMicrophoneActive(false);
+} catch (e) {
+  e.name; // "InvalidStateError" — the document is no longer fully active
+}</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5188639100370944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/mediasession/#dom-mediasession-setmicrophoneactive" target="_blank" rel="noopener">Spec: setMicrophoneActive() steps</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/document-sequences.html#fully-active" target="_blank" rel="noopener">HTML: fully active</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { observeCall, summarize, hasMediaSession, SHIP_NOTE } from "../ms.js";
+
+document.getElementById("ship-note").textContent = SHIP_NOTE;
+const verdict = document.getElementById("verdict");
+const results = [];
+
+function makeFrame() {
+  return new Promise((resolve) => {
+    const f = document.createElement("iframe");
+    f.title = "Scratch frame for the detached-document scenario";
+    f.hidden = true;
+    f.srcdoc = "<!doctype html><title>scratch</title><p>first document</p>";
+    f.addEventListener("load", () => resolve(f), { once: true });
+    document.body.append(f);
+  });
+}
+
+function render() {
+  const tbody = document.getElementById("rows");
+  tbody.textContent = "";
+  for (const r of results) {
+    const tr = document.createElement("tr");
+    for (const [txt, cls] of [
+      [r.label, ""],
+      [r.active ? "yes" : "no", "mono"],
+      [summarize(r.mic), "mono"],
+      [summarize(r.cam), "mono"],
+      [r.active ? "Promise fulfilled with undefined" : "Promise rejected with InvalidStateError", ""],
+    ]) {
+      const td = document.createElement("td");
+      td.textContent = txt;
+      if (cls) td.className = cls;
+      tr.append(td);
+    }
+    tbody.append(tr);
+  }
+}
+
+function judge(r) {
+  const ok = (rec) =>
+    r.active
+      ? rec.isThenable && rec.settled === "fulfilled" && rec.value === undefined
+      : rec.isThenable && rec.settled === "rejected" && rec.reason?.name === "InvalidStateError";
+  const legacy = (rec) => !rec.threwSync && !rec.isThenable && rec.returnType === "undefined";
+  if (ok(r.mic) && ok(r.cam)) {
+    verdict.className = "verdict yes";
+    verdict.textContent = `${r.label}: matches the spec — ${r.active ? "both calls fulfilled with undefined" : "both calls returned promises rejected with InvalidStateError"}.`;
+    window.showcaseTelemetry?.assert(`ms-detached-${r.key}-spec`, true, {});
+  } else if (legacy(r.mic) && legacy(r.cam)) {
+    verdict.className = "verdict no";
+    verdict.textContent = `${r.label}: legacy behaviour — both calls returned plain undefined${r.active ? "" : ", so the failure was silent: no exception, no rejection, nothing to catch"}. Chrome 159 changes this.`;
+    window.showcaseTelemetry?.assert(`ms-detached-${r.key}-legacy-branch`, true, {});
+  } else {
+    verdict.className = "verdict no";
+    verdict.textContent = `${r.label}: does not match the spec or the legacy shape — mic: ${summarize(r.mic)}; camera: ${summarize(r.cam)}.`;
+    window.showcaseTelemetry?.assert(`ms-detached-${r.key}-unexpected`, false, { mic: summarize(r.mic) });
+  }
+}
+
+async function run(key, label, prepare) {
+  for (const b of document.querySelectorAll("[role=group] button")) b.disabled = true;
+  verdict.className = "verdict";
+  verdict.textContent = `Running: ${label}…`;
+  try {
+    const f = await makeFrame();
+    const ms = f.contentWindow.navigator.mediaSession;
+    const active = await prepare(f);
+    const mic = await observeCall(() => ms.setMicrophoneActive(false));
+    const cam = await observeCall(() => ms.setCameraActive(false));
+    f.remove();
+    const r = { key, label, active, mic, cam };
+    results.push(r);
+    render();
+    judge(r);
+  } catch (e) {
+    verdict.className = "verdict no";
+    verdict.textContent = `Scenario could not be set up: ${e.name}: ${e.message}`;
+  } finally {
+    for (const b of document.querySelectorAll("[role=group] button")) b.disabled = false;
+  }
+}
+
+if (!hasMediaSession()) {
+  verdict.className = "verdict no";
+  verdict.textContent = "navigator.mediaSession.setMicrophoneActive is unavailable in this browser; the scenarios cannot run.";
+  for (const b of document.querySelectorAll("[role=group] button")) b.disabled = true;
+} else {
+  document.getElementById("attached").addEventListener("click", () =>
+    run("attached", "iframe attached (control)", async () => true));
+  document.getElementById("removed").addEventListener("click", () =>
+    run("removed", "iframe removed", async (f) => {
+      f.remove();
+      return false;
+    }));
+  document.getElementById("navigated").addEventListener("click", () =>
+    run("navigated", "iframe navigated away", (f) =>
+      new Promise((resolve) => {
+        f.addEventListener("load", () => resolve(false), { once: true });
+        f.srcdoc = "<!doctype html><title>second</title><p>second document</p>";
+      })));
+}
+</script>
+</body>
+</html>

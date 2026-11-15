@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canvas2D tone mapping — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); overflow-wrap: anywhere; }
+    .probe { border: 2px solid var(--border-black); background: var(--bg-paper); padding: var(--space-3); font-family: var(--font-mono); font-size: 0.85rem; overflow-wrap: anywhere; }
+    .probe .yes { color: var(--accent-emerald-dark); font-weight: 700; }
+    .probe .no { color: var(--accent-rose); font-weight: 700; }
+    pre { overflow-x: auto; max-width: 100%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v160/">&larr; Chrome 160</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · graphics · Blink&gt;Canvas · HDR</p>
+    <h1>Canvas2D tone mapping</h1>
+    <p class="lede">A <code>float16</code> 2D canvas can already store values brighter than SDR white, but every browser displays it clamped to the standard dynamic range. This feature adds <code>toneMapping: {mode: "standard" | "extended"}</code> to <code>CanvasRenderingContext2DSettings</code>. With <code>"extended"</code>, the canvas may use the display's HDR headroom, and <code>"standard"</code> keeps today's behaviour. The dictionary is the same <code>CanvasToneMapping</code> that WebGPU already uses, now moved into HTML, so 2D canvas, WebGL and WebGPU share one way to control HDR output.</p>
+  </header>
+
+  <div class="note" role="note">
+    <strong>Behind a flag in builds where it is not yet on by default.</strong> The runtime feature is <code>CanvasToneMapping</code> (status <code>experimental</code> in <code>runtime_enabled_features.json5</code>, crbug.com/448552449). To try it: open <code>chrome://flags/#enable-experimental-web-platform-features</code>, set it to Enabled and relaunch, or start Chrome with <code>--enable-blink-features=CanvasToneMapping</code> (or <code>--enable-experimental-web-platform-features</code>). There is no dedicated <code>chrome://flags</code> entry for this feature. Seeing the visual effect also needs an HDR-capable display. A page cannot measure that, so the demos treat the visual difference as a manual observation, while the attribute echo and pixel values are real measurements.
+  </div>
+
+  <p class="probe" id="probe" role="status">Probing…</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./hdr-gradient-compare/">HDR ramp: standard vs extended</a></h3>
+      <p>The basic, canonical use. Two <code>float16</code> canvases draw the same ramp from black to 8× SDR white plus an HDR "sun", one requesting each mode. The page reads back the stored values, which go above 1.0 in both canvases, alongside the 8-bit view that clips to 255. A CSS <code>dynamic-range-limit</code> switch shows the documented interaction: <code>"extended"</code> under <code>standard</code> should look the same as <code>"standard"</code>.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./settings-inspector/">Settings inspector</a></h3>
+      <p>An inspection tool that also covers the edge cases. Build any <code>colorSpace</code> × <code>colorType</code> × <code>toneMapping</code> request on an <code>HTMLCanvasElement</code> or <code>OffscreenCanvas</code>, and see what was requested next to what <code>getContextAttributes()</code> reports. It labels four outcomes: honoured, ignored (the member is accepted but reported as <code>"standard"</code>), a <code>TypeError</code> for a future mode such as <code>"reinhard"</code>, and the second-<code>getContext()</code> trap. A one-click matrix covers all 14 colour-space and pixel-format combinations.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./highlight-painter/">HDR highlight painter</a></h3>
+      <p>A practical product use. Paint specular highlights from 1× to 8× SDR white onto an SDR scene with a pointer or the keyboard. A pixel inspector reads each stamp back. The export step encodes with <code>toBlob()</code>, decodes the file into a fresh <code>float16</code> canvas and reports whether the highlights survived or were clipped. The explainer says extended canvases should be encoded with HLG or PQ.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./context-parity-matrix/">Context parity matrix</a></h3>
+      <p>An advanced composition. The same <code>{mode}</code> request goes to an on-page canvas, an <code>OffscreenCanvas</code>, an <code>OffscreenCanvas</code> inside a worker, a canvas passed to a worker with <code>transferControlToOffscreen()</code>, and a WebGPU canvas read back through <code>getConfiguration()</code>. The aim is one <code>CanvasToneMapping</code> across every rendering surface.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>why it is proposed</h2>
+    <p>The output bitmap of a <code>float16</code> canvas can represent any colour, but the spec has no way to say whether values above 1.0 are HDR content or just extra precision for SDR content. WebGPU solved the same problem with <code>GPUCanvasConfiguration.toneMapping</code>, and this proposal renames that dictionary to <code>CanvasToneMapping</code>, moves it into HTML and adds it to the 2D settings with a default of <code>{mode: "standard"}</code>, which is what browsers do today. <code>"extended"</code> is defined exactly as in WebGPU: within SDR range the content looks the same as with standard, and values beyond it use whatever headroom the display has, clamped at the limit. The explainer also covers the interaction with <code>dynamic-range-limit</code>, preserving the mode through <code>ImageBitmap</code> and <code>VideoFrame</code>, and HLG/PQ encoding on export. Future directions list Reinhard, reference-white, BT.2408 and SMPTE ST 2094-50 modes, which are not in the enum yet.</p>
+  </section>
+
+  <section><h2>the surface</h2>
+    <pre tabindex="0"><code>enum CanvasToneMappingMode { "standard", "extended" };
+dictionary CanvasToneMapping { CanvasToneMappingMode mode = "standard"; };
+partial dictionary CanvasRenderingContext2DSettings {
+  CanvasToneMapping toneMapping = {};
+};
+
+const ctx = canvas.getContext('2d', {
+  colorSpace: 'display-p3',
+  colorType: 'float16',                 // values &gt; 1.0 need a float bitmap
+  toneMapping: { mode: 'extended' },    // allow HDR headroom on display
+});
+ctx.getContextAttributes().toneMapping.mode;  // "extended" only when supported
+ctx.fillStyle = 'color(srgb-linear 4 4 4)';   // 4× SDR white</code></pre>
+  </section>
+
+  <section><h2>use-case portfolio</h2>
+    <ul>
+      <li><strong>Basic / canonical:</strong> <a href="./hdr-gradient-compare/">HDR ramp</a>.</li>
+      <li><strong>Configuration / inspection tooling:</strong> <a href="./settings-inspector/">settings inspector</a> (request vs echo, support matrix).</li>
+      <li><strong>Practical product:</strong> <a href="./highlight-painter/">HDR highlight painter</a> (painting, inspection, export).</li>
+      <li><strong>Edge / failure / migration:</strong> <a href="./settings-inspector/">settings inspector</a> (ignored member, TypeError on a future mode, unorm8 + extended, second getContext call), <a href="./hdr-gradient-compare/">HDR ramp</a> (<code>dynamic-range-limit</code> clamp), and <a href="./highlight-painter/">painter export</a> (clipping in the file).</li>
+      <li><strong>Novel / advanced composition:</strong> <a href="./context-parity-matrix/">context parity matrix</a> (2D, OffscreenCanvas, worker, transferred canvas and WebGPU under one dictionary).</li>
+    </ul>
+    <p>Not built: <code>VideoFrame</code> metadata. The explainer only says frames "should include metadata" from a WebCodecs registry entry that does not exist yet, so there is no observable surface to probe.</p>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id 5077164932333568, listing name "Canvas2D tone mapping" (v160 listing).
+    chromestatus: category Graphics, finch_name CanvasToneMapping, owner ccameron@chromium.org,
+    bug crbug.com/448552449, spec whatwg/html PR #11734, TAG w3ctag/design-reviews#1194,
+    explainers w3c/ColorWeb-CG canvas-tone-map.md (read in full) + hdr-big-picture.md.
+    Chromium source: core/html/canvas/canvas_tone_mapping.idl defines CanvasToneMappingMode
+    {"standard","extended"} and CanvasToneMapping {mode = "standard"};
+    modules/canvas/canvas2d/canvas_rendering_context_2d_settings.idl has
+    `CanvasToneMapping toneMapping = {}` WITHOUT a RuntimeEnabled guard, while
+    modules/canvas/htmlcanvas/canvas_context_creation_attributes_helpers.cc only parses it
+    (ParseCanvasToneMapping) and echoes it (setToneMapping) under
+    RuntimeEnabledFeatures::CanvasToneMappingEnabled(). Consequence verified in Chrome for
+    Testing 153.0.8010.12, with and without --enable-experimental-web-platform-features and
+    --enable-blink-features=CanvasToneMapping: getContext accepts {mode:"extended"} and
+    getContextAttributes() reports toneMapping {mode:"standard"}. An invalid mode
+    ("bogus"/"reinhard") throws a TypeError only with experimental features on; by default
+    it passes silently, so enum validation is not a support signal either way. That is the "ignored dictionary member" false-support trap,
+    so every page treats only an echo of "extended" as support. runtime_enabled_features.json5
+    lists CanvasToneMapping with status "experimental" (the comment cites
+    whatwg/html#11424). Related: CanvasFloatingPoint (stable; float16 colorType and
+    getImageData pixelFormat "rgba-float16", which works in 153), CanvasHDR (experimental;
+    rec2100-* colour spaces). The WebGPU definitions of standard/extended are at
+    w3.org/TR/webgpu#gpucanvastonemappingmode.
+    Use-case portfolio: covered above; the only non-applicable item is VideoFrame metadata
+    (reason given in the page).
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5077164932333568" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://github.com/whatwg/html/pull/11734" target="_blank" rel="noopener">Spec PR: whatwg/html#11734</a></li>
+    <li><a href="https://github.com/w3c/ColorWeb-CG/blob/main/canvas-tone-map.md" target="_blank" rel="noopener">Explainer: Tone mapping for 2D Canvas</a></li>
+    <li><a href="https://github.com/w3c/ColorWeb-CG/blob/main/hdr-big-picture.md" target="_blank" rel="noopener">HDR on the web: the big picture</a></li>
+    <li><a href="https://github.com/w3ctag/design-reviews/issues/1194" target="_blank" rel="noopener">TAG review</a></li>
+    <li><a href="https://issues.chromium.org/issues/448552449" target="_blank" rel="noopener">Chromium bug 448552449</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  const el = document.getElementById('probe');
+  let got, err = '';
+  try {
+    const c = document.createElement('canvas');
+    const ctx = c.getContext('2d', { colorType: 'float16', toneMapping: { mode: 'extended' } });
+    const a = ctx.getContextAttributes();
+    got = a && a.toneMapping ? a.toneMapping.mode : undefined;
+  } catch (e) { err = `${e.name}: ${e.message}`; }
+  const ok = got === 'extended';
+  el.textContent = '';
+  const s = document.createElement('span');
+  s.className = ok ? 'yes' : 'no';
+  s.textContent = ok ? 'Supported: ' : 'Not active: ';
+  el.append(s, document.createTextNode(ok
+    ? 'getContext("2d", {colorType: "float16", toneMapping: {mode: "extended"}}).getContextAttributes().toneMapping.mode === "extended".'
+    : err ? `getContext threw ${err}.` : `asked for "extended", and getContextAttributes() reports ${JSON.stringify(got)}. The member is accepted but not applied, so enable the flag above.`));
+  globalThis.showcaseTelemetry?.assert('canvas-tonemapping-index-probe', true, { got, ok });
+})();
+</script>
+</body>
+</html>
