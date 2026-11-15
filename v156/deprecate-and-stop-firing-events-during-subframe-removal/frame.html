@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Embedded widget — subframe removal demo</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    body { margin: 0; padding: var(--space-2); background: var(--bg-paper); color: var(--text-charcoal); font-size: 0.85rem; line-height: 1.35; }
+    p { margin: 0 0 var(--space-2); }
+    .row { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+    button { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); font: inherit; font-weight: 700; min-height: 44px; padding: 0 var(--space-3); }
+    button:focus-visible, input:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    input { font: inherit; min-height: 44px; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: 0 var(--space-2); width: 100%; box-sizing: border-box; }
+    label { font-weight: 700; display: block; margin-bottom: var(--space-1); }
+    iframe { width: 100%; height: 70px; border: 2px dashed var(--border-black); background: var(--bg-ivory); }
+  </style>
+</head>
+<body>
+  <p><strong id="label">widget</strong> · loaded <output id="loads">1</output>× · clicks: <output id="clicks">0</output></p>
+  <div class="row" id="controls">
+    <button type="button" id="inc">Add a click (in-frame state)</button>
+  </div>
+  <div id="draft-wrap" hidden>
+    <label for="draft">Unsent draft</label>
+    <input id="draft" autocomplete="off" placeholder="Type a message…">
+  </div>
+  <div id="nest-wrap" hidden></div>
+  <script>
+    (() => {
+      "use strict";
+      // Every lifecycle event this document sees is reported to the embedding page.
+      // Same-origin parents get a SYNCHRONOUS direct call (so the parent can tell an
+      // event fired *inside* its own removal call); opaque/cross-origin parents get a
+      // postMessage, which can only prove the event fired, not when.
+      const params = new URLSearchParams(location.search);
+      const id = params.get("id") || "frame";
+      const strategy = params.get("strategy") || "";
+      document.getElementById("label").textContent = id;
+      const loadsKey = "subframe-removal-loads:" + id;
+      let loads = 1;
+      try {
+        loads = Number(sessionStorage.getItem(loadsKey) || "0") + 1;
+        sessionStorage.setItem(loadsKey, String(loads));
+      } catch {
+        // opaque-origin sandbox: no storage, the count stays 1
+      }
+      document.getElementById("loads").textContent = String(loads);
+
+      function report(type, extra) {
+        const msg = Object.assign({ src: "subframe-removal", id, type, loads }, extra || {});
+        let direct = false;
+        // Walk up to the nearest same-origin ancestor that hosts the harness (a
+        // nested grandchild reports straight to the demo page).
+        let w = parent;
+        while (!direct && w && w !== window) {
+          try {
+            if (typeof w.__subframeRemovalReport === "function") {
+              w.__subframeRemovalReport(msg);
+              direct = true;
+            }
+          } catch {
+            // cross-origin or opaque: fall through to postMessage
+          }
+          if (w === w.parent) break;
+          w = w.parent;
+        }
+        if (!direct && parent !== window) {
+          try {
+            parent.postMessage(msg, "*");
+          } catch {
+            // detached: nowhere left to report
+          }
+        }
+      }
+
+      let clicks = 0;
+      document.getElementById("inc").addEventListener("click", () => {
+        clicks++;
+        document.getElementById("clicks").textContent = String(clicks);
+        report("state", { clicks });
+      });
+
+      // The draft field powers the teardown-migration concept.
+      const draft = document.getElementById("draft");
+      function saveDraft(how) {
+        try {
+          sessionStorage.setItem("subframe-removal-draft:" + id, JSON.stringify({ text: draft.value, how }));
+        } catch {
+          // ignore
+        }
+      }
+      if (params.has("draft")) {
+        document.getElementById("draft-wrap").hidden = false;
+        document.getElementById("controls").hidden = true;
+        if (strategy === "eager") {
+          draft.addEventListener("input", () => saveDraft("eager input listener"));
+        }
+      }
+
+      // Nested child: a grandchild frame inside this one.
+      if (params.has("nest")) {
+        const wrap = document.getElementById("nest-wrap");
+        wrap.hidden = false;
+        const child = document.createElement("iframe");
+        child.title = "Nested grandchild widget";
+        child.src = "./frame.html?id=" + encodeURIComponent(id + "/grandchild");
+        wrap.append(child);
+      }
+
+      addEventListener("pagehide", (e) => {
+        report("pagehide", { persisted: e.persisted });
+        if (strategy === "pagehide" && params.has("draft")) saveDraft("pagehide handler");
+      });
+      document.addEventListener("visibilitychange", () => report("visibilitychange", { state: document.visibilityState }));
+      // An unload listener is deliberate here: it is one of the three events the
+      // deprecation stops firing on removal. It only affects this throwaway frame.
+      addEventListener("unload", () => report("unload"));
+      addEventListener("blur", () => report("blur"));
+
+      // Explicit teardown protocol (the recommended replacement): the host asks,
+      // the widget flushes, then acknowledges on the transferred port.
+      addEventListener("message", (e) => {
+        if (e.source !== parent || !e.data || e.data.type !== "teardown") return;
+        if (params.has("draft")) saveDraft("explicit teardown message");
+        report("teardown-flushed");
+        e.ports[0]?.postMessage({ type: "teardown-ack", id });
+      });
+
+      report("load");
+    })();
+  </script>
+</body>
+</html>

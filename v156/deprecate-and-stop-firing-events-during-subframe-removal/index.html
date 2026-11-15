@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deprecate and stop firing events during subframe removal — Chrome 156 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .note code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v156/">&larr; Chrome 156</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v156 · DOM · deprecation (developer trial, behind a flag)</p>
+    <h1>Deprecate and stop firing events during subframe removal</h1>
+    <p class="lede">When script removes an <code>&lt;iframe&gt;</code> (or <code>&lt;object&gt;</code>/<code>&lt;frame&gt;</code>) from the DOM, Chrome today runs the child document's <code>pagehide</code>, <code>visibilitychange</code> and <code>unload</code> handlers <em>synchronously, inside the removal call</em>. A same-origin child can then reach back into the parent's DOM while the parent is half-way through mutating it. The HTML Standard's <a href="https://html.spec.whatwg.org/multipage/document-sequences.html#destroy-a-child-navigable">destroy a child navigable</a> fires none of these events, and Chrome is deprecating the behaviour for subframes that have script access to an ancestor's DOM.</p>
+  </header>
+
+  <p class="note"><strong>Behind a flag, not shipped.</strong> ChromeStatus: developer trial from M156 and a deprecation trial planned for M160–M162. The Blink runtime flag is <code>OmitSubframeDetachmentEventsOnRemoval</code> (status <code>test</code> in <code>runtime_enabled_features.json5</code>), so <code>--enable-experimental-web-platform-features</code> does <strong>not</strong> turn it on, and there is no <code>chrome://flags</code> entry. To try the new behaviour, launch Chrome with <code>--enable-blink-features=OmitSubframeDetachmentEventsOnRemoval</code>. The Finch feature has the same name, so <code>--enable-features=OmitSubframeDetachmentEventsOnRemoval</code> also works. Each concept tells you which behaviour this browser actually showed. It never assumes from the version number.</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./removal-event-probe/">Removal event probe</a></h3>
+      <p><strong>Basic.</strong> One real same-origin iframe and one <code>iframe.remove()</code>, with a timeline of every event the child reports and whether it ran <em>inside</em> the removal call. The page reaches a verdict (deprecated behaviour still active, or events omitted as the spec says) only after a control navigation shows that the child's listeners work.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./removal-method-matrix/">Removal method matrix</a></h3>
+      <p><strong>Inspection tool.</strong> Runs ten real teardown paths: <code>remove()</code>, removing an ancestor wrapper, <code>innerHTML = ''</code>, <code>replaceChildren()</code>, <code>replaceWith()</code>, <code>&lt;object&gt;</code>, a nested grandchild, an opaque <code>sandbox</code> frame (no ancestor access, so it is outside the deprecation's scope), and two controls (<code>src</code> navigation and <code>moveBefore()</code>). The result is a pass/fail grid of what fired, and when.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./reentrancy-hazard/">Re-entrancy hazard</a></h3>
+      <p><strong>Edge / failure mode.</strong> This is why the behaviour is going away. A host's "clear all widgets" loop is ordinary code, but a widget's <code>pagehide</code> handler that tidies its container re-enters the parent DOM mid-loop. The loop then throws <code>NotFoundError</code>, leaves stray nodes behind, or reads a half-torn tree. You can see each effect live, and each one disappears when the events stop firing.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./widget-teardown-migration/">Widget teardown migration</a></h3>
+      <p><strong>Practical product + migration.</strong> An embedded chat widget holds an unsent draft. You can compare three strategies on the same removal: saving in <code>pagehide</code> (the pattern this deprecation breaks), an explicit host→widget teardown handshake over a <code>MessageChannel</code> before removal, and eager save-on-input. The page shows which drafts survived in this browser.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./reparent-with-movebefore/">Re-parent with moveBefore()</a></h3>
+      <p><strong>Advanced composition.</strong> A lot of "removal" is really re-parenting: layout changes, drag-and-drop, docking a player. <code>appendChild()</code> on a connected iframe detaches it, so the widget's teardown events fire and it reloads with its state lost. <code>Element.moveBefore()</code> moves it atomically, with no detach, no events and the state kept. The page counts reloads and events for each approach.</p>
+    </li>
+  </ol></section>
+
+  <section><h2>what changes, exactly</h2>
+    <p>Chrome currently dispatches the events from <code>Document::DispatchUnloadEvents</code> when a frame owner element is disconnected (<code>FrameDetachType::kRemove</code>). With the flag on, it omits them when the removed subframe shares an agent with the document the node is removed from (that is, when it could synchronously script the ancestor DOM). Cross-origin out-of-process frames and opaque sandboxed frames keep their teardown handlers in the narrower "Option 2b" scope that the compat study recommends. Navigating a frame is unchanged: <code>pagehide</code>/<code>unload</code> still fire there. A related but separate flag, <code>OmitBlurEventOnElementRemoval</code>, stops <code>blur</code> on a focused element that is removed. The probe shows it but does not count it toward this feature's verdict.</p>
+    <p><strong>Migration:</strong> do not rely on a subframe's <code>pagehide</code>/<code>unload</code> as a removal hook. Have the host tell the embedded document it is about to go (<code>postMessage</code> with an acknowledgement), persist state eagerly as it changes, send telemetry with <code>fetchLater()</code> or on <code>visibilitychange</code> of the top-level page, and use <code>moveBefore()</code> when you only mean to move the frame.</p>
+  </section>
+
+  <section><h2>use-case portfolio</h2>
+    <ul>
+      <li>Basic/canonical → <a href="./removal-event-probe/">removal-event-probe</a></li>
+      <li>Configuration / inspection tooling → <a href="./removal-method-matrix/">removal-method-matrix</a></li>
+      <li>Practical product use → <a href="./widget-teardown-migration/">widget-teardown-migration</a></li>
+      <li>Edge / failure / migration → <a href="./reentrancy-hazard/">reentrancy-hazard</a> (failure) and <a href="./widget-teardown-migration/">widget-teardown-migration</a> (migration)</li>
+      <li>Novel / advanced composition → <a href="./reparent-with-movebefore/">reparent-with-movebefore</a></li>
+    </ul>
+  </section>
+
+  <!-- research record (routine-prompt Step 5c)
+    Feature id 5754395122860032 — listing name "Deprecate and stop firing events during subframe
+    removal"; listed in v156 and v160; built ONCE here in v156 (the developer-trial milestone; the
+    v160 listing is the deprecation-trial stage, desktop 160–162). chromestatus: feature_type
+    "Feature removal", status "In developer trial (Behind a flag)", flag_name/finch_name
+    OmitSubframeDetachmentEventsOnRemoval, blink component Blink>HTML>IFrame, owner
+    nrosenthal@chromium.org, tracking bug issues.chromium.org/issues/552675453.
+    Spec: html.spec.whatwg.org "destroy a child navigable" (no pagehide/visibilitychange/unload
+    on removal); discussion whatwg/html#10194. Compat study (gist noamr/f80676a6…): October 2026
+    HTTP Archive — PageHideFired/DocumentUnloadFired during load on ~3.1% of mobile root pages;
+    Option 1 (all subframes) vs Option 2b (only when canAccessAnyAncestor) vs 2a (canAccessParent);
+    0 user-facing breakage; affected handlers are third-party telemetry (Shop Pay Bugsnag, PayPal
+    Zoid beacons, YouTube embed lifecycle), Google Publisher Tags friendly-iframe pagehide
+    re-entrancy on innerHTML clearing (gismeteo.ru), Auth0 lock release (wetransfer). Sanity
+    removal patterns from that study (remove(), ancestor removeChild, innerHTML='', <object>,
+    cross-origin OOPIF, A1→B→A2 sandwich) shaped the removal-method-matrix rows.
+    runtime_enabled_features.json5: OmitSubframeDetachmentEventsOnRemoval status "test" (comment:
+    "omits firing those events on element removal when the subframe shares an agent with the
+    document the node is removed from"); sibling OmitBlurEventOnElementRemoval status "test".
+    No chrome://flags entry in about_flags.cc. Verification browser: Chromium 153.0.8010.12
+    headless (Playwright). Default: all three events fire synchronously on remove()/object/
+    ancestor removal; sandboxed opaque frame reports them asynchronously via postMessage;
+    navigation control fires them after the call returns; moveBefore() of a loaded iframe fires
+    none. With --enable-blink-features=OmitSubframeDetachmentEventsOnRemoval on 153 the events
+    STILL fired (the flag's behaviour postdates 153; the compat study used 156.0.8078.79), while
+    OmitBlurEventOnElementRemoval did suppress the host-side iframe blur — so pages report the
+    observed behaviour, never a version-derived claim.
+    modern-web-guidance consulted (npx modern-web-guidance@latest): move-dom-element-without-
+    losing-state (moveBefore + fallback), full-session-analytics (fetchLater over unload
+    beacons), accessibility (live regions), responsive-design/css-layout (no overflow at 360px),
+    forms (labelled controls). Per-concept detail in each _questions.json guidanceConsulted.
+  -->
+
+  <section><h2>references</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5754395122860032" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/document-sequences.html#destroy-a-child-navigable" target="_blank" rel="noopener">HTML Standard: destroy a child navigable</a></li>
+    <li><a href="https://github.com/whatwg/html/issues/10194" target="_blank" rel="noopener">whatwg/html#10194: events fired on iframe removal</a></li>
+    <li><a href="https://gist.github.com/noamr/f80676a616444de7efb5be671692e919" target="_blank" rel="noopener">Compat impact study (HTTP Archive, Options 1 / 2a / 2b)</a></li>
+    <li><a href="https://issues.chromium.org/issues/552675453" target="_blank" rel="noopener">Chromium tracking bug 552675453</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Element/moveBefore" target="_blank" rel="noopener">MDN: Element.moveBefore()</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
