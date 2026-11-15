@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Datagram drop lab — WebTransport connection statistics — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../kit.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransport connection statistics</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · webtransport · datagram stats × queue options</p>
+    <h1>Datagram drop lab</h1>
+    <p class="lede">Datagrams are unreliable by design, and <code>stats.datagrams</code> tells you <em>which</em> kind of unreliability you hit. A datagram dropped because your page did not read fast enough is your bug. One that expired in the outgoing queue means you are sending more than the connection can carry. One the network lost is nobody's fault. Each experiment here changes one real queue setting on <code>transport.datagrams</code>, sends a real burst to an echo server, and reports the change in the matching counter between two <code>getStats()</code> calls.</p>
+  </header>
+
+  <p class="note">Needs <code>WebTransport.prototype.getStats</code> (Chrome 159, or <code>chrome://flags/#enable-experimental-web-platform-features</code> / <code>--enable-blink-features=WebTransportStats</code>) and an HTTP/3 server that echoes datagrams, reachable over UDP (<a href="../#own-endpoint">run one locally</a>). Counters move only when the real event happens. A delta of 0 is reported as 0, and a counter this browser does not expose is reported as absent.</p>
+
+  <section class="stage" aria-labelledby="setup-title">
+    <h2 id="setup-title">1 · Open an echo session</h2>
+    <fieldset class="endpoint">
+      <legend>Endpoint</legend>
+      <div class="field">
+        <label for="url">WebTransport URL (must echo datagrams)</label>
+        <input id="url" type="url" value="https://echo.webtransport.day:4433" spellcheck="false" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="hash">Certificate SHA-256 in hex (optional)</label>
+        <input id="hash" type="text" spellcheck="false" autocomplete="off" aria-describedby="hash-error">
+        <p class="error-text" id="hash-error" aria-live="polite"></p>
+      </div>
+      <div class="field">
+        <label for="burst">Burst size</label>
+        <select id="burst">
+          <option value="50">50 datagrams</option>
+          <option value="200" selected>200 datagrams</option>
+          <option value="1000">1000 datagrams</option>
+        </select>
+      </div>
+    </fieldset>
+    <div class="row">
+      <button type="button" id="open">Open session</button>
+      <button type="button" class="secondary" id="close" disabled>Close session</button>
+    </div>
+    <output id="status" aria-live="polite">No session.</output>
+  </section>
+
+  <section class="stage" aria-labelledby="exp-title">
+    <h2 id="exp-title">2 · Run an experiment</h2>
+    <div class="row">
+      <button type="button" class="exp" data-exp="unread" disabled>A · Don't read the echoes</button>
+      <button type="button" class="exp" data-exp="read" disabled>B · Read the echoes (control)</button>
+      <button type="button" class="exp" data-exp="outAge" disabled>C · outgoingMaxAge = 1 ms</button>
+      <button type="button" class="exp" data-exp="inAge" disabled>D · incomingMaxAge = 1 ms</button>
+    </div>
+    <p class="hint">A and B set the receive queue to one datagram (<code>incomingMaxBufferedDatagrams</code>, or the older <code>incomingHighWaterMark</code>). A should raise <code>droppedIncoming</code>; B is the same burst with a reader running, for comparison; C targets <code>expiredOutgoing</code>; D targets <code>expiredIncoming</code>.</p>
+    <div class="table-wrap" tabindex="0" role="region" aria-labelledby="res-cap">
+      <table>
+        <caption id="res-cap">Counter deltas per experiment (newest first)</caption>
+        <thead><tr><th scope="col">experiment</th><th scope="col">counter</th><th scope="col">before</th><th scope="col">after</th><th scope="col">delta</th><th scope="col">reading</th></tr></thead>
+        <tbody id="res"><tr><td colspan="6">No experiment run: needs an open session.</td></tr></tbody>
+      </table>
+    </div>
+    <output id="exp-out" aria-live="polite"></output>
+  </section>
+
+  <section><h2>code path</h2><pre tabindex="0"><code>const dg = transport.datagrams;
+dg.incomingMaxBufferedDatagrams = 1;   // tiny receive queue
+const before = (await transport.getStats()).datagrams;
+for (let i = 0; i &lt; 200; i++) writer.write(payload);   // echo server sends them back
+await new Promise((r) =&gt; setTimeout(r, 800));        // ...and nobody reads
+const after = (await transport.getStats()).datagrams;
+after.droppedIncoming - before.droppedIncoming;      // overflowed the queue</code></pre></section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5120203192139776" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#dictdef-webtransportdatagramstats" target="_blank" rel="noopener">Spec: WebTransportDatagramStats</a></li>
+    <li><a href="https://w3c.github.io/webtransport/#datagram-duplex-stream-attributes" target="_blank" rel="noopener">Spec: datagram queue attributes</a></li>
+    <li><a href="../health-monitor/">Connection health monitor</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { hasGetStats, hasWebTransport, FLAG_STEPS, openSession, diagnose, wireEndpointForm, datagramWriter, incomingQueueAttr } from "../stats-kit.js";
+
+const LOG = "[wt-stats:drop-lab]";
+const supported = hasGetStats();
+const form = wireEndpointForm(document.getElementById("url"), document.getElementById("hash"), document.getElementById("hash-error"));
+const $ = (id) => document.getElementById(id);
+const status = $("status");
+const expOut = $("exp-out");
+const openBtn = $("open");
+const closeBtn = $("close");
+const expBtns = [...document.querySelectorAll("button.exp")];
+let transport = null;
+let writer = null;
+let running = false;
+
+const EXPERIMENTS = {
+  unread: { label: "A · unread echoes", counter: "droppedIncoming" },
+  read: { label: "B · read echoes (control)", counter: "droppedIncoming" },
+  outAge: { label: "C · outgoingMaxAge = 1 ms", counter: "expiredOutgoing" },
+  inAge: { label: "D · incomingMaxAge = 1 ms", counter: "expiredIncoming" },
+};
+
+if (!supported) {
+  status.textContent = !hasWebTransport()
+    ? "No WebTransport in this browser" + (globalThis.isSecureContext ? "." : " (not a secure context).")
+    : "WebTransport.prototype.getStats is " + typeof WebTransport.prototype.getStats + " here, so no counters can be read. Enable it with " + FLAG_STEPS + ", or use Chrome 159+.";
+  openBtn.disabled = true;
+  globalThis.showcaseTelemetry?.assert("wt-stats-droplab-surface-missing", true, {});
+}
+
+function setExpEnabled(on) {
+  for (const b of expBtns) b.disabled = !on;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Set a datagram queue attribute, reporting what the browser accepted.
+function setAttr(name, value) {
+  const dg = transport.datagrams;
+  if (!(name in dg)) return name + " is not exposed on transport.datagrams here";
+  const prev = dg[name];
+  try {
+    dg[name] = value;
+  } catch (error) {
+    return name + " = " + value + " threw " + error.name;
+  }
+  return name + ": " + prev + " → " + dg[name];
+}
+
+function restore(saved) {
+  for (const [k, v] of Object.entries(saved)) {
+    try {
+      if (k in transport.datagrams) transport.datagrams[k] = v;
+    } catch { /* leave as is */ }
+  }
+}
+
+async function run(kind) {
+  const exp = EXPERIMENTS[kind];
+  const dg = transport.datagrams;
+  const burst = Number($("burst").value);
+  const saved = {};
+  const queueAttr = incomingQueueAttr(transport);
+  for (const k of [queueAttr, "incomingMaxAge", "outgoingMaxAge"]) if (k && k in dg) saved[k] = dg[k];
+  const notes = [];
+  if (kind === "unread" || kind === "read") notes.push(queueAttr ? setAttr(queueAttr, 1) : "no receive-queue size attribute on transport.datagrams here");
+  if (kind === "outAge") notes.push(setAttr("outgoingMaxAge", 1));
+  if (kind === "inAge") notes.push(setAttr("incomingMaxAge", 1));
+
+  const before = (await transport.getStats()).datagrams || {};
+  let reader = null;
+  let received = 0;
+  let reading = null;
+  if (kind === "read") {
+    reader = dg.readable.getReader();
+    reading = (async () => {
+      for (;;) {
+        const { done } = await reader.read();
+        if (done) break;
+        received++;
+      }
+    })().catch(() => {});
+  }
+  const size = kind === "outAge" ? Math.min(1200, dg.maxDatagramSize || 1000) : 100;
+  const payload = new Uint8Array(size);
+  for (let i = 0; i < burst; i++) writer.write(payload).catch(() => {});
+  await sleep(kind === "inAge" ? 300 : 900);
+  const after = (await transport.getStats()).datagrams || {};
+  if (reader) {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+    await reading;
+  } else if (kind !== "outAge") {
+    // Drain what piled up so the next experiment starts from an empty queue.
+    const r = dg.readable.getReader();
+    for (;;) {
+      const next = await Promise.race([r.read(), sleep(50).then(() => null)]);
+      if (!next || next.done) break;
+    }
+    r.releaseLock();
+  }
+  restore(saved);
+
+  const c = exp.counter;
+  const present = c in after;
+  const delta = present ? after[c] - (before[c] ?? 0) : null;
+  const verdict = !present
+    ? "absent: this browser does not report " + c
+    : delta > 0
+    ? "observed " + delta + " " + (c === "droppedIncoming" ? "receive-queue overflows" : "expiries")
+    : "0: nothing was " + (c === "droppedIncoming" ? "dropped (the queue kept up)" : "expired this time");
+  const tr = document.createElement("tr");
+  for (const v of [exp.label, c, present ? before[c] ?? 0 : "absent", present ? after[c] : "absent", present ? delta : "—", verdict]) {
+    const td = document.createElement("td");
+    td.textContent = String(v);
+    tr.append(td);
+  }
+  const res = $("res");
+  if (res.firstElementChild?.children.length === 1) res.replaceChildren();
+  res.prepend(tr);
+  expOut.textContent = exp.label + ": sent " + burst + " × " + size + " B. " + notes.join("; ") + "." + (kind === "read" ? " Reader received " + received + " echoes." : "") + " " + c + " " + verdict + ". Other counters after: " + JSON.stringify(after) + ".";
+  globalThis.showcaseTelemetry?.assert("wt-stats-droplab-" + kind, true, { counter: c, present, delta });
+  console.log(LOG, kind, c, present, delta);
+}
+
+openBtn.addEventListener("click", async () => {
+  if (!form.validate()) return;
+  openBtn.disabled = true;
+  status.textContent = "Connecting to " + form.url() + "…";
+  try {
+    transport = await openSession(form.url(), form.hash());
+  } catch (error) {
+    status.textContent = "No session, so no counters. " + error.name + ": " + error.message + "\n\n" + diagnose(error, form.url());
+    globalThis.showcaseTelemetry?.assert("wt-stats-droplab-no-session-reported", true, { name: error.name });
+    openBtn.disabled = false;
+    return;
+  }
+  writer = datagramWriter(transport);
+  status.textContent = "Session open. maxDatagramSize is " + transport.datagrams.maxDatagramSize + " bytes. Run the experiments in any order.";
+  closeBtn.disabled = false;
+  setExpEnabled(true);
+  transport.closed.then(() => {}, () => {}).finally(() => {
+    status.textContent = "Session closed.";
+    setExpEnabled(false);
+    closeBtn.disabled = true;
+    openBtn.disabled = false;
+    transport = null;
+  });
+});
+
+closeBtn.addEventListener("click", () => {
+  try {
+    transport?.close({ closeCode: 0, reason: "lab done" });
+  } catch { /* already closed */ }
+});
+
+for (const b of expBtns) {
+  b.addEventListener("click", async () => {
+    if (running || !transport) return;
+    running = true;
+    setExpEnabled(false);
+    expOut.textContent = "Running " + EXPERIMENTS[b.dataset.exp].label + "…";
+    try {
+      await run(b.dataset.exp);
+    } catch (error) {
+      expOut.textContent = "Experiment failed: " + error.name + ": " + error.message;
+      globalThis.showcaseTelemetry?.assert("wt-stats-droplab-" + b.dataset.exp, false, { name: error.name });
+    } finally {
+      running = false;
+      if (transport) setExpEnabled(true);
+    }
+  });
+}
+
+console.log(LOG, "ready", "getStats=" + supported);
+</script>
+</body>
+</html>
