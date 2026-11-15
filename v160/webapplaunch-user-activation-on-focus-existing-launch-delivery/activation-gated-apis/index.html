@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Activation-gated APIs — WebAppLaunch: user activation on focus-existing launch delivery — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+  <style>
+    #fs-target { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-3); }
+    #fs-target:fullscreen { background: var(--bg-paper); display: grid; place-items: center; font-size: 2rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebAppLaunch: user activation on focus-existing launch delivery</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · web apps · edge cases &amp; failure modes</p>
+    <h1>Activation-gated APIs</h1>
+    <p class="lede">The ChromeStatus entry names <code>window.open()</code> and <code>requestFullscreen()</code> as the calls a launch consumer could not make before. Activation is a budget, not a permission: transient-activation calls fail once it has expired, consuming calls use it up for everything after them, and sticky-activation calls (<code>vibrate()</code>) only need the page to have been activated once. A launch consumer has the same budget. Pick an API and a timing; each run makes the real call and records <code>isActive</code> before and after.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">1 · Run an activation-gated call</h2>
+    <div class="controls">
+      <label for="api">API
+        <select id="api">
+          <option value="open">window.open() (consumes)</option>
+          <option value="fullscreen">element.requestFullscreen() (consumes)</option>
+          <option value="picker">input.showPicker() (requires activation; watch isActive after)</option>
+          <option value="vibrate">navigator.vibrate() (sticky activation)</option>
+        </select>
+      </label>
+      <label for="timing">Timing
+        <select id="timing">
+          <option value="now">immediately in the click (like a Chrome 160 launch delivery)</option>
+          <option value="expired">after 5.5 s (expired, like a pre-160 delivery that waited)</option>
+          <option value="after-consume">after window.open() consumed it in the same click</option>
+        </select>
+      </label>
+      <button type="button" class="demo-btn" id="run">Run</button>
+    </div>
+    <p class="verdict" id="verdict" aria-live="polite">Not run yet.</p>
+    <div id="fs-target" tabindex="-1">Fullscreen target (press Esc to leave fullscreen)</div>
+    <label for="picker-input">Picker target</label>
+    <input type="text" id="picker-input" list="picker-list" placeholder="showPicker() target">
+    <datalist id="picker-list"><option value="alpha"></option><option value="beta"></option></datalist>
+  </section>
+
+  <section class="stage" aria-labelledby="history-title">
+    <h2 id="history-title">2 · Results so far</h2>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Results table (scrolls horizontally on narrow screens)"><table class="results">
+      <caption class="visually-hidden">Activation-gated call results</caption>
+      <thead><tr><th scope="col">API</th><th scope="col">Timing</th><th scope="col">isActive before → after</th><th scope="col">Outcome</th></tr></thead>
+      <tbody id="history"><tr><td colspan="4">No runs yet.</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section><h2>design rules for a launch consumer</h2>
+    <ul>
+      <li>Make the activation-gated call <strong>synchronously</strong> in the consumer, before any <code>await</code> that might outlast the activation window.</li>
+      <li>You get <strong>one</strong> consuming call per launch. Choose between opening a window and going fullscreen; do not try both.</li>
+      <li>Feature-detect by outcome: <code>window.open()</code> returning <code>null</code> means blocked. Fall back to switching the existing window (no activation needed) so the launch never appears broken.</li>
+      <li>Other client modes do not need this: <code>navigate-new</code> and <code>navigate-existing</code> load a new document, so the launch is an ordinary navigation.</li>
+    </ul>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5191118118584320" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/interaction.html#activation-consuming-api" target="_blank" rel="noopener">HTML: activation-consuming APIs</a></li>
+    <li><a href="https://developer.mozilla.org/docs/Web/Security/User_activation" target="_blank" rel="noopener">MDN: features gated by user activation</a></li>
+    <li><a href="../activation-inspector/">Activation inspector</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  "use strict";
+  const LOG = "[webapp-launch-activation:apis]";
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const ua = navigator.userActivation;
+  const history = [];
+
+  // Each call returns a promise of an outcome string; the synchronous part runs first.
+  const CALLS = {
+    open() {
+      const inactive = navigator.userActivation && !navigator.userActivation.isActive;
+      const w = window.open("about:blank", "gated-api-probe", "popup,width=320,height=240");
+      if (w) w.close();
+      return Promise.resolve(w ? (inactive ? "opened even though activation was gone (popup blocker off or popups allowed for this site)" : "opened (allowed)") : "returned null (blocked)");
+    },
+    fullscreen() {
+      const el = $("fs-target");
+      if (typeof el.requestFullscreen !== "function") return Promise.resolve("requestFullscreen not available");
+      return el.requestFullscreen().then(
+        () => {
+          document.exitFullscreen().catch(() => {});
+          return "entered fullscreen (allowed), then exited";
+        },
+        (error) => `rejected: ${error.name}`,
+      );
+    },
+    picker() {
+      const input = $("picker-input");
+      if (typeof input.showPicker !== "function") return Promise.resolve("showPicker not available");
+      try {
+        input.showPicker();
+        return Promise.resolve("picker shown (allowed)");
+      } catch (error) {
+        return Promise.resolve(`threw ${error.name}`);
+      }
+    },
+    vibrate() {
+      if (typeof navigator.vibrate !== "function") return Promise.resolve("navigator.vibrate not available on this device/browser");
+      return Promise.resolve(`returned ${navigator.vibrate(30)}`);
+    },
+  };
+
+  function record(api, timing, before, after, outcome) {
+    history.unshift({ api, timing, before, after, outcome });
+    $("history").innerHTML = history.slice(0, 20).map((r) =>
+      `<tr><td>${esc(r.api)}</td><td>${esc(r.timing)}</td><td>${r.before} → ${r.after}</td><td>${esc(r.outcome)}</td></tr>`
+    ).join("");
+    const blocked = /blocked|rejected|threw/.test(outcome);
+    $("verdict").className = blocked ? "verdict no" : "verdict yes";
+    $("verdict").textContent = `${api} (${timing}): ${outcome}. isActive ${before} → ${after}.`;
+    globalThis.showcaseTelemetry?.assert("webapp-launch-gated-api-run", true, { api, timing, before, after, outcome });
+    console.log(LOG, { api, timing, before, after, outcome });
+  }
+
+  async function invoke(api, timing) {
+    const before = ua ? ua.isActive : "n/a";
+    const pending = CALLS[api]();
+    const after = ua ? ua.isActive : "n/a";
+    record(api, timing, before, after, await pending);
+  }
+
+  $("run").addEventListener("click", () => {
+    const api = $("api").value;
+    const timing = $("timing").value;
+    if (timing === "now") {
+      invoke(api, timing);
+    } else if (timing === "after-consume") {
+      const w = window.open("about:blank", "gated-api-consumer", "popup,width=320,height=240");
+      w?.close();
+      invoke(api, timing);
+    } else {
+      $("run").disabled = true;
+      $("verdict").className = "verdict";
+      $("verdict").textContent = "Waiting 5.5 s for this click's activation to expire…";
+      setTimeout(() => {
+        $("run").disabled = false;
+        invoke(api, timing);
+      }, 5500);
+    }
+  });
+
+  console.log(LOG, "ready", { userActivation: Boolean(ua) });
+})();
+</script>
+</body>
+</html>
