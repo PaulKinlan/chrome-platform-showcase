@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Legacy sniffing audit — SharedWorkerConnectEventEmptyStringData — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; SharedWorkerConnectEventEmptyStringData</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v160 · workers · migration &amp; edge cases</p>
+    <h1>Legacy sniffing audit</h1>
+    <p class="lede">A <code>null</code> to <code>""</code> change sounds harmless, but JavaScript treats the two very differently: <code>JSON.parse(null)</code> returns <code>null</code> while <code>JSON.parse("")</code> throws, <code>d ?? x</code> keeps <code>""</code> but replaces <code>null</code>, and <code>typeof</code> flips from <code>"object"</code> to <code>"string"</code>. Worker code that sniffed <code>e.data</code> to tell a connect from a message, or parsed it blindly, changes behaviour in Chrome 160. This audit runs ten common patterns inside a real shared worker against the real <code>connect</code> event, then runs the same function with the other value so you can see exactly what changes.</p>
+  </header>
+
+  <section class="stage" aria-labelledby="audit-title">
+    <h2 id="audit-title">1 · Run the audit against the real connect event</h2>
+    <button type="button" class="demo-btn" id="audit">Start a shared worker and audit its connect event</button>
+    <p class="verdict" id="verdict" aria-live="polite">Not run yet.</p>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Results table (scrolls horizontally on narrow screens)"><table class="results">
+      <caption class="visually-hidden">Legacy patterns evaluated against the connect event's data</caption>
+      <thead><tr><th scope="col">Pattern</th><th scope="col">Code</th><th scope="col" id="col-now">This browser</th><th scope="col" id="col-other">Other value</th><th scope="col">Changes?</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5">Not run yet.</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section class="stage" aria-labelledby="own-title">
+    <h2 id="own-title">2 · Check your own expression</h2>
+    <p>Write an expression over <code>d</code> (the connect event's <code>data</code>). It runs in this page against the value the worker observed and against the other value. It is your own code running in your own tab.</p>
+    <label for="expr">Expression</label>
+    <input type="text" id="expr" value="d === null ? 'connect' : 'message'" spellcheck="false" autocomplete="off">
+    <button type="button" class="demo-btn" id="run-own">Evaluate both ways</button>
+    <output id="own-out" aria-live="polite">Run the audit first so the real value is known; until then "" and null are both shown.</output>
+  </section>
+
+  <section><h2>the migration-safe pattern</h2>
+    <pre tabindex="0"><code>// Before: sniffing data (breaks in Chrome 160)
+onconnect = onmessage = (e) =&gt; {
+  if (e.data === null) return setUp(e.ports[0]);
+  handle(e.data);
+};
+
+// After: branch on the event type, never on data
+self.addEventListener("connect", (e) =&gt; setUp(e.ports[0]));
+function setUp(port) { port.onmessage = (m) =&gt; handle(m.data); }</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5142074717503488" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/workers.html#dom-sharedworker" target="_blank" rel="noopener">HTML: SharedWorker constructor</a></li>
+    <li><a href="https://crbug.com/583449815" target="_blank" rel="noopener">Chromium bug 583449815</a></li>
+    <li><a href="../connect-data-probe/">Connect data probe</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  "use strict";
+  const LOG = "[sw-connect-data:audit]";
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const CODE = {
+    "strict-null-check": "d === null ? connect : message",
+    "loose-null-check": "d == null ? connect : message",
+    "falsy-check": "!d ? connect : message",
+    "typeof-object": "typeof d === 'object'",
+    "nullish-default": "d ?? 'default-payload'",
+    "or-default": "d || 'default-payload'",
+    "string-coercion": "String(d)",
+    "template-literal": "`payload=${d}`",
+    "json-parse": "JSON.parse(d)",
+    "property-access": "d.length",
+  };
+  let observed; // undefined until the audit has run
+
+  $("audit").addEventListener("click", () => {
+    const verdict = $("verdict");
+    if (typeof SharedWorker !== "function") {
+      verdict.className = "verdict no";
+      verdict.textContent = "SharedWorker is not available here, so the audit cannot observe a real connect event.";
+      globalThis.showcaseTelemetry?.assert("sw-connect-audit-no-sharedworker", true, {});
+      return;
+    }
+    verdict.className = "verdict";
+    verdict.textContent = "Starting a shared worker…";
+    const worker = new SharedWorker("../worker.js", { name: `audit-${Date.now()}` });
+    const timer = setTimeout(() => {
+      verdict.className = "verdict no";
+      verdict.textContent = "The worker did not reply within 5 s.";
+    }, 5000);
+    worker.onerror = () => {
+      clearTimeout(timer);
+      verdict.className = "verdict no";
+      verdict.textContent = "The shared worker script failed to load.";
+    };
+    worker.port.onmessage = (m) => {
+      if (m.data?.type !== "connected") return;
+      clearTimeout(timer);
+      const { audit } = m.data;
+      observed = JSON.parse(audit.actualJSON);
+      $("col-now").textContent = `This browser (d = ${audit.actualJSON})`;
+      $("col-other").textContent = `Other value (d = ${audit.otherJSON})`;
+      let changed = 0;
+      $("rows").innerHTML = Object.entries(audit.results).map(([name, r]) => {
+        const differs = r.now !== r.otherWorld;
+        if (differs) changed++;
+        return `<tr><td>${esc(name)}</td><td><code>${esc(CODE[name] || "")}</code></td><td><code>${esc(r.now)}</code></td><td><code>${esc(r.otherWorld)}</code></td><td>${differs ? '<span class="fail">yes</span>' : '<span class="pass">no</span>'}</td></tr>`;
+      }).join("");
+      verdict.className = "verdict yes";
+      verdict.textContent = `The connect event's data here is ${audit.actualJSON} (${observed === "" ? "spec behaviour, Chrome 160+" : observed === null ? "legacy Chromium behaviour" : "unexpected"}). ${changed} of ${Object.keys(audit.results).length} patterns behave differently between "" and null.`;
+      globalThis.showcaseTelemetry?.assert("sw-connect-audit-ran", observed === "" || observed === null, { actual: audit.actualJSON, changed });
+      worker.port.postMessage({ type: "bye" });
+      console.log(LOG, audit);
+    };
+    worker.port.start();
+  });
+
+  $("run-own").addEventListener("click", () => {
+    const expr = $("expr").value;
+    const out = $("own-out");
+    let fn;
+    try {
+      fn = new Function("d", `"use strict"; return (${expr});`);
+    } catch (error) {
+      out.textContent = `Syntax error: ${error.message}`;
+      return;
+    }
+    const run = (d) => {
+      try {
+        return `→ ${JSON.stringify(fn(d))}`;
+      } catch (error) {
+        return `→ threw ${error.name}: ${error.message}`;
+      }
+    };
+    const values = observed === undefined ? ["", null] : [observed, observed === "" ? null : ""];
+    out.textContent = values.map((v, i) =>
+      `d = ${JSON.stringify(v)}${observed !== undefined && i === 0 ? " (observed here)" : ""} ${run(v)}`
+    ).join("\n");
+  });
+
+  console.log(LOG, "ready");
+})();
+</script>
+</body>
+</html>
