@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telemetry triage — race-network-and-fetch-handler TypeError — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; ServiceWorker Static Routing: distinct TypeError for cancelled race requests</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · service worker · practical use + migration</p>
+    <h1>Telemetry triage</h1>
+    <p class="lede">Why the message changed: offline-capable apps moving from Navigation Preload to <code>race-network-and-fetch-handler</code> found that every cancelled race showed up in error telemetry as <code>"Failed to fetch"</code> — a false outage spike. Navigation Preload already had a distinct cancellation message; now static routing does too. This page sends a burst of real requests through the worker, feeds the worker's real rejections into two error pipelines, and shows what each one alerts on.</p>
+  </header>
+
+  <p class="note" id="flag-note"></p>
+
+  <section class="stage" aria-labelledby="burst-title">
+    <h2 id="burst-title">1 · Generate traffic</h2>
+    <p>One burst = three requests where the offline-fallback timer beats a slow network (expected cancellations) plus one request that hits a redirect loop (a genuine network failure). All four go through the real worker and its real routing rule.</p>
+    <button type="button" id="burst">Send a burst of 4 requests</button>
+    <button type="button" id="reset" class="secondary">Reset counters</button>
+    <progress id="progress" max="4" value="0" aria-label="Requests completed in this burst">0 of 4</progress>
+  </section>
+
+  <section class="stage" aria-labelledby="pipes-title">
+    <h2 id="pipes-title">2 · Two pipelines, same events</h2>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Pipeline counters">
+      <table class="results">
+        <thead><tr><th scope="col">pipeline</th><th scope="col">events</th><th scope="col">suppressed</th><th scope="col">alerts</th><th scope="col">false alerts</th></tr></thead>
+        <tbody id="pipes"></tbody>
+      </table>
+    </div>
+    <p class="verdict" id="verdict" aria-live="polite">No traffic yet.</p>
+    <ol class="log" id="log" aria-label="Raw events from the worker"></ol>
+  </section>
+
+  <section class="stage" aria-labelledby="clf-title">
+    <h2 id="clf-title">3 · The classifier</h2>
+    <pre tabindex="0"><code>const RACE_CANCELLED =
+  "The service worker race-network-and-fetch-handler request was cancelled before 'fetch()' settled.";
+const PRELOAD_CANCELLED =
+  "The service worker navigation preload request was cancelled before 'preloadResponse' settled.";
+
+function triage(error) {
+  if (error instanceof TypeError &amp;&amp;
+      (error.message === RACE_CANCELLED || error.message === PRELOAD_CANCELLED)) {
+    return 'expected-cancellation';   // count it, do not page anyone
+  }
+  return 'network-error';             // includes "Failed to fetch": alert
+}</code></pre>
+    <p>Match the exact strings (the race string is verbatim from Chromium's service_worker_global_scope.cc; the preload string is quoted in the ChromeStatus motivation); there is no error code or IDL property for this — the entry is explicit that it is a message-only change with no spec or IDL change. Keep the preload string while you migrate: both paths can coexist.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5124748525830144" target="_blank" rel="noopener">ChromeStatus entry (motivation)</a></li>
+    <li><a href="https://developer.chrome.com/docs/web-platform/service-worker-static-routing" target="_blank" rel="noopener">Static routing API overview</a></li>
+    <li><a href="../cancellation-lab/">Cancellation lab</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { ensureController, runScenario, classify, FLAG_STEPS } from "../race-client.js";
+
+const $ = (id) => document.getElementById(id);
+$("flag-note").textContent = FLAG_STEPS;
+let events = [];
+
+function render() {
+  const rejected = events.filter((e) => e.sw?.outcome === "rejected");
+  const genuine = rejected.filter((e) => e.genuine);
+  const naive = { label: "naive: every rejected fetch is an outage", events: rejected.length, suppressed: 0, alerts: rejected.length };
+  const tri = rejected.map((e) => ({ e, k: classify(e.sw).kind }));
+  const suppressed = tri.filter((t) => t.k === "cancel-new" || t.k === "cancel-preload").length;
+  const triage = { label: "triage: suppress known cancellation messages", events: rejected.length, suppressed, alerts: rejected.length - suppressed };
+  const tbody = $("pipes");
+  tbody.textContent = "";
+  for (const p of [naive, triage]) {
+    const falseAlerts = Math.max(p.alerts - genuine.length, 0);
+    const tr = document.createElement("tr");
+    for (const [txt, cls] of [[p.label, ""], [p.events, "mono"], [p.suppressed, "mono"], [p.alerts, "mono"], [falseAlerts, falseAlerts ? "fail" : "pass"]]) {
+      const td = document.createElement("td");
+      td.textContent = String(txt);
+      if (cls) td.className = cls;
+      tr.append(td);
+    }
+    tbody.append(tr);
+  }
+  const v = $("verdict");
+  if (!events.length) {
+    v.className = "verdict";
+    v.textContent = "No traffic yet.";
+    return;
+  }
+  const triFalse = Math.max(triage.alerts - genuine.length, 0);
+  if (suppressed > 0 && triFalse === 0) {
+    v.className = "verdict yes";
+    v.textContent = `This browser emits the distinct message: triage suppressed ${suppressed} expected cancellation(s) and alerted only on the ${genuine.length} genuine failure(s).`;
+  } else {
+    v.className = "verdict no";
+    v.textContent = `This browser reports cancelled races as "Failed to fetch": even the triage pipeline raised ${triFalse} false alert(s), because the messages are identical. In Chrome 159+ those ${triFalse} would be suppressed.`;
+  }
+}
+
+function logEvent(e) {
+  const li = document.createElement("li");
+  li.textContent = `${e.genuine ? "genuine" : "race"} · ${e.sw ? (e.sw.outcome === "rejected" ? `${e.sw.name}: ${e.sw.message}` : "resolved") : "no worker report"}`;
+  $("log").prepend(li);
+}
+
+ensureController().catch((e) => {
+  $("verdict").className = "verdict no";
+  $("verdict").textContent = `Service worker unavailable: ${e.message}`;
+  $("burst").disabled = true;
+});
+
+$("burst").addEventListener("click", async () => {
+  const btn = $("burst");
+  btn.disabled = true;
+  const progress = $("progress");
+  progress.value = 0;
+  const plan = [
+    { genuine: false, opts: { kind: "slow", mode: "fallback", delay: 3000, timer: 300 } },
+    { genuine: false, opts: { kind: "slow", mode: "fallback", delay: 3000, timer: 350 } },
+    { genuine: true, opts: { kind: "loop", mode: "guard" } },
+    { genuine: false, opts: { kind: "slow", mode: "fallback", delay: 3000, timer: 400 } },
+  ];
+  try {
+    const results = await Promise.all(plan.map(async (p) => {
+      const r = await runScenario(p.opts);
+      progress.value++;
+      progress.textContent = `${progress.value} of 4`;
+      const ev = { genuine: p.genuine, sw: r.sw };
+      events.push(ev);
+      logEvent(ev);
+      return ev;
+    }));
+    render();
+    const cancels = results.filter((r) => !r.genuine && r.sw?.outcome === "rejected");
+    const kinds = cancels.map((r) => classify(r.sw).kind);
+    window.showcaseTelemetry?.assert(
+      kinds.includes("cancel-new") ? "sw-race-triage-distinct" : "sw-race-triage-generic-branch",
+      cancels.length > 0,
+      { kinds: kinds.join(",") },
+    );
+  } catch (e) {
+    $("verdict").className = "verdict no";
+    $("verdict").textContent = `Burst failed: ${e.message}. Reload to retry.`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("reset").addEventListener("click", () => {
+  events = [];
+  $("log").textContent = "";
+  render();
+});
+render();
+</script>
+</body>
+</html>

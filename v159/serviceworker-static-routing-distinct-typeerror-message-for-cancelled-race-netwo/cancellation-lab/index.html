@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cancellation lab — race-network-and-fetch-handler TypeError — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; ServiceWorker Static Routing: distinct TypeError for cancelled race requests</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · service worker · canonical scenario</p>
+    <h1>Cancellation lab</h1>
+    <p class="lede">The exact situation from the ChromeStatus entry, for real: this page's service worker has a static routing rule with <code>source: 'race-network-and-fetch-handler'</code>. Its fetch handler calls <code>fetch(event.request)</code> — which Chromium deduplicates with the racing network request — and also starts an offline-fallback timer. When the timer wins, the network request is cancelled before its headers arrive, and the worker's <code>fetch()</code> rejects. Which <code>TypeError</code> message it rejects with is what Chrome 159 changes.</p>
+  </header>
+
+  <p class="note" id="flag-note"></p>
+
+  <section class="stage" aria-labelledby="sw-title">
+    <h2 id="sw-title">1 · Service worker + routing rule</h2>
+    <p class="verdict" id="sw-state" aria-live="polite">Registering…</p>
+  </section>
+
+  <section class="stage" aria-labelledby="ctl-title">
+    <h2 id="ctl-title">2 · Run the race</h2>
+    <div class="field">
+      <label for="delay">Server holds response headers for: <output id="delay-out" for="delay">3000 ms</output></label>
+      <input type="range" id="delay" min="0" max="6000" step="100" value="3000">
+    </div>
+    <div class="field">
+      <label for="timer">Worker's offline-fallback timer: <output id="timer-out" for="timer">400 ms</output></label>
+      <input type="range" id="timer" min="100" max="4000" step="100" value="400">
+    </div>
+    <p id="predict">Prediction: the timer wins, so the network leg is cancelled before its headers arrive.</p>
+    <button type="button" id="run">Run the race</button>
+    <p class="verdict" id="verdict" aria-live="polite">Not run yet.</p>
+    <dl class="state" aria-label="Last run details">
+      <dt>page received</dt><dd id="r-page">—</dd>
+      <dt>worker's fetch(event.request)</dt><dd id="r-sw">—</dd>
+      <dt>exact message</dt><dd id="r-msg">—</dd>
+      <dt>classification</dt><dd id="r-class">—</dd>
+      <dt>router (Resource Timing)</dt><dd id="r-route">—</dd>
+    </dl>
+  </section>
+
+  <section><h2>the worker code</h2>
+    <pre tabindex="0"><code>// install
+event.addRoutes([{ condition: { urlPattern: { pathname: '/…/race/*' } },
+                   source: 'race-network-and-fetch-handler' }]);
+// fetch
+const network = fetch(event.request);           // deduplicated with the race leg
+const fallback = sleep(timer).then(() =&gt; new Response(offlineJSON));
+event.respondWith(Promise.race([network, fallback]));
+network.catch((e) =&gt; report(e.message));
+// ≤ Chrome 158:  "Failed to fetch"
+// Chrome 159+:   "The service worker race-network-and-fetch-handler request
+//                 was cancelled before 'fetch()' settled."</code></pre>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5124748525830144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://w3c.github.io/ServiceWorker/#dom-routersourceenum-race-network-and-fetch-handler" target="_blank" rel="noopener">Spec: race-network-and-fetch-handler</a></li>
+    <li><a href="../scenario-matrix/">Scenario matrix</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { ensureController, runScenario, classify, FLAG_STEPS, NEW_MESSAGE } from "../race-client.js";
+
+const $ = (id) => document.getElementById(id);
+$("flag-note").textContent = FLAG_STEPS;
+const delay = $("delay"), timer = $("timer");
+
+function predict() {
+  $("delay-out").textContent = `${delay.value} ms`;
+  $("timer-out").textContent = `${timer.value} ms`;
+  const d = +delay.value, t = +timer.value;
+  $("predict").textContent = t < d
+    ? "Prediction: the timer wins, so the network leg is cancelled before its headers arrive — the case this feature changes."
+    : "Prediction: the network answers first, nothing is cancelled, and fetch(event.request) resolves (control arm).";
+}
+delay.addEventListener("input", predict);
+timer.addEventListener("input", predict);
+predict();
+
+const swState = $("sw-state");
+ensureController().then(({ reg, status }) => {
+  const ok = status?.routerInstall?.ok;
+  swState.className = ok ? "verdict yes" : "verdict no";
+  swState.textContent = ok
+    ? `Worker active at ${reg.scope}; addRoutes() accepted the race-network-and-fetch-handler rule for ${status.racePath}*.`
+    : `Worker active, but the routing rule was not installed: ${status?.routerInstall?.error ?? "no status reply"}. Without the rule there is no race to cancel.`;
+  window.showcaseTelemetry?.assert("sw-race-lab-router-installed", !!ok, { error: status?.routerInstall?.error });
+}).catch((e) => {
+  swState.className = "verdict no";
+  swState.textContent = `Service worker unavailable: ${e.message}`;
+  $("run").disabled = true;
+  window.showcaseTelemetry?.assert("sw-race-lab-no-sw", true, { error: e.message });
+});
+
+$("run").addEventListener("click", async () => {
+  const btn = $("run");
+  btn.disabled = true;
+  const v = $("verdict");
+  v.className = "verdict";
+  v.textContent = "Racing…";
+  try {
+    const r = await runScenario({ kind: "slow", mode: "fallback", delay: +delay.value, timer: +timer.value });
+    const c = classify(r.sw);
+    $("r-page").textContent = r.page.outcome === "resolved"
+      ? `${r.page.status} from ${r.page.servedBy} after ${r.page.elapsedMs} ms`
+      : `${r.page.name}: ${r.page.message}`;
+    $("r-sw").textContent = r.sw ? `${r.sw.outcome} after ${r.sw.elapsedMs} ms${r.sw.outcome === "rejected" ? ` (${r.sw.name}, instanceof TypeError: ${r.sw.isTypeError})` : ""}` : "no report from the worker";
+    $("r-msg").textContent = r.sw?.message ? JSON.stringify(r.sw.message) : "—";
+    $("r-class").textContent = c.label;
+    $("r-route").textContent = r.routing ? `matched: ${r.routing.matched || "(empty)"} · final: ${r.routing.final || "(empty)"}` : "no entry";
+    if (c.kind === "cancel-new") {
+      v.className = "verdict yes";
+      v.textContent = "Distinct message: the cancelled race leg rejected with the new Chrome 159 TypeError — telemetry can tell this apart from an outage.";
+      window.showcaseTelemetry?.assert("sw-race-lab-distinct-message", r.sw.message === NEW_MESSAGE && r.sw.isTypeError, {});
+    } else if (c.kind === "generic") {
+      v.className = "verdict no";
+      v.textContent = "Generic \"Failed to fetch\": the race leg was cancelled (the fallback won) but this browser reports it exactly like a network outage. That is the pre-159 behaviour the feature fixes.";
+      window.showcaseTelemetry?.assert("sw-race-lab-generic-branch", r.page.servedBy === "sw-fallback-timer", { servedBy: r.page.servedBy });
+    } else if (c.kind === "ok") {
+      v.className = "verdict";
+      v.textContent = "Control arm: the network answered before the timer, nothing was cancelled, and fetch(event.request) resolved.";
+    } else {
+      v.className = "verdict no";
+      v.textContent = `Unexpected outcome — ${c.label}. Reported verbatim.`;
+      window.showcaseTelemetry?.assert("sw-race-lab-unexpected", false, { label: c.label });
+    }
+  } catch (e) {
+    v.className = "verdict no";
+    v.textContent = `Could not run: ${e.message}. Reload to retry.`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

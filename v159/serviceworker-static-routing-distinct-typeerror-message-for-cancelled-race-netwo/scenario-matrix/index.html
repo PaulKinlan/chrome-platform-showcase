@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scenario matrix — race-network-and-fetch-handler TypeError — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; ServiceWorker Static Routing: distinct TypeError for cancelled race requests</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · service worker · inspection tool</p>
+    <h1>Scenario matrix</h1>
+    <p class="lede">The new message is deliberately narrow. Chromium's implementation only substitutes it when <em>all</em> of these hold: the error is <code>net::ERR_ABORTED</code>, the request carries a race-network-request token (it is <code>fetch(event.request)</code> on a raced request), and the race loader was actually used. Everything else must keep saying <code>"Failed to fetch"</code>. This matrix runs six real scenarios and tabulates the exact message each produced, so you can see the boundary.</p>
+  </header>
+
+  <p class="note" id="flag-note"></p>
+
+  <section class="stage" aria-labelledby="run-title">
+    <h2 id="run-title">1 · Run the matrix</h2>
+    <button type="button" id="run">Run all six scenarios (about 15 s)</button>
+    <p class="verdict" id="verdict" aria-live="polite">Not run yet.</p>
+    <progress id="progress" max="6" value="0" aria-label="Scenarios completed">0 of 6</progress>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Scenario results">
+      <table class="results">
+        <thead><tr><th scope="col">scenario</th><th scope="col">page saw</th><th scope="col">worker's fetch(event.request)</th><th scope="col">Chrome 159 expects</th><th scope="col">router</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section><h2>reading the matrix</h2>
+    <ul>
+      <li><strong>Fallback timer wins</strong> — the canonical case: cancelled before headers, so 159+ gives the distinct message.</li>
+      <li><strong>Page aborts (no respondWith)</strong> — the client's <code>AbortController</code> cancels the request the race leg is serving; also <code>ERR_ABORTED</code> before headers.</li>
+      <li><strong>Network wins / fast route</strong> — headers arrived, nothing cancelled: <code>fetch()</code> resolves.</li>
+      <li><strong>Redirect loop</strong> — a genuine network error (<code>ERR_TOO_MANY_REDIRECTS</code>, not <code>ERR_ABORTED</code>; the worker answers the page with a JSON error page (served 200, marked x-served-by: sw-error-page) so the failure stays inside the worker): must stay <code>"Failed to fetch"</code> on every version, otherwise the change would hide real outages.</li>
+      <li><strong>Page aborts (respondWith passthrough)</strong> — recorded as observed; Chromium may tear down the fetch event before the worker's promise settles, in which case no report arrives within the window.</li>
+    </ul>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5124748525830144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://crbug.com/584504247" target="_blank" rel="noopener">crbug 584504247</a></li>
+    <li><a href="../telemetry-triage/">Telemetry triage</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script type="module">
+import { ensureController, runScenario, classify, FLAG_STEPS, NEW_MESSAGE, GENERIC_MESSAGE } from "../race-client.js";
+
+document.getElementById("flag-note").textContent = FLAG_STEPS;
+
+const SCENARIOS = [
+  { label: "Fallback timer wins (delay 3000, timer 300)", opts: { kind: "slow", mode: "fallback", delay: 3000, timer: 300 }, expect: "cancel" },
+  { label: "Page aborts at 300 ms, handler only observes", opts: { kind: "slow", mode: "observe", delay: 3000, abortAfter: 300 }, expect: "cancel" },
+  { label: "Network wins (delay 100, timer 2500)", opts: { kind: "slow", mode: "fallback", delay: 100, timer: 2500 }, expect: "resolve" },
+  { label: "Fast route, passthrough (control)", opts: { kind: "fast", mode: "passthrough" }, expect: "resolve" },
+  { label: "Redirect loop — genuine network error", opts: { kind: "loop", mode: "guard" }, expect: "generic" },
+  { label: "Page aborts at 300 ms, respondWith passthrough", opts: { kind: "slow", mode: "passthrough", delay: 3000, abortAfter: 300, waitMs: 5000 }, expect: "observe" },
+];
+const EXPECT_TEXT = {
+  cancel: `rejects: ${NEW_MESSAGE}`,
+  resolve: "resolves",
+  generic: `rejects: ${GENERIC_MESSAGE}`,
+  observe: "not specified by the entry — recorded as observed",
+};
+
+ensureController().catch((e) => {
+  const v = document.getElementById("verdict");
+  v.className = "verdict no";
+  v.textContent = `Service worker unavailable: ${e.message}`;
+  document.getElementById("run").disabled = true;
+});
+
+document.getElementById("run").addEventListener("click", async () => {
+  const btn = document.getElementById("run");
+  const v = document.getElementById("verdict");
+  const tbody = document.getElementById("rows");
+  const progress = document.getElementById("progress");
+  btn.disabled = true;
+  tbody.textContent = "";
+  progress.value = 0;
+  v.className = "verdict";
+  v.textContent = "Running…";
+  const kinds = [];
+  try {
+    for (const s of SCENARIOS) {
+      const r = await runScenario(s.opts);
+      const c = classify(r.sw);
+      kinds.push({ s, c, r });
+      const tr = document.createElement("tr");
+      for (const [txt, cls] of [
+        [s.label, ""],
+        [r.page.outcome === "resolved" ? `${r.page.status} via ${r.page.servedBy}` : `${r.page.name}`, "mono"],
+        [r.sw ? (r.sw.outcome === "resolved" ? `resolved (${r.sw.status})` : `${r.sw.name}: ${r.sw.message}`) : "no report within the window", "mono"],
+        [EXPECT_TEXT[s.expect], ""],
+        [r.routing ? `${r.routing.matched || "—"} → ${r.routing.final || "—"}` : "—", "mono"],
+      ]) {
+        const td = document.createElement("td");
+        td.textContent = txt;
+        if (cls) td.className = cls;
+        tr.append(td);
+      }
+      tbody.append(tr);
+      progress.value++;
+      progress.textContent = `${progress.value} of 6`;
+    }
+    const cancels = kinds.filter((k) => k.s.expect === "cancel" && k.r.sw);
+    const newCount = cancels.filter((k) => k.c.kind === "cancel-new").length;
+    const genericCount = cancels.filter((k) => k.c.kind === "generic").length;
+    const loop = kinds.find((k) => k.s.expect === "generic");
+    const loopOk = loop?.c.kind === "generic";
+    if (newCount > 0) {
+      v.className = loopOk ? "verdict yes" : "verdict no";
+      v.textContent = `Distinct message observed on ${newCount}/${cancels.length} cancellation scenario(s); the genuine failure ${loopOk ? "still reads \"Failed to fetch\" — the boundary is correct." : "did NOT read \"Failed to fetch\" — unexpected."}`;
+      window.showcaseTelemetry?.assert("sw-race-matrix-distinct", loopOk, { newCount });
+    } else if (genericCount > 0) {
+      v.className = "verdict no";
+      v.textContent = `Not in this browser: ${genericCount}/${cancels.length} cancellation scenario(s) rejected with the generic "Failed to fetch" — indistinguishable from the redirect-loop outage row. This is the pre-159 behaviour.`;
+      window.showcaseTelemetry?.assert("sw-race-matrix-generic-branch", loopOk, { genericCount });
+    } else {
+      v.className = "verdict no";
+      v.textContent = "No cancellation scenario produced a worker report; see the table for what did happen.";
+      window.showcaseTelemetry?.assert("sw-race-matrix-no-cancel-report", false, {});
+    }
+  } catch (e) {
+    v.className = "verdict no";
+    v.textContent = `Matrix stopped: ${e.message}. Reload to retry.`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
