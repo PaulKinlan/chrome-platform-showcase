@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deprecate and remove WebRTC peer connection method — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .note strong { color: var(--text-black); }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<!--
+RESEARCH RECORD (weekly-hardening-builder, 2026-11-22)
+Feature id: 5160724576993280 · listing name "Deprecate and remove WebRTC peer connection method"
+Feature type: Feature removal. Milestone 160 (desktop + Android + WebView).
+EXACT removed surface: RTCPeerConnection.prototype.createDTMFSender(MediaStreamTrack track)
+  - Chromium IDL (main, 2026-11-22) third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.idl:
+    [DeprecateAs=V8RTCPeerConnection_CreateDTMFSender_Method, RaisesException]
+    RTCDTMFSender createDTMFSender(MediaStreamTrack track);   (in the legacy partial interface)
+  - Implementation rtc_peer_connection.cc RTCPeerConnection::createDTMFSender: throws
+    InvalidStateError if signalingState is "closed"; SyntaxError "track.kind is not 'audio'.";
+    SyntaxError "No RTCRtpSender is available for the track provided."; SyntaxError "Unable to create
+    DTMF sender for track"; otherwise returns found_rtp_sender->dtmf() — i.e. the SAME object as
+    RTCRtpSender.dtmf (verified: legacy === sender.dtmf is true on Chrome 153 headless).
+  - Use counter 1642, ~0.001-0.003% of page loads. Not in the WebRTC spec; Blink-only.
+Replacement (spec): RTCRtpSender.dtmf → RTCDTMFSender { insertDTMF(tones, duration=100, interToneGap=70),
+  ontonechange, canInsertDTMF, toneBuffer }; RTCDTMFToneChangeEvent { tone }.
+  Spec sections: https://w3c.github.io/webrtc-pc/#peer-to-peer-dtmf and #dtmf-example.
+  Rules exercised: canInsertDTMF false until the transceiver's currentDirection sends;
+  insertDTMF throws InvalidStateError when !canInsertDTMF, InvalidCharacterError for chars outside
+  0-9 A-D # * , (case-insensitive, buffer uppercased); duration clamped to [40, 6000] ms,
+  interToneGap min 30 ms; "," = 2 s pause; a new insertDTMF REPLACES the buffer; empty tone "" fires
+  when the buffer drains; video senders have dtmf === null.
+Intent: https://groups.google.com/a/chromium.org/d/msgid/blink-dev/6a9a9bad.81999fdc.db953.0066.GAE%40google.com
+  - "Intent to Deprecate and Remove" — no deprecation period (usage too low); API owners LGTM'd
+    "to proceed with a flag and that shim linked from release notes" (Finch kill switch).
+  - Guido Urdaneta posted a polyfill shim reproducing Chromium's exception names/messages on top of
+    RTCRtpSender.dtmf — the migration-shim concept runs it verbatim (logic) side-by-side with native.
+  - Migration references: Mozilla blog "DTMF now available in Firefox" (2017); MDN Using_DTMF.
+Flag: grep of runtime_enabled_features.json5, blink features.cc/.h on chromium main (gitiles,
+  2026-11-22) finds NO DTMF-related runtime flag yet, and there is no chrome://flags entry — so
+  there is nothing to enable to preview the removal. The migration-shim concept offers a clearly
+  labelled in-tab SIMULATION (deleting the prototype member) instead.
+WPT: webrtc/historical.html?interop-2026 — assert_false("createDTMFSender" in RTCPeerConnection.prototype)
+  (Interop 2026 also lists onremovestream and removeStream; those are NOT this chromestatus entry).
+Ground truth on Chrome 153 (this container): 'createDTMFSender' in prototype === true; loopback
+  call returns RTCDTMFSender identical to sender.dtmf; createDTMFSender({}) → TypeError (bad arg).
+  Loopback DTMF is played out by the receiver (NetEq tone generation) and is decodable with a
+  Goertzel filter on the received track — only when the sending track carries frames (we feed a
+  silent oscillator into a MediaStreamAudioDestinationNode).
+Use-case portfolio:
+  1. basic/canonical → removal-probe (in-prototype probe + real call on a live loopback that can
+     return false; identity comparison with RTCRtpSender.dtmf)
+  2. inspection tooling → tone-buffer-inspector (the RTCDTMFSender contract rule by rule:
+     canInsertDTMF, InvalidStateError/InvalidCharacterError, clamping, comma pause, buffer replace,
+     recvonly + video senders)
+  3. practical product → dtmf-keypad (softphone keypad using sender.dtmf, live toneBuffer + tonechange
+     log + received-audio meter)
+  4. edge/migration → migration-shim (the blink-dev shim, simulation of the 160 removal, error-parity
+     matrix native vs shim, recommended rewrite)
+  5. advanced composition → ivr-decoder (a second peer acts as an IVR that DECODES the received tones
+     with a Goertzel filter bank and navigates a menu — proves the replacement works end-to-end)
+-->
+<main>
+  <p class="crumbs"><a href="/v160/">&larr; Chrome 160</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · removal</p>
+    <h1>Deprecate and remove WebRTC peer connection method</h1>
+    <p class="lede">The method is <code>RTCPeerConnection.prototype.createDTMFSender(track)</code> &mdash; a Blink-only, pre-spec way to send telephone keypad tones (DTMF) on a call. Chrome 160 removes it, with no deprecation period, as part of Interop 2026. The standard replacement has existed since 2017: every audio <code>RTCRtpSender</code> exposes the very same <code>RTCDTMFSender</code> as <code>sender.dtmf</code>. These demos probe the removal for real and run the replacement over a live two-peer loopback in this tab &mdash; no server, no microphone.</p>
+  </header>
+
+  <div class="note" role="note">
+    <strong>No flag to preview this removal.</strong> As of 2026-11-22 Chromium&rsquo;s <code>runtime_enabled_features.json5</code> on main has no DTMF-related entry and there is no <code>chrome://flags</code> switch; the API owners approved the removal &ldquo;with a flag&rdquo; that acts as a server-side kill switch, not a user opt-in. On Chrome 159 and earlier the probe honestly reports the method as present &mdash; use the <a href="./migration-shim/">migration shim</a> page&rsquo;s clearly labelled in-tab simulation to see what your code does on 160.
+  </div>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./removal-probe/">Removal probe</a></h3>
+      <p>Is <code>createDTMFSender</code> gone in this browser? Checks the prototype, then actually calls it on a live loopback call: either it returns an <code>RTCDTMFSender</code> (and we show it is the <em>identical</em> object as <code>sender.dtmf</code>) or it throws <code>TypeError: not a function</code>.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./dtmf-keypad/">DTMF keypad (the replacement)</a></h3>
+      <p>A softphone keypad wired to <code>RTCRtpSender.dtmf.insertDTMF()</code>: tap keys or dial a string, tune tone duration and gap, and watch <code>toneBuffer</code>, <code>tonechange</code> events and the received audio level on the other peer.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./tone-buffer-inspector/">Tone-buffer inspector</a></h3>
+      <p>The <code>RTCDTMFSender</code> contract, rule by rule, measured live: <code>canInsertDTMF</code> before negotiation and on <code>recvonly</code>, <code>InvalidStateError</code> / <code>InvalidCharacterError</code>, duration and gap clamping, the two-second comma, buffer replacement, and <code>dtmf === null</code> on video senders.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./migration-shim/">Migration shim</a></h3>
+      <p>Run legacy <code>pc.createDTMFSender(track)</code> code against a simulated Chrome 160, install the shim posted on the blink-dev intent thread, and compare its exceptions against the native method case by case &mdash; then the two-line rewrite to <code>sender.dtmf</code>.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./ivr-decoder/">IVR decoder</a></h3>
+      <p>End-to-end proof: the second peer plays an automated phone menu and <em>decodes</em> the tones it receives with a Goertzel filter bank on the remote audio track &mdash; so you can see the replacement API actually puts DTMF on the wire.</p>
+    </li>
+  </ol></section>
+
+  <section>
+    <h2>the change</h2>
+    <pre tabindex="0"><code>// Before — Blink-only, removed in Chrome 160:
+const dtmf = pc.createDTMFSender(audioTrack);
+
+// After — standard, works in every engine:
+const sender = pc.getSenders().find(s =&gt; s.track === audioTrack);
+const dtmf = sender.dtmf;            // same RTCDTMFSender object
+
+dtmf.ontonechange = (e) =&gt; console.log(e.tone || "(done)");
+if (dtmf.canInsertDTMF) dtmf.insertDTMF("1234#", 100, 70);</code></pre>
+    <p>On Chrome 159 and earlier, <code>createDTMFSender(track)</code> simply looks up the sender for <code>track</code> and returns its <code>dtmf</code>. Nothing is lost by switching: the tone engine, events and timing rules are identical. What changes on 160 is that the call throws <code>TypeError: pc.createDTMFSender is not a function</code>, so unguarded legacy code stops at that line.</p>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5160724576993280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://groups.google.com/a/chromium.org/d/msgid/blink-dev/6a9a9bad.81999fdc.db953.0066.GAE%40google.com" target="_blank" rel="noopener">blink-dev: Intent to Deprecate and Remove (with the migration shim)</a></li>
+      <li><a href="https://w3c.github.io/webrtc-pc/#peer-to-peer-dtmf" target="_blank" rel="noopener">WebRTC 1.0 &mdash; Peer-to-peer DTMF (RTCRtpSender.dtmf / RTCDTMFSender)</a></li>
+      <li><a href="https://w3c.github.io/webrtc-pc/#dtmf-example" target="_blank" rel="noopener">WebRTC 1.0 &mdash; DTMF example</a></li>
+      <li><a href="https://wpt.fyi/results/webrtc/historical.html%3Finterop-2026?label=master&amp;label=experimental&amp;aligned" target="_blank" rel="noopener">WPT: webrtc/historical.html?interop-2026</a></li>
+      <li><a href="https://issues.chromium.org/issues/553274713" target="_blank" rel="noopener">crbug 553274713 &mdash; tracking bug</a></li>
+      <li><a href="https://chromestatus.com/metrics/feature/timeline/popularity/1642" target="_blank" rel="noopener">Use counter 1642 (createDTMFSender usage)</a></li>
+      <li><a href="https://developer.mozilla.org/docs/Web/API/RTCRtpSender/dtmf" target="_blank" rel="noopener">MDN: RTCRtpSender.dtmf</a></li>
+      <li><a href="https://blog.mozilla.org/webrtc/dtmf-now-available-firefox/" target="_blank" rel="noopener">Mozilla: DTMF now available in Firefox (migration notes)</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

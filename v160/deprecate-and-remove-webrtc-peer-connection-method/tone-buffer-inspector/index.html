@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tone-buffer inspector — Deprecate and remove WebRTC peer connection method — Chrome 160</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin: var(--space-3) 0; }
+    .controls button { min-height: 44px; }
+    .checks { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-3); }
+    .check {
+      border: 2px solid var(--border-black);
+      background: var(--bg-ivory);
+      padding: var(--space-3);
+      display: grid;
+      gap: var(--space-2);
+    }
+    .check h3 { margin: 0; font-size: 1rem; }
+    .check p { margin: 0; font-size: 0.85rem; }
+    .check button { min-height: 44px; justify-self: start; }
+    .check .obs {
+      font-family: var(--font-mono); font-size: 0.75rem;
+      background: var(--bg-stone); color: var(--text-black); border: 1px solid var(--border-black);
+      padding: var(--space-2); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0;
+    }
+    .badge {
+      display: inline-block; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 700;
+      padding: 0.1rem 0.45rem; border: 2px solid currentColor; background: var(--bg-ivory);
+    }
+    .badge[data-v="pass"] { color: var(--accent-emerald-dark); }
+    .badge[data-v="fail"] { color: var(--accent-rose); }
+    .badge[data-v="idle"], .badge[data-v="running"] { color: var(--text-charcoal); }
+    .summary {
+      font-family: var(--font-mono); font-size: 0.85rem; font-weight: 700;
+      padding: var(--space-3); border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black);
+      overflow-wrap: anywhere;
+    }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v160/deprecate-and-remove-webrtc-peer-connection-method/">&larr; Deprecate and remove WebRTC peer connection method</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · inspection</p>
+    <h1>Tone-buffer inspector</h1>
+    <p class="lede">Migrating off <code>createDTMFSender()</code> means relying on the spec&rsquo;s <code>RTCDTMFSender</code> rules directly. Each check below runs one of those rules on a real loopback call and records the browser&rsquo;s actual behaviour &mdash; exceptions, normalisation, timing clamps, the comma pause, buffer replacement, and which senders get a DTMF sender at all. Every check can fail.</p>
+  </header>
+
+  <div class="note" role="note">Timing checks measure the gap between successive <code>tonechange</code> events with <code>performance.now()</code>; a busy device adds jitter, so the tolerances are generous and the raw numbers are always shown.</div>
+
+  <div class="stage">
+    <div class="controls">
+      <button type="button" id="run-all">Run all checks</button>
+    </div>
+    <p class="summary" id="summary" role="status" aria-live="polite">No checks run yet.</p>
+    <ul class="checks" id="checks"></ul>
+  </div>
+
+  <section>
+    <h2>the rules being tested</h2>
+    <pre tabindex="0"><code>// WebRTC 1.0 §7.2 RTCDTMFSender
+dtmf.canInsertDTMF        // false until the transceiver currently sends
+dtmf.insertDTMF(tones, duration = 100, interToneGap = 70)
+  // !canInsertDTMF                    → InvalidStateError
+  // char outside 0-9 A-D # * ,        → InvalidCharacterError
+  // tones uppercased into toneBuffer
+  // duration clamped to [40, 6000] ms; interToneGap at least 30 ms
+  // ","  → 2000 ms pause
+  // a new call REPLACES whatever is still in toneBuffer
+  // tonechange fires per tone, then once with tone ""
+sender.dtmf               // null when the sender's kind is "video"</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Deprecate and remove WebRTC peer connection method</a> &mdash; feature index</li>
+      <li><a href="../removal-probe/">Removal probe</a></li>
+      <li><a href="../dtmf-keypad/">DTMF keypad (the replacement)</a></li>
+      <li><a href="../migration-shim/">Migration shim</a></li>
+      <li><a href="../ivr-decoder/">IVR decoder</a></li>
+      <li><a href="https://chromestatus.com/feature/5160724576993280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://w3c.github.io/webrtc-pc/#rtcdtmfsender" target="_blank" rel="noopener">Spec &mdash; RTCDTMFSender</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  (function () {
+    var checksEl = document.getElementById("checks");
+    var summary = document.getElementById("summary");
+    var runAll = document.getElementById("run-all");
+    var supported = typeof window.RTCPeerConnection === "function" && typeof window.RTCRtpSender === "function" && ("dtmf" in RTCRtpSender.prototype);
+
+    function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+    function waitConnected(pc, ms) {
+      return new Promise(function (resolve, reject) {
+        if (pc.connectionState === "connected") return resolve();
+        var t = setTimeout(function () { reject(new Error("timed out waiting for 'connected' (now '" + pc.connectionState + "')")); }, ms);
+        pc.addEventListener("connectionstatechange", function on() {
+          if (pc.connectionState === "connected") { clearTimeout(t); pc.removeEventListener("connectionstatechange", on); resolve(); }
+          else if (pc.connectionState === "failed") { clearTimeout(t); reject(new Error("connectionState 'failed'")); }
+        });
+      });
+    }
+
+    function silentTrack() {
+      var ac = new AudioContext();
+      var dest = ac.createMediaStreamDestination();
+      var osc = ac.createOscillator();
+      var g = ac.createGain();
+      g.gain.value = 0;
+      osc.connect(g).connect(dest);
+      osc.start();
+      return { ac: ac, stream: dest.stream, track: dest.stream.getAudioTracks()[0] };
+    }
+
+    // opts.direction: when set, use addTransceiver with that direction instead of addTrack.
+    async function loopback(opts) {
+      opts = opts || {};
+      var src = silentTrack();
+      await src.ac.resume();
+      var pc1 = new RTCPeerConnection();
+      var pc2 = new RTCPeerConnection();
+      pc1.onicecandidate = function (e) { if (e.candidate) pc2.addIceCandidate(e.candidate).catch(function () {}); };
+      pc2.onicecandidate = function (e) { if (e.candidate) pc1.addIceCandidate(e.candidate).catch(function () {}); };
+      var sender = opts.direction
+        ? pc1.addTransceiver(src.track, { direction: opts.direction }).sender
+        : pc1.addTrack(src.track, src.stream);
+      await pc1.setLocalDescription();
+      await pc2.setRemoteDescription(pc1.localDescription);
+      await pc2.setLocalDescription();
+      await pc1.setRemoteDescription(pc2.localDescription);
+      await waitConnected(pc1, 10000);
+      // canInsertDTMF can lag a tick behind "connected" (transport/DTMF readiness) — wait up to 3 s so controls never race it.
+      if (!opts.direction) await (async function (d) { for (var i = 0; i < 60 && d && !d.canInsertDTMF; i++) await new Promise(function (r) { setTimeout(r, 50); }); })(pc1.getSenders()[0].dtmf);
+      return {
+        pc1: pc1, pc2: pc2, sender: sender, dtmf: sender.dtmf, track: src.track,
+        close: function () { pc1.close(); pc2.close(); src.track.stop(); src.ac.close(); }
+      };
+    }
+
+    // Record tonechange events with timestamps until "" fires or timeout.
+    function record(dtmf, timeoutMs, onTone) {
+      return new Promise(function (resolve) {
+        var evs = [];
+        var t0 = performance.now();
+        var done = false;
+        var to = setTimeout(finish, timeoutMs);
+        function finish() { if (done) return; done = true; clearTimeout(to); dtmf.ontonechange = null; resolve(evs); }
+        dtmf.ontonechange = function (e) {
+          evs.push({ tone: e.tone, t: Math.round(performance.now() - t0) });
+          if (onTone) onTone(e.tone, evs);
+          if (e.tone === "") finish();
+        };
+      });
+    }
+
+    function fmt(evs) {
+      return evs.map(function (e) { return "+" + e.t + "ms " + (e.tone === "" ? "\"\"" : e.tone); }).join("  ");
+    }
+
+    var CHECKS = [
+      {
+        id: "can-before-negotiation",
+        title: "canInsertDTMF is false before negotiation",
+        rule: "A sender that is not yet sending cannot insert tones; insertDTMF must throw InvalidStateError.",
+        run: async function () {
+          var src = silentTrack();
+          var pc = new RTCPeerConnection();
+          var s = pc.addTrack(src.track, src.stream);
+          var can = s.dtmf.canInsertDTMF;
+          var err = "no throw";
+          try { s.dtmf.insertDTMF("1"); } catch (e) { err = e.name; }
+          pc.close(); src.track.stop(); src.ac.close();
+          return { pass: can === false && err === "InvalidStateError", obs: "canInsertDTMF=" + can + " · insertDTMF(\"1\") → " + err };
+        }
+      },
+      {
+        id: "invalid-character",
+        title: "Invalid characters throw InvalidCharacterError",
+        rule: "Only 0-9, A-D, #, * and comma are allowed.",
+        run: async function () {
+          var c = await loopback();
+          var err = "no throw";
+          try { c.dtmf.insertDTMF("12x"); } catch (e) { err = e.name; }
+          var buf = c.dtmf.toneBuffer;
+          c.close();
+          return { pass: err === "InvalidCharacterError" && buf === "", obs: "insertDTMF(\"12x\") → " + err + " · toneBuffer after=\"" + buf + "\"" };
+        }
+      },
+      {
+        id: "uppercase-normalisation",
+        title: "Lowercase a-d are normalised to uppercase",
+        rule: "toneBuffer stores the tones uppercased.",
+        run: async function () {
+          var c = await loopback();
+          c.dtmf.insertDTMF("abcd", 40, 30);
+          var buf = c.dtmf.toneBuffer;
+          c.close();
+          return { pass: buf === "ABCD", obs: "insertDTMF(\"abcd\") → toneBuffer=\"" + buf + "\"" };
+        }
+      },
+      {
+        id: "clamping",
+        title: "duration < 40 and gap < 30 are clamped up",
+        rule: "insertDTMF(\"111\", 10, 5) is clamped to a 40 ms tone + 30 ms gap, so tones must be spaced well beyond the requested 15 ms.",
+        run: async function () {
+          var c = await loopback();
+          var p = record(c.dtmf, 4000);
+          c.dtmf.insertDTMF("111", 10, 5);
+          var evs = await p;
+          c.close();
+          var ones = evs.filter(function (e) { return e.tone === "1"; });
+          var gaps = [];
+          for (var i = 1; i < ones.length; i++) gaps.push(ones[i].t - ones[i - 1].t);
+          var avg = gaps.length ? Math.round(gaps.reduce(function (a, b) { return a + b; }, 0) / gaps.length) : NaN;
+          return { pass: ones.length === 3 && avg >= 60, obs: fmt(evs) + "\nmean tone-to-tone interval: " + avg + " ms — unclamped would be 15 ms; the spec's duration + gap is 70 ms (this check passes on any clearly clamped interval ≥ 60 ms; Chromium has been observed at ≈ duration + 2 × gap)" };
+        }
+      },
+      {
+        id: "comma-pause",
+        title: "A comma pauses for two seconds",
+        rule: "\"1,2\" fires tonechange for 1, for \",\", then for 2 about 2000 ms later.",
+        run: async function () {
+          var c = await loopback();
+          var p = record(c.dtmf, 6000);
+          c.dtmf.insertDTMF("1,2", 40, 30);
+          var evs = await p;
+          c.close();
+          var comma = evs.find(function (e) { return e.tone === ","; });
+          var two = evs.find(function (e) { return e.tone === "2"; });
+          var d = comma && two ? two.t - comma.t : NaN;
+          return { pass: !!comma && !!two && d >= 1900 && d <= 2500, obs: fmt(evs) + "\n\",\" → \"2\": " + d + " ms" };
+        }
+      },
+      {
+        id: "buffer-replace",
+        title: "A new insertDTMF replaces the queued buffer",
+        rule: "Calling insertDTMF(\"9\") while \"123456\" plays discards the rest: 2-6 never play.",
+        run: async function () {
+          var c = await loopback();
+          var replaced = false;
+          var p = record(c.dtmf, 5000, function (tone) {
+            if (tone === "1" && !replaced) { replaced = true; c.dtmf.insertDTMF("9", 60, 40); }
+          });
+          c.dtmf.insertDTMF("123456", 60, 40);
+          var evs = await p;
+          c.close();
+          var seq = evs.map(function (e) { return e.tone; }).join("|");
+          var pass = seq.indexOf("9") !== -1 && seq.indexOf("2") === -1;
+          return { pass: pass, obs: fmt(evs) + "\nsequence: " + seq };
+        }
+      },
+      {
+        id: "recvonly-cannot-send",
+        title: "A recvonly audio transceiver cannot insert DTMF",
+        rule: "canInsertDTMF stays false when the transceiver never sends, even after the call connects.",
+        run: async function () {
+          var c = await loopback({ direction: "recvonly" });
+          var can = c.dtmf ? c.dtmf.canInsertDTMF : "dtmf is null";
+          c.close();
+          return { pass: can === false, obs: "direction=recvonly · connected · sender.dtmf.canInsertDTMF=" + can };
+        }
+      },
+      {
+        id: "video-sender-null",
+        title: "Video senders have no DTMF sender",
+        rule: "sender.dtmf is null for a video transceiver — the reason createDTMFSender() threw SyntaxError on non-audio tracks.",
+        run: async function () {
+          var pc = new RTCPeerConnection();
+          var t = pc.addTransceiver("video");
+          var v = t.sender.dtmf;
+          pc.close();
+          return { pass: v === null, obs: "addTransceiver(\"video\").sender.dtmf === " + (v === null ? "null" : Object.prototype.toString.call(v)) };
+        }
+      }
+    ];
+
+    var results = {};
+    CHECKS.forEach(function (ch) {
+      var li = document.createElement("li");
+      li.className = "check";
+      li.innerHTML = "<h3 id=\"h-" + ch.id + "\"></h3><p class=\"rule\"></p>" +
+        "<p><span class=\"badge\" data-v=\"idle\">not run</span></p>" +
+        "<pre class=\"obs\" aria-label=\"observed result\">—</pre>" +
+        "<button type=\"button\">Run this check</button>";
+      li.querySelector("h3").textContent = ch.title;
+      li.querySelector(".rule").textContent = ch.rule;
+      var btn = li.querySelector("button");
+      btn.setAttribute("aria-describedby", "h-" + ch.id);
+      btn.addEventListener("click", function () { runOne(ch, li).then(updateSummary); });
+      if (!supported) btn.disabled = true;
+      ch.li = li;
+      checksEl.appendChild(li);
+    });
+
+    async function runOne(ch, li) {
+      var badge = li.querySelector(".badge");
+      var obs = li.querySelector(".obs");
+      var btn = li.querySelector("button");
+      btn.disabled = true;
+      badge.dataset.v = "running";
+      badge.textContent = "running…";
+      try {
+        var r = await ch.run();
+        results[ch.id] = r.pass;
+        badge.dataset.v = r.pass ? "pass" : "fail";
+        badge.textContent = r.pass ? "matches spec" : "differs from spec";
+        obs.textContent = r.obs;
+      } catch (e) {
+        results[ch.id] = false;
+        badge.dataset.v = "fail";
+        badge.textContent = "could not run";
+        obs.textContent = e.name + ": " + e.message + " — press the button to retry.";
+      } finally {
+        btn.disabled = false;
+      }
+      window.showcaseTelemetry?.assert("inspector-" + ch.id, results[ch.id] === true, { obs: obs.textContent.slice(0, 200) });
+    }
+
+    function updateSummary() {
+      var ids = Object.keys(results);
+      var pass = ids.filter(function (k) { return results[k]; }).length;
+      summary.textContent = ids.length + "/" + CHECKS.length + " checks run · " + pass + " match the spec" +
+        (ids.length - pass ? " · " + (ids.length - pass) + " differ or could not run" : "") + ".";
+    }
+
+    if (!supported) {
+      runAll.disabled = true;
+      summary.textContent = "Unsupported: this browser has no RTCPeerConnection / RTCRtpSender.dtmf, so none of the checks can run.";
+      return;
+    }
+
+    runAll.addEventListener("click", async function () {
+      runAll.disabled = true;
+      runAll.setAttribute("aria-busy", "true");
+      summary.textContent = "Running all checks (about 10 seconds)…";
+      for (var i = 0; i < CHECKS.length; i++) {
+        await runOne(CHECKS[i], CHECKS[i].li);
+        await sleep(50);
+      }
+      updateSummary();
+      runAll.disabled = false;
+      runAll.removeAttribute("aria-busy");
+    });
+  })();
+</script>
+</body>
+</html>
