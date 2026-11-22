@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SharedWorkerConnectEventEmptyStringData — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.9rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    h1 { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<!--
+RESEARCH RECORD (weekly-hardening-builder, 2026-11-22)
+Feature id: 5142074717503488 · listing name "SharedWorkerConnectEventEmptyStringData" · milestone 160
+ChromeStatus type: "No developer-visible change" (interop fix). Owner blee@igalia.com, Blink>Workers,
+  bug https://crbug.com/583449815. Firefox + Safari stable already pass the WPT.
+Spec (HTML, both places a connect event is fired):
+  - "run a worker" step: "If is shared is true, then queue a global task on the DOM manipulation task
+    source given worker global scope to fire an event named connect at worker global scope, using
+    MessageEvent, with the data attribute initialized to the empty string, the ports attribute
+    initialized to a new frozen array containing inside port, and the source attribute initialized
+    to inside port."  (FIRST connection: a brand-new SharedWorkerGlobalScope)
+  - SharedWorker(scriptURL, options) constructor, "worker global scope is not null" branch:
+    "...fire an event named connect at workerGlobalScope, using MessageEvent, with the data attribute
+    initialized to the empty string, the ports attribute initialized to a new frozen array containing
+    only insidePort, and the source attribute initialized to insidePort."  (EVERY LATER connection)
+Chromium implementation (third_party/blink/renderer/core/workers/shared_worker_global_scope.cc,
+  SharedWorkerGlobalScope::Connect, read via gitiles 2026-11-22):
+  if RuntimeEnabledFeatures::SharedWorkerConnectEventEmptyStringDataEnabled():
+     MessageEvent::Create(); initMessageEvent(connect, bubbles=false, cancelable=false,
+     data=g_empty_string, origin=null, lastEventId=String(), source=port, ports=[port])
+  else (legacy): MessageEvent::Create(ports, origin=null, String(), port) + initEvent(connect) —
+     data left in its "none" state, which the data getter exposes as null.
+  TODO in source: remove the legacy MessageEvent::Create(ports, origin, last_event_id, source)
+  constructor once the flag is removed (it has no other caller).
+Blink runtime feature (runtime_enabled_features.json5, gitiles main 2026-11-22):
+  name "SharedWorkerConnectEventEmptyStringData", status "stable" — on by default in 160, a
+  kill switch only. No chrome://flags entry. Finch name identical. To reproduce the OLD behaviour on
+  160+: --disable-blink-features=SharedWorkerConnectEventEmptyStringData.
+WPT: workers/constructors/SharedWorker/connect-event.html (+ connect-event.js) asserts
+  e.data === '', e instanceof MessageEvent, e.ports.length == 1.
+Ground truth in this container (Chrome for Testing 153, headless, 2026-11-22): real connect event
+  data === null (typeof "object"), origin "", lastEventId "", ports.length 1, Object.isFrozen(ports)
+  true, source === ports[0], bubbles false, cancelable false, isTrusted true. Passing
+  --enable-blink-features=SharedWorkerConnectEventEmptyStringData to 153 changes nothing (the feature
+  does not exist in that build). Blob-URL shared workers report the same null.
+  new MessageEvent('connect') — the constructor's MessageEventInit default for data is null and is
+  NOT changed by this feature: only the UA-fired event changes.
+Use-case portfolio:
+  1. basic/canonical + inspection → connect-event-inspector (connect a real SharedWorker, fresh or
+     existing, and read every MessageEvent field of the UA-fired connect event, with a verdict)
+  2. practical product → connection-hub (multi-connection presence hub: every connect, first from
+     "run a worker" and later from the constructor path, is logged with its data — the spec change
+     covers both algorithms; open more tabs to watch it)
+  3. edge/failure/migration → null-sentinel-migration (eight real-world handler patterns run against
+     the REAL event inside the worker; shows which ones flip branch between 159 and 160 and the
+     pattern that is stable on both)
+  4. advanced composition / tooling → synthetic-connect-fidelity (test fakes: build connect events
+     with new MessageEvent(...) and diff them field by field against the real one — which fake
+     matches 160, which matches 159, and the field no fake can match: isTrusted)
+  5. configuration tooling (flags) → no separate page: the feature has no configuration surface;
+     the kill-switch flag is documented on every page instead.
+-->
+<main>
+  <p class="crumbs"><a href="/v160/">&larr; Chrome 160</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · dom · workers · interop fix</p>
+    <h1>SharedWorkerConnectEventEmptyStringData</h1>
+    <p class="lede">Every time a page connects to a <code>SharedWorker</code>, the browser fires a <code>connect</code> <code>MessageEvent</code> inside the worker. The HTML spec says that event&rsquo;s <code>data</code> is <strong>the empty string</strong>. Chrome&nbsp;159 and earlier left it as <code>null</code>; Chrome&nbsp;160 initialises it to <code>""</code>, matching the spec, Firefox and Safari. The handshake itself (<code>ports</code>, <code>source</code>) is unchanged &mdash; but any worker code that branched on <code>e.data === null</code>, defaulted with <code>??</code>, or routed on <code>typeof e.data</code> now takes a different path.</p>
+  </header>
+
+  <p class="note">No flag needed: in Chrome&nbsp;160 the Blink runtime feature <code>SharedWorkerConnectEventEmptyStringData</code> is <em>stable</em> (on by default). It is a kill switch only &mdash; there is no <code>chrome://flags</code> entry. To reproduce the old <code>null</code> behaviour on 160+ for testing, launch Chrome with <code>--disable-blink-features=SharedWorkerConnectEventEmptyStringData</code>. Every demo below runs a real <code>SharedWorker</code> and reads the real, browser-fired event &mdash; nothing is simulated.</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./connect-event-inspector/">Connect event inspector</a></h3>
+      <p>Connect to a real shared worker &mdash; a brand-new one or the one already running &mdash; and read every field of the browser-fired <code>connect</code> event back: <code>data</code> and its <code>typeof</code>, <code>origin</code>, <code>lastEventId</code>, the frozen <code>ports</code> array, <code>source&nbsp;===&nbsp;ports[0]</code>, <code>isTrusted</code>. A verdict tells you whether this browser follows the spec.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./connection-hub/">Connection hub</a></h3>
+      <p>A practical presence hub: every page (and every tab) that connects is logged by the worker with the <code>data</code> of its own <code>connect</code> event. The first connection comes from &ldquo;run a worker&rdquo;, later ones from the <code>SharedWorker</code> constructor &mdash; the spec says <code>""</code> for both, and the roster shows it per connection.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./null-sentinel-migration/">Null-sentinel migration</a></h3>
+      <p>Eight handler patterns found in real worker code, executed against the real event inside the worker. <code>e.data&nbsp;===&nbsp;null</code>, <code>e.data&nbsp;??&nbsp;default</code> and <code>typeof&nbsp;e.data&nbsp;===&nbsp;'object'</code> flip branch between Chrome&nbsp;159 and 160; <code>!e.data</code> and <code>e.type&nbsp;===&nbsp;'connect'</code> don&rsquo;t. See what your browser does and what to migrate to.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./synthetic-connect-fidelity/">Synthetic connect fidelity</a></h3>
+      <p>For test harnesses that fake <code>connect</code> events: build candidates with <code>new MessageEvent('connect', init)</code> inside the worker and diff them field by field against the real one. The constructor&rsquo;s default <code>data</code> is still <code>null</code> &mdash; only the browser-fired event changed &mdash; so a fake must pass <code>data:&nbsp;""</code> to match Chrome&nbsp;160.</p>
+    </li>
+  </ol></section>
+
+  <section>
+    <h2>why it shipped</h2>
+    <p>The spec has always said the <code>connect</code> event&rsquo;s <code>data</code> is the empty string. Chromium created that event through a special-purpose <code>MessageEvent</code> constructor that never set <code>data</code>, so the getter returned <code>null</code> and Chrome failed <a href="https://wpt.fyi/results/workers/constructors/SharedWorker/connect-event.html" target="_blank" rel="noopener">WPT <code>connect-event.html</code></a> while Firefox and Safari passed. Chrome&nbsp;160 builds the event with <code>initMessageEvent(&hellip;, data = "", &hellip;)</code> instead. Interop risk is low because almost nobody reads <code>data</code> on <code>connect</code> &mdash; but code that does, and only ever ran in Chrome, changes behaviour.</p>
+  </section>
+
+  <section>
+    <h2>the API</h2>
+    <pre tabindex="0"><code>// shared-worker.js
+onconnect = (e) =&gt; {
+  e.data;               // Chrome ≤159: null     Chrome 160+: ""  (Firefox, Safari: "")
+  typeof e.data;        // "object"              "string"
+  e.ports.length;       // 1  — unchanged
+  e.source === e.ports[0]; // true — unchanged
+  const port = e.ports[0]; // the robust way to handle a connection
+};
+
+// page.js
+const worker = new SharedWorker("shared-worker.js", { name: "hub" });
+worker.port.postMessage("hi");</code></pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5142074717503488" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/workers.html#run-a-worker" target="_blank" rel="noopener">HTML &mdash; run a worker (first connect event)</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/workers.html#dom-sharedworker" target="_blank" rel="noopener">HTML &mdash; SharedWorker constructor (later connect events)</a></li>
+      <li><a href="https://crbug.com/583449815" target="_blank" rel="noopener">crbug.com/583449815 &mdash; implementation bug</a></li>
+      <li><a href="https://github.com/web-platform-tests/wpt/blob/master/workers/constructors/SharedWorker/connect-event.html" target="_blank" rel="noopener">WPT: workers/constructors/SharedWorker/connect-event.html</a></li>
+      <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/core/workers/shared_worker_global_scope.cc" target="_blank" rel="noopener">Chromium: SharedWorkerGlobalScope::Connect</a></li>
+      <li><a href="https://developer.mozilla.org/docs/Web/API/SharedWorkerGlobalScope/connect_event" target="_blank" rel="noopener">MDN: SharedWorkerGlobalScope connect event</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
