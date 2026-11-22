@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Download on a constrained device — Translator API on Android — Chrome 161</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { background: var(--bg-stone); border: 2px solid var(--border-black); border-left: 8px solid var(--accent-amber); padding: var(--space-3); margin: var(--space-4) 0; font-size: 0.9rem; overflow-wrap: anywhere; }
+    .stage { border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); background: var(--bg-paper); padding: var(--space-4); margin: var(--space-4) 0; }
+    .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); gap: var(--space-3); align-items: end; }
+    label { display: block; font-weight: 600; margin-bottom: var(--space-1); }
+    select { width: 100%; min-height: 44px; font: inherit; padding: 0 var(--space-2); border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+    .controls button { min-height: 44px; }
+    button.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    button:focus-visible, select:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    dl.signals { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: var(--space-2); margin: 0; }
+    dl.signals div { border: 1px solid var(--border-black); background: var(--bg-stone); padding: var(--space-2) var(--space-3); }
+    dl.signals dt { font-size: 0.8rem; color: var(--text-charcoal); font-family: var(--font-mono); }
+    dl.signals dd { margin: 0; font-weight: 700; overflow-wrap: anywhere; }
+    .decision { border: 2px solid var(--border-black); border-left: 8px solid var(--accent-blue); background: var(--bg-ivory); padding: var(--space-3); margin-top: var(--space-3); }
+    .readout { font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); margin-top: var(--space-3); overflow-wrap: anywhere; }
+    progress { width: 100%; accent-color: var(--accent-blue); height: 1rem; }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v161/translator-api-on-android/">&larr; Translator API on Android</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v161 · concept 2 · inspection tool</p>
+    <h1>Download on a constrained device</h1>
+    <p class="lede">On desktop, a language-pack download is usually invisible. On a phone it might use metered data, run into Save-Data, or compete for storage. The spec leaves Chrome free to refuse a download under storage pressure (&sect;7.1). This page reads the signals a page actually has, makes a decision, and downloads only when you tap the button that says so.</p>
+  </header>
+
+  <div class="warn-block" role="note" id="banner">Checking whether <code>Translator</code> is exposed&hellip;</div>
+
+  <section>
+    <h2>1 · device signals (read live)</h2>
+    <div class="stage">
+      <dl class="signals" id="signals"><div><dt>status</dt><dd>reading…</dd></div></dl>
+      <div class="controls"><button type="button" id="reread" class="secondary">Re-read signals</button></div>
+      <p class="note">These are hints, not measurements of free disk. <code>storage.estimate()</code> is this origin's quota, not the model store, and <code>deviceMemory</code> is rounded and capped. Chrome doesn't tell a page the pack size.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>2 · decide for a language pair</h2>
+    <div class="stage">
+      <div class="row">
+        <div><label for="src">Source</label><select id="src"><option value="es">Spanish (es)</option><option value="en">English (en)</option><option value="hi">Hindi (hi)</option><option value="ja">Japanese (ja)</option><option value="pt">Portuguese (pt)</option></select></div>
+        <div><label for="tgt">Target</label><select id="tgt"><option value="en">English (en)</option><option value="es">Spanish (es)</option><option value="hi">Hindi (hi)</option><option value="fr">French (fr)</option><option value="de">German (de)</option></select></div>
+      </div>
+      <div class="controls"><button type="button" id="decide">Check &amp; decide</button></div>
+      <div class="decision" id="decision" role="status" aria-live="polite">No decision yet. Press &ldquo;Check &amp; decide&rdquo;.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>3 · download only on an explicit tap</h2>
+    <div class="stage">
+      <p>Tapping <strong>Download language pack</strong> calls <code>Translator.create()</code> inside your tap. If the pack isn't on the device, this <em>will</em> download it. It stays installed for the whole browser profile.</p>
+      <label for="prog">Download progress</label>
+      <progress id="prog" max="1" value="0" aria-describedby="dlstatus">0%</progress>
+      <div class="controls">
+        <button type="button" id="download" disabled>Download language pack</button>
+        <button type="button" id="cancel" class="secondary" disabled>Cancel</button>
+        <button type="button" id="testTranslate" class="secondary" disabled>Translate a test sentence</button>
+        <button type="button" id="release" class="secondary" disabled>Release translator (destroy)</button>
+      </div>
+      <div class="readout" id="dlstatus" role="status" aria-live="polite">Run &ldquo;Check &amp; decide&rdquo; first.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>the code</h2>
+<pre tabindex="0"><code>const c = navigator.connection;
+const metered = c?.saveData || ["slow-2g", "2g", "3g"].includes(c?.effectiveType) || c?.type === "cellular";
+const state = await Translator.availability({ sourceLanguage, targetLanguage });
+if (state === "downloadable" &amp;&amp; metered) showAskFirst();   // never auto-download on cellular
+
+downloadButton.onclick = async () =&gt; {           // transient user activation
+  const ac = new AbortController(); cancelButton.onclick = () =&gt; ac.abort();
+  translator = await Translator.create({ sourceLanguage, targetLanguage, signal: ac.signal,
+    monitor: (m) =&gt; m.addEventListener("downloadprogress", (e) =&gt; progress.value = e.loaded) });
+};</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../availability-states/">Availability states on this device</a></li>
+      <li><a href="../memory-and-input-limits/">Memory &amp; input limits</a>: what happens after the download</li>
+      <li><a href="https://developer.chrome.com/docs/ai/inform-users-of-model-download" target="_blank" rel="noopener">Chrome: Inform users of model download</a></li>
+      <li><a href="https://webmachinelearning.github.io/writing-assistance-apis/#privacy-availability-eviction" target="_blank" rel="noopener">Spec: download eviction and disk space</a></li>
+      <li><a href="https://chromestatus.com/feature/5106126157905920" target="_blank" rel="noopener">ChromeStatus entry (5106126157905920)</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const exposed = typeof Translator === "function" && typeof Translator.create === "function";
+  const KNOWN = ["available", "downloadable", "downloading", "unavailable"];
+  $("banner").innerHTML = exposed
+    ? "<strong>Translator is exposed.</strong> Signals and availability below are live. The only control that can download is the clearly labelled button in section 3."
+    : "<strong>Translator is not exposed here</strong> (<code>typeof Translator</code> = <code>" + esc(typeof self.Translator) + "</code>). On Chrome for Android it's on by default from 161; on older Android builds, launch with <code>--enable-features=TranslationAPI</code> or <code>--enable-blink-features=TranslationAPI</code> (no chrome://flags entry). The device signals still read live, but the decision will be &ldquo;no on-device translation&rdquo;.";
+
+  let signals = {};
+  async function readSignals() {
+    const c = navigator.connection;
+    signals = {
+      effectiveType: c?.effectiveType ?? "not exposed",
+      type: c?.type ?? "not exposed",
+      saveData: c ? String(!!c.saveData) : "not exposed",
+      downlink: c?.downlink != null ? `${c.downlink} Mb/s (estimate)` : "not exposed",
+      deviceMemory: navigator.deviceMemory != null ? `${navigator.deviceMemory} GB (rounded)` : "not exposed",
+      onLine: String(navigator.onLine),
+      mobile: navigator.userAgentData ? String(navigator.userAgentData.mobile) : "not exposed",
+      quota: "reading…",
+    };
+    try {
+      const est = await navigator.storage.estimate();
+      signals.quota = `${(est.usage / 1048576).toFixed(1)} MiB used of ${(est.quota / 1048576).toFixed(0)} MiB origin quota`;
+    } catch (e) { signals.quota = `estimate() threw ${e.name}`; }
+    $("signals").innerHTML = Object.entries({
+      "connection.effectiveType": signals.effectiveType, "connection.type": signals.type, "connection.saveData": signals.saveData,
+      "connection.downlink": signals.downlink, "navigator.deviceMemory": signals.deviceMemory, "navigator.onLine": signals.onLine,
+      "userAgentData.mobile (layout hint only)": signals.mobile, "storage.estimate()": signals.quota,
+    }).map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("");
+    return signals;
+  }
+  readSignals();
+  $("reread").addEventListener("click", async () => { await readSignals(); $("decision").textContent = "Signals re-read. Press “Check & decide” to update the decision."; });
+  addEventListener("online", readSignals); addEventListener("offline", readSignals);
+  navigator.connection?.addEventListener?.("change", readSignals);
+
+  let lastState = null, translator = null, ac = null;
+  function constrained() {
+    const c = navigator.connection;
+    const why = [];
+    if (c?.saveData) why.push("Save-Data is on");
+    if (["slow-2g", "2g", "3g"].includes(c?.effectiveType)) why.push(`effective connection is ${c.effectiveType}`);
+    if (c?.type === "cellular") why.push("connection type is cellular");
+    if (navigator.deviceMemory != null && navigator.deviceMemory <= 2) why.push(`deviceMemory is ${navigator.deviceMemory} GB (each loaded pair holds ~80 MiB on Android)`);
+    if (!navigator.onLine) why.push("the device is offline");
+    return why;
+  }
+
+  $("decide").addEventListener("click", async () => {
+    const s = $("src").value, t = $("tgt").value;
+    await readSignals();
+    $("decision").textContent = `Checking ${s} → ${t}…`;
+    if (!exposed) {
+      lastState = "not exposed";
+      $("decision").innerHTML = "<strong>Decision: no on-device translation.</strong> The API isn't exposed, so keep the original text, or use your own server translation <em>with</em> the user's consent.";
+      $("download").disabled = true;
+      $("dlstatus").textContent = "Download disabled: Translator isn't exposed in this browser.";
+      window.showcaseTelemetry?.assert("translator-android-decision-fallback", true, { branch: "not-exposed" });
+      return;
+    }
+    try {
+      lastState = await Promise.race([Translator.availability({ sourceLanguage: s, targetLanguage: t }), new Promise((_, r) => setTimeout(() => r(new Error("availability() gave no answer in 10 s")), 10000))]);
+    } catch (e) { lastState = `error: ${e.message}`; }
+    const why = constrained();
+    let verdict;
+    if (lastState === "available") verdict = "<strong>Translate now.</strong> The pack is already on the device, so no data is used and it works offline.";
+    else if (lastState === "downloadable" || lastState === "downloading") {
+      verdict = why.length
+        ? `<strong>Ask first, or wait.</strong> A download would be needed and ${esc(why.join("; "))}. Offer &ldquo;Download on Wi-Fi&rdquo; and keep the original text for now.`
+        : "<strong>Offer the download.</strong> Nothing here suggests a constrained connection, but it's still a download, so it happens on the user's tap and nothing else.";
+    } else if (lastState === "unavailable") verdict = "<strong>Don't offer translation.</strong> The pair is unsupported, or policy or permissions policy blocks it.";
+    else verdict = `<strong>Unknown state (${esc(lastState)}).</strong> Log it; don't guess.`;
+    $("decision").innerHTML = `availability → <code>${esc(lastState)}</code><br>${verdict}`;
+    const canCreate = lastState === "available" || lastState === "downloadable" || lastState === "downloading";
+    $("download").disabled = !canCreate || !!ac;
+    $("download").textContent = lastState === "available" ? "Create translator (already on device)" : "Download language pack";
+    $("dlstatus").textContent = canCreate ? "Ready. Nothing happens until you tap the button above." : "Download disabled: this pair can't be created.";
+    window.showcaseTelemetry?.assert("translator-android-decision-made", KNOWN.includes(lastState) || String(lastState).startsWith("error"), { state: KNOWN.includes(lastState) ? lastState : "other", constrainedSignals: why.length });
+  });
+
+  $("download").addEventListener("click", async () => {
+    const s = $("src").value, t = $("tgt").value;
+    ac = new AbortController();
+    $("download").disabled = true; $("cancel").disabled = false;
+    const prog = $("prog"); prog.removeAttribute("value"); // indeterminate until the first event
+    let events = 0;
+    const started = performance.now();
+    const watchdog = setInterval(() => {
+      const secs = ((performance.now() - started) / 1000).toFixed(0);
+      if (!events) $("dlstatus").textContent = `Waiting for the browser: ${secs}s, no downloadprogress events yet. This is real: it isn't stuck in the page. Cancel any time.`;
+    }, 1000);
+    $("dlstatus").textContent = "create() called inside your tap…";
+    try {
+      translator = await Translator.create({
+        sourceLanguage: s, targetLanguage: t, signal: ac.signal,
+        monitor(m) { m.addEventListener("downloadprogress", (e) => { events++; prog.value = e.loaded; $("dlstatus").textContent = `downloadprogress: ${(e.loaded * 100).toFixed(0)}% (event ${events})`; }); },
+      });
+      prog.value = 1;
+      $("dlstatus").textContent = `Translator ready (${translator.sourceLanguage} → ${translator.targetLanguage}) after ${((performance.now() - started) / 1000).toFixed(1)} s, ${events} progress event(s). inputQuota = ${translator.inputQuota}.`;
+      $("testTranslate").disabled = false; $("release").disabled = false;
+      window.showcaseTelemetry?.assert("translator-android-create-success", true, { events });
+    } catch (e) {
+      prog.value = 0;
+      const hint = { AbortError: "You cancelled. Nothing more is fetched for this request.", NotAllowedError: "The browser wanted a fresh user gesture, or the user or browser declined the download.", NetworkError: "The download failed (offline or blocked). Retry on a better connection.", NotSupportedError: "Chrome can't create this pair: unsupported, policy, disk space or service limits. Check the console warning for the reason." }[e.name] || "Unexpected failure.";
+      $("dlstatus").textContent = `create() rejected: ${e.name}: ${e.message}. ${hint} You can retry.`;
+      window.showcaseTelemetry?.assert("translator-android-create-fallback", true, { error: e.name });
+      $("download").disabled = false; $("download").textContent = "Retry download";
+    } finally {
+      clearInterval(watchdog); ac = null; $("cancel").disabled = true;
+    }
+  });
+  $("cancel").addEventListener("click", () => { ac?.abort(); $("dlstatus").textContent = "Abort requested…"; });
+  $("testTranslate").addEventListener("click", async () => {
+    if (!translator) return;
+    try {
+      const sample = { es: "¿Dónde está la parada del autobús?", en: "Where is the bus stop?", hi: "बस स्टॉप कहाँ है?", ja: "バス停はどこですか？", pt: "Onde fica o ponto de ônibus?" }[translator.sourceLanguage] || "Hello";
+      const t0 = performance.now();
+      const r = await translator.translate(sample);
+      $("dlstatus").textContent = `translate("${sample}") → "${r}" in ${(performance.now() - t0).toFixed(0)} ms, on-device.`;
+      window.showcaseTelemetry?.assert("translator-android-translate-returned-string", typeof r === "string", {});
+    } catch (e) { $("dlstatus").textContent = `translate() rejected: ${e.name}: ${e.message}`; }
+  });
+  $("release").addEventListener("click", () => {
+    translator?.destroy(); translator = null;
+    $("testTranslate").disabled = true; $("release").disabled = true;
+    $("dlstatus").textContent = "translator.destroy() called. The page no longer holds the model. On Android, Chrome unloads an idle pair after a minute anyway.";
+    $("download").disabled = false; $("download").textContent = "Create translator again";
+  });
+})();
+</script>
+</body>
+</html>

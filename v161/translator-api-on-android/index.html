@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Translator API on Android — Chrome 161 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      border-left: 8px solid var(--accent-amber);
+      padding: var(--space-3);
+      margin: var(--space-4) 0;
+      font-size: 0.95rem;
+      overflow-wrap: anywhere;
+    }
+    .warn-block code { white-space: normal; }
+    table.limits { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+    table.limits th, table.limits td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: left; vertical-align: top; }
+    table.limits th { background: var(--bg-stone); }
+    .table-scroll { overflow-x: auto; }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<!--
+RESEARCH RECORD (weekly-hardening-builder, 2026-11-22)
+Feature id 5106126157905920 · listing name "Translator API on Android" · milestone 161.
+ChromeStatus: "Exposes the Translator JavaScript Web API on Chrome for Android (including Chrome Custom
+  Tabs) ... The TranslatorAPIAllowed enterprise policy is supported on Android to disable the API and
+  prevent model downloads." browsers.chrome.android = 161, desktop = null (desktop shipped in 138 under
+  feature 5172811302961152, demoed at /v131 /v138 /v148 translator-api).
+Spec: https://webmachinelearning.github.io/translation-api/#translator-api (IDL re-read 2026-11-22):
+  static availability(TranslatorCreateCoreOptions) -> Promise<Availability>
+  static create(TranslatorCreateOptions{sourceLanguage, targetLanguage, signal, monitor})
+  translate(), translateStreaming(), measureInputUsage(), inputQuota, sourceLanguage, targetLanguage,
+  destroy() (DestroyableModel). Policy-controlled feature "translator", default allowlist 'self'.
+  Availability enum (Writing Assistance APIs §shared infra): "unavailable" | "downloadable" |
+  "downloading" | "available". create() when availability is downloadable/downloading requires
+  TRANSIENT user activation (NotAllowedError otherwise) and consumes it; monitor fires
+  downloadprogress ProgressEvents (loaded 0..1, total 1); NetworkError on download failure;
+  NotSupportedError for unavailable. Privacy: UAs may mask "available" as "downloadable" and may fake
+  a download (§6.2 Sensitive language availability). Disk space §7.1.
+Chromium source (gitiles main, 2026-11-22):
+  runtime_enabled_features.json5: TranslationAPI status {Win,Mac,Linux,ChromeOS: stable, default: ""},
+    base_feature_status enabled, copied_from_base_feature_if overridden -> on an Android build before the
+    launch, --enable-features=TranslationAPI (or --enable-blink-features=TranslationAPI) exposes it.
+    There is NO chrome://flags entry (about_flags.cc has none). It is NOT experimental, so
+    --enable-experimental-web-platform-features does not turn it on.
+  components/on_device_translation/features.cc — ANDROID-ONLY params on kTranslationAPI:
+    TranslationAPIModelIdleUnloadTimeout = 1 minute on Android (0 elsewhere): "holding about 79 to
+      84 MiB per loaded language pair in the service process".
+    TranslationAPIMaxInputSizeBytes = 256 * 1024 on Android (0 = unlimited elsewhere); enforced in
+      components/on_device_translation/translator.cc VerifyPrerequisites() on input.size() (UTF-8
+      bytes) -> kErrorInputTooLarge -> QuotaExceededError("The input is too large.", {requested, quota})
+      (third_party/blink/renderer/modules/ai/exception_helpers.cc).
+  blink translator.cc: inputQuota returns +Infinity and measureInputUsage resolves 0 on EVERY
+    platform — so the Android byte cap is not discoverable through those two members.
+  create_translator_client.cc: availability "unavailable" -> NotSupportedError + console warning
+    naming the reason (kDisallowedByPolicy -> "The translation is disallowed by policy.",
+    kNotEnoughDiskSpace, kExceedsServiceCountLimitation ...); downloadable without transient
+    activation -> NotAllowedError 'Requires a user gesture when availability is "downloading" or
+    "downloadable".'
+Ground truth in this container (Chrome for Testing 153, Linux headless, 2026-11-22):
+  availability en->fr / en->ja = "downloadable"; en->kl and en->en = "unavailable"; invalid tag ->
+  RangeError; missing targetLanguage -> TypeError; iframe allow="translator 'none'" -> availability
+  "unavailable" and create NotAllowedError; pre-aborted signal -> AbortError; create() with no
+  gesture -> NotAllowedError only after several seconds (so every create needs a watchdog);
+  create() with a gesture -> download starts but produced no progress within 15 s (no network
+  component download in the sandbox). The success path (translate on a real Android phone) could
+  not be exercised here.
+Use-case portfolio (Android angle; desktop canonical demos already exist):
+  1 basic/canonical   -> availability-states (raw availability per pair, masking, LanguageDetector pairing)
+  2 inspection/config -> download-on-a-constrained-device (connection/saveData/deviceMemory/storage +
+                         availability -> download decision; consent-gated create with progress/cancel/retry)
+  3 edge/limits       -> memory-and-input-limits (256 KiB UTF-8 cap, chunk planner, inputQuota/measureInputUsage
+                         truth, idle-unload cold vs warm latency)
+  4 edge/failure      -> failure-and-policy-gates (no-gesture NotAllowedError, permissions-policy iframe,
+                         RangeError/TypeError/NotSupportedError/AbortError, enterprise policy signature)
+  5 practical + composition -> offline-chat-composer (mobile chat composer; LanguageDetector + Translator,
+                         sticky composer with safe-area/dvh, IME-safe Enter, onLine state)
+-->
+<main>
+  <p class="crumbs"><a href="/v161/">&larr; Chrome 161</a></p>
+
+  <aside class="lineage-note">
+    <p class="lineage-head">Android availability listing</p>
+    <p>The <code>Translator</code> API itself shipped on desktop in Chrome 138 and is demonstrated in depth elsewhere on this site. This folder is only about what changes when the same API arrives on <strong>Chrome for Android</strong> (and Chrome Custom Tabs): which availability states a phone reports, how a page should handle a language-pack download on a metered, storage-constrained device, the Android-only memory and input limits, the enterprise policy, and a phone-first UI.</p>
+    <ul class="lineage-links">
+      <li><a href="/v138/translator-api/">Chrome 138 · Translator API</a> · desktop launch</li>
+      <li><a href="/v148/translator-api/">Chrome 148 · Translator API</a> · eight more desktop demos</li>
+      <li><a href="/v157/language-detector-api-on-android/">Chrome 157 · Language Detector API on Android</a> · the companion API</li>
+    </ul>
+  </aside>
+
+  <header class="lede-block">
+    <p class="eyebrow">v161 · built-in ai · android</p>
+    <h1>Translator API on Android</h1>
+    <p class="lede">Chrome for Android 161 exposes the <code>Translator</code> API, so a mobile web app can translate text with an on-device model, without sending it to a cloud endpoint. It's the same API as on desktop. The phone is what changes: the language pack has to be downloaded over a connection that may be metered, the translation service shares a phone's memory, and an admin can switch the whole thing off with the <code>TranslatorAPIAllowed</code> policy. These demos make those differences visible, and none of them ever downloads a model unless you tap a button that says it will.</p>
+  </header>
+
+  <div class="warn-block" role="note">
+    <p><strong>Running these demos.</strong> On Chrome 161+ for Android, and on Chrome desktop 138+, <code>Translator</code> is on by default. On an older Android build, launch Chrome with <code>--enable-features=TranslationAPI</code> (or <code>--enable-blink-features=TranslationAPI</code>). There's no <code>chrome://flags</code> entry. <code>--enable-experimental-web-platform-features</code> does <em>not</em> turn it on, because the feature isn't marked experimental. A managed device can also disable it with the <a href="https://chromeenterprise.google/policies/translator-api-allowed/" target="_blank" rel="noopener">TranslatorAPIAllowed</a> policy. Every page reports the value the browser actually returned.</p>
+  </div>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./availability-states/">Availability states on this device</a></h3>
+      <p>The basic call. Pick a language pair and read the raw <code>Translator.availability()</code> result: <code>available</code>, <code>downloadable</code>, <code>downloading</code> or <code>unavailable</code>. For each one the page says what a mobile app should do next. It also shows why <code>downloadable</code> can be a privacy mask, and checks the companion <code>LanguageDetector</code> that shipped on Android in 157.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./download-on-a-constrained-device/">Download on a constrained device</a></h3>
+      <p>An inspection tool that reads the real signals a phone page has: <code>navigator.connection</code> (including Save-Data), <code>deviceMemory</code>, <code>storage.estimate()</code> and <code>onLine</code>. It combines them with availability to decide whether to translate now, ask first, or wait for Wi-Fi. The download itself needs your tap, with a <code>&lt;progress&gt;</code> bar fed by <code>downloadprogress</code>, plus cancel and retry.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./memory-and-input-limits/">Memory &amp; input limits</a></h3>
+      <p>Android-only limits from the Chromium source: each <code>translate()</code> call is capped at 256 KiB of UTF-8, and going over throws <code>QuotaExceededError</code>, while <code>inputQuota</code> still reports Infinity. An idle language pair (about 80 MiB) is unloaded after a minute. Includes a byte-accurate chunk planner and a timer for the slower first call after an idle unload.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./failure-and-policy-gates/">Failure &amp; policy gates</a></h3>
+      <p>Every way <code>create()</code> refuses, each run for real and none of them downloading anything: no user gesture (<code>NotAllowedError</code>), an iframe denied by <code>allow="translator 'none'"</code>, a bad language tag (<code>RangeError</code>), an unsupported pair (<code>NotSupportedError</code>) and an aborted signal (<code>AbortError</code>). Also shows what the <code>TranslatorAPIAllowed</code> enterprise policy looks like from inside a page.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./offline-chat-composer/">Offline chat composer</a></h3>
+      <p>A practical example: a phone-first support chat where your message is language-detected with <code>LanguageDetector</code> and translated with <code>Translator</code> before it leaves the device. The composer is sticky and keeps clear of the safe area, Enter is IME-safe, and the offline state is shown. If the model isn't on the device, the message is sent clearly labelled as untranslated. There's no fake translation.</p>
+    </li>
+  </ol></section>
+
+  <section>
+    <h2>what is different on Android (from the Chromium source)</h2>
+    <div class="table-scroll" tabindex="0" role="region" aria-label="Android vs desktop limits table">
+    <table class="limits">
+      <thead><tr><th scope="col">Parameter on <code>kTranslationAPI</code></th><th scope="col">Android</th><th scope="col">Desktop</th><th scope="col">What a page sees</th></tr></thead>
+      <tbody>
+        <tr><td><code>TranslationAPIMaxInputSizeBytes</code></td><td>256 KiB (262,144 bytes) per call</td><td>0 (no cap)</td><td><code>translate()</code> rejects with <code>QuotaExceededError</code> (<code>requested</code>, <code>quota</code>); <code>inputQuota</code> is still <code>Infinity</code></td></tr>
+        <tr><td><code>TranslationAPIModelIdleUnloadTimeout</code></td><td>1 minute</td><td>never</td><td>the first call after a minute idle reloads about 79&ndash;84 MiB per language pair, so it takes longer</td></tr>
+        <tr><td>Runtime flag <code>TranslationAPI</code></td><td>default-on from 161</td><td>stable since 138</td><td><code>typeof Translator</code></td></tr>
+        <tr><td><code>TranslatorAPIAllowed</code> policy</td><td>supported from 161</td><td>supported</td><td>every pair is <code>unavailable</code>; <code>create()</code> throws <code>NotSupportedError</code> and logs the console warning &ldquo;The translation is disallowed by policy.&rdquo;</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>the API</h2>
+<pre tabindex="0"><code>// 1. Ask, never assume. This call does not download anything.
+const state = await Translator.availability({ sourceLanguage: "es", targetLanguage: "en" });
+// "available" | "downloadable" | "downloading" | "unavailable"
+
+// 2. Only inside a tap: create() may start a language-pack download.
+button.onclick = async () =&gt; {
+  const ac = new AbortController();
+  const translator = await Translator.create({
+    sourceLanguage: "es", targetLanguage: "en", signal: ac.signal,
+    monitor(m) { m.addEventListener("downloadprogress", (e) =&gt; progress.value = e.loaded); },
+  });
+  // 3. On Android, keep each call under 256 KiB of UTF-8.
+  out.textContent = await translator.translate(text);
+};</code></pre>
+  </section>
+
+  <section>
+    <h2>why it shipped</h2>
+    <p>The motivation on ChromeStatus is local translation for mobile web apps: <q>low latency and offline support, pairing with the Language Detector API shipped on Chrome for Android in M157.</q> Page text stays on the device, and translation keeps working on a bad connection once the language pack is installed. Making the <code>TranslatorAPIAllowed</code> policy work on Android means managed fleets can turn off both the API and its model downloads. Firefox's position is negative and Safari has given no signal, so treat the API as progressive enhancement on every platform.</p>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5106126157905920" target="_blank" rel="noopener">ChromeStatus entry: Translator API on Android (5106126157905920)</a></li>
+      <li><a href="https://webmachinelearning.github.io/translation-api/#translator-api" target="_blank" rel="noopener">Spec: Translator and Language Detector APIs</a></li>
+      <li><a href="https://webmachinelearning.github.io/writing-assistance-apis/#supporting" target="_blank" rel="noopener">Writing Assistance APIs: shared model availability, download and privacy infrastructure</a></li>
+      <li><a href="https://github.com/webmachinelearning/translation-api" target="_blank" rel="noopener">Explainer (webmachinelearning/translation-api)</a></li>
+      <li><a href="https://developer.chrome.com/docs/ai/translator-api" target="_blank" rel="noopener">Chrome docs: Translation with built-in AI</a></li>
+      <li><a href="https://chromeenterprise.google/policies/translator-api-allowed/" target="_blank" rel="noopener">TranslatorAPIAllowed enterprise policy</a></li>
+      <li><a href="https://crbug.com/428227642" target="_blank" rel="noopener">crbug.com/428227642: Android launch tracking</a></li>
+      <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:components/on_device_translation/features.cc" target="_blank" rel="noopener">Chromium: components/on_device_translation/features.cc (Android limits)</a></li>
+      <li><a href="https://chromestatus.com/feature/5172811302961152" target="_blank" rel="noopener">ChromeStatus: Translator API (desktop, 5172811302961152)</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
