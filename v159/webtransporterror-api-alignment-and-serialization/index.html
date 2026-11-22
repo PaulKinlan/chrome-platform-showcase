@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WebTransportError API alignment and serialization — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+</head>
+<body>
+<!--
+RESEARCH RECORD (weekly-hardening-builder, 2026-11-22)
+Feature id: 5158277221580800 · listing name "WebTransportError API alignment and serialization"
+  (listed under milestone 159 twice: "Enabled by default" and "In developer trial (Behind a flag)").
+Spec: https://www.w3.org/TR/webtransport/#web-transport-error-interface (§12)
+  [Exposed=(Window,Worker), Serializable, SecureContext]
+  interface WebTransportError : DOMException {
+    constructor(optional DOMString message = "", optional WebTransportErrorOptions options = {});
+    readonly attribute WebTransportErrorSource source;          // "stream" | "session"
+    readonly attribute unsigned long? streamErrorCode;
+  };
+  dictionary WebTransportErrorOptions { WebTransportErrorSource source = "stream";
+                                        [Clamp] unsigned long? streamErrorCode = null; };
+  §12.4 serialization: DOMException serialization steps + [[Source]] + [[StreamErrorCode]].
+  §13 protocol mappings: writable.abort(error) / readable.cancel(error) send the streamErrorCode,
+  converted to an HTTP/3 code per draft-ietf-webtrans-http3 §4.4
+  (first = 0x52e4a40fa8db; http = first + n + floor(n / 0x1e); 32-bit app code space).
+Chromium main (gitiles, read 2026-11-22):
+  modules/webtransport/web_transport_error.idl — BOTH constructors:
+    constructor(optional DOMString message = "", optional WebTransportErrorOptions options = {});
+    [MeasureAs=WebTransportErrorLegacyConstructor] constructor(WebTransportErrorInit init, optional any legacyIgnored);
+  web_transport_error_init.idl — legacy dictionary: [Clamp] octet streamErrorCode; DOMString message.
+    Legacy path always produces source "stream".
+  web_transport_error_test.cc — 70000 survives the standard ctor; legacy {streamErrorCode: 11} → 11, source stream;
+    legacy ctor ignores a trailing argument.
+  bindings/modules/v8/serialization/v8_script_value_serializer_for_modules.cc — WebTransportError is
+    handled BEFORE the core DOMException path, guarded by RuntimeEnabledFeatures::
+    WebTransportErrorSerializationEnabled(); writes tag + version 1 + message + an EMPTY stack field
+    ("Stack serialization is intentionally not supported yet") + source + has-code + code.
+    The deserializer has no runtime guard (persisted values always decode).
+Flag (runtime_enabled_features.json5, main): WebTransportErrorSerialization, status "stable" —
+  a writer-side kill switch. The constructor overload has NO runtime flag. ChromeStatus lists
+  chrome://flags/#enable-experimental-web-platform-features for the developer trial.
+Ground truth in this container, Chrome for Testing 153 (headless, 2026-11-22):
+  typeof WebTransportError === "function"; length 0; new WebTransportError() → name
+  "WebTransportError", code 0, source "stream", streamErrorCode null.
+  new WebTransportError("m", {…}) / new WebTransportError("hello") → TypeError
+  "The provided value is not of type 'WebTransportErrorInit'" (legacy-only build).
+  new WebTransportError({message:"legacy", streamErrorCode:300}) → 255 (octet clamp).
+  structuredClone(webTransportError) → DataCloneError; postMessage likewise throws.
+  new WebTransport("https://127.0.0.1:44443/never").ready rejects with a real WebTransportError
+  (source "session", streamErrorCode null, "Opening handshake failed.") which ALSO fails to clone.
+Firefox and Safari: Shipped (bugzilla 2009530, webkit 305224). Chromium bug 577073049.
+Use-case portfolio:
+  1. basic/canonical → constructor-overloads (both constructor shapes, a WebIDL call-shape matrix)
+  2. inspection tool → stream-error-code-range (standard unsigned-long clamp vs legacy octet clamp,
+     plus the HTTP/3 wire codepoint the spec maps the code to)
+  3. practical product → worker-error-relay (a real handshake failure raised inside a Worker,
+     relayed to the page as a WebTransportError via postMessage)
+  4. edge / persistence → persisted-error-log (IndexedDB stores the error via structured
+     serialization; what survives — message/source/code — and what does not — stack)
+  5. migration / advanced composition → migration-shim (independent capability probes,
+     a constructor shim that tells you when it had to downgrade, and a clone fallback)
+-->
+<main>
+  <p class="crumbs"><a href="/v159/">&larr; Chrome 159</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · networking · webtransport</p>
+    <h1>WebTransportError API alignment and serialization</h1>
+    <p class="lede">Chromium&rsquo;s <code>WebTransportError</code> predates the spec it implements. It only accepted a dictionary (<code>new WebTransportError({message, streamErrorCode})</code>), squeezed the stream error code into 8 bits even though the attribute is an <code>unsigned long</code>, and threw <code>DataCloneError</code> the moment you tried to <code>postMessage</code> one out of a worker. Chrome 159 adds the standard <code>new WebTransportError(message, {source, streamErrorCode})</code> constructor, carries the full 32-bit code, and makes the error structured-clonable &mdash; while keeping the old dictionary constructor working.</p>
+  </header>
+
+  <p class="note"><strong>How to run it.</strong> Enabled by default from Chrome 159; Firefox and Safari already ship the standard shape. In a developer-trial build, turn on <code>chrome://flags/#enable-experimental-web-platform-features</code>. Serialization has its own writer-side runtime switch, <code>WebTransportErrorSerialization</code> (status &ldquo;stable&rdquo; in Chromium&rsquo;s <code>runtime_enabled_features.json5</code>); if a build has it switched off, relaunch with <code>--enable-blink-features=WebTransportErrorSerialization</code>. The new constructor has no flag of its own. Everything here runs without a WebTransport server &mdash; the network errors come from a real session attempt against an address that is guaranteed to refuse it.</p>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./constructor-overloads/">Constructor overloads</a></h3>
+      <p>Build an error with the standard <code>(message, options)</code> shape or the legacy dictionary shape, read back <code>name</code>, <code>code</code>, <code>source</code> and <code>streamErrorCode</code>, then run a matrix of call shapes &mdash; strings, dictionaries, <code>undefined</code>, <code>null</code>, an invalid <code>source</code> &mdash; to see which overload WebIDL picks.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./stream-error-code-range/">Stream error code range</a></h3>
+      <p>An inspection tool for the code itself: type any number and compare what the standard <code>[Clamp] unsigned long</code> keeps with what the legacy <code>[Clamp] octet</code> keeps, then see the HTTP/3 error codepoint the spec maps that code to on the wire.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./worker-error-relay/">Worker error relay</a></h3>
+      <p>The everyday reason serialization matters: networking lives in a Worker, the UI lives in the page. A real failed session inside a Worker rejects with a <code>WebTransportError</code>, and the Worker posts that error object straight to the page &mdash; or reports the <code>DataCloneError</code> that pre-159 builds throw.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./persisted-error-log/">Persisted error log</a></h3>
+      <p>IndexedDB stores values by structured serialization, so a 159 build can keep real <code>WebTransportError</code> objects in a diagnostics log and read them back after a reload. See exactly which fields survive the trip &mdash; and that <code>stack</code> deliberately does not.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./migration-shim/">Migration shim</a></h3>
+      <p>Code that must run on both sides of the change: two independent probes (constructor, serialization), a constructor helper that reports when it had to fall back to the 8-bit legacy path, and a clone helper that ships a plain record only when the browser cannot clone the error itself.</p>
+    </li>
+  </ol></section>
+
+  <section>
+    <h2>why it shipped</h2>
+    <p>The interface in the WebTransport spec gained a <code>(message, options)</code> constructor so that a <code>WebTransportError</code> can be built like any other <code>DOMException</code>, with an explicit <code>source</code> (<code>"stream"</code> or <code>"session"</code>). Chromium kept its older dictionary-only constructor, so portable code that worked in Firefox and Safari threw <code>TypeError</code> in Chrome. The stream error code is an application protocol value carried in <code>RESET_STREAM</code> and <code>STOP_SENDING</code>; the protocol allows 32 bits, but Chromium narrowed outgoing codes to 8 bits. And because the spec marks the interface <code>[Serializable]</code>, an error raised in a worker or stored in IndexedDB should keep its <code>source</code> and <code>streamErrorCode</code> &mdash; Chromium refused to clone it at all. All three gaps showed up in the <a href="https://github.com/web-platform-tests/interop/issues/1121" target="_blank" rel="noopener">Interop 2026 WebTransport proposal</a>.</p>
+  </section>
+
+  <section>
+    <h2>the API</h2>
+    <pre tabindex="0"><code>// Standard constructor (Chrome 159, Firefox, Safari)
+const err = new WebTransportError("peer reset", {
+  source: "stream",          // or "session"; default "stream"
+  streamErrorCode: 70000,    // [Clamp] unsigned long?, default null
+});
+err.name;            // "WebTransportError"
+err.code;            // 0 — no legacy DOMException code
+err.streamErrorCode; // 70000
+
+// Legacy constructor — still accepted by Chromium for compatibility
+new WebTransportError({ message: "peer reset", streamErrorCode: 300 });
+//   → source "stream", streamErrorCode clamped to 255 ([Clamp] octet)
+
+// Serialization: message, source and streamErrorCode survive
+const copy = structuredClone(err);
+copy instanceof WebTransportError; // true
+worker.postMessage(err);           // no more DataCloneError
+writer.abort(err);                 // sends the full 32-bit code in RESET_STREAM</code></pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5158277221580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://www.w3.org/TR/webtransport/#web-transport-error-interface" target="_blank" rel="noopener">WebTransport spec &sect;12 &mdash; WebTransportError interface (constructor, attributes, serialization)</a></li>
+      <li><a href="https://www.w3.org/TR/webtransport/#protocol-mapping" target="_blank" rel="noopener">WebTransport spec &sect;13 &mdash; protocol mappings for abort / cancel error codes</a></li>
+      <li><a href="https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/" target="_blank" rel="noopener">draft-ietf-webtrans-http3 &sect;4.4 &mdash; mapping application codes to HTTP/3 error codes</a></li>
+      <li><a href="https://github.com/w3c/webtransport/blob/main/explainer.md" target="_blank" rel="noopener">WebTransport explainer</a></li>
+      <li><a href="https://issues.chromium.org/issues/577073049" target="_blank" rel="noopener">issues.chromium.org/577073049 &mdash; implementation tracking</a></li>
+      <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/modules/webtransport/web_transport_error.idl" target="_blank" rel="noopener">Chromium: web_transport_error.idl (both constructors)</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/WebTransportError" target="_blank" rel="noopener">MDN: WebTransportError</a></li>
+      <li><a href="https://developer.chrome.com/docs/capabilities/web-apis/webtransport" target="_blank" rel="noopener">Chrome for Developers: Using WebTransport</a></li>
+      <li><a href="https://bugzilla.mozilla.org/show_bug.cgi?id=2009530" target="_blank" rel="noopener">Firefox bug 2009530</a> &middot; <a href="https://bugs.webkit.org/show_bug.cgi?id=305224" target="_blank" rel="noopener">WebKit bug 305224</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
