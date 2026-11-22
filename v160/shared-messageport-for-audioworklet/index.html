@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shared MessagePort for AudioWorklet — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.9rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .note code { overflow-wrap: anywhere; }
+    pre { overflow-x: auto; max-inline-size: 100%; }
+  </style>
+</head>
+<body>
+<!--
+RESEARCH RECORD (weekly-hardening-builder, 2026-11-22)
+Feature id: 5079784523694080 · listing name "Shared MessagePort for AudioWorklet" (milestone 160 listing).
+Owners hocheung@ / kmaheshb@. Bug https://issues.chromium.org/issues/446920095. Category Multimedia,
+"Chromium catches up": Firefox shipped it in 138; Safari "No signal" (WebKit standards-positions #739).
+Spec: https://webaudio.github.io/web-audio-api/#dom-audioworklet-port (Web Audio 1.1, already in the W3C TR).
+  IDL (spec, verified 2026-11-22 by fetching the editor's draft):
+    [Exposed=Window, SecureContext] interface AudioWorklet : Worklet { readonly attribute MessagePort port; };
+    interface AudioWorkletGlobalScope : WorkletGlobalScope { … readonly attribute MessagePort port; };
+  "A MessagePort connected to the port on the AudioWorkletGlobalScope" / "… on the AudioWorklet".
+  Note in spec: authors with a "message" listener should close() either end so resources can be collected.
+  "Each BaseAudioContext possesses exactly one AudioWorklet" -> one shared channel PER context
+  (AudioContext and OfflineAudioContext alike).
+Chromium IDL (gitiles main, 2026-11-22):
+  modules/webaudio/audio_worklet.idl: [RuntimeEnabled=AudioWorkletSharedPort] readonly attribute MessagePort port;
+  modules/webaudio/audio_worklet_global_scope.idl: [RuntimeEnabled=AudioWorkletSharedPort] readonly attribute MessagePort port;
+Flag (runtime_enabled_features.json5 on main): name "AudioWorkletSharedPort", status "stable".
+  chromestatus flag_name = enable-experimental-web-platform-features, finch_name = AudioWorkletSharedPort.
+  Enable on a pre-default build: chrome://flags/#enable-experimental-web-platform-features, or
+  --enable-blink-features=AudioWorkletSharedPort, or --enable-features=AudioWorkletSharedPort.
+WPT: webaudio/the-audio-api/the-audioworklet-interface/audioworklet-messageport.https.html asserts:
+  (1) context.audioWorklet.port instanceof MessagePort BEFORE addModule();
+  (2) the global-scope port is usable at module-evaluation time (module posts during evaluation);
+  (3) main -> global scope -> main echo round-trip.
+Explainer links: WebAudio issue #2456, PR #2507; Emscripten PR #25354 (dropping the dummy-processor hack).
+Motivation: without it, apps instantiate a bootstrap AudioWorkletProcessor/AudioWorkletNode only to get
+  a message channel into the global scope (Emscripten output, MOD players).
+Local ground truth (Chrome for Testing 153.0.8010.12, headless, this container, 2026-11-22):
+  - 'port' in AudioWorklet.prototype === false with no flags, with --enable-experimental-web-platform-features,
+    and with --enable-blink-features=AudioWorkletSharedPort -> the implementation post-dates 153; only the
+    unsupported branch and the bootstrap-processor workaround could execute here.
+  - Bootstrap workaround works: AudioWorkletNode('bootstrap') on an OfflineAudioContext receives its
+    constructor message, relays config into module scope, and processors read it during startRendering().
+  - Posting a WebAssembly.Module through a worklet MessagePort fires "messageerror" in the global scope
+    (page not cross-origin isolated); posting the raw bytes (transferred ArrayBuffer) and compiling with
+    new WebAssembly.Module(bytes) inside AudioWorkletGlobalScope works.
+Use-case portfolio (each its own concept folder):
+  1. basic/canonical -> global-scope-handshake (port before addModule, module-evaluation hello, echo, close)
+  2. configuration/inspection -> port-inspector (descriptor/identity/per-context/readonly + global-scope side)
+  3. practical product -> shared-tuning-bus (one message retunes every voice; offline render measures pitch)
+  4. edge/failure/migration -> bootstrap-migration (legacy dummy processor vs shared port; early post,
+     close(), per-context isolation, WebAssembly.Module vs bytes)
+  5. novel/advanced composition -> worker-direct-line (MessageChannel handed through the shared port so a
+     Worker streams a wavetable straight into the audio global scope; main thread never touches the data)
+No server route needed: everything is client-side Web Audio.
+-->
+<main>
+  <p class="crumbs"><a href="/v160/">&larr; Chrome 160</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · multimedia · web audio</p>
+    <h1>Shared MessagePort for AudioWorklet</h1>
+    <p class="lede">Every <code>AudioWorkletNode</code> has a <code>port</code> to its own processor &mdash; but until now Chrome had no channel to the <em>AudioWorkletGlobalScope</em> itself. Code that wanted to hand the audio thread a config object, a wavetable or WebAssembly bytes had to spin up a do-nothing &ldquo;bootstrap&rdquo; processor just to borrow its port. Chrome 160 exposes the Web Audio spec&rsquo;s shared channel: <code>audioContext.audioWorklet.port</code> on the main thread, connected to a global <code>port</code> inside the worklet scope. Firefox has shipped it since 138.</p>
+  </header>
+
+  <div class="note" id="support-note" role="status">Probing this browser&hellip;</div>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./global-scope-handshake/">Global-scope handshake</a></h3>
+      <p>The canonical round-trip: the port exists before <code>addModule()</code>, the worklet module says hello <em>during evaluation</em>, you echo text into the audio thread and back, then <code>close()</code> the channel and watch replies stop.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./port-inspector/">Port inspector</a></h3>
+      <p>An inspection table for both ends: the getter-only descriptor on <code>AudioWorklet.prototype</code>, identity across reads, one distinct port per <code>BaseAudioContext</code>, strict-mode readonly behaviour &mdash; and, from inside the worklet, <code>typeof port</code>, its prototype and what it sits next to.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./shared-tuning-bus/">Shared tuning bus</a></h3>
+      <p>The product use case: one message on the shared port retunes every voice of a synth at once &mdash; no per-node fan-out. Change the reference pitch or temperament, render offline, and read the <em>measured</em> frequency of each voice; or play the chord live.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./bootstrap-migration/">Bootstrap-processor migration</a></h3>
+      <p>The workaround this feature retires, run for real beside the spec path: a dummy <code>AudioWorkletNode</code> created only to borrow a port. Plus edge probes &mdash; posting before <code>addModule()</code>, <code>close()</code>, per-context isolation, and why you send WebAssembly <em>bytes</em> rather than a <code>WebAssembly.Module</code>.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./worker-direct-line/">Worker direct line</a></h3>
+      <p>Advanced composition: hand one end of a <code>MessageChannel</code> to the audio global scope through the shared port and the other to a <code>Worker</code>. The worker synthesises a wavetable and transfers it straight to the audio thread &mdash; the main thread never touches a sample.</p>
+    </li>
+  </ol></section>
+
+  <section>
+    <h2>the API</h2>
+    <pre tabindex="0"><code>// main thread
+const ctx = new AudioContext();
+ctx.audioWorklet.port.onmessage = (e) =&gt; console.log("from global scope:", e.data);
+await ctx.audioWorklet.addModule("synth.js");
+ctx.audioWorklet.port.postMessage({ type: "tuning", a4: 442 });
+
+// synth.js — runs in AudioWorkletGlobalScope
+const shared = { a4: 440 };             // module-level state every processor reads
+port.onmessage = (e) =&gt; { if (e.data.type === "tuning") shared.a4 = e.data.a4; };
+port.postMessage({ type: "ready", sampleRate });   // allowed during module evaluation
+registerProcessor("voice", class extends AudioWorkletProcessor { /* reads shared.a4 */ });</code></pre>
+    <p>Feature-detect with <code>"port" in AudioWorklet.prototype</code> and keep the bootstrap-processor path only as a fallback for engines without it.</p>
+  </section>
+
+  <section>
+    <h2>how to run it</h2>
+    <p>Ships enabled by default in Chrome 160 (Blink runtime feature <code>AudioWorkletSharedPort</code>, status &ldquo;stable&rdquo;). On an earlier Canary/Dev build that carries the implementation but not the default, enable <code>chrome://flags/#enable-experimental-web-platform-features</code>, or launch with <code>--enable-blink-features=AudioWorkletSharedPort</code> (equivalently <code>--enable-features=AudioWorkletSharedPort</code>). Chrome 153 and older do not contain the implementation at all, flag or not &mdash; every concept page says so and, where it can, runs the labelled bootstrap fallback instead.</p>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5079784523694080" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://webaudio.github.io/web-audio-api/#dom-audioworklet-port" target="_blank" rel="noopener">Web Audio API &mdash; AudioWorklet.port</a></li>
+      <li><a href="https://webaudio.github.io/web-audio-api/#dom-audioworkletglobalscope-port" target="_blank" rel="noopener">Web Audio API &mdash; AudioWorkletGlobalScope.port</a></li>
+      <li><a href="https://github.com/WebAudio/web-audio-api/issues/2456" target="_blank" rel="noopener">WebAudio issue #2456</a> and <a href="https://github.com/WebAudio/web-audio-api/pull/2507" target="_blank" rel="noopener">PR #2507</a></li>
+      <li><a href="https://github.com/emscripten-core/emscripten/pull/25354" target="_blank" rel="noopener">Emscripten PR #25354 &mdash; the bootstrap-processor workaround in the wild</a></li>
+      <li><a href="https://wpt.fyi/results/webaudio/the-audio-api/the-audioworklet-interface/audioworklet-messageport.https.html" target="_blank" rel="noopener">WPT: audioworklet-messageport.https.html</a></li>
+      <li><a href="https://issues.chromium.org/issues/446920095" target="_blank" rel="noopener">issues.chromium.org/446920095 &mdash; implementation tracking</a></li>
+      <li><a href="https://developer.mozilla.org/docs/Web/API/AudioWorkletGlobalScope/port" target="_blank" rel="noopener">MDN: AudioWorkletGlobalScope.port</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  (function () {
+    var note = document.getElementById("support-note");
+    var has = typeof AudioWorklet !== "undefined" && "port" in AudioWorklet.prototype;
+    note.textContent = typeof AudioWorklet === "undefined"
+      ? "AudioWorklet is not exposed here (it requires a secure context). The concept pages explain what they would show."
+      : has
+        ? "This browser exposes AudioWorklet.prototype.port — the shared channel is available; every concept runs the spec path."
+        : "This browser has AudioWorklet but no AudioWorklet.prototype.port. The concepts show the unsupported branch honestly and, where possible, run the labelled bootstrap-processor fallback. See “how to run it” below.";
+  })();
+</script>
+</body>
+</html>

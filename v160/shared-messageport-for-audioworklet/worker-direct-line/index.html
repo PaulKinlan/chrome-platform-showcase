@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker direct line — Shared MessagePort for AudioWorklet — Chrome 160</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .note.warn { border-left-color: var(--accent-rose); }
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; margin: var(--space-3) 0; }
+    .controls button { min-height: 44px; }
+    .field { display: flex; flex-direction: column; gap: 0.25rem; min-inline-size: 0; flex: 1 1 12rem; }
+    .field label { font-size: 0.85rem; font-weight: 700; }
+    .field input[type="range"] { inline-size: 100%; min-height: 44px; accent-color: var(--accent-blue); }
+    .field select { min-height: 44px; font: inherit; border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: 0 0.5rem; }
+    input[type="range"]:focus-visible, select:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    output { font-family: var(--font-mono); font-size: 0.85rem; }
+    .topology { font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); white-space: pre-wrap; overflow-wrap: anywhere; margin: var(--space-3) 0; }
+    canvas { display: block; inline-size: 100%; block-size: auto; aspect-ratio: 4 / 1; border: 2px solid var(--border-black); background: var(--bg-ivory); }
+    dl.metrics { display: grid; grid-template-columns: auto 1fr; gap: 0.2rem 0.6rem; font-size: 0.8rem; margin: var(--space-3) 0 0; }
+    dl.metrics dt { font-weight: 700; }
+    dl.metrics dd { margin: 0; font-family: var(--font-mono); overflow-wrap: anywhere; }
+    @media (max-width: 30rem) { dl.metrics { grid-template-columns: 1fr; } dl.metrics dd { margin-block-end: 0.4rem; } }
+    .ok { color: var(--accent-emerald-dark); font-weight: 700; }
+    .bad { color: var(--accent-rose); font-weight: 700; }
+    #status { font-weight: 700; margin-top: var(--space-3); overflow-wrap: anywhere; }
+    pre { overflow-x: auto; max-inline-size: 100%; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v160/shared-messageport-for-audioworklet/">&larr; Shared MessagePort for AudioWorklet</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · multimedia · web audio</p>
+    <h1>Worker direct line</h1>
+    <p class="lede">The shared port is a <code>MessagePort</code>, so it can carry <em>other</em> ports. Create a <code>MessageChannel</code>, send one end to the audio global scope through <code>audioWorklet.port</code> and the other to a <code>Worker</code>: now the worker can synthesise heavy data &mdash; here an additive-synthesis wavetable &mdash; and <em>transfer</em> it straight to the audio thread. The main thread wires the line and then gets out of the way; it never sees a sample of the table.</p>
+  </header>
+
+  <div class="note" id="support-note" role="status">Probing this browser&hellip;</div>
+
+  <div class="stage">
+    <div class="controls">
+      <div class="field">
+        <label for="shape">Waveform</label>
+        <select id="shape">
+          <option value="saw">Sawtooth (all harmonics, 1/n)</option>
+          <option value="square">Square (odd harmonics, 1/n)</option>
+          <option value="triangle">Triangle (odd harmonics, 1/n², alternating)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="harm">Harmonics <output id="harm-out" for="harm">8</output></label>
+        <input type="range" id="harm" min="1" max="48" step="1" value="8" aria-valuetext="8 harmonics">
+      </div>
+    </div>
+    <div class="controls">
+      <button type="button" id="build-btn">Wire line, build in worker &amp; render</button>
+      <button type="button" id="play-btn" aria-pressed="false">Play 220 Hz live</button>
+    </div>
+    <p class="topology" id="topology">main ──audioWorklet.port──▶ AudioWorkletGlobalScope
+  └──Worker.postMessage──▶ Worker
+Worker ◀══ MessageChannel ══▶ AudioWorkletGlobalScope   (not yet wired)</p>
+    <canvas id="scope" width="800" height="200" role="img" aria-label="One rendered cycle of the wavetable. Not rendered yet."></canvas>
+    <dl class="metrics" id="metrics"><dt>result</dt><dd>not run</dd></dl>
+    <p id="status" role="status" aria-live="polite"></p>
+  </div>
+
+  <section>
+    <h2>the three pieces</h2>
+    <pre tabindex="0"><code>// main: wire the line, then step aside
+const { port1, port2 } = new MessageChannel();
+ctx.audioWorklet.port.postMessage({ type: "attach-line", line: port2 }, [port2]);
+worker.postMessage({ type: "line", line: port1 }, [port1]);
+
+// worker: build + transfer straight to the audio thread
+line.postMessage({ type: "wavetable", table }, [table.buffer]);
+
+// AudioWorkletGlobalScope
+port.onmessage = (e) =&gt; { if (e.data.type === "attach-line") e.data.line.onmessage = onTable; };</code></pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5079784523694080" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://webaudio.github.io/web-audio-api/#dom-audioworkletglobalscope-port" target="_blank" rel="noopener">Web Audio API &mdash; AudioWorkletGlobalScope.port</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/web-messaging.html#channel-messaging" target="_blank" rel="noopener">HTML &mdash; channel messaging &amp; transferable ports</a></li>
+      <li><a href="https://developer.mozilla.org/docs/Web/API/Web_Workers_API/Transferable_objects" target="_blank" rel="noopener">MDN: Transferable objects</a></li>
+    </ul>
+  </section>
+</main>
+<script>
+  (function () {
+    "use strict";
+    var TABLE_SIZE = 2048;
+    var MODULE = [
+      "const shared = { table: null, version: 0 };",
+      "function checksum(t) { let s = 0; for (let i = 0; i < t.length; i++) s = (s + Math.round(t[i] * 1e6) * (i + 1)) % 2147483647; return s; }",
+      "function onControl(d, reply) {",
+      "  if (d && d.type === 'attach-line') {",
+      "    const line = d.line;",
+      "    line.onmessage = (e) => {",
+      "      if (e.data.type !== 'wavetable') return;",
+      "      shared.table = e.data.table; shared.version++;",
+      "      let peak = 0; for (const v of shared.table) peak = Math.max(peak, Math.abs(v));",
+      "      line.postMessage({ type: 'table-ack', version: shared.version, length: shared.table.length,",
+      "                         checksum: checksum(shared.table), peak });",
+      "    };",
+      "    reply({ type: 'line-attached' });",
+      "  }",
+      "}",
+      "if (typeof port === 'object' && port) port.onmessage = (e) => onControl(e.data, (m) => port.postMessage(m));",
+      "registerProcessor('line-bootstrap', class extends AudioWorkletProcessor {   // FALLBACK only",
+      "  constructor() { super(); this.port.onmessage = (e) => onControl(e.data, (m) => this.port.postMessage(m)); }",
+      "  process() { return false; }",
+      "});",
+      "registerProcessor('wavetable-voice', class extends AudioWorkletProcessor {",
+      "  constructor(o) { super(); this.hz = o.processorOptions.hz; this.pos = 0; }",
+      "  process(inputs, outputs) {",
+      "    const out = outputs[0][0], t = shared.table;",
+      "    if (!t) return true;",
+      "    const step = this.hz * t.length / sampleRate;",
+      "    for (let i = 0; i < out.length; i++) {",
+      "      const i0 = Math.floor(this.pos), f = this.pos - i0;",
+      "      out[i] = t[i0 % t.length] * (1 - f) + t[(i0 + 1) % t.length] * f;",
+      "      this.pos = (this.pos + step) % t.length;",
+      "    }",
+      "    return true;",
+      "  }",
+      "});"
+    ].join("\n");
+    var WORKER = [
+      "let line = null;",
+      "function checksum(t) { let s = 0; for (let i = 0; i < t.length; i++) s = (s + Math.round(t[i] * 1e6) * (i + 1)) % 2147483647; return s; }",
+      "onmessage = (e) => {",
+      "  const d = e.data;",
+      "  if (d.type === 'line') { line = d.line; line.onmessage = (m) => postMessage({ type: 'from-audio', data: m.data }); return; }",
+      "  if (d.type === 'build') {",
+      "    const t0 = performance.now(), N = d.size, table = new Float32Array(N);",
+      "    for (let n = 1; n <= d.harmonics; n++) {",
+      "      let amp = 0;",
+      "      if (d.shape === 'saw') amp = 1 / n;",
+      "      else if (d.shape === 'square') amp = n % 2 ? 1 / n : 0;",
+      "      else amp = n % 2 ? ((((n - 1) / 2) % 2) ? -1 : 1) / (n * n) : 0;",
+      "      if (!amp) continue;",
+      "      for (let i = 0; i < N; i++) table[i] += amp * Math.sin(2 * Math.PI * n * i / N);",
+      "    }",
+      "    let peak = 0; for (const v of table) peak = Math.max(peak, Math.abs(v));",
+      "    for (let i = 0; i < N; i++) table[i] = 0.8 * table[i] / (peak || 1);",
+      "    const sum = checksum(table), ms = performance.now() - t0;",
+      "    line.postMessage({ type: 'wavetable', table }, [table.buffer]);",
+      "    postMessage({ type: 'sent', checksum: sum, ms, byteLengthAfterTransfer: table.buffer.byteLength });",
+      "  }",
+      "};"
+    ].join("\n");
+    var MODULE_URL = URL.createObjectURL(new Blob([MODULE], { type: "text/javascript" }));
+    var WORKER_URL = URL.createObjectURL(new Blob([WORKER], { type: "text/javascript" }));
+
+    var note = document.getElementById("support-note");
+    var shape = document.getElementById("shape");
+    var harm = document.getElementById("harm");
+    var harmOut = document.getElementById("harm-out");
+    var buildBtn = document.getElementById("build-btn");
+    var playBtn = document.getElementById("play-btn");
+    var topo = document.getElementById("topology");
+    var metricsEl = document.getElementById("metrics");
+    var statusEl = document.getElementById("status");
+    var canvas = document.getElementById("scope");
+
+    var hasAW = typeof AudioWorklet !== "undefined";
+    var hasPort = hasAW && "port" in AudioWorklet.prototype;
+    if (!hasAW || typeof Worker === "undefined") {
+      note.className = "note warn";
+      note.textContent = "AudioWorklet or Worker is not exposed here (secure context required).";
+      buildBtn.disabled = playBtn.disabled = true;
+    } else if (!hasPort) {
+      note.className = "note warn";
+      note.textContent = "No AudioWorklet.prototype.port here. Chrome 160 ships it by default; on an earlier build with the implementation, enable chrome://flags/#enable-experimental-web-platform-features or launch with --enable-blink-features=AudioWorkletSharedPort. FALLBACK in use: the channel end is handed over through a bootstrap AudioWorkletNode('line-bootstrap') — the workaround this feature removes. The worker→audio transfer itself is real either way.";
+    } else {
+      note.textContent = "AudioWorklet.prototype.port is present — the line is wired through the shared port with no helper node.";
+    }
+
+    function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return "&#" + c.charCodeAt(0) + ";"; }); }
+    function once(target, pred, ms) {
+      return new Promise(function (resolve) {
+        var t = setTimeout(function () { target.removeEventListener("message", on); resolve(null); }, ms || 3000);
+        function on(e) { if (pred(e.data)) { clearTimeout(t); target.removeEventListener("message", on); resolve(e.data); } }
+        target.addEventListener("message", on);
+        if (target.start) target.start();
+      });
+    }
+
+    // Wires worker <-> audio global scope on ctx and builds a table. Returns details.
+    async function wire(ctx) {
+      await ctx.audioWorklet.addModule(MODULE_URL);
+      var control, kind;
+      if (ctx.audioWorklet.port instanceof MessagePort) { control = ctx.audioWorklet.port; kind = "shared"; }
+      else { control = new AudioWorkletNode(ctx, "line-bootstrap").port; kind = "bootstrap"; }
+      var worker = new Worker(WORKER_URL);
+      var ch = new MessageChannel();
+      var attached = once(control, function (d) { return d && d.type === "line-attached"; });
+      control.postMessage({ type: "attach-line", line: ch.port2 }, [ch.port2]);
+      worker.postMessage({ type: "line", line: ch.port1 }, [ch.port1]);
+      var att = await attached;
+      var sent = once(worker, function (d) { return d && d.type === "sent"; });
+      var ack = once(worker, function (d) { return d && d.type === "from-audio" && d.data.type === "table-ack"; });
+      worker.postMessage({ type: "build", shape: shape.value, harmonics: Number(harm.value), size: TABLE_SIZE });
+      var s = await sent, a = await ack;
+      return { control: control, kind: kind, worker: worker, attached: !!att, sent: s, ack: a && a.data };
+    }
+
+    function draw(data) {
+      var g = canvas.getContext("2d");
+      var cs = getComputedStyle(document.documentElement);
+      var w = canvas.width, h = canvas.height;
+      g.clearRect(0, 0, w, h);
+      g.strokeStyle = cs.getPropertyValue("--text-muted").trim() || "gray";
+      g.lineWidth = 1;
+      g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
+      g.strokeStyle = cs.getPropertyValue("--accent-blue").trim() || "blue";
+      g.lineWidth = 3;
+      g.beginPath();
+      for (var x = 0; x < w; x++) {
+        var v = data[Math.floor(x / w * data.length)];
+        var y = h / 2 - v * (h / 2 - 6);
+        if (x) g.lineTo(x, y); else g.moveTo(x, y);
+      }
+      g.stroke();
+    }
+
+    function setTopology(kind, ok) {
+      topo.textContent = "main ──" + (kind === "shared" ? "audioWorklet.port (shared)" : "bootstrap node.port (FALLBACK)") + "──▶ AudioWorkletGlobalScope\n" +
+        "  └──Worker.postMessage──▶ Worker\n" +
+        "Worker ◀══ MessageChannel ══▶ AudioWorkletGlobalScope   (" + (ok ? "wired · table transferred" : "wiring failed") + ")";
+    }
+
+    buildBtn.addEventListener("click", async function () {
+      buildBtn.disabled = true;
+      statusEl.textContent = "";
+      var sr = 48000;
+      var ctx = new OfflineAudioContext(1, TABLE_SIZE * 2, sr);
+      var r = await wire(ctx);
+      var ok = r.attached && r.sent && r.ack && r.sent.checksum === r.ack.checksum && r.ack.length === TABLE_SIZE;
+      setTopology(r.kind, ok);
+      // Exactly one cycle per TABLE_SIZE samples: hz = sr / TABLE_SIZE.
+      new AudioWorkletNode(ctx, "wavetable-voice", { processorOptions: { hz: sr / TABLE_SIZE } }).connect(ctx.destination);
+      var buf = await ctx.startRendering();
+      var cyc = buf.getChannelData(0).subarray(TABLE_SIZE, TABLE_SIZE * 2);
+      var peak = 0; for (var i = 0; i < cyc.length; i++) peak = Math.max(peak, Math.abs(cyc[i]));
+      var peakMatch = r.ack ? Math.abs(peak - r.ack.peak) < 1e-3 : false;
+      draw(cyc);
+      canvas.setAttribute("aria-label", "One rendered cycle of a " + shape.value + " wavetable with " + harm.value + " harmonics; rendered peak " + peak.toFixed(3) + ".");
+      r.worker.terminate();
+      if (r.kind === "shared") r.control.close();
+      metricsEl.innerHTML = [
+        ["control transport", r.kind === "shared" ? "audioWorklet.port (spec)" : "bootstrap node port (FALLBACK)", r.kind === "shared" ? "ok" : "bad"],
+        ["line attached in global scope", String(r.attached), r.attached ? "ok" : "bad"],
+        ["worker build time", r.sent ? r.sent.ms.toFixed(2) + " ms" : "—"],
+        ["worker buffer after transfer", r.sent ? r.sent.byteLengthAfterTransfer + " bytes (detached = moved, not copied)" : "—"],
+        ["checksum worker → audio thread", r.sent && r.ack ? r.sent.checksum + " → " + r.ack.checksum : "no ack", ok ? "ok" : "bad"],
+        ["rendered peak vs table peak", r.ack ? peak.toFixed(4) + " vs " + r.ack.peak.toFixed(4) : "—", peakMatch ? "ok" : "bad"],
+        ["samples the main thread handled", "0 (it only rendered and drew the OUTPUT)"]
+      ].map(function (p) { return "<dt>" + esc(p[0]) + "</dt><dd" + (p[2] ? " class=\"" + p[2] + "\"" : "") + ">" + esc(p[1]) + "</dd>"; }).join("");
+      statusEl.textContent = ok && peakMatch
+        ? "Wavetable built in the worker and transferred directly to the audio thread via a line wired through " + (r.kind === "shared" ? "the shared port." : "the FALLBACK bootstrap port.") + " Checksums match and the rendered cycle is drawn."
+        : "The direct line did not complete — see the metrics.";
+      window.showcaseTelemetry?.assert("worker-direct-line", !!(ok && peakMatch) && r.kind === (hasPort ? "shared" : "bootstrap"),
+        { kind: r.kind, ok: !!ok, peakMatch: peakMatch, branch: hasPort ? "spec" : "bootstrap-fallback" });
+      buildBtn.disabled = false;
+    });
+
+    var live = null;
+    playBtn.addEventListener("click", async function () {
+      if (live) {
+        var l = live; live = null;
+        l.worker.terminate();
+        await l.ctx.close();
+        playBtn.setAttribute("aria-pressed", "false");
+        playBtn.textContent = "Play 220 Hz live";
+        statusEl.textContent = "Live playback stopped.";
+        return;
+      }
+      playBtn.disabled = true;
+      var ctx = new AudioContext();
+      var r = await wire(ctx);
+      var gain = new GainNode(ctx, { gain: 0.3 });
+      new AudioWorkletNode(ctx, "wavetable-voice", { processorOptions: { hz: 220 } }).connect(gain).connect(ctx.destination);
+      await ctx.resume();
+      live = { ctx: ctx, worker: r.worker, kind: r.kind };
+      setTopology(r.kind, !!r.ack);
+      playBtn.disabled = false;
+      playBtn.setAttribute("aria-pressed", "true");
+      playBtn.textContent = "Stop";
+      statusEl.textContent = "Playing the worker-built " + shape.value + " table at 220 Hz (" + ctx.state + "). Press Stop, change the controls and play again to rebuild.";
+    });
+
+    harm.addEventListener("input", function () {
+      harmOut.textContent = harm.value;
+      harm.setAttribute("aria-valuetext", harm.value + " harmonics");
+    });
+  })();
+</script>
+</body>
+</html>
