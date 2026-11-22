@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Navigation, moves &amp; focus — Deprecate and stop firing events during subframe removal — Chrome 156</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .stage h2 { margin-top: 0; }
+    .actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0; }
+    .actions button { min-height: 44px; }
+    .actions button.secondary { background: var(--bg-ivory); color: var(--text-black); border: 2px solid var(--border-black); }
+    .boxes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); gap: var(--space-3); }
+    .box { min-block-size: 6rem; border: 2px dashed var(--border-black); background: var(--bg-ivory); padding: var(--space-2); }
+    .box h3 { font-size: 0.8rem; margin: 0 0 var(--space-2); }
+    .box iframe, .solo iframe { inline-size: 100%; block-size: 4.5rem; border: 1px solid var(--border-black); background: var(--bg-paper); }
+    .solo { border: 2px dashed var(--border-black); background: var(--bg-ivory); padding: var(--space-2); min-block-size: 5rem; }
+    .readout {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      background: var(--bg-stone); color: var(--text-black); border: 2px solid var(--border-black);
+      padding: var(--space-3); margin-top: var(--space-3);
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .verdict { font-weight: 700; }
+    pre { overflow-x: auto; max-inline-size: 100%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v156/deprecate-and-stop-firing-events-during-subframe-removal/">&larr; Deprecate and stop firing events during subframe removal</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v156 · dom · feature removal</p>
+    <h1>Navigation, moves &amp; focus</h1>
+    <p class="lede">The change is narrow, and the edges are where code goes wrong. A subframe that <strong>navigates</strong> still fires all three events &mdash; only removal changes. <code>moveBefore()</code> never fired anything because it never destroys the frame. And the <code>blur</code>/<code>focusout</code> a focused field might get on removal is a different flag entirely.</p>
+  </header>
+
+  <div class="note" role="note">
+    <strong>Flag:</strong> <code>--enable-blink-features=OmitSubframeDetachmentEventsOnRemoval</code> (Chrome 156+). The focus experiment&rsquo;s neighbouring change is
+    <code>--enable-blink-features=OmitBlurEventOnElementRemoval</code> &mdash; also status <code>"test"</code>, and not part of this ChromeStatus entry.
+  </div>
+
+  <section class="stage" aria-labelledby="nav-h">
+    <h2 id="nav-h">1 · Navigate, then remove</h2>
+    <p>Loads a same-origin frame, navigates it to a second document (<code>srcdoc</code> change), then removes the second document. Expected with the flag on: events in step 1, none in step 2.</p>
+    <div class="solo" id="nav-host" aria-label="navigation probe host"></div>
+    <div class="actions"><button type="button" id="nav-run">Navigate the frame, then remove it</button></div>
+    <p class="verdict" id="nav-verdict" role="status" aria-live="polite">Not run yet.</p>
+    <div class="readout" id="nav-log" aria-label="navigation probe log">—</div>
+  </section>
+
+  <section class="stage" aria-labelledby="move-h">
+    <h2 id="move-h">2 · moveBefore() vs insertBefore()</h2>
+    <p>The frame counts its own lifetime ticks. Moving it with <code>moveBefore()</code> keeps the document alive; moving it with <code>insertBefore()</code> is a remove-then-insert: the old document is destroyed (firing the removal events on legacy Chrome) and a fresh one loads.</p>
+    <div class="boxes">
+      <div class="box" id="box-a" aria-label="box A"><h3>box A</h3></div>
+      <div class="box" id="box-b" aria-label="box B"><h3>box B</h3></div>
+    </div>
+    <div class="actions">
+      <button type="button" id="move-atomic">Move with moveBefore()</button>
+      <button type="button" class="secondary" id="move-legacy">Move with insertBefore()</button>
+    </div>
+    <p class="verdict" id="move-verdict" role="status" aria-live="polite">Loading the frame…</p>
+    <div class="readout" id="move-log" aria-label="move probe log">—</div>
+  </section>
+
+  <section class="stage" aria-labelledby="focus-h">
+    <h2 id="focus-h">3 · Remove a frame that holds focus</h2>
+    <p>Focuses a text field inside a same-origin frame, then removes the frame. Records <code>blur</code>/<code>focusout</code> on the field, <code>blur</code> on its window, and the detachment events &mdash; and where focus lands in the parent afterwards.</p>
+    <div class="solo" id="focus-host" aria-label="focus probe host"></div>
+    <div class="actions"><button type="button" id="focus-run">Focus the inner field, then remove the frame</button></div>
+    <p class="verdict" id="focus-verdict" role="status" aria-live="polite">Not run yet.</p>
+    <div class="readout" id="focus-log" aria-label="focus probe log">—</div>
+  </section>
+
+  <section>
+    <h2>the code</h2>
+    <pre tabindex="0"><code>// Navigation is NOT removal — these still fire (spec: "unload a document")
+frame.srcdoc = "&lt;p&gt;next&lt;/p&gt;";       // pagehide(persisted=false), visibilitychange, unload
+
+// Removal — omitted with the flag on (spec: "destroy a child navigable")
+frame.remove();
+
+// A move that is not a removal at all
+if ("moveBefore" in Element.prototype) boxB.moveBefore(frame, null); // no teardown, no reload
+else boxB.insertBefore(frame, null); // remove + insert: destroys and reloads the frame</code></pre>
+    <p>Ground truth while building (Chrome for Testing 153, headless): navigation fired <code>pagehide</code> with <code>persisted=false</code>; <code>moveBefore()</code> fired nothing and caused no reload, <code>insertBefore()</code> fired <code>pagehide</code> and reloaded the frame; removing a focused frame fired <code>pagehide</code> but no <code>blur</code>/<code>focusout</code> in that headless session (focus behaviour depends on whether the window itself has system focus).</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Deprecate and stop firing events during subframe removal</a> &mdash; feature index</li>
+      <li><a href="../removal-event-recorder/">Removal event recorder</a></li>
+      <li><a href="../agent-boundary-matrix/">Agent boundary matrix</a></li>
+      <li><a href="../explicit-teardown-handshake/">Explicit teardown handshake</a></li>
+      <li><a href="../reentrancy-hazard/">Re-entrancy hazard</a></li>
+      <li><a href="/v133/dom-state-preserving-move/">DOM state-preserving move (moveBefore) &mdash; Chrome 133</a></li>
+      <li><a href="https://chromestatus.com/feature/5754395122860032" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/document-lifecycle.html#unload-a-document" target="_blank" rel="noopener">HTML &mdash; unload a document (navigation path)</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(() => {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  function loadInto(f, parent) {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("load timed out")), 6000);
+      f.addEventListener("load", () => { clearTimeout(t); resolve(f); }, { once: true });
+      parent.append(f);
+    });
+  }
+  function hook(f, ev, tag) {
+    const win = f.contentWindow;
+    const doc = f.contentDocument;
+    win.addEventListener("pagehide", (e) => ev.push(tag + "pagehide (persisted=" + e.persisted + ")"));
+    doc.addEventListener("visibilitychange", () => ev.push(tag + "visibilitychange (" + doc.visibilityState + ")"));
+    win.addEventListener("unload", () => ev.push(tag + "unload"));
+  }
+  function lock(btns, on) { for (const b of btns) b.disabled = on; }
+
+  // ---------- 1. navigate, then remove ----------
+  const navHost = document.getElementById("nav-host");
+  const navBtn = document.getElementById("nav-run");
+  navBtn.addEventListener("click", async () => {
+    lock([navBtn], true);
+    const out = document.getElementById("nav-verdict");
+    const log = document.getElementById("nav-log");
+    try {
+      navHost.replaceChildren();
+      const f = document.createElement("iframe");
+      f.title = "navigation probe frame";
+      f.srcdoc = "<p style='font:14px system-ui'>document 1</p>";
+      await loadInto(f, navHost);
+      const navEvents = [];
+      hook(f, navEvents, "doc1 ");
+      await new Promise((resolve) => {
+        f.addEventListener("load", resolve, { once: true });
+        f.srcdoc = "<p style='font:14px system-ui'>document 2 (navigated)</p>";
+      });
+      const removeEvents = [];
+      hook(f, removeEvents, "doc2 ");
+      f.remove();
+      await wait(50);
+      log.textContent = "step 1 — navigation (doc1 → doc2):\n  " + (navEvents.join("\n  ") || "none") +
+        "\n\nstep 2 — removal of doc2:\n  " + (removeEvents.join("\n  ") || "none");
+      const navFired = navEvents.some((e) => e.includes("pagehide"));
+      const removeFired = removeEvents.length > 0;
+      out.textContent = !navFired
+        ? "Unexpected: navigation did not fire pagehide."
+        : removeFired
+          ? "Navigation fired the events, and so did removal — legacy removal behaviour (flag not active)."
+          : "Navigation fired the events; removal fired none — the 156 behaviour.";
+      window.showcaseTelemetry?.assert("navigation-still-fires-pagehide", navFired, { navEvents: navEvents.length });
+      window.showcaseTelemetry?.assert("navigate-then-remove-observed", true, { removeFired });
+    } catch (err) {
+      out.textContent = "Could not run: " + err.message;
+      window.showcaseTelemetry?.assert("navigation-still-fires-pagehide", false, { error: String(err.message) });
+    } finally {
+      lock([navBtn], false);
+    }
+  });
+
+  // ---------- 2. moveBefore vs insertBefore ----------
+  const boxA = document.getElementById("box-a");
+  const boxB = document.getElementById("box-b");
+  const atomicBtn = document.getElementById("move-atomic");
+  const legacyBtn = document.getElementById("move-legacy");
+  const moveVerdict = document.getElementById("move-verdict");
+  const moveLog = document.getElementById("move-log");
+  const hasMoveBefore = "moveBefore" in Element.prototype;
+  let moveFrame = null;
+  let loads = 0;
+  let moveEvents = [];
+  const TICKER = "<!doctype html><p style='font:14px system-ui;margin:6px'>document <b id=id></b> · alive <b id=t>0</b> ticks</p>" +
+    "<script>document.getElementById('id').textContent=Math.random().toString(36).slice(2,6);" +
+    "var n=0;setInterval(function(){document.getElementById('t').textContent=++n},250)<\/script>";
+
+  async function setupMove() {
+    moveFrame = document.createElement("iframe");
+    moveFrame.title = "frame that gets moved between boxes";
+    moveFrame.srcdoc = TICKER;
+    moveFrame.addEventListener("load", () => {
+      loads++;
+      hook(moveFrame, moveEvents, "");
+    });
+    await loadInto(moveFrame, boxA);
+    moveVerdict.textContent = hasMoveBefore
+      ? "Frame loaded in box A. Pick a move."
+      : "Frame loaded. moveBefore() is not available in this browser, so only insertBefore() can run.";
+    atomicBtn.disabled = !hasMoveBefore;
+  }
+  function docId() {
+    try { return moveFrame.contentDocument.getElementById("id").textContent; } catch { return "?"; }
+  }
+  async function doMove(kind) {
+    lock([atomicBtn, legacyBtn], true);
+    try {
+      const target = moveFrame.parentElement === boxA ? boxB : boxA;
+      const before = { id: docId(), loads };
+      moveEvents = [];
+      // re-hook on the current document so this move is recorded
+      hook(moveFrame, moveEvents, "");
+      if (kind === "atomic") target.moveBefore(moveFrame, null);
+      else target.insertBefore(moveFrame, null);
+      await wait(600);
+      const after = { id: docId(), loads };
+      const reloaded = after.loads > before.loads;
+      const unique = [...new Set(moveEvents)];
+      moveLog.textContent = (kind === "atomic" ? "target.moveBefore(frame, null)" : "target.insertBefore(frame, null)") +
+        "\n  document id: " + before.id + " → " + after.id + (reloaded ? "  (new document loaded)" : "  (same document)") +
+        "\n  events on the old document: " + (unique.length ? unique.join(", ") : "none");
+      moveVerdict.textContent = kind === "atomic"
+        ? (reloaded || unique.length ? "Unexpected: moveBefore() tore the frame down." : "moveBefore(): same document, no events — nothing to deprecate here.")
+        : (reloaded ? "insertBefore(): the old document was destroyed and a new one loaded — " + (unique.length ? "and the removal events fired (legacy)." : "with no removal events (156 behaviour).") : "insertBefore() did not reload — unexpected.");
+      window.showcaseTelemetry?.assert(kind === "atomic" ? "movebefore-no-teardown" : "insertbefore-reloads",
+        kind === "atomic" ? (!reloaded && unique.length === 0) : reloaded, { events: unique.length });
+    } catch (err) {
+      moveVerdict.textContent = "Could not move: " + err.message;
+    } finally {
+      legacyBtn.disabled = false;
+      atomicBtn.disabled = !hasMoveBefore;
+    }
+  }
+  atomicBtn.addEventListener("click", () => doMove("atomic"));
+  legacyBtn.addEventListener("click", () => doMove("legacy"));
+  setupMove().catch((err) => { moveVerdict.textContent = "Could not load the frame: " + err.message; });
+
+  // ---------- 3. focus ----------
+  const focusHost = document.getElementById("focus-host");
+  const focusBtn = document.getElementById("focus-run");
+  focusBtn.addEventListener("click", async () => {
+    lock([focusBtn], true);
+    const out = document.getElementById("focus-verdict");
+    const log = document.getElementById("focus-log");
+    try {
+      focusHost.replaceChildren();
+      const f = document.createElement("iframe");
+      f.title = "frame with a focused text field";
+      f.srcdoc = "<label style='font:14px system-ui'>inner field <input id=i value='typing…'></label>";
+      await loadInto(f, focusHost);
+      const ev = [];
+      const input = f.contentDocument.getElementById("i");
+      input.focus();
+      const focused = f.contentDocument.activeElement === input && document.activeElement === f;
+      input.addEventListener("blur", () => ev.push("input blur"));
+      input.addEventListener("focusout", () => ev.push("input focusout"));
+      f.contentWindow.addEventListener("blur", () => ev.push("window blur"));
+      hook(f, ev, "");
+      await wait(50);
+      f.remove();
+      await wait(50);
+      const landed = document.activeElement ? document.activeElement.tagName.toLowerCase() : "none";
+      log.textContent = "inner field focused before removal: " + focused +
+        "\nevents: " + (ev.length ? ev.join(", ") : "none") +
+        "\nparent document.activeElement afterwards: <" + landed + ">";
+      const focusEv = ev.filter((e) => e.includes("blur") || e.includes("focusout"));
+      const detach = ev.filter((e) => !(e.includes("blur") || e.includes("focusout")));
+      out.textContent = "Detachment events: " + (detach.length ? "fired (legacy)" : "omitted (156)") +
+        ". Focus events: " + (focusEv.length ? focusEv.length + " fired" : "none") +
+        " — governed by OmitBlurEventOnElementRemoval, not this feature.";
+      window.showcaseTelemetry?.assert("focused-frame-removal-observed", true, { focused, focusEv: focusEv.length, detach: detach.length });
+    } catch (err) {
+      out.textContent = "Could not run: " + err.message;
+    } finally {
+      lock([focusBtn], false);
+      // Removing the focused frame drops focus to <body>; return it to the control the user pressed.
+      if (!document.activeElement || document.activeElement === document.body) focusBtn.focus();
+    }
+  });
+})();
+</script>
+</body>
+</html>
