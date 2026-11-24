@@ -16,6 +16,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
+import { loadSidecar, loadSidecarFromRef } from "./support.mjs";
 
 const FEATURE_INDEX_RE = /^(v\d+)\/([^/]+)\/index\.html$/;
 const CONCEPT_INDEX_RE = /^v\d+\/[^/]+\/([^/]+)\/index\.html$/;
@@ -55,33 +56,20 @@ export function loadMigrations(root = REPO_ROOT) {
   return parsed;
 }
 
-// Responsive support sidecar (mobile + desktop parity invariant): a git-tracked
-// `responsive-support.json` keyed by feature-demo id. Merged into each manifest
-// entry as `support`. ADDITIVE — absence yields the honest untested default so
-// the gate/coverage never crash on an un-seeded tree.
+// Responsive support sidecar (mobile + desktop parity invariant): per-feature
+// `v<N>/<feature-slug>/_support.json` sidecars (falling back to legacy root
+// `responsive-support.json` when present), keyed by feature-demo id. Merged
+// into each manifest entry as `support`. ADDITIVE — absence yields the honest
+// untested default so the gate/coverage never crash on an un-seeded tree.
 const DEFAULT_SUPPORT = { desktop: "untested", mobile: "untested" };
 
 export function loadSupportSidecar(root = REPO_ROOT) {
-  const file = join(root, "responsive-support.json");
-  if (!existsSync(file)) return {};
-  try {
-    const parsed = JSON.parse(readFileSync(file, "utf8"));
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
+  return loadSidecar(root);
 }
 
 export function loadSupportSidecarFromRef(ref, root = REPO_ROOT) {
   try {
-    const raw = execFileSync("git", ["show", `${ref}:responsive-support.json`], {
-      cwd: root,
-      encoding: "utf8",
-      maxBuffer: 64 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
+    return loadSidecarFromRef(ref, root) ?? {};
   } catch {
     return {};
   }

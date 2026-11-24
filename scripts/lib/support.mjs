@@ -1,26 +1,69 @@
 // Shared responsive-support helpers (mobile + desktop parity invariant).
 //
 // Side-effect-free: safe to import from both the responsive-support CLI and the
-// route regression gate. Reads the git-tracked `responsive-support.json` sidecar
-// keyed by feature-demo id (`v<N>/<feature-slug>`).
+// route regression gate. Reads per-feature `v<N>/<feature-slug>/_support.json`
+// sidecars keyed by feature-demo id (`v<N>/<feature-slug>`), falling back to /
+// overlaying over a legacy root `responsive-support.json` when present.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { REPO_ROOT } from "./manifest.mjs";
+
+const REPO_ROOT = join(new URL(".", import.meta.url).pathname, "..", "..");
+const FEATURE_SUPPORT_RE = /^(v\d+)\/([^/]+)\/_support\.json$/;
 
 export const SUPPORT_CLASSES = ["desktop", "mobile"];
 const STATES = ["ok", "unsupported", "untested", "needs-review", "broken"];
 
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function jsonKind(value) {
+  return value === null ? "null" : Array.isArray(value) ? "an array" : `a ${typeof value}`;
+}
+
 export function loadSidecar(root = REPO_ROOT) {
-  const file = join(root, "responsive-support.json");
-  if (!existsSync(file)) return {};
-  try {
-    const parsed = JSON.parse(readFileSync(file, "utf8"));
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
+  const out = {};
+  const legacyFile = join(root, "responsive-support.json");
+  if (existsSync(legacyFile)) {
+    try {
+      const parsed = JSON.parse(readFileSync(legacyFile, "utf8"));
+      if (isPlainObject(parsed)) Object.assign(out, parsed);
+    } catch {
+      // ignore malformed legacy file
+    }
   }
+  let topEntries;
+  try {
+    topEntries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const rel of topEntries) {
+    if (!rel.isDirectory() || !/^v\d+$/.test(rel.name)) continue;
+    const relDir = join(root, rel.name);
+    let features;
+    try {
+      features = readdirSync(relDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const feat of features) {
+      if (!feat.isDirectory()) continue;
+      const supportFile = join(relDir, feat.name, "_support.json");
+      if (!existsSync(supportFile)) continue;
+      try {
+        const parsed = JSON.parse(readFileSync(supportFile, "utf8"));
+        if (isPlainObject(parsed)) {
+          out[`${rel.name}/${feat.name}`] = parsed;
+        }
+      } catch {
+        // ignore malformed per-feature file on disk load
+      }
+    }
+  }
+  return out;
 }
 
 // The git-tracked support map was introduced here (the commit that added it).
@@ -82,6 +125,59 @@ function gitIn(root, args) {
   }
 }
 
+// Read many git blobs in a single `git cat-file --batch` invocation using raw
+// Buffer byte offsets so multibyte UTF-8 payloads are sliced accurately.
+function gitBatchRead(root, specs) {
+  const input = `${specs.join("\n")}\n`;
+  let buf;
+  try {
+    buf = execFileSync("git", ["cat-file", "--batch"], {
+      cwd: root,
+      input,
+      stdio: ["pipe", "pipe", "pipe"],
+      maxBuffer: 128 * 1024 * 1024,
+    });
+  } catch (err) {
+    if (typeof err?.status === "number") {
+      const stderr = err.stderr ? String(err.stderr) : "";
+      const cause = stderr.trim().split("\n")[0] ?? "";
+      const customErr = new Error(
+        `git cat-file --batch exited ${err.status}${cause ? `: ${cause}` : ""}`,
+      );
+      customErr.status = err.status;
+      throw customErr;
+    }
+    throw err;
+  }
+
+  const results = [];
+  let offset = 0;
+  for (let i = 0; i < specs.length; i++) {
+    const nl = buf.indexOf(0x0a, offset);
+    if (nl === -1) {
+      throw new Error(`unexpected EOF in git cat-file --batch output for ${specs[i]}`);
+    }
+    const header = buf.subarray(offset, nl).toString("utf8");
+    offset = nl + 1;
+    if (header.endsWith(" missing")) {
+      throw new Error(`git object ${specs[i]} is missing`);
+    }
+    const parts = header.split(" ");
+    if (parts.length !== 3) {
+      throw new Error(`unexpected git cat-file header for ${specs[i]}: ${header}`);
+    }
+    const [, type, sizeStr] = parts;
+    const size = Number(sizeStr);
+    if (!Number.isFinite(size) || size < 0 || offset + size > buf.length) {
+      throw new Error(`invalid object size in git cat-file output for ${specs[i]}: ${header}`);
+    }
+    const content = buf.subarray(offset, offset + size).toString("utf8");
+    offset += size + 1; // trailing LF after object payload
+    results.push({ spec: specs[i], type, content });
+  }
+  return results;
+}
+
 // Returns the support map at `ref`, `null` when the ref provably predates the
 // map (documented, visible policy), and throws SupportSnapshotError for every
 // other failure — a missing ref, a map deleted after it was introduced, an
@@ -100,89 +196,152 @@ export function loadSidecarFromRef(ref, root = REPO_ROOT, opts = {}) {
       `the ref could not be resolved as a commit in this clone${cause(err)}`,
     );
   }
-  let present = true;
+
+  let treeRaw;
   try {
-    gitIn(root, ["cat-file", "-e", `${ref}:responsive-support.json`]);
-  } catch {
-    present = false;
+    treeRaw = gitIn(root, ["ls-tree", "-r", "-z", "--name-only", ref]);
+  } catch (err) {
+    throw new SupportSnapshotError(
+      ref,
+      `the tree at that ref could not be listed${cause(err)}`,
+    );
   }
-  if (!present) {
-    // Ancestry decides the policy, and it must be asked in BOTH directions:
-    // `--is-ancestor intro ref` exiting 1 means "not an ancestor", which covers
-    // both "ref predates the map" and "unrelated histories" — only the former is
-    // a legitimate skip (bead chrome_platform_showcase-7kr).
-    const isAncestor = (a, b) => {
-      try {
-        gitIn(root, ["merge-base", "--is-ancestor", a, b]);
-        return true;
-      } catch (err) {
-        if (err?.status === 1) return false;
-        throw err;
-      }
-    };
-    let introIsAncestorOfRef, refIsAncestorOfIntro;
+
+  const supportFiles = [];
+  let hasLegacyMap = false;
+  for (const path of treeRaw.split("\0")) {
+    if (!path) continue;
+    if (path === "responsive-support.json") {
+      hasLegacyMap = true;
+      continue;
+    }
+    const m = path.match(FEATURE_SUPPORT_RE);
+    if (m) {
+      supportFiles.push({ path, id: `${m[1]}/${m[2]}` });
+    }
+  }
+
+  if (supportFiles.length > 0) {
+    const specs = supportFiles.map((f) => `${ref}:${f.path}`);
+    let objects;
     try {
-      introIsAncestorOfRef = isAncestor(introducedIn, ref);
-      refIsAncestorOfIntro = introIsAncestorOfRef ? false : isAncestor(ref, introducedIn);
+      objects = gitBatchRead(root, specs);
     } catch (err) {
       throw new SupportSnapshotError(
         ref,
-        `the map is absent and this clone cannot determine the ancestry of ${ref} against the ` +
-          `introduction (${
-            introducedIn.slice(0, 12)
-          } did not resolve — fetch more history, e.g. git fetch --unshallow)${cause(err)}`,
+        `per-feature support sidecars exist at that ref but could not be read${cause(err)}`,
       );
     }
-    if (introIsAncestorOfRef) {
+    const out = {};
+    for (let i = 0; i < supportFiles.length; i++) {
+      const { path, id } = supportFiles[i];
+      const obj = objects[i];
+      if (obj.type !== "blob") {
+        throw new SupportSnapshotError(
+          ref,
+          `${path} at that ref is a git ${obj.type}, not a blob`,
+        );
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(obj.content);
+      } catch (err) {
+        throw new SupportSnapshotError(
+          ref,
+          `${path} exists at that ref but is not valid JSON — a malformed baseline must not read as empty${
+            cause(err)
+          }`,
+        );
+      }
+      if (!isPlainObject(parsed)) {
+        throw new SupportSnapshotError(
+          ref,
+          `${path} at that ref is ${
+            jsonKind(parsed)
+          }, not a JSON object — a non-object baseline must not read as an empty map`,
+        );
+      }
+      out[id] = parsed;
+    }
+    return out;
+  }
+
+  if (hasLegacyMap) {
+    let raw;
+    try {
+      raw = gitIn(root, ["show", `${ref}:responsive-support.json`]);
+    } catch (err) {
       throw new SupportSnapshotError(
         ref,
-        `responsive-support.json is absent although ${ref} contains its introduction ` +
-          `(${introducedIn.slice(0, 12)}) — the monotonicity check cannot run vacuously`,
+        `the map exists at that ref but could not be read${cause(err)}`,
       );
     }
-    if (refIsAncestorOfIntro) return null; // provably predates the map: nothing to compare
-    throw new SupportSnapshotError(
-      ref,
-      `the map is absent and ${ref} shares no ancestry with the introduction ` +
-        `(${introducedIn.slice(0, 12)}) — unrelated histories fail closed rather than ` +
-        `skipping the monotonicity check`,
-    );
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      throw new SupportSnapshotError(
+        ref,
+        `the map exists at that ref but is not valid JSON — a malformed baseline must not read as empty${
+          cause(err)
+        }`,
+      );
+    }
+    // A map is a plain JSON object. `{}` is a legitimate empty map; null, an
+    // array, a string or a number is not a map at all, and reading any of them as
+    // empty made the monotonicity loop vacuous (bead chrome_platform_showcase-e8x).
+    if (!isPlainObject(parsed)) {
+      throw new SupportSnapshotError(
+        ref,
+        `the map at that ref is ${
+          jsonKind(parsed)
+        }, not a JSON object — a non-map baseline must not read as an empty map`,
+      );
+    }
+    return parsed;
   }
-  let raw;
+
+  // Neither per-feature _support.json files nor legacy responsive-support.json
+  // exist at `ref`. Ancestry decides the policy, and it must be asked in BOTH
+  // directions: `--is-ancestor intro ref` exiting 1 means "not an ancestor",
+  // which covers both "ref predates the map" and "unrelated histories" — only
+  // the former is a legitimate skip (bead chrome_platform_showcase-7kr).
+  const isAncestor = (a, b) => {
+    try {
+      gitIn(root, ["merge-base", "--is-ancestor", a, b]);
+      return true;
+    } catch (err) {
+      if (err?.status === 1) return false;
+      throw err;
+    }
+  };
+  let introIsAncestorOfRef, refIsAncestorOfIntro;
   try {
-    raw = gitIn(root, ["show", `${ref}:responsive-support.json`]);
+    introIsAncestorOfRef = isAncestor(introducedIn, ref);
+    refIsAncestorOfIntro = introIsAncestorOfRef ? false : isAncestor(ref, introducedIn);
   } catch (err) {
     throw new SupportSnapshotError(
       ref,
-      `the map exists at that ref but could not be read${cause(err)}`,
+      `the map is absent and this clone cannot determine the ancestry of ${ref} against the ` +
+        `introduction (${
+          introducedIn.slice(0, 12)
+        } did not resolve — fetch more history, e.g. git fetch --unshallow)${cause(err)}`,
     );
   }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
+  if (introIsAncestorOfRef) {
     throw new SupportSnapshotError(
       ref,
-      `the map exists at that ref but is not valid JSON — a malformed baseline must not read as empty${
-        cause(err)
-      }`,
+      `support sidecars (v*/*/_support.json or responsive-support.json) are absent although ${ref} contains the map introduction ` +
+        `(${introducedIn.slice(0, 12)}) — the monotonicity check cannot run vacuously`,
     );
   }
-  // A map is a plain JSON object. `{}` is a legitimate empty map; null, an
-  // array, a string or a number is not a map at all, and reading any of them as
-  // empty made the monotonicity loop vacuous (bead chrome_platform_showcase-e8x).
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    const kind = parsed === null
-      ? "null"
-      : Array.isArray(parsed)
-      ? "an array"
-      : `a ${typeof parsed}`;
-    throw new SupportSnapshotError(
-      ref,
-      `the map at that ref is ${kind}, not a JSON object — a non-map baseline must not read as an empty map`,
-    );
-  }
-  return parsed;
+  if (refIsAncestorOfIntro) return null; // provably predates the map: nothing to compare
+  throw new SupportSnapshotError(
+    ref,
+    `the map is absent and ${ref} shares no ancestry with the introduction ` +
+      `(${introducedIn.slice(0, 12)}) — unrelated histories fail closed rather than ` +
+      `skipping the monotonicity check`,
+  );
 }
 
 // A class is acceptable for a TOUCHED demo only when it is ok, or unsupported
@@ -222,10 +381,10 @@ export function coverage(data) {
   };
 }
 
-// Feature-demo ids (`v<N>/<feature-slug>`) with any change vs a baseline ref:
-// committed + staged + unstaged + untracked. Used to enforce the "touched demo
-// must be tested on every supported class" rule without failing the whole
-// backlog of untested demos.
+// Feature-demo ids (`v<N>/<feature-slug>`) with any frontend change vs a
+// baseline ref: committed + staged + unstaged + untracked. Per-feature support
+// metadata (`_support.json`) and server-route handlers (`_server.ts`) are
+// excluded so metadata/server-only edits do not trigger rule (C) of check-routes.
 //
 // Fail closed: a git failure is reported as a TouchedSetError, never as an empty
 // set. An empty set is a legitimate answer (nothing changed, including a truly
@@ -235,8 +394,11 @@ export function coverage(data) {
 export function changedFeatureIds(ref, root = REPO_ROOT) {
   const ids = new Set();
   const add = (path) => {
-    const m = String(path).match(/^(v\d+)\/([^/]+)\//);
-    if (m) ids.add(`${m[1]}/${m[2]}`);
+    const m = String(path).match(/^(v\d+)\/([^/]+)\/(.+)$/);
+    if (!m) return;
+    const rel = m[3];
+    if (rel === "_support.json" || rel === "_server.ts") return;
+    ids.add(`${m[1]}/${m[2]}`);
   };
   let changed;
   let untracked;

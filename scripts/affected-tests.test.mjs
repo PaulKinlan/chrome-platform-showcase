@@ -116,8 +116,8 @@ function parseSidecarWiring(source) {
   ) {
     imported.set(match[2], match[1]);
   }
-  const registryMarker = "const STATIC_FEATURE_SERVERS";
-  const registryStart = code.indexOf(registryMarker);
+  const registryMatch = code.match(/const\s+(?:GENERATED|STATIC)_FEATURE_SERVERS\b/);
+  const registryStart = registryMatch ? registryMatch.index : -1;
   const registryEnd = registryStart >= 0 ? code.indexOf("};", registryStart) : -1;
   const registered = new Map();
   if (registryEnd > registryStart) {
@@ -275,6 +275,7 @@ test("the affected-file map fails closed and never orphans a suite", async () =>
   };
 
   staticOnly("generated support record", "responsive-support.json");
+  staticOnly("per-feature support record", "v156/some-new-feature/_support.json");
   staticOnly("generated demo index", "demo-index.json");
   staticOnly("generated lineage", "feature-lineage.json");
   staticOnly("prose", "reports/2026-10-09-critique.md");
@@ -355,9 +356,14 @@ test("the affected-file map fails closed and never orphans a suite", async () =>
     selectSteps(["routes/release.ts"]).steps.includes("test-header-grammar"),
   );
 
-  const gc = selectSteps(["routes/release-endpoints.ts"]);
+  const gc = selectSteps([
+    "v145/secure-payment-confirmation-browser-bound-keys/_server.ts",
+    "v145/device-bound-session-credentials/_server.ts",
+    "v150/email-verification-protocol/_server.ts",
+    "v131/exempt-speculation-rules-header-from-csp-restrictions/_server.ts",
+  ]);
   check(
-    "a release-endpoint change selects every GC-exposed suite",
+    "sidecar changes select their GC-exposed suites",
     [
       "test-spc-bbk-jwk-shape",
       "test-dbsc-jwk-shape",
@@ -689,9 +695,15 @@ test("the affected-file map fails closed and never orphans a suite", async () =>
     }
 
     const releaseSource = read("routes/release.ts");
-    const { imported, registered, registryFound } = parseSidecarWiring(releaseSource);
     check(
-      "STATIC_FEATURE_SERVERS block exists and is terminated in routes/release.ts",
+      "routes/release.ts imports GENERATED_FEATURE_SERVERS from ./_feature-servers.generated.ts",
+      releaseSource.includes('from "./_feature-servers.generated.ts"') &&
+        releaseSource.includes("GENERATED_FEATURE_SERVERS"),
+    );
+    const registrySource = read("routes/_feature-servers.generated.ts");
+    const { imported, registered, registryFound } = parseSidecarWiring(registrySource);
+    check(
+      "GENERATED_FEATURE_SERVERS block exists and is terminated in routes/_feature-servers.generated.ts",
       registryFound,
     );
     const onDisk = new Set();

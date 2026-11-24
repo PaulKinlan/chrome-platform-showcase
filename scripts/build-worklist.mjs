@@ -1,5 +1,6 @@
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { getChannels, getMilestoneFeatures, slugify } from "../lib/chromestatus.ts";
+import { loadSidecar } from "./lib/support.mjs";
 
 const args = new Map();
 for (let index = 0; index < process.argv.slice(2).length; index++) {
@@ -144,7 +145,7 @@ const minMilestone = Number(args.get("min") || localReleases[0]);
 const maxMilestone = Number(
   args.get("max") || Math.max(localReleases.at(-1), channels.dev.mstone + 2),
 );
-const responsive = await readJson(new URL("responsive-support.json", ROOT), {});
+const responsive = loadSidecar();
 const gendn = await readJson(new URL("gendn-links.json", ROOT), { routes: [] });
 const gendnRoutes = new Set(gendn.routes || []);
 const inventory = await localInventory();

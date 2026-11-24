@@ -28,7 +28,7 @@
 //     perfectly correct; a naive element-rect sweep reports it forever.
 //
 // Concept mode writes a REPORT (reports/responsive/concept-overflow-scan.json) and
-// never merges into the sidecar: `responsive-support.json` is keyed by feature
+// never merges into the sidecar: per-feature `_support.json` sidecars are keyed by feature
 // folder, and inventing 3,900 concept keys would make the route gate demand
 // records for pages it does not model. Promoting concept findings into the
 // sidecar is a separate decision.
@@ -232,7 +232,7 @@ async function assertServingThisTree() {
   throw new Error(
     `${base} is not serving this working tree (${probe} -> ${status}).\n` +
       `  Refusing to measure: a server without these demos reports every page broken/overflowed, ` +
-      `and --merge would contaminate responsive-support.json.\n` +
+      `and --merge would contaminate per-feature _support.json sidecars.\n` +
       `  Start a server from THIS worktree and pass --base http://localhost:<port> --no-server.`,
   );
 }

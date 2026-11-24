@@ -64,7 +64,7 @@ import {
   SPECULATION_RULES_PROBE_MAX_DOC_CHARS,
   SPECULATION_RULES_PROBE_MAX_DOCS_PER_RECORD,
 } from "../lib/probe-record-store.ts";
-import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
+import { handleFeatureRequest } from "../v131/exempt-speculation-rules-header-from-csp-restrictions/_server.ts";
 
 const RELEASE = "v131";
 const PREFIX = "/exempt-speculation-rules-header-from-csp-restrictions";
@@ -193,7 +193,10 @@ async function probeRoute(route, params = {}) {
   const query = new URLSearchParams(params).toString();
   const sub = `${PREFIX}/spec-rules-csp/${route}`;
   const req = new Request(`http://localhost:3000/${RELEASE}${sub}${query ? `?${query}` : ""}`);
-  const res = await handleLegacyReleaseEndpoints(req, RELEASE, sub, NO_ASSET);
+  const res = await handleFeatureRequest(req, sub, {
+    release: RELEASE,
+    readReleaseAsset: NO_ASSET,
+  });
   assert(res, `${route} should be handled`);
   return { res, body: await res.json().catch(() => ({})) };
 }

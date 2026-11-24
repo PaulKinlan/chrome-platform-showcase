@@ -33,8 +33,9 @@
 // (bead chrome-platform-showcase-bn2).
 //
 // Writes screenshots to reports/responsive/<id>/<class>.png and a run report to
-// reports/responsive/last-run.json. With --merge it also updates
-// responsive-support.json (ok/broken only; blocked never flips a class).
+// reports/responsive/last-run.json. With --merge it also updates the touched
+// per-feature `v<N>/<feature>/_support.json` sidecars (ok/broken only; blocked
+// never flips a class).
 
 import { createServer } from "node:net";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -130,7 +131,7 @@ if (!targets.length) {
 // answered. When another lane already held that port the spawn lost the bind,
 // the poll succeeded against the FOREIGN server, every demo under test 404ed,
 // and the checker recorded `broken` for pages it never loaded — which --merge
-// then wrote into the shared, git-tracked responsive-support.json. check-routes
+// then wrote into the git-tracked per-feature `_support.json` sidecars. check-routes
 // fails on any `broken` record for a supported class, so one lane's port
 // collision became every lane's red gate, and the obvious reaction ("the gate
 // says broken, record broken") writes the lie into main.
@@ -181,7 +182,7 @@ async function assertServingThisTree() {
   throw new Error(
     `${base} is not serving this working tree (${probe} -> ${status}).\n` +
       `  Refusing to measure: a server without these demos reports every class broken, ` +
-      `and --merge would write that into responsive-support.json.\n` +
+      `and --merge would write that into per-feature _support.json sidecars.\n` +
       `  Start a server from THIS worktree and pass --base http://localhost:<port> --no-server.`,
   );
 }

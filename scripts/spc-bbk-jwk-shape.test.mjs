@@ -31,7 +31,7 @@
 // Run: npm run test-spc-bbk-jwk-shape   (needs --v8-flags=--expose-gc)
 
 import { test } from "node:test";
-import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
+import { handleFeatureRequest } from "../v145/secure-payment-confirmation-browser-bound-keys/_server.ts";
 import { p256PublicJwkForStorage } from "../lib/jwk.ts";
 
 const PREFIX = "secure-payment-confirmation-browser-bound-keys";
@@ -87,7 +87,10 @@ async function post(sub, body) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  const res = await handleLegacyReleaseEndpoints(req, "v145", sub, noAsset);
+  const res = await handleFeatureRequest(req, sub, {
+    release: "v145",
+    readReleaseAsset: noAsset,
+  });
   assert(res, `${sub} should be handled by the release router`);
   return { res, body: await res.json() };
 }

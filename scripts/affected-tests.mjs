@@ -80,21 +80,6 @@ const SPEECH_DEMOS = [
   "**/speechrecognitionresult-timestamps-webspeech-api/**",
 ];
 
-// The release-endpoint suites share routes/release-endpoints.ts as their subject
-// (and the GC ones are the four `--v8-flags=--expose-gc` suites).
-const RELEASE_ENDPOINT_STEPS = [
-  "test-spc-bbk-device-name",
-  "test-spc-bbk-jwk-shape",
-  "test-dbsc-jwk-shape",
-  "test-evp-nonce-replay",
-  "test-speculation-probe-store",
-  "test-speculation-probe-docs",
-  "test-header-grammar",
-  "test-session-bounds",
-  "test-hardening",
-  "check-routes",
-];
-
 // The server/behaviour family. Matched by server.ts, routes/** and lib/**.
 // test-worker-platform scans routes/, lib/ and every sidecar for direct host API
 // calls (Deno.*, node:fs, node:http), which would break the Cloudflare Worker.
@@ -113,7 +98,12 @@ export const RULES = [
   {
     pattern: "responsive-support.json",
     staticOnly: true,
-    note: "generated support record; its structural check is check-routes monotonicity",
+    note: "legacy support record; its structural check is check-routes monotonicity",
+  },
+  {
+    pattern: "v*/*/_support.json",
+    staticOnly: true,
+    note: "per-feature support record; its structural check is check-routes monotonicity",
   },
   {
     pattern: "demo-index.json",
@@ -186,7 +176,62 @@ export const RULES = [
   {
     pattern: "v150/css-url-request-modifiers/_server.ts",
     steps: ["test-header-grammar", "check-routes"],
-    note: "CSS URL request modifiers referrer-echo sidecar",
+    note: "CSS URL request modifiers sidecar",
+  },
+  {
+    pattern: "v135/secure-payment-confirmation-browser-bound-keys/_server.ts",
+    steps: ["test-spc-bbk-device-name", "test-spc-bbk-jwk-shape", "test-hardening"],
+    note: "SPC BBK sidecar",
+  },
+  {
+    pattern: "v145/secure-payment-confirmation-browser-bound-keys/_server.ts",
+    steps: ["test-spc-bbk-device-name", "test-spc-bbk-jwk-shape", "test-hardening"],
+    note: "SPC BBK sidecar",
+  },
+  {
+    pattern: "v135/device-bound-session-credentials/_server.ts",
+    steps: ["test-dbsc-jwk-shape", "test-hardening"],
+    note: "DBSC sidecar",
+  },
+  {
+    pattern: "v145/device-bound-session-credentials/_server.ts",
+    steps: ["test-dbsc-jwk-shape", "test-hardening"],
+    note: "DBSC sidecar",
+  },
+  {
+    pattern: "v147/device-bound-session-credentials/_server.ts",
+    steps: ["test-dbsc-jwk-shape", "test-hardening"],
+    note: "DBSC sidecar",
+  },
+  {
+    pattern: "v150/email-verification-protocol/_server.ts",
+    steps: ["test-evp-nonce-replay", "test-hardening"],
+    note: "EVP sidecar",
+  },
+  {
+    pattern: "v131/exempt-speculation-rules-header-from-csp-restrictions/_server.ts",
+    steps: ["test-speculation-probe-store", "test-speculation-probe-docs", "test-hardening"],
+    note: "speculation-rules CSP probe sidecar",
+  },
+  {
+    pattern: "v130/webauthn-signal-api/_server.ts",
+    steps: ["test-session-bounds", "test-hardening"],
+    note: "WebAuthn signal session-bounded sidecar",
+  },
+  {
+    pattern: "v130/storage-access-headers/_server.ts",
+    steps: ["test-session-bounds", "test-hardening"],
+    note: "Storage Access Headers bounded sidecar",
+  },
+  {
+    pattern: "v136/web-authentication-conditional-create-automatic-passkey-upgrades/_server.ts",
+    steps: ["test-session-bounds", "test-hardening"],
+    note: "auto-passkey session-bounded sidecar",
+  },
+  {
+    pattern: "v138/pass-sec-purpose-prefetch-header-with-link-rel-prefetch/_server.ts",
+    steps: ["test-session-bounds", "test-hardening"],
+    note: "prefetch budget session-bounded sidecar",
   },
   {
     pattern: "v*/**/_server.ts",
@@ -197,8 +242,12 @@ export const RULES = [
   {
     pattern: "routes/release.ts",
     steps: ["test-header-grammar"],
-    note:
-      "STATIC_FEATURE_SERVERS edits run the registry-completeness pin (vo6); unions with routes/**",
+    note: "release router edits run the registry-completeness pin (vo6); unions with routes/**",
+  },
+  {
+    pattern: "routes/_feature-servers.generated.ts",
+    steps: ["test-header-grammar", "test-worker-platform"],
+    note: "generated feature-server registry",
   },
   ...SPEECH_DEMOS.map((pattern) => ({
     pattern,
@@ -228,11 +277,6 @@ export const RULES = [
     note: "server entry",
   },
   {
-    pattern: "routes/release-endpoints.ts",
-    steps: RELEASE_ENDPOINT_STEPS,
-    note: "release endpoint surface",
-  },
-  {
     pattern: "routes/critique-renderers.ts",
     steps: ["test-critique-table-scroll", "test-hardening"],
     note: "critique renderer",
@@ -241,6 +285,21 @@ export const RULES = [
     pattern: "routes/demo-telemetry.ts",
     steps: ["test-auth-throttle", "test-hardening"],
     note: "demo telemetry route",
+  },
+  {
+    pattern: "routes/telemetry/**",
+    steps: ["test-auth-throttle", "test-hardening"],
+    note: "demo telemetry submodules",
+  },
+  {
+    pattern: "routes/conformance/**",
+    steps: ["test-conformance-runner", "test-hardening"],
+    note: "conformance renderer submodules",
+  },
+  {
+    pattern: "scripts/build-feature-servers.mjs",
+    staticOnly: true,
+    note: "feature-server registry generator; static check-feature-servers guards it",
   },
   { pattern: "routes/**", steps: SERVER_STEPS, note: "route surface" },
   // ALL of lib/** fails closed to the full gate (coord, 2026-10-09): the shared
@@ -363,6 +422,15 @@ export function selectSteps(paths, { steps = GATE_STEPS, rules = RULES } = {}) {
     }
     if (hit.length === 0) {
       unmatched.push(path);
+      continue;
+    }
+    const staticRule = hit.find((r) => r.staticOnly);
+    if (staticRule) {
+      reasons.push({
+        path,
+        detail: `${staticRule.pattern} (${staticRule.note})`,
+        steps: [],
+      });
       continue;
     }
     const ids = [];
