@@ -1,7 +1,7 @@
 # Source of truth for the chrome-platform-showcase routine
 
 > This is the prompt the remote Claude Code routine receives. The live copy lives on the routine
-> trigger (trig_01GtXjwvzEM5mhsktARhGeSx). When you change this file, ALSO push the change to the
+> trigger (trig_01328Ji5KGCnwibMmoehXCVr). When you change this file, ALSO push the change to the
 > live routine via `RemoteTrigger.update`. Otherwise this drifts out of date.
 
 ---

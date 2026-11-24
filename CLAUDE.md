@@ -13,7 +13,7 @@ humans. Hosted on Deno Deploy via Deno's native GitHub integration.
 
 - Live site: https://chrome-platform-showcase.paulkinlan-ea.deno.net/
 - Repo: https://github.com/PaulKinlan/chrome-platform-showcase
-- Routine: https://claude.ai/code/routines/trig_01GtXjwvzEM5mhsktARhGeSx
+- Routine: https://claude.ai/code/routines/trig_01328Ji5KGCnwibMmoehXCVr
 
 Sister project: [gendn](https://github.com/PaulKinlan/gendn) (reference docs, same shape).
 
@@ -72,11 +72,12 @@ working commits for all features. You can also inspect the current quality snaps
 
 ## The routine
 
-Cron `17 6 * * *` (once a day, 06:17 UTC), trigger `trig_01GtXjwvzEM5mhsktARhGeSx`. Runs in
-Anthropic's cloud as a Claude Code session against a fresh checkout of `main`. Soft 90-minute budget
-per run. Picks up where the last run left off. **Toolset is Bash/Read/Write/Edit/Glob/Grep (+
-WebFetch/WebSearch) — no `chrome-devtools-mcp`.** It verifies with headless Chrome via Bash and
-`Read`-the-screenshot (see `.claude/routine-prompt.md` → "Toolset & verification environment").
+Cron `17 6 * * 1-6` (06:17 UTC Monday to Saturday; Sunday belongs to the weekly hardening run),
+trigger `trig_01328Ji5KGCnwibMmoehXCVr`. Runs in Anthropic's cloud as a Claude Code session against
+a fresh checkout of `main`. Soft 90-minute budget per run. Picks up where the last run left off.
+**Toolset is Bash/Read/Write/Edit/Glob/Grep (+ WebFetch/WebSearch) — no `chrome-devtools-mcp`.** It
+verifies with headless Chrome via Bash and `Read`-the-screenshot (see `.claude/routine-prompt.md` →
+"Toolset & verification environment").
 
 Cadence history: hourly → every-2-hours (2026-05-30, routines-per-day cap) → **once a day
 (2026-07-18)**, when the routine was re-enabled after a period disabled and its prompt was hardened
@@ -622,7 +623,7 @@ If you changed the design system (`public/styles.css`):
    kept drifting out of date.)
 2. Only use `RemoteTrigger` (action `update`) when you need to change cadence, enable/disable, the
    allowed tools, the model, or the bootstrap message itself. Trigger IDs: build
-   `trig_01GtXjwvzEM5mhsktARhGeSx`, weekly hardening `trig_01ShfGDEQYwDRsoisCRXhZBT`.
+   `trig_01328Ji5KGCnwibMmoehXCVr`, weekly hardening `trig_01ShfGDEQYwDRsoisCRXhZBT`.
 3. To smoke-test a prompt change, run the routine once via `RemoteTrigger` (action `run`) before
    relying on the next cron tick.
 
@@ -661,7 +662,7 @@ chromestatus API docs.
 
 - Live: https://chrome-platform-showcase.paulkinlan-ea.deno.net/
 - Catalogue: https://chrome-platform-showcase.paulkinlan-ea.deno.net/features
-- Routine UI: https://claude.ai/code/routines/trig_01GtXjwvzEM5mhsktARhGeSx
+- Routine UI: https://claude.ai/code/routines/trig_01328Ji5KGCnwibMmoehXCVr
 - chromestatus API: https://chromestatus.com/api/v0/channels
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
