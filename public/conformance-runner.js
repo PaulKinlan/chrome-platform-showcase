@@ -30,6 +30,25 @@ export async function withProbeRejectionsCaptured(run) {
   }
 }
 
+const ROUTE_CONTEXT_PATTERN =
+  /\bfetch\s*\(\s*(?:['"`]\.\.?\/|location\.href\b)|\bnew\s+URL\s*\(\s*['"`]\.\.?\/|\bdocument\.(?:featurePolicy|permissionsPolicy)\b|\bnew\s+(?:(?:globalThis|window|self)\.)?Profiler\b|\bself\.Profiler\b/;
+
+/**
+ * Returns true when an assertion's script depends on its own route URL,
+ * Document-Policy/Permissions-Policy response headers, or page-scoped policy
+ * state and therefore must execute inside that suite's own conformance page
+ * context rather than directly in `/conformance/run-all/`.
+ */
+export function assertionNeedsRouteContext(assertion) {
+  if (!assertion || (assertion.kind !== "script" && assertion.kind !== "throws")) {
+    return false;
+  }
+  if (typeof assertion.test !== "string" || !assertion.test) {
+    return false;
+  }
+  return ROUTE_CONTEXT_PATTERN.test(assertion.test);
+}
+
 export async function runConformanceAssertion(kind, test, expect, environment = globalThis) {
   try {
     function propertyDescriptor(target, property) {

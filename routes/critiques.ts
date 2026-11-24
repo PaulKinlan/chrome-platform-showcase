@@ -1,12 +1,26 @@
 import { htmlResponse } from "./html.ts";
 import { readCritique, renderCritiqueDetail, renderCritiquesIndex } from "./critique-renderers.ts";
 
+function parseIntParam(raw: string | null): number | undefined {
+  if (raw === null) return undefined;
+  const trimmed = raw.trim();
+  if (!/^-?\d+$/.test(trimmed)) return undefined;
+  return Number(trimmed);
+}
+
 export async function handleCritiquesRoute(req: Request): Promise<Response | null> {
-  const path = new URL(req.url).pathname;
+  const url = new URL(req.url);
+  const path = url.pathname;
 
   if (path === "/critiques" || path === "/critiques/") {
     try {
-      return htmlResponse(await renderCritiquesIndex());
+      const sp = url.searchParams;
+      const release = sp.get("release")?.trim() || undefined;
+      const page = parseIntParam(sp.get("page"));
+      const limit = parseIntParam(sp.get("limit"));
+      const allParam = sp.get("all")?.trim();
+      const all = allParam === "1" || allParam === "true";
+      return htmlResponse(await renderCritiquesIndex({ release, page, limit, all }));
     } catch (err) {
       return new Response(`Failed to render critiques: ${err}`, { status: 502 });
     }

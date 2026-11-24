@@ -106,95 +106,60 @@ export function renderConformancePage(s: ConformanceSuite): string {
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 
-<script>
-(async () => {
-  document.getElementById("ua").textContent = navigator.userAgent;
+<script type="module">
+import {
+  runConformanceAssertion,
+  withProbeRejectionsCaptured,
+} from "/public/conformance-runner.js";
+
+const uaEl = document.getElementById("ua");
+if (uaEl) uaEl.textContent = navigator.userAgent;
+
+window.addEventListener("message", async (event) => {
+  if (event.origin !== location.origin) return;
+  const msg = event.data;
+  if (!msg || msg.type !== "conformance-run-assertion" || typeof msg.requestId !== "string") {
+    return;
+  }
+  const { value } = await withProbeRejectionsCaptured(() =>
+    runConformanceAssertion(msg.kind, msg.test, msg.expect)
+  );
+  const replyTarget = event.source && typeof event.source.postMessage === "function"
+    ? event.source
+    : window.parent;
+  if (replyTarget && replyTarget !== window) {
+    replyTarget.postMessage(
+      {
+        type: "conformance-assertion-result",
+        requestId: msg.requestId,
+        result: value,
+      },
+      event.origin,
+    );
+  }
+});
+
+const isEmbed = new URLSearchParams(location.search).get("embed") === "1";
+
+if (isEmbed) {
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage(
+      { type: "conformance-embed-ready", href: location.pathname },
+      location.origin,
+    );
+  }
+} else {
   const rows = document.querySelectorAll("#rows tr");
   let pass = 0, fail = 0, blocked = 0;
-
-  async function runAssertion(kind, test, expect) {
-    try {
-      function propertyDescriptor(target, property) {
-        let cur = Object(target);
-        while (cur) {
-          const descriptor = Object.getOwnPropertyDescriptor(cur, property);
-          if (descriptor) return descriptor;
-          cur = Object.getPrototypeOf(cur);
-        }
-        return undefined;
-      }
-
-      if (kind === "css-supports") {
-        // CSS.supports accepts either ("prop: value") or ("prop", "value");
-        // we pass the raw declaration form.
-        return { ok: !!CSS.supports(test), detail: "" };
-      }
-      if (kind === "exists") {
-        // Walk a dotted path against the global.
-        const parts = test.split(".");
-        let cur = globalThis;
-        for (let i = 0; i < parts.length; i++) {
-          const p = parts[i];
-          if (cur == null) return { ok: false, detail: "missing at " + p };
-          if (i === parts.length - 1) {
-            const ok = p in Object(cur);
-            return { ok, detail: ok ? "" : "undefined" };
-          }
-          cur = cur[p];
-        }
-        return { ok: false, detail: "empty path" };
-      }
-      if (kind === "typeof") {
-        const parts = test.split(".");
-        let cur = globalThis;
-        for (let i = 0; i < parts.length; i++) {
-          const p = parts[i];
-          if (cur == null) return { ok: false, detail: "missing at " + p };
-          if (i === parts.length - 1) {
-            let actual;
-            try {
-              actual = typeof cur[p];
-            } catch (e) {
-              const descriptor = propertyDescriptor(cur, p);
-              if (!descriptor) throw e;
-              actual = "value" in descriptor ? typeof descriptor.value : "accessor";
-            }
-            return { ok: actual === expect, detail: "typeof = " + actual };
-          }
-          cur = cur[p];
-        }
-        return { ok: false, detail: "empty path" };
-      }
-      if (kind === "script") {
-        // eslint-disable-next-line no-new-func
-        const result = new Function("return (" + test + ")")();
-        const resolved = (result instanceof Promise) ? await result : result;
-        return { ok: !!resolved, blocked: false, detail: String(resolved) };
-      }
-      if (kind === "manual") {
-        return { ok: false, blocked: true, detail: test };
-      }
-      if (kind === "throws") {
-        try {
-          // eslint-disable-next-line no-new-func
-          const result = new Function("return (" + test + ")")();
-          const resolved = (result instanceof Promise) ? await result : result;
-          return { ok: false, detail: "no throw (resolved to " + resolved + ")" };
-        } catch (e) {
-          return { ok: true, detail: e && e.name ? e.name : "threw" };
-        }
-      }
-      return { ok: false, detail: "unknown kind" };
-    } catch (e) {
-      return { ok: false, detail: (e && e.message) ? e.message : String(e) };
-    }
-  }
 
   for (const row of rows) {
     const kind = row.dataset.kind;
     const test = row.dataset.test;
     const expect = row.dataset.expect;
-    const { ok, blocked: isBlocked = false, detail } = await runAssertion(kind, test, expect);
+    const { value } = await withProbeRejectionsCaptured(() =>
+      runConformanceAssertion(kind, test, expect)
+    );
+    const { ok, blocked: isBlocked = false, detail } = value;
     const cell = row.querySelector("[data-verdict]");
     cell.classList.remove("verdict-na");
     cell.classList.add(isBlocked ? "verdict-blocked" : ok ? "verdict-pass" : "verdict-fail");
@@ -205,7 +170,7 @@ export function renderConformancePage(s: ConformanceSuite): string {
   document.getElementById("n-pass").textContent = pass;
   document.getElementById("n-fail").textContent = fail;
   document.getElementById("n-blocked").textContent = blocked;
-})();
+}
 </script>
 </body>
 </html>`;

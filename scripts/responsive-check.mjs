@@ -24,6 +24,7 @@
 //   npm run responsive-check -- --sample 12            # representative spread
 //   npm run responsive-check v153/some-feature ...  # explicit ids
 //   npm run responsive-check -- --milestone v153       # a whole milestone
+//   npm run responsive-check -- --milestone v153 --concepts  # include concept pages
 //   npm run responsive-check -- --sample 12 --merge     # fold results into sidecar
 //   npm run responsive-check -- --base http://localhost:4000 --no-server  # reuse a server
 //
@@ -32,10 +33,12 @@
 // already holds it — measuring another lane's server is never a useful result
 // (bead chrome-platform-showcase-bn2).
 //
-// Writes screenshots to reports/responsive/<id>/<class>.png and a run report to
+// Writes screenshots to reports/responsive/<id>/<class>.png (and with --concepts
+// to reports/responsive/<id>/<concept>/<class>.png) and a run report to
 // reports/responsive/last-run.json. With --merge it also updates the touched
 // per-feature `v<N>/<feature>/_support.json` sidecars (ok/broken only; blocked
-// never flips a class).
+// never flips a class; with --concepts a feature is only marked ok on a class if
+// its index AND every checked concept page passed on that class).
 
 import { createServer } from "node:net";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -43,6 +46,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
 import { cdpConnection, cleanupChrome, launchChrome, spawnChild } from "./lib/cdp.mjs";
+import {
+  expandResponsiveTargets,
+  rollupFeatureSupport,
+  toSidecarUpdates,
+} from "./lib/responsive-targets.mjs";
 
 const CLASSES = {
   desktop: { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false },
@@ -63,8 +71,9 @@ function flag(name, { boolean = false } = {}) {
 }
 const doMerge = Boolean(flag("--merge", { boolean: true }));
 const noServer = Boolean(flag("--no-server", { boolean: true }));
+const includeConcepts = Boolean(flag("--concepts", { boolean: true }));
 const explicitBase = flag("--base");
-let base = explicitBase ?? "http://localhost:3000";
+let base = (explicitBase ?? "http://localhost:3000").replace(/\/+$/, "");
 const sampleN = Number(flag("--sample") ?? 0);
 const nextN = Number(flag("--next") ?? flag("--untested") ?? 0);
 const milestone = flag("--milestone");
@@ -124,6 +133,10 @@ if (!targets.length) {
   console.error("No matching built demos.");
   process.exit(2);
 }
+const pageTargets = expandResponsiveTargets(targets, { includeConcepts });
+const conceptCounts = Object.fromEntries(
+  targets.map((t) => [t.id, Array.isArray(t.concepts) ? t.concepts.length : 0]),
+);
 
 // ── boot a local server unless told to reuse one ──────────────────────────────
 //
@@ -526,36 +539,69 @@ async function main() {
     // Chrome genuinely unavailable → every class blocked, never a pass.
     console.error(`CHROME UNAVAILABLE: ${e.message}. All classes recorded blocked (not a pass).`);
     const blockedReport = {};
-    for (const t of targets) blockedReport[t.id] = { desktop: "blocked", mobile: "blocked" };
-    await writeReport(blockedReport, {});
+    const blockedPages = [];
+    const today = new Date().toISOString().slice(0, 10);
+    for (const pt of pageTargets) {
+      blockedReport[pt.pageId] = { desktop: "blocked", mobile: "blocked" };
+      blockedPages.push({
+        featureId: pt.featureId,
+        pageId: pt.pageId,
+        route: pt.route,
+        isConcept: pt.isConcept,
+        desktop: "blocked",
+        mobile: "blocked",
+        lastChecked: today,
+        source: "harness",
+      });
+    }
+    const blockedFeatures = rollupFeatureSupport(blockedPages, {
+      conceptCounts,
+      lastChecked: today,
+      source: "harness",
+    });
+    await writeReport(blockedReport, {}, blockedFeatures);
     if (serverChild) serverChild.kill();
     process.exit(1);
   }
   const conn = await cdpConnection(chrome.wsUrl);
 
   const results = {};
-  const sidecarUpdate = {};
+  const pageResults = [];
+  const today = new Date().toISOString().slice(0, 10);
   let okD = 0, okM = 0, brokenN = 0, blockedN = 0;
-  for (const t of targets) {
-    const url = `${base}/${t.id}/`;
-    results[t.id] = {};
-    const rec = { source: "harness", lastChecked: new Date().toISOString().slice(0, 10) };
+  for (const pt of pageTargets) {
+    const url = `${base}${pt.route}`;
+    results[pt.pageId] = {};
+    const pageRec = {
+      featureId: pt.featureId,
+      pageId: pt.pageId,
+      route: pt.route,
+      isConcept: pt.isConcept,
+      lastChecked: today,
+      source: "harness",
+    };
     for (const cls of Object.keys(CLASSES)) {
       const r = await checkPage(conn, url, cls);
-      results[t.id][cls] = r;
+      results[pt.pageId][cls] = r;
+      pageRec[cls] = r.outcome;
       if (r.outcome === "ok") {
-        rec[cls] = "ok";
         cls === "desktop" ? okD++ : okM++;
       } else if (r.outcome === "broken") {
-        rec[cls] = "broken";
         brokenN++;
       } else {
         blockedN++; // blocked: leave sidecar class untouched
       }
-      console.log(`  ${t.id} [${cls}] ${r.outcome.toUpperCase()} — ${r.detail}`);
+      console.log(`  ${pt.pageId} [${cls}] ${r.outcome.toUpperCase()} — ${r.detail}`);
     }
-    if (rec.desktop || rec.mobile) sidecarUpdate[t.id] = rec;
+    pageResults.push(pageRec);
   }
+
+  const features = rollupFeatureSupport(pageResults, {
+    conceptCounts,
+    lastChecked: today,
+    source: "harness",
+  });
+  const sidecarUpdate = toSidecarUpdates(features);
 
   conn.close();
   await cleanupChrome(chrome);
@@ -576,12 +622,31 @@ async function main() {
       }]),
     ),
     results,
+    features,
   );
 
-  console.log(
-    `\nresponsive-check: ${targets.length} demos · desktop ok ${okD}/${targets.length} · ` +
-      `mobile ok ${okM}/${targets.length} · broken ${brokenN} · blocked ${blockedN}`,
-  );
+  if (includeConcepts) {
+    const featValues = Object.values(features);
+    const featOkD = featValues.filter((f) => f.desktop === "ok").length;
+    const featOkM = featValues.filter((f) => f.mobile === "ok").length;
+    const featBroken = featValues.filter(
+      (f) => f.desktop === "broken" || f.mobile === "broken",
+    ).length;
+    console.log(
+      `\nresponsive-check: ${pageTargets.length} pages across ${targets.length} demos · ` +
+        `pages desktop ok ${okD}/${pageTargets.length} · ` +
+        `mobile ok ${okM}/${pageTargets.length} · ` +
+        `broken ${brokenN} · blocked ${blockedN}\n` +
+        `  feature rollup: ${targets.length} demos · ` +
+        `desktop ok ${featOkD}/${targets.length} · ` +
+        `mobile ok ${featOkM}/${targets.length} · features broken ${featBroken}`,
+    );
+  } else {
+    console.log(
+      `\nresponsive-check: ${targets.length} demos · desktop ok ${okD}/${targets.length} · ` +
+        `mobile ok ${okM}/${targets.length} · broken ${brokenN} · blocked ${blockedN}`,
+    );
+  }
   if (unhandledRejections > 0) {
     console.error(
       `responsive-check: ${unhandledRejections} unhandled rejection(s) during the run — ` +
@@ -601,24 +666,23 @@ async function main() {
   }
 }
 
-async function writeReport(summary, full) {
+async function writeReport(summary, full, features) {
   const dir = `${REPO_ROOT}/reports/responsive`;
   await mkdir(dir, { recursive: true });
-  await writeFile(
-    `${dir}/last-run.json`,
-    JSON.stringify(
-      {
-        generatedAt: new Date().toISOString(),
-        // Persisted, not just printed: a run that swallowed a rejection should leave
-        // that fact in the evidence rather than only in a scrollback.
-        harness: { unhandledRejections, perPageTimeoutMs: perPageMs },
-        summary,
-        full,
-      },
-      null,
-      2,
-    ) + "\n",
-  );
+  const report = {
+    generatedAt: new Date().toISOString(),
+    // Persisted, not just printed: a run that swallowed a rejection should leave
+    // that fact in the evidence rather than only in a scrollback.
+    harness: {
+      unhandledRejections,
+      perPageTimeoutMs: perPageMs,
+      ...(includeConcepts ? { includeConcepts: true } : {}),
+    },
+    summary,
+    ...(includeConcepts ? { features } : {}),
+    full,
+  };
+  await writeFile(`${dir}/last-run.json`, JSON.stringify(report, null, 2) + "\n");
 }
 
 await main();

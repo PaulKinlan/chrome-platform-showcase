@@ -311,6 +311,16 @@ export const RULES = [
     staticOnly: true,
     note: "writing lint script; unit suite in tests/unit guards it",
   },
+  {
+    pattern: "scripts/check-jank.mjs",
+    staticOnly: true,
+    note: "jank checker CLI; unit suite in tests/unit guards it",
+  },
+  {
+    pattern: "scripts/responsive-check.mjs",
+    staticOnly: true,
+    note: "responsive check harness; unit suite in tests/unit guards target expansion",
+  },
   { pattern: "routes/**", steps: SERVER_STEPS, note: "route surface" },
   // ALL of lib/** fails closed to the full gate (coord, 2026-10-09): the shared
   // backend library has no proven per-file affected coverage, so a narrowed map
