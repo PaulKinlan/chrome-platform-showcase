@@ -293,3 +293,43 @@ Deno.test("D1 adapter: prefix ranges, reverse, limit and paging match Deno KV", 
   const deep = await collect(kv.list({ prefix: ["t"] }, { reverse: true, limit: 700 }));
   assertEquals(deep.at(-1).value, 504, "reverse paging continues past the first page");
 });
+
+Deno.test("bundles hold every _questions.json and conformance.json, byte for byte", async () => {
+  const { bundleFor } = await import("../worker/fs.ts");
+  assertEquals(
+    bundleFor("v151/x/y/_questions.json"),
+    "_worker/bundle-_questions.json",
+    "concept critiques map to the critique bundle",
+  );
+  assertEquals(bundleFor("v151/x/conformance.json"), "_worker/bundle-conformance.json", "suites");
+  assertEquals(bundleFor("v151/x/index.html"), null, "everything else is read individually");
+
+  const out = await Deno.makeTempDir({ prefix: "worker-bundles-" });
+  try {
+    const run = await new Deno.Command("deno", {
+      args: [
+        "run",
+        "--allow-read",
+        "--allow-write",
+        "scripts/build-worker-assets.mjs",
+        "--out",
+        out,
+      ],
+      cwd: ROOT,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assert(run.success, new TextDecoder().decode(run.stderr));
+    const manifest = JSON.parse(await Deno.readTextFile(`${out}/_worker/fs-manifest.json`));
+    for (const name of ["_questions.json", "conformance.json"]) {
+      const bundle = JSON.parse(await Deno.readTextFile(`${out}/_worker/bundle-${name}`));
+      const expected = manifest.files.filter((f) => f.endsWith(`/${name}`));
+      assertEquals(Object.keys(bundle).length, expected.length, `${name}: one entry per file`);
+      for (const f of expected.slice(0, 50)) {
+        assertEquals(bundle[f], await Deno.readTextFile(new URL(f, ROOT)), `${f} differs`);
+      }
+    }
+  } finally {
+    await Deno.remove(out, { recursive: true });
+  }
+});

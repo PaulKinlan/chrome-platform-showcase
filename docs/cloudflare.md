@@ -23,8 +23,10 @@ request ──> worker/index.ts ──> routes/dispatch.ts ──> routes/*.ts  
   Worker file or `v<N>/**/_server.ts` sidecar calls a Deno host API directly, because that works
   locally and throws on Workers.
 - **Static files.** `scripts/build-worker-assets.mjs` copies `v<N>/**`, `public/**`,
-  `demo-index.json` and `gendn-links.json` into `dist/worker-assets/` and writes the manifest.
-  `_server.ts` sidecars are never staged; they are bundled as code through the static registry in
+  `demo-index.json` and `gendn-links.json` into `dist/worker-assets/` and writes the manifest. Every
+  `_questions.json` and `conformance.json` is also bundled into `_worker/bundle-<name>`, so the
+  listing pages load two files instead of ~3,200 (each asset read is a subrequest). `_server.ts`
+  sidecars are never staged; they are bundled as code through the static registry in
   `routes/release.ts`. wrangler runs this script automatically before `dev` and `deploy`.
 - **Every request reaches the Worker first** (`run_worker_first`), because demo HTML is rewritten on
   the way out (breadcrumbs, conformance panel, telemetry script) and internal files
@@ -44,13 +46,10 @@ request ──> worker/index.ts ──> routes/dispatch.ts ──> routes/*.ts  
    `0001_kv.sql` applied. Later migrations:
    `npx wrangler@4.167.0 d1 migrations apply chrome-platform-showcase --remote`.
 
-2. **Connect the repo with Workers Builds** (Cloudflare's native GitHub integration, the same model
-   as Deno Deploy). Cloudflare dashboard → Workers & Pages → Create → Import a repository →
-   `PaulKinlan/chrome-platform-showcase`.
-   - Build command: leave empty (wrangler's build hook stages the assets).
-   - Deploy command: `npx wrangler@4.167.0 deploy`
-   - Non-production branch deploy command: `npx wrangler@4.167.0 versions upload` (gives each PR a
-     preview URL and a GitHub check).
+2. **Workers Builds.** Done: the `chrome-platform-showcase` Worker is connected to this repo with
+   two triggers. "Deploy on push to main" runs `npx wrangler@4.167.0 deploy`. "Branch previews" runs
+   `npx wrangler@4.167.0 versions upload` for every other branch. Both leave the build command
+   empty, because wrangler's build hook stages the assets.
 3. **Secret** for the telemetry admin pages: `npx wrangler@4.167.0 secret put showcase_password`
    (same value as on Deno Deploy).
 4. **Custom domain (optional).** The Worker answers on

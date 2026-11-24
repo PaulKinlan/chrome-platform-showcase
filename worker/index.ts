@@ -24,6 +24,7 @@ import { type D1DatabaseLike, d1Kv } from "./d1.ts";
 import {
   assetRequest,
   buildIndex,
+  bundleFor,
   type FsIndex,
   type FsManifest,
   MANIFEST_PATH,
@@ -101,9 +102,31 @@ function workersPlatform(env: Env): Platform {
     return indexPromise;
   };
 
+  // _questions.json / conformance.json come from one bundle per kind, loaded
+  // once per isolate, so the listing pages cost two subrequests, not ~3,200.
+  const bundles = new Map<string, Promise<Record<string, string>>>();
+  const loadBundle = (name: string): Promise<Record<string, string>> => {
+    let p = bundles.get(name);
+    if (!p) {
+      p = env.ASSETS.fetch(assetRequest(name)).then((res) => {
+        if (!res.ok) throw new Error(`bundle ${name} missing (${res.status})`);
+        return res.json() as Promise<Record<string, string>>;
+      });
+      p.catch(() => bundles.delete(name));
+      bundles.set(name, p);
+    }
+    return p;
+  };
+  const encoder = new TextEncoder();
+
   const readFile = async (path: string): Promise<Uint8Array<ArrayBuffer>> => {
     const key = normalize(path);
     if (!(await index()).files.has(key)) throw notFound(path);
+    const bundle = bundleFor(key);
+    if (bundle) {
+      const text = (await loadBundle(bundle))[key];
+      if (text !== undefined) return encoder.encode(text) as Uint8Array<ArrayBuffer>;
+    }
     const res = await env.ASSETS.fetch(assetRequest(key));
     if (!res.ok) throw notFound(path);
     return new Uint8Array(await res.arrayBuffer());

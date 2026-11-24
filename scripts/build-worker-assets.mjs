@@ -20,7 +20,15 @@
 // Runs under Node (Cloudflare's build image, `wrangler` build hook) and Deno.
 // Usage: node scripts/build-worker-assets.mjs [--out dist/worker-assets]
 
-import { copyFileSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -34,6 +42,8 @@ const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
 const ROOT_FILES = ["demo-index.json", "gendn-links.json"];
 const SKIP_NAMES = new Set(["_server.ts", ".DS_Store"]);
+// Must match BUNDLED_NAMES in worker/fs.ts.
+const BUNDLED_NAMES = ["_questions.json", "conformance.json"];
 
 function walk(dir, out) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -57,7 +67,7 @@ for (const name of ROOT_FILES) sources.push(join(ROOT, name));
 const files = sources.map((full) => relative(ROOT, full).split("\\").join("/")).sort();
 
 const problems = [];
-if (files.length + 1 > MAX_FILES) {
+if (files.length + 1 + BUNDLED_NAMES.length > MAX_FILES) {
   problems.push(`${files.length} files exceeds the ${MAX_FILES}-file static-assets limit`);
 }
 for (const file of files) {
@@ -77,6 +87,19 @@ for (const file of files) {
 }
 
 mkdirSync(join(OUT, "_worker"), { recursive: true });
+
+// The /critiques and /conformance listings read every _questions.json and
+// conformance.json (about 3,200 files). One ASSETS fetch per file would blow
+// through the Worker's subrequest limit, so each kind is also bundled into a
+// single JSON object { path: text } that the Worker loads once per isolate.
+for (const name of BUNDLED_NAMES) {
+  const bundle = {};
+  for (const file of files) {
+    if (file.endsWith(`/${name}`)) bundle[file] = readFileSync(join(ROOT, file), "utf8");
+  }
+  writeFileSync(join(OUT, "_worker", `bundle-${name}`), JSON.stringify(bundle));
+}
+
 writeFileSync(
   join(OUT, "_worker", "fs-manifest.json"),
   JSON.stringify({ generatedAt: new Date().toISOString(), files }),
