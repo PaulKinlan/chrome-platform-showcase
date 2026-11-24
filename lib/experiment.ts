@@ -246,12 +246,14 @@ async function scanExperiments(host: Platform): Promise<ExperimentRecord[]> {
     );
 
     experimentsCache = { host, at: Date.now(), records: out };
-    if (experimentsInFlight?.promise === promise) {
-      experimentsInFlight = null;
-    }
     return out;
   })();
   experimentsInFlight = { host, promise };
+  promise.finally(() => {
+    if (experimentsInFlight?.promise === promise) {
+      experimentsInFlight = null;
+    }
+  });
   return promise;
 }
 
