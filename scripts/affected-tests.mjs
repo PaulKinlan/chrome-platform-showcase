@@ -242,8 +242,7 @@ export const RULES = [
   {
     pattern: "routes/release.ts",
     steps: ["test-header-grammar"],
-    note:
-      "release router edits run the registry-completeness pin (vo6); unions with routes/**",
+    note: "release router edits run the registry-completeness pin (vo6); unions with routes/**",
   },
   {
     pattern: "routes/_feature-servers.generated.ts",

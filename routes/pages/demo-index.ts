@@ -115,9 +115,9 @@ export async function resolveDemo(
 
 export function renderProbeAttrs(probe: DemoProbe | undefined): string {
   if (!probe) return "";
-  return ` data-probe-kind="${escapeHTML(probe.kind)}" data-probe-test="${
-    escapeHTML(probe.test)
-  }"${probe.expect ? ` data-probe-expect="${escapeHTML(probe.expect)}"` : ""}`;
+  return ` data-probe-kind="${escapeHTML(probe.kind)}" data-probe-test="${escapeHTML(probe.test)}"${
+    probe.expect ? ` data-probe-expect="${escapeHTML(probe.expect)}"` : ""
+  }`;
 }
 
 /**

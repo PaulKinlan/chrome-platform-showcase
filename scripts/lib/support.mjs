@@ -20,11 +20,7 @@ function isPlainObject(value) {
 }
 
 function jsonKind(value) {
-  return value === null
-    ? "null"
-    : Array.isArray(value)
-    ? "an array"
-    : `a ${typeof value}`;
+  return value === null ? "null" : Array.isArray(value) ? "an array" : `a ${typeof value}`;
 }
 
 export function loadSidecar(root = REPO_ROOT) {
