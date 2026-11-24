@@ -62,6 +62,15 @@
       flex-wrap: wrap;
       margin-bottom: var(--space-3);
     }
+    :root { --target-size: 24px; }
+    @media (pointer: coarse) { :root { --target-size: 44px; } }
+    .script, .prompt-row input, .prompt-row button, #clear { min-block-size: var(--target-size); }
+    #trace { max-block-size: 22rem; overflow-y: auto; }
+    .prompt-row { flex-wrap: wrap; align-items: center; }
+    .prompt-label { flex-basis: 100%; font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-muted); }
+    .prompt-row input { min-inline-size: 0; }
+    .hint { font-family: var(--font-serif); font-size: 0.9rem; color: var(--text-charcoal); margin: 0 0 var(--space-3); }
+    .mode-status[data-mode="live"] { border-left: 4px solid var(--accent-emerald); }
     .script {
       background: var(--bg-ivory);
       color: var(--text-black);
@@ -85,7 +94,7 @@
       text-align: center;
       font-family: var(--font-mono);
     }
-    .meter b { display: block; font-family: var(--font-display); font-size: 1.4rem; }
+    .meter output { display: block; font-weight: 700; font-family: var(--font-display); font-size: 1.4rem; }
     .meter span { font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); }
 
     .warn-block {
@@ -105,15 +114,10 @@
   <header class="lede-block">
     <p class="eyebrow">demo &middot; v146</p>
     <h1>Tool call replay</h1>
-    <p class="lede">A staged conversation: a fictional in-page assistant takes natural-language prompts and selects a tool from the page's registered WebMCP set, runs it, and gets a response. Pick a scripted scenario or freestyle. The trace shows the prompt → tool match → arguments → response → side effect.</p>
+    <p class="lede">A staged conversation: a fictional in-page assistant takes natural-language prompts and picks one of the page's WebMCP tools. The tools are registered with <code>document.modelContext.registerTool()</code>, discovered with <code>getTools()</code> and run with <code>executeTool()</code>, so the trace shows real resolved values and real rejections: a tool that throws, input that fails its schema, and a call cancelled by a deadline. The assistant's tool choice is a keyword stand-in for a model.</p>
   </header>
 
-  <div class="warn-block">
-    <strong>Behind a flag:</strong> WebMCP / <code>navigator.modelContext</code> ships behind
-    <code>chrome://flags/#enable-experimental-web-platform-features</code> in Chrome 146.
-    The page registers a stub registry and matches prompts against tool descriptions so the demo
-    works regardless.
-  </div>
+  <div class="warn-block mode-status" id="mc-status" role="status">Checking for <code>document.modelContext</code>…</div>
 
   <div class="stage">
     <h3>scripts</h3>
@@ -123,40 +127,53 @@
       <button class="script" data-s="checkout">check out my cart</button>
       <button class="script" data-s="filter">filter under $50</button>
       <button class="script" data-s="unknown">recommend a song</button>
+      <button class="script" data-s="bad-input">filter under a sensible price</button>
+      <button class="script" data-s="deadline">search "lamps" within 100 ms</button>
     </div>
+    <p class="hint">Try <em>check out my cart</em> before adding anything: the tool throws, <code>executeTool()</code> rejects with an <code>OperationError</code>, and Chrome logs <q>WebMCP tool execution failed</q> to the console with the original error. That console line is expected.</p>
 
     <h3>or freestyle</h3>
     <div class="prompt-row">
-      <input id="prompt" placeholder="ask the page assistant…" aria-label="Ask the page assistant…">
-      <button id="send">send</button>
+      <label for="prompt" class="prompt-label">ask the page assistant</label>
+      <input id="prompt" placeholder="e.g. add 3 mugs to cart">
+      <button id="send" type="button">send</button>
+      <button id="clear" type="button">reset</button>
     </div>
 
     <div class="lane">
       <div class="pane">
-        <h4>tool registry</h4>
+        <h4>tool registry <small id="tools-source"></small></h4>
         <div id="tools"></div>
       </div>
       <div class="pane">
         <h4>trace</h4>
-        <div id="trace"></div>
+        <div id="trace" role="log" aria-live="polite" aria-label="Tool call trace" tabindex="0"></div>
       </div>
     </div>
 
     <div class="meters">
-      <div class="meter"><b id="m-prompts">0</b><span>prompts</span></div>
-      <div class="meter"><b id="m-calls">0</b><span>tool calls</span></div>
-      <div class="meter"><b id="m-cart">0</b><span>items in cart</span></div>
+      <div class="meter"><output id="m-prompts" aria-labelledby="l-prompts">0</output><span id="l-prompts">prompts</span></div>
+      <div class="meter"><output id="m-calls" aria-labelledby="l-calls">0</output><span id="l-calls">tool calls</span></div>
+      <div class="meter"><output id="m-cart" aria-labelledby="l-cart">0</output><span id="l-cart">items in cart</span></div>
     </div>
   </div>
 
-  <pre><code>// 146 surface:
-navigator.modelContext.registerTool({
+  <pre tabindex="0" aria-label="WebMCP code for this demo"><code>// The page registers tools on Document (not navigator):
+await document.modelContext.registerTool({
   name: "addToCart",
-  description: "Add one or more items to the cart",
-  parameters: { type: "object", properties: { sku: {type: "string"}, qty: {type: "number"} } },
-  invoke: ({ sku, qty }) =&gt; cart.add(sku, qty),
+  description: "Add one or more units of a product to the shopping cart",
+  inputSchema: { type: "object",
+                 properties: { sku: { type: "string" }, qty: { type: "integer" } },
+                 required: ["sku", "qty"] },
+  async execute({ sku, qty }, { signal }) { return cart.add(sku, qty); },
 });
-// A user agent (or another tool consumer) calls invoke() over the registered set.</code></pre>
+
+// An in-page agent discovers and calls them:
+const tools = await document.modelContext.getTools();
+const tool = tools.find((t) =&gt; t.name === "addToCart");
+const json = await document.modelContext.executeTool(tool, { sku: "french-press", qty: 2 },
+                                                     { signal: AbortSignal.timeout(5000) });
+// json is the JSON-stringified return value. A throwing execute() rejects with OperationError.</code></pre>
 
   <section>
     <h2>see also</h2>
@@ -164,7 +181,8 @@ navigator.modelContext.registerTool({
       <li><a href="/v146/webmcp/">Feature page</a></li>
       <li><a href="/v146/webmcp/agent-handshake-simulator/">Agent handshake simulator</a></li>
       <li><a href="/v146/webmcp/tool-registry-explorer/">Tool registry explorer</a></li>
-      <li><a href="https://github.com/WICG/web-model-context" target="_blank" rel="noopener">WICG Web Model Context</a></li>
+      <li><a href="https://webmachinelearning.github.io/webmcp/" target="_blank" rel="noopener">WebMCP specification</a></li>
+      <li><a href="https://github.com/webmachinelearning/webmcp" target="_blank" rel="noopener">WebMCP explainer</a></li>
       <li><a href="https://chromestatus.com/feature/5117755740913664" target="_blank" rel="noopener">ChromeStatus entry</a></li>
     </ul>
   </section>
@@ -172,105 +190,175 @@ navigator.modelContext.registerTool({
   <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
 </main>
 
-<script>
-  const cart = { items: [] };
+<script type="module">
+  import { connectModelContext, describeError, validateAgainstSchema } from "../webmcp-live.js";
 
-  const tools = [
-    { name: "addToCart", description: "Add items to the cart", keys: ["add", "buy", "purchase"],
-      invoke({ sku, qty }) { cart.items.push({ sku, qty }); return { ok: true, cart }; },
+  const $ = (id) => document.getElementById(id);
+  const mc = connectModelContext($("mc-status"));
+  const cart = { items: [] };
+  const PRICE = 24.5;
+
+  // Real registrations: inputSchema + execute(input, { signal }), exactly as the spec defines them.
+  const definitions = [
+    {
+      name: "addToCart",
+      description: "Add one or more units of a product to the shopping cart",
+      inputSchema: { type: "object", properties: { sku: { type: "string" }, qty: { type: "integer" } }, required: ["sku", "qty"] },
+      async execute({ sku, qty }) {
+        cart.items.push({ sku, qty });
+        return { ok: true, added: { sku, qty }, units: cart.items.reduce((s, i) => s + i.qty, 0) };
+      },
     },
-    { name: "searchProducts", description: "Search the catalogue", keys: ["search", "find", "look for"],
-      invoke({ query }) { return { ok: true, results: [{ sku: "linen-12", title: "Linen napkin set", price: 28 }] }; },
+    {
+      name: "searchProducts",
+      description: "Search the product catalogue by keyword",
+      inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+      annotations: { readOnlyHint: true },
+      async execute({ query }, { signal }) {
+        // A deliberately slow "network" lookup so a deadline can cancel it.
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(resolve, 400);
+          // Stop the work when the caller cancels. executeTool() has already rejected for the
+          // caller; resolving here (rather than throwing) keeps the cancellation quiet.
+          signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+        });
+        if (signal?.aborted) return { ok: false, cancelled: true };
+        return { ok: true, query, results: [{ sku: "linen-12", title: "Linen napkin set", price: 28 }] };
+      },
     },
-    { name: "checkout", description: "Begin checkout", keys: ["check out", "checkout", "pay"],
-      invoke() { const total = cart.items.length * 24.5; return { ok: true, total }; },
+    {
+      name: "checkout",
+      description: "Begin checkout for everything in the cart and return the total",
+      inputSchema: { type: "object", properties: {} },
+      annotations: { consequentialHint: true },
+      async execute() {
+        const units = cart.items.reduce((s, i) => s + i.qty, 0);
+        if (units === 0) throw new Error("The cart is empty, so there is nothing to check out.");
+        return { ok: true, units, total: +(units * PRICE).toFixed(2) };
+      },
     },
-    { name: "filterByPrice", description: "Filter results by price", keys: ["filter", "under", "less than", "below"],
-      invoke({ maxUSD }) { return { ok: true, applied: { maxUSD } }; },
+    {
+      name: "filterByPrice",
+      description: "Filter the product list to items under a maximum price in US dollars",
+      inputSchema: { type: "object", properties: { maxUSD: { type: "number" } }, required: ["maxUSD"] },
+      annotations: { readOnlyHint: true },
+      async execute({ maxUSD }) {
+        return { ok: true, applied: { maxUSD } };
+      },
     },
   ];
 
-  document.getElementById("tools").innerHTML = tools.map((t) =>
-    `<div class="row">${t.name} — <i>${t.description}</i></div>`
-  ).join("");
+  // The "assistant" is a fictional keyword matcher standing in for a model. It only sees what
+  // getTools() returns; these keywords are its private heuristics, not part of WebMCP.
+  const KEYWORDS = {
+    addToCart: ["add", "buy", "purchase"],
+    searchProducts: ["search", "find", "look for"],
+    checkout: ["check out", "checkout", "pay"],
+    filterByPrice: ["filter", "under", "less than", "below"],
+  };
 
-  const trace = document.getElementById("trace");
+  const trace = $("trace");
   function row(kind, msg) {
     const r = document.createElement("div");
     r.className = "row " + kind;
     r.textContent = msg;
-    trace.prepend(r);
-    while (trace.children.length > 60) trace.lastChild.remove();
+    trace.append(r);
+    while (trace.children.length > 60) trace.firstChild.remove();
+    trace.scrollTop = trace.scrollHeight;
   }
 
   let prompts = 0, calls = 0;
   function updateMeters() {
-    document.getElementById("m-prompts").textContent = prompts;
-    document.getElementById("m-calls").textContent = calls;
-    document.getElementById("m-cart").textContent = cart.items.reduce((s, i) => s + (i.qty || 1), 0);
+    $("m-prompts").value = prompts;
+    $("m-calls").value = calls;
+    $("m-cart").value = cart.items.reduce((s, i) => s + i.qty, 0);
   }
 
-  function match(promptText) {
-    const lc = promptText.toLowerCase();
-    for (const t of tools) {
-      if (t.keys.some((k) => lc.includes(k))) return t;
-    }
-    return null;
-  }
-
-  function extract(t, prompt) {
+  function extract(name, prompt) {
     const lc = prompt.toLowerCase();
-    if (t.name === "addToCart") {
+    if (name === "addToCart") {
       const qty = (lc.match(/(\d+)/) || [, "1"])[1];
-      const sku = (lc.match(/add\s+\d*\s*(.*?)(?:\s+to\s+cart|$)/) || [, "item"])[1].trim();
+      const sku = (lc.match(/(?:add|buy|purchase)\s+\d*\s*(.*?)(?:\s+to\s+(?:my\s+)?cart|$)/) || [, ""])[1].trim();
       return { sku: sku || "item", qty: +qty };
     }
-    if (t.name === "searchProducts") {
-      const q = (lc.match(/(?:search|find|look for)\s+(.+)/) || [, ""])[1].replace(/^["']|["']$/g, "");
+    if (name === "searchProducts") {
+      const q = (lc.match(/(?:search|find|look for)\s+(.+?)(?:\s+within\s+\d+\s*ms)?$/) || [, ""])[1].replace(/^["']|["']$/g, "");
       return { query: q };
     }
-    if (t.name === "filterByPrice") {
-      const u = (lc.match(/\$?(\d+)/) || [, "100"])[1];
-      return { maxUSD: +u };
+    if (name === "filterByPrice") {
+      const m = lc.match(/\$?(\d+(?:\.\d+)?)/);
+      return m ? { maxUSD: +m[1] } : {};
     }
     return {};
   }
 
-  function send(promptText) {
+  async function send(promptText) {
     prompts++;
+    updateMeters();
     row("", "prompt: " + promptText);
-    const tool = match(promptText);
+    const lc = promptText.toLowerCase();
+    const tools = await mc.getTools();
+    const tool = tools.find((t) => (KEYWORDS[t.name] ?? []).some((k) => lc.includes(k)));
     if (!tool) {
-      row("err", "no tool match · would defer to general model / external action");
-      updateMeters();
+      row("err", `no match among ${tools.length} tools from getTools() · the assistant would answer without a tool`);
       return;
     }
-    const args = extract(tool, promptText);
-    row("call", "call " + tool.name + "(" + JSON.stringify(args) + ")");
+    const args = extract(tool.name, promptText);
+    const problems = validateAgainstSchema(tool.inputSchema, args);
+    if (problems.length) {
+      // The browser does not validate input against inputSchema, so the caller must.
+      row("err", `${tool.name}: input fails its inputSchema (${problems.join("; ")}) · not executed`);
+      return;
+    }
+    const deadline = lc.match(/within\s+(\d+)\s*ms/);
+    const options = deadline ? { signal: AbortSignal.timeout(+deadline[1]) } : {};
+    row("call", `executeTool(${tool.name}, ${JSON.stringify(args)}${deadline ? `, { signal: AbortSignal.timeout(${deadline[1]}) }` : ""})`);
     try {
-      const out = tool.invoke(args);
+      const json = await mc.executeTool(tool, args, options);
       calls++;
-      row("resp", "→ " + JSON.stringify(out));
+      row("resp", "→ resolved " + json);
     } catch (err) {
-      row("err", "→ " + err.message);
+      row("err", "→ rejected " + describeError(err));
     }
     updateMeters();
   }
 
-  document.getElementById("send").addEventListener("click", () => {
-    const p = document.getElementById("prompt").value.trim();
+  for (const def of definitions) {
+    try {
+      await mc.registerTool(def);
+    } catch (err) {
+      row("err", `registerTool(${def.name}) rejected: ${describeError(err)}`);
+    }
+  }
+  const registered = await mc.getTools();
+  $("tools").replaceChildren(...registered.map((t) => {
+    const r = document.createElement("div");
+    r.className = "row";
+    const i = document.createElement("i");
+    i.textContent = t.description;
+    r.append(`${t.name} — `, i);
+    return r;
+  }));
+  $("tools-source").textContent = mc.simulated ? "getTools() · simulated" : "getTools() · live";
+
+  $("send").addEventListener("click", () => {
+    const p = $("prompt").value.trim();
     if (!p) return;
     send(p);
-    document.getElementById("prompt").value = "";
+    $("prompt").value = "";
   });
-  document.getElementById("prompt").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") document.getElementById("send").click();
+  $("prompt").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) $("send").click();
   });
-
-  document.getElementById("scripts").addEventListener("click", (e) => {
+  $("scripts").addEventListener("click", (e) => {
     const t = e.target.closest("[data-s]");
-    if (!t) return;
-    send(t.textContent);
+    if (t) send(t.textContent);
+  });
+  $("clear").addEventListener("click", () => {
+    trace.replaceChildren();
+    cart.items.length = 0;
+    prompts = calls = 0;
+    updateMeters();
   });
 </script>
 </body>
