@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Memory &amp; input limits — Translator API on Android — Chrome 161</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .warn-block { background: var(--bg-stone); border: 2px solid var(--border-black); border-left: 8px solid var(--accent-amber); padding: var(--space-3); margin: var(--space-4) 0; font-size: 0.9rem; overflow-wrap: anywhere; }
+    .stage { border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); background: var(--bg-paper); padding: var(--space-4); margin: var(--space-4) 0; }
+    .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); gap: var(--space-3); align-items: end; }
+    label { display: block; font-weight: 600; margin-bottom: var(--space-1); }
+    select { width: 100%; min-height: 44px; font: inherit; padding: 0 var(--space-2); border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    textarea { width: 100%; box-sizing: border-box; min-height: 7rem; font: inherit; padding: var(--space-2); border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+    .controls button { min-height: 44px; }
+    button.secondary { background: var(--bg-ivory); color: var(--text-black); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    .readout { font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-stone); border: 1px solid var(--border-black); padding: var(--space-3); margin-top: var(--space-3); overflow-wrap: anywhere; }
+    .meter { margin-top: var(--space-2); }
+    meter { width: 100%; height: 1rem; }
+    ol.chunks { font-family: var(--font-mono); font-size: 0.8rem; max-height: 14rem; overflow: auto; border: 1px solid var(--border-black); padding: var(--space-2) var(--space-2) var(--space-2) 2.5rem; background: var(--bg-ivory); }
+    .over { color: var(--accent-rose); font-weight: 700; }
+    .ok { color: var(--accent-emerald-dark); font-weight: 700; }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v161/translator-api-on-android/">&larr; Translator API on Android</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v161 · concept 3 · edge / limits</p>
+    <h1>Memory &amp; input limits</h1>
+    <p class="lede">Chromium sets two parameters only on Android (<code>components/on_device_translation/features.cc</code>). First, a single <code>translate()</code> call may carry at most <strong>256 KiB of UTF-8</strong>; anything bigger is rejected with <code>QuotaExceededError</code>. Second, a language pair that sits idle for <strong>one minute</strong> is unloaded to give back about 79&ndash;84 MiB. Neither limit shows up in <code>inputQuota</code> or <code>measureInputUsage()</code>, so a mobile page has to plan for them itself.</p>
+  </header>
+
+  <div class="warn-block" role="note" id="banner">Checking whether <code>Translator</code> is exposed&hellip;</div>
+
+  <section>
+    <h2>1 · count the bytes that matter</h2>
+    <div class="stage">
+      <div class="row">
+        <div><label for="preset">Fill with a sample</label>
+          <select id="preset">
+            <option value="short">Short English paragraph (≈0.3 KiB)</option>
+            <option value="en200">English, ≈200 KiB (under the cap)</option>
+            <option value="en300">English, ≈300 KiB (over the cap)</option>
+            <option value="hi120k">Hindi, 120,000 characters (≈295 KiB UTF-8, over the cap)</option>
+          </select></div>
+        <div><label for="cap">Per-call budget for the planner</label>
+          <select id="cap">
+            <option value="262144">256 KiB (Android limit)</option>
+            <option value="65536">64 KiB (keeps each call short and responsive)</option>
+            <option value="8192">8 KiB (streaming-sized chunks)</option>
+          </select></div>
+      </div>
+      <div class="controls"><button type="button" id="fill" class="secondary">Fill text</button><button type="button" id="plan">Count &amp; plan chunks</button></div>
+      <label for="text" style="margin-top: var(--space-3)">Text to translate</label>
+      <textarea id="text" spellcheck="false">Where is the nearest pharmacy? I need something for a headache. Is it open late tonight, and do they accept card payments?</textarea>
+      <div class="meter"><label for="m">UTF-8 bytes against the 256 KiB Android cap</label><meter id="m" min="0" max="262144" low="196608" high="250000" optimum="0" value="0"></meter></div>
+      <div class="readout" id="count" role="status" aria-live="polite">Press &ldquo;Count &amp; plan chunks&rdquo;.</div>
+      <ol class="chunks" id="chunks" aria-label="Planned chunks"></ol>
+    </div>
+  </section>
+
+  <section>
+    <h2>2 · run it against a pack that's already on the device</h2>
+    <div class="stage">
+      <p>This section only creates a translator when <code>availability()</code> says <code>available</code>, so it never downloads anything. To install a pack deliberately, use <a href="../download-on-a-constrained-device/">Download on a constrained device</a>.</p>
+      <div class="row">
+        <div><label for="pair">Pair (source text above is English)</label><select id="pair"><option value="es">en → es</option><option value="fr">en → fr</option><option value="hi">en → hi</option><option value="ja">en → ja</option><option value="de">en → de</option></select></div>
+      </div>
+      <div class="controls">
+        <button type="button" id="attach">Use installed pack</button>
+        <button type="button" id="measure" class="secondary" disabled>Read inputQuota &amp; measureInputUsage()</button>
+        <button type="button" id="one" class="secondary" disabled>Translate as ONE call</button>
+        <button type="button" id="chunked" class="secondary" disabled>Translate chunk by chunk</button>
+        <button type="button" id="stop" class="secondary" disabled>Stop</button>
+      </div>
+      <div class="readout" id="run" role="status" aria-live="polite">Not attached.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>3 · cold vs warm after the 1-minute idle unload</h2>
+    <div class="stage">
+      <p>Time a short call now (warm). Then wait 65 seconds without using the translator and time the same call again. On Android, Chrome unloads the idle pair after 1 minute, so the second call includes reloading it. On desktop the timeout is 0 (never unload), so both calls should take about the same time.</p>
+      <div class="controls"><button type="button" id="warm" disabled>Time a warm call</button><button type="button" id="cold" class="secondary" disabled>Wait 65 s, then time again</button></div>
+      <div class="readout" id="timing" role="status" aria-live="polite">Attach an installed pack first (section 2).</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>the code</h2>
+<pre tabindex="0"><code>const ANDROID_MAX = 256 * 1024;                     // UTF-8 bytes per call
+const bytes = (s) =&gt; new TextEncoder().encode(s).length;  // NOT s.length (UTF-16 units)
+translator.inputQuota;                               // Infinity, even on Android
+await translator.measureInputUsage(text);            // 0, even on Android
+try { await translator.translate(huge); }
+catch (e) { if (e.name === "QuotaExceededError") { /* e.requested, e.quota when exposed */ } }
+for (const chunk of planChunks(text, ANDROID_MAX)) out.push(await translator.translate(chunk));</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../download-on-a-constrained-device/">Download on a constrained device</a></li>
+      <li><a href="/v148/translator-api/batch-translator/">Desktop batch translator (v148)</a></li>
+      <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:components/on_device_translation/features.cc" target="_blank" rel="noopener">Chromium: features.cc (Android parameters)</a></li>
+      <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:components/on_device_translation/translator.cc" target="_blank" rel="noopener">Chromium: translator.cc (input size check)</a></li>
+      <li><a href="https://chromestatus.com/feature/5106126157905920" target="_blank" rel="noopener">ChromeStatus entry (5106126157905920)</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const CAP = 262144;
+  const enc = new TextEncoder();
+  const bytes = (s) => enc.encode(s).length;
+  const kib = (n) => (n / 1024).toFixed(1) + " KiB";
+  const exposed = typeof Translator === "function" && typeof Translator.availability === "function";
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  $("banner").innerHTML = exposed
+    ? "<strong>Translator is exposed.</strong> Section 1 runs anywhere. Sections 2 and 3 need a pack this site can already use (<code>available</code>), and never trigger a download."
+    : "<strong>Translator is not exposed here</strong> (<code>typeof Translator</code> = <code>" + esc(typeof self.Translator) + "</code>). The byte counter and chunk planner are plain <code>TextEncoder</code> and still run for real. To translate on Chrome for Android before 161, launch with <code>--enable-features=TranslationAPI</code> or <code>--enable-blink-features=TranslationAPI</code> (no chrome://flags entry).";
+
+  const EN = "Where is the nearest pharmacy? I need something for a headache. Is it open late tonight, and do they accept card payments? ";
+  const HI = "निकटतम दवा की दुकान कहाँ है? ";
+  function fillText(kind) {
+    if (kind === "short") return EN.trim();
+    if (kind === "en200") return EN.repeat(Math.ceil(200 * 1024 / bytes(EN)));
+    if (kind === "en300") return EN.repeat(Math.ceil(300 * 1024 / bytes(EN)));
+    const s = HI.repeat(Math.ceil(120000 / HI.length)); return s.slice(0, 120000);
+  }
+  // Greedy sentence packer: never splits inside a sentence unless a single sentence
+  // alone exceeds the budget, in which case it splits on code points (never mid surrogate pair).
+  function planChunks(text, budget) {
+    const sentences = text.match(/[^.!?।？。]+[.!?।？。]*\s*/gu) || [text];
+    const out = []; let cur = "", curB = 0;
+    for (const s of sentences) {
+      const b = bytes(s);
+      if (b > budget) {
+        if (cur) { out.push(cur); cur = ""; curB = 0; }
+        let piece = "", pb = 0;
+        for (const ch of s) { const cb = bytes(ch); if (pb + cb > budget) { out.push(piece); piece = ""; pb = 0; } piece += ch; pb += cb; }
+        if (piece) { cur = piece; curB = pb; }
+        continue;
+      }
+      if (curB + b > budget) { out.push(cur); cur = ""; curB = 0; }
+      cur += s; curB += b;
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+  let plan = [];
+  function doPlan() {
+    const text = $("text").value, budget = +$("cap").value;
+    const b = bytes(text);
+    $("m").value = Math.min(b, CAP);
+    plan = planChunks(text, budget);
+    const allFit = plan.every((c) => bytes(c) <= budget);
+    $("count").innerHTML = `${text.length.toLocaleString()} UTF-16 code units (String.length) → <strong>${b.toLocaleString()} UTF-8 bytes</strong> (${kib(b)}). ` +
+      (b > CAP ? `<span class="over">Over the Android 256 KiB cap: one translate() call would reject with QuotaExceededError.</span>` : `<span class="ok">Within the Android cap for a single call.</span>`) +
+      `<br>Plan at ${kib(budget)} per call: ${plan.length} chunk(s), all within budget: ${allFit}. Rejoined text identical: ${plan.join("") === text}.`;
+    $("chunks").innerHTML = plan.slice(0, 50).map((c, i) => `<li>${kib(bytes(c))}: “${esc(c.slice(0, 40))}…”</li>`).join("") + (plan.length > 50 ? `<li>…and ${plan.length - 50} more</li>` : "");
+    window.showcaseTelemetry?.assert("translator-android-chunk-plan-lossless", plan.join("") === text && allFit, { chunks: plan.length, overCap: b > CAP });
+  }
+  $("fill").addEventListener("click", () => { $("text").value = fillText($("preset").value); doPlan(); });
+  $("plan").addEventListener("click", doPlan);
+  $("cap").addEventListener("change", doPlan);
+
+  let translator = null, ac = null;
+  const set = (ids, v) => ids.forEach((id) => { $(id).disabled = v; });
+  $("attach").addEventListener("click", async () => {
+    translator?.destroy?.(); translator = null; set(["measure", "one", "chunked", "warm", "cold"], true);
+    if (!exposed) { $("run").textContent = "Translator isn't exposed in this browser, so there's nothing to attach."; window.showcaseTelemetry?.assert("translator-android-attach-fallback", true, { branch: "not-exposed" }); return; }
+    const t = $("pair").value;
+    $("run").textContent = `availability({en → ${t}})…`;
+    let state;
+    try { state = await Promise.race([Translator.availability({ sourceLanguage: "en", targetLanguage: t }), new Promise((_, r) => setTimeout(() => r(new Error("no answer in 10 s")), 10000))]); }
+    catch (e) { $("run").textContent = `availability() failed: ${e.message}`; return; }
+    if (state !== "available") {
+      $("run").innerHTML = `availability → <code>${esc(state)}</code>. Not attaching, because creating now could start a download. Install the pack deliberately on the <a href="../download-on-a-constrained-device/">download page</a>, then come back. (Chrome can also report <code>downloadable</code> for a pack that's installed but that this site hasn't used yet.)`;
+      window.showcaseTelemetry?.assert("translator-android-attach-fallback", true, { branch: state === "unavailable" ? "unavailable" : "not-installed" });
+      return;
+    }
+    try {
+      translator = await Translator.create({ sourceLanguage: "en", targetLanguage: t });
+      $("run").textContent = `Attached en → ${translator.targetLanguage} with no download (availability was "available").`;
+      set(["measure", "one", "chunked", "warm", "cold"], false);
+      $("timing").textContent = "Ready: time a warm call.";
+      window.showcaseTelemetry?.assert("translator-android-attach-success", true, {});
+    } catch (e) { $("run").textContent = `create() rejected: ${e.name}: ${e.message}`; }
+  });
+  $("measure").addEventListener("click", async () => {
+    const text = $("text").value;
+    try {
+      const usage = await translator.measureInputUsage(text);
+      $("run").innerHTML = `inputQuota = <strong>${translator.inputQuota}</strong>; measureInputUsage(text) = <strong>${usage}</strong>; actual UTF-8 size = <strong>${bytes(text).toLocaleString()}</strong> bytes.<br>` +
+        (translator.inputQuota === Infinity ? "As in Chromium's translator.cc: quota is reported as Infinity, so the Android 256 KiB cap isn't discoverable here. Plan with TextEncoder instead." : "Quota is finite here. Prefer it over the hard-coded cap.");
+      window.showcaseTelemetry?.assert("translator-android-quota-readout", typeof usage === "number", { quotaInfinite: translator.inputQuota === Infinity, usageZero: usage === 0 });
+    } catch (e) { $("run").textContent = `measureInputUsage() rejected: ${e.name}: ${e.message}`; }
+  });
+  $("one").addEventListener("click", async () => {
+    const text = $("text").value; ac = new AbortController(); $("stop").disabled = false;
+    $("run").textContent = `translate() with ${kib(bytes(text))} in one call…`;
+    const t0 = performance.now();
+    try {
+      const r = await translator.translate(text, { signal: ac.signal });
+      $("run").textContent = `Single call succeeded in ${(performance.now() - t0).toFixed(0)} ms (${kib(bytes(r))} out). On Android, input over 256 KiB would have been refused, so this browser either isn't Android or the input fits.`;
+    } catch (e) {
+      const extra = e.name === "QuotaExceededError" ? ` requested=${e.requested ?? "n/a"} quota=${e.quota ?? "n/a"}. This is the Android cap. Use chunk-by-chunk.` : "";
+      $("run").textContent = `translate() rejected: ${e.name}: ${e.message}.${extra}`;
+      window.showcaseTelemetry?.assert("translator-android-oversize-rejected", e.name === "QuotaExceededError" || e.name === "AbortError" || bytes(text) <= CAP, { error: e.name, overCap: bytes(text) > CAP });
+    } finally { ac = null; $("stop").disabled = true; }
+  });
+  $("chunked").addEventListener("click", async () => {
+    const text = $("text").value; const chunks = planChunks(text, +$("cap").value);
+    ac = new AbortController(); $("stop").disabled = false;
+    const out = []; const t0 = performance.now();
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        $("run").textContent = `Chunk ${i + 1}/${chunks.length} (${kib(bytes(chunks[i]))})…`;
+        out.push(await translator.translate(chunks[i], { signal: ac.signal }));
+      }
+      $("run").textContent = `All ${chunks.length} chunk(s) translated in ${(performance.now() - t0).toFixed(0)} ms. Output starts: “${out.join("").slice(0, 120)}…”`;
+      window.showcaseTelemetry?.assert("translator-android-chunked-complete", out.length === chunks.length, { chunks: chunks.length });
+    } catch (e) { $("run").textContent = `Stopped at chunk ${out.length + 1}: ${e.name}: ${e.message}`; }
+    finally { ac = null; $("stop").disabled = true; }
+  });
+  $("stop").addEventListener("click", () => ac?.abort());
+
+  let warmMs = null, countdown = null;
+  async function timeCall() { const t0 = performance.now(); await translator.translate("Good morning."); return performance.now() - t0; }
+  $("warm").addEventListener("click", async () => {
+    try { await timeCall(); warmMs = await timeCall(); $("timing").textContent = `Warm call: ${warmMs.toFixed(0)} ms (after a priming call). Now try the 65 s wait.`; }
+    catch (e) { $("timing").textContent = `translate() rejected: ${e.name}: ${e.message}`; }
+  });
+  $("cold").addEventListener("click", () => {
+    if (countdown) return;
+    let left = 65; $("cold").disabled = true;
+    countdown = setInterval(async () => {
+      left--;
+      if (left > 0) { if (left % 5 === 0) $("timing").textContent = `Idle… ${left}s left. Don't use the translator.`; return; }
+      clearInterval(countdown); countdown = null;
+      try {
+        const cold = await timeCall();
+        const ratio = warmMs ? (cold / warmMs).toFixed(1) : "n/a";
+        $("timing").textContent = `After 65 s idle: ${cold.toFixed(0)} ms vs warm ${warmMs ? warmMs.toFixed(0) : "?"} ms (×${ratio}). A big jump is consistent with Android's 1-minute idle unload. About the same suggests desktop (no unload) or a fast reload.`;
+        window.showcaseTelemetry?.assert("translator-android-idle-timing", cold >= 0, { ratio });
+      } catch (e) { $("timing").textContent = `translate() after idle rejected: ${e.name}: ${e.message}`; }
+      $("cold").disabled = false;
+    }, 1000);
+  });
+  doPlan();
+})();
+</script>
+</body>
+</html>

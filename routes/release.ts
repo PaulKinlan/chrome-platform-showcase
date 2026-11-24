@@ -8,6 +8,7 @@ import { handleFeatureRequest as handleDelayedEchoServer } from "../v151/resourc
 import { handleFeatureRequest as handleCssUrlRequestModifiersServer } from "../v150/css-url-request-modifiers/_server.ts";
 import { handleFeatureRequest as handleUaChMigrationServer } from "../v145/reduced-user-agent-strings-by-default/_server.ts";
 import { handleFeatureRequest as handleConnectionAllowlistServer } from "../v157/connection-allowlists-embedded-enforcement/_server.ts";
+import { handleFeatureRequest as handleGpcServer } from "../v157/global-privacy-control-in-chrome/_server.ts";
 import { escapeHTML } from "./html.ts";
 import { knownReleaseMilestones, renderReleasePage } from "./pages.ts";
 import {
@@ -38,6 +39,7 @@ const STATIC_FEATURE_SERVERS: Record<string, FeatureServerHandler> = {
   "v150/css-url-request-modifiers": handleCssUrlRequestModifiersServer,
   "v145/reduced-user-agent-strings-by-default": handleUaChMigrationServer,
   "v157/connection-allowlists-embedded-enforcement": handleConnectionAllowlistServer,
+  "v157/global-privacy-control-in-chrome": handleGpcServer,
 };
 
 const dynamicFeatureServerCache = new Map<string, FeatureServerHandler | null>();

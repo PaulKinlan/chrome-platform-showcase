@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>App-shell revalidation — Distinct TypeError for cancelled race-network-and-fetch-handler fetch() — Chrome 159</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Distinct TypeError message for cancelled race-network-and-fetch-handler fetch()</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · service worker · advanced composition</p>
+    <h1>App-shell revalidation</h1>
+    <p class="lede">A common composition: answer instantly from a cached shell, then refresh that cache in the background (stale-while-revalidate). Put the URL behind a <code>"race-network-and-fetch-handler"</code> route and the obvious refresh, <code>fetch(event.request)</code>, rides on the raced request &mdash; which the browser cancels the moment your cached response wins. The refresh dies, the cache never updates, and until Chrome 159 the only trace was a <q>Failed to fetch</q> that looked like an outage. Try both refresh strategies against a live Cache Storage entry.</p>
+  </header>
+
+  <div class="note" id="status" role="status">Registering this feature&rsquo;s service worker&hellip;</div>
+
+  <div class="stage">
+    <h2>Load through the shell</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="delay">Server holds back its headers for</label>
+        <input type="range" id="delay" min="0" max="1200" step="50" value="600">
+        <output for="delay" id="delay-out">600 ms</output>
+      </div>
+    </div>
+    <div class="actions">
+      <button type="button" id="refresh-request">Load · refresh with fetch(event.request)</button>
+      <button type="button" id="refresh-url">Load · refresh with fetch(event.request.url)</button>
+      <button type="button" id="clear" class="secondary">Clear the cached shell</button>
+    </div>
+
+    <div class="counters">
+      <div class="counter">
+        <h3>Cached shell entry</h3>
+        <div id="cache-state" class="readout" role="status" aria-live="polite">reading Cache Storage…</div>
+      </div>
+      <div class="counter">
+        <h3>Last background refresh</h3>
+        <div id="refresh-state" class="readout" role="status" aria-live="polite" aria-atomic="true">none yet</div>
+      </div>
+    </div>
+  </div>
+
+  <section>
+    <h2>the two refresh strategies</h2>
+    <pre tabindex="0"><code>// A: rides the race — cancelled as soon as the shell answers
+const refresh = fetch(event.request);
+// Chrome 159+: TypeError "The service worker race-network-and-fetch-handler
+//              request was cancelled before 'fetch()' settled."
+// earlier:     TypeError "Failed to fetch"
+
+// B: an independent request — not deduplicated, not cancelled
+const refresh = fetch(event.request.url, { cache: "no-store" });
+
+event.waitUntil(refresh.then((r) =&gt; cache.put(SHELL_KEY, r.clone())));
+event.respondWith(caches.match(SHELL_KEY));</code></pre>
+    <p>Strategy B costs a second network request (the browser&rsquo;s own raced request is still made and then dropped). The cleaner fix is often to not race at all for cache-first URLs &mdash; route them with <code>source: "cache"</code> or plain <code>"fetch-event"</code> &mdash; and keep <code>"race-network-and-fetch-handler"</code> for URLs where you actually want the network response. The new message is what lets you <em>notice</em> you have this bug: a stream of &ldquo;cancelled before &lsquo;fetch()&rsquo; settled&rdquo; in your refresh path is a design smell, not an outage.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../fallback-timer-race/">Fallback-timer race</a></li>
+      <li><a href="../fetch-shape-inspector/">Fetch-shape inspector</a></li>
+      <li><a href="../telemetry-noise-filter/">Telemetry noise filter</a></li>
+      <li><a href="../error-taxonomy/">Error taxonomy</a></li>
+      <li><a href="https://chromestatus.com/feature/5124748525830144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://w3c.github.io/ServiceWorker/#dom-routersourceenum-race-network-and-fetch-handler" target="_blank" rel="noopener">Spec &mdash; race-network-and-fetch-handler</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script type="module">
+  import { run, SHELL_CACHE, SHELL_KEY } from "../harness.js";
+  import { showStatus, engineReading } from "../ui.js";
+
+  const $ = (id) => document.getElementById(id);
+  const delay = $("delay");
+  const sync = () => {
+    $("delay-out").textContent = `${delay.value} ms`;
+    delay.setAttribute("aria-valuetext", `${delay.value} milliseconds`);
+  };
+  delay.addEventListener("input", sync);
+  sync();
+
+  async function readCache() {
+    if (!("caches" in window)) {
+      $("cache-state").textContent = "Cache Storage is not available here.";
+      return null;
+    }
+    const cache = await caches.open(SHELL_CACHE);
+    const hit = await cache.match(SHELL_KEY);
+    if (!hit) {
+      $("cache-state").textContent = "empty — the next load will be answered by the worker's built-in fallback.";
+      return null;
+    }
+    const at = hit.headers.get("x-refreshed-at");
+    const body = await hit.text();
+    let scenario = "";
+    try { scenario = JSON.parse(body).elapsedMs !== undefined ? ` · server took ${JSON.parse(body).elapsedMs} ms` : ""; } catch {}
+    $("cache-state").textContent = `refreshed at ${at}${scenario}\n${body.length} bytes cached`;
+    return at;
+  }
+
+  await showStatus($("status"));
+  await readCache();
+
+  async function load(mode, button) {
+    for (const b of document.querySelectorAll(".actions button")) b.disabled = true;
+    $("refresh-state").textContent = "loading through the shell…";
+    try {
+      const before = await readCache();
+      const r = await run(mode, { delay: Number(delay.value) });
+      // The worker's cache.put runs in its own waitUntil; give it a moment, then re-read.
+      let after = await readCache();
+      for (let i = 0; i < 5 && after === before && r.worker.fetches?.[0]?.settled === "fulfilled"; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        after = await readCache();
+      }
+      const f = r.worker.fetches?.[0];
+      const lines = [
+        `page answered in ${r.page.ms} ms by ${r.page.ok ? r.page.servedBy === "offline-fallback" ? "the worker's fallback (no shell cached yet)" : "the cached shell" : r.page.message}`,
+        `refresh ${f?.label ?? "?"}: ${f ? f.settled === "fulfilled" ? `fulfilled · HTTP ${f.status} after ${f.ms} ms` : `rejected after ${f.ms} ms\n  ${f.name}: ${f.message}` : r.worker.error ?? "no report"}`,
+        `cache ${after && after !== before ? "UPDATED" : "not updated"}`,
+      ];
+      const reading = engineReading(f);
+      if (reading) lines.push("", reading);
+      $("refresh-state").textContent = lines.join("\n");
+      window.showcaseTelemetry?.assert("shell-refresh-reported", Boolean(f), {
+        mode, settled: f?.settled, message: f?.message, cacheUpdated: Boolean(after && after !== before),
+      });
+    } catch (error) {
+      $("refresh-state").textContent = `Load failed: ${error.message}`;
+      window.showcaseTelemetry?.assert("shell-refresh-reported", false, { error: error.message });
+    } finally {
+      for (const b of document.querySelectorAll(".actions button")) b.disabled = false;
+      button.focus();
+    }
+  }
+
+  $("refresh-request").addEventListener("click", (e) => load("shell", e.currentTarget));
+  $("refresh-url").addEventListener("click", (e) => load("shell-url", e.currentTarget));
+  $("clear").addEventListener("click", async () => {
+    await caches.delete(SHELL_CACHE);
+    await readCache();
+    $("refresh-state").textContent = "cache cleared";
+  });
+</script>
+</body>
+</html>

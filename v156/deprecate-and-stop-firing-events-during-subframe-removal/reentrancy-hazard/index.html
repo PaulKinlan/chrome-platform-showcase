@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Re-entrancy hazard — Deprecate and stop firing events during subframe removal — Chrome 156</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0; }
+    .actions button { min-height: 44px; }
+    .actions button.secondary { background: var(--bg-ivory); color: var(--text-black); border: 2px solid var(--border-black); }
+    #cards { list-style: none; padding: 0; margin: var(--space-3) 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr)); gap: var(--space-2); min-block-size: 4.5rem; border: 2px dashed var(--border-black); background: var(--bg-ivory); padding: var(--space-2); }
+    #cards li { margin: 0; }
+    #cards iframe { inline-size: 100%; block-size: 4rem; border: 1px solid var(--border-black); background: var(--bg-paper); }
+    #cards .ghost { font-size: 0.8rem; border: 2px solid var(--accent-rose); background: var(--bg-paper); color: var(--text-black); padding: var(--space-2); }
+    .trace { list-style: none; padding: var(--space-3); margin: var(--space-3) 0 0; font-family: var(--font-mono); font-size: 0.76rem; background: var(--bg-stone); color: var(--text-black); border: 2px solid var(--border-black); }
+    .trace li { margin: 0 0 0.25rem; overflow-wrap: anywhere; }
+    .trace li[data-depth="1"] { padding-inline-start: 1.25rem; border-inline-start: 3px solid var(--accent-rose); }
+    .trace li[data-depth="2"] { padding-inline-start: 2.5rem; border-inline-start: 3px solid var(--accent-rose); }
+    .trace li[data-depth="mo"] { padding-inline-start: 1.25rem; border-inline-start: 3px solid var(--accent-blue); }
+    .verdict { font-weight: 700; }
+    pre { overflow-x: auto; max-inline-size: 100%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v156/deprecate-and-stop-firing-events-during-subframe-removal/">&larr; Deprecate and stop firing events during subframe removal</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v156 · dom · feature removal</p>
+    <h1>Re-entrancy hazard</h1>
+    <p class="lede">Why the events are going: they let a child&rsquo;s script run <em>inside</em> the parent&rsquo;s DOM mutation. Three same-origin card iframes sit in a list; the parent clears the list with an ordinary loop. Card&nbsp;0 has a perfectly reasonable-looking <code>pagehide</code> handler that tidies its neighbour away. On legacy Chrome that handler runs in the middle of the parent&rsquo;s <code>remove()</code> call and edits the list the parent is iterating.</p>
+  </header>
+
+  <div class="note" role="note">
+    <strong>Flag:</strong> run Chrome 156+ with <code>--enable-blink-features=OmitSubframeDetachmentEventsOnRemoval</code> to see the trace collapse to the parent&rsquo;s own steps. Red-ruled lines are child script running during a parent call; blue-ruled lines are the parent&rsquo;s <code>MutationObserver</code>, which always runs afterwards, as a microtask.
+  </div>
+
+  <div class="stage">
+    <h2>Clear the card list</h2>
+    <ol id="cards" aria-label="card iframes"></ol>
+    <div class="actions">
+      <button type="button" id="loop">Clear with a for…of remove() loop</button>
+      <button type="button" class="secondary" id="replace">Clear with list.replaceChildren()</button>
+      <button type="button" class="secondary" id="reset">Reset cards</button>
+    </div>
+    <p class="verdict" id="verdict" role="status" aria-live="polite">Loading cards…</p>
+    <ol class="trace" id="trace" aria-label="interleaved execution trace"></ol>
+  </div>
+
+  <section>
+    <h2>the code</h2>
+    <pre tabindex="0"><code>// parent
+for (const li of [...cards.children]) li.remove();   // looks atomic per step
+
+// inside card 0 (same origin, so it can reach the parent's DOM)
+addEventListener("pagehide", () =&gt; {
+  const next = parent.document.querySelector("#cards li:nth-child(2)");
+  next?.remove();      // legacy Chrome: runs INSIDE the parent's li.remove()
+});
+
+// Legacy trace:   parent remove #0 → card 0 pagehide → card 1 pagehide (nested)
+//                 → parent remove #1 on an already-detached node → …
+// 156 (flag on):  parent remove #0 → parent remove #1 → parent remove #2</code></pre>
+    <p>This is benign here, but the same shape is what Blink kept fixing: a handler that inserts a frame into the subtree being removed, navigates, re-parents the iframe, or calls <code>document.open()</code>, all while the parent&rsquo;s removal algorithm is half-finished. The compat study found a real instance in Google Publisher Tags&rsquo; friendly-iframe <code>pagehide</code> handler, which mutates ad-slot state when a host clears an ad container with <code>innerHTML = ""</code>.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Deprecate and stop firing events during subframe removal</a> &mdash; feature index</li>
+      <li><a href="../removal-event-recorder/">Removal event recorder</a></li>
+      <li><a href="../agent-boundary-matrix/">Agent boundary matrix</a></li>
+      <li><a href="../navigation-move-and-focus/">Navigation, moves &amp; focus</a></li>
+      <li><a href="../explicit-teardown-handshake/">Explicit teardown handshake</a></li>
+      <li><a href="https://chromestatus.com/feature/5754395122860032" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://gist.github.com/noamr/f80676a616444de7efb5be671692e919" target="_blank" rel="noopener">Compat study (re-entrancy analysis, Option 2a vs 2b)</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(() => {
+  const cards = document.getElementById("cards");
+  const traceEl = document.getElementById("trace");
+  const verdictEl = document.getElementById("verdict");
+  const buttons = [...document.querySelectorAll(".stage button")];
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  let inParentCall = false;
+  let childRuns = 0;
+  let childRunsInside = 0;
+  let tracing = false;
+
+  // Called synchronously by the card frames' own pagehide handlers.
+  window.__cardTrace = (msg, depth) => {
+    if (!tracing) return;
+    childRuns++;
+    if (inParentCall) childRunsInside++;
+    trace(msg + (inParentCall ? "  [inside a parent call]" : "  [after the parent call]"), String(depth));
+  };
+  window.__cardState = () => ({ inParentCall, items: cards.children.length });
+  window.__cardDepth = 0;
+
+  function trace(text, depth = "0") {
+    const li = document.createElement("li");
+    li.dataset.depth = depth;
+    li.textContent = text;
+    traceEl.append(li);
+  }
+
+  const CARD = (n) => `<!doctype html><p style="font:14px system-ui;margin:6px">card ${n}</p>
+<script>
+addEventListener('pagehide', function () {
+  var P = parent;
+  P.__cardDepth++;
+  var d = P.__cardDepth, s = P.__cardState();
+  P.__cardTrace('card ${n} pagehide: parent list has ' + s.items + ' item(s); my frameElement.isConnected=' + frameElement.isConnected, d);
+  if (${n} === 0) {
+    var next = P.document.querySelector('#cards li:nth-child(2)');
+    if (next) {
+      P.__cardTrace('card 0 handler: removing ' + next.dataset.name + ' from the parent list', d);
+      next.remove();
+    }
+  }
+  P.__cardDepth--;
+});
+<\/script>`;
+
+  async function resetCards() {
+    for (const b of buttons) b.disabled = true;
+    cards.replaceChildren();
+    traceEl.replaceChildren();
+    verdictEl.textContent = "Loading cards…";
+    for (let n = 0; n < 3; n++) {
+      const li = document.createElement("li");
+      li.dataset.name = "card " + n;
+      const f = document.createElement("iframe");
+      f.title = "card " + n;
+      f.srcdoc = CARD(n);
+      li.append(f);
+      await new Promise((resolve) => {
+        const t = setTimeout(resolve, 5000);
+        f.addEventListener("load", () => { clearTimeout(t); resolve(); }, { once: true });
+        cards.append(li);
+      });
+    }
+    verdictEl.textContent = "Three cards loaded. Clear the list.";
+    for (const b of buttons) b.disabled = false;
+  }
+
+  const mo = new MutationObserver((records) => {
+    if (!tracing) return;
+    const removed = records.reduce((n, r) => n + r.removedNodes.length, 0);
+    trace("MutationObserver: " + records.length + " record(s), " + removed + " node(s) removed — delivered after the synchronous work", "mo");
+  });
+  mo.observe(cards, { childList: true });
+
+  async function clear(kind) {
+    if (!cards.children.length) await resetCards();
+    for (const b of buttons) b.disabled = true;
+    traceEl.replaceChildren();
+    childRuns = 0;
+    childRunsInside = 0;
+    tracing = true;
+    let detachedRemovals = 0;
+    if (kind === "loop") {
+      const items = [...cards.children];
+      items.forEach((li, i) => {
+        const wasConnected = li.isConnected;
+        if (!wasConnected) detachedRemovals++;
+        trace("parent: step " + i + " — " + li.dataset.name + ".remove()  (isConnected=" + wasConnected + ")");
+        inParentCall = true;
+        li.remove();
+        inParentCall = false;
+        trace("parent: step " + i + " returned — list has " + cards.children.length + " item(s)");
+      });
+    } else {
+      trace("parent: list.replaceChildren()  (" + cards.children.length + " items)");
+      inParentCall = true;
+      cards.replaceChildren();
+      inParentCall = false;
+      trace("parent: replaceChildren() returned — list has " + cards.children.length + " item(s)");
+    }
+    await wait(60);
+    tracing = false;
+    const legacy = childRunsInside > 0;
+    verdictEl.textContent = legacy
+      ? "Re-entrancy: child script ran " + childRunsInside + " time(s) inside the parent's own call" +
+        (detachedRemovals ? ", and the loop then called remove() on " + detachedRemovals + " node(s) a child had already detached." : ".") +
+        " This is the legacy behaviour the flag removes."
+      : childRuns === 0
+        ? "No child script ran during removal — the parent's steps are the whole story (OmitSubframeDetachmentEventsOnRemoval active)."
+        : "Child script ran only after the parent's calls returned.";
+    if (legacy) {
+      window.showcaseTelemetry?.assert("removal-reentrancy-legacy", childRunsInside >= 1, { kind, childRunsInside, detachedRemovals });
+    } else {
+      window.showcaseTelemetry?.assert("removal-no-reentrancy", childRunsInside === 0, { kind, childRuns });
+    }
+    for (const b of buttons) b.disabled = false;
+  }
+
+  document.getElementById("loop").addEventListener("click", () => clear("loop"));
+  document.getElementById("replace").addEventListener("click", () => clear("replace"));
+  document.getElementById("reset").addEventListener("click", resetCards);
+  resetCards();
+})();
+</script>
+</body>
+</html>

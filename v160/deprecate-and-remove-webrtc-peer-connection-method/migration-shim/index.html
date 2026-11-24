@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Migration shim — Deprecate and remove WebRTC peer connection method — Chrome 160</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .note.warn { border-left-color: var(--accent-rose); }
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin: var(--space-3) 0; }
+    .controls button { min-height: 44px; }
+    .toggle {
+      display: flex; gap: var(--space-2); align-items: center;
+      min-block-size: 44px; font-size: 0.9rem; cursor: pointer;
+    }
+    .toggle input { inline-size: 1.4rem; block-size: 1.4rem; margin: 0; flex: none; accent-color: var(--accent-blue); }
+    .state {
+      font-family: var(--font-mono); font-size: 0.8rem; font-weight: 700;
+      padding: var(--space-2) var(--space-3); border: 2px solid var(--border-black);
+      background: var(--bg-ivory); color: var(--text-black); overflow-wrap: anywhere;
+    }
+    .readout {
+      font-family: var(--font-mono); font-size: 0.75rem;
+      background: var(--bg-stone); color: var(--text-black); border: 2px solid var(--border-black);
+      padding: var(--space-3); margin-top: var(--space-3);
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .tablewrap { overflow-x: auto; }
+    table { border-collapse: collapse; inline-size: 100%; font-size: 0.72rem; font-family: var(--font-mono); }
+    caption { text-align: left; font-size: 0.8rem; padding-block: 0.3rem; color: var(--text-charcoal); }
+    th, td { border: 1px solid var(--border-black); padding: 0.4rem 0.5rem; text-align: left; vertical-align: top; }
+    th { background: var(--bg-stone); color: var(--text-black); }
+    td.match { color: var(--accent-emerald-dark); font-weight: 700; }
+    td.mismatch { color: var(--accent-rose); font-weight: 700; }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v160/deprecate-and-remove-webrtc-peer-connection-method/">&larr; Deprecate and remove WebRTC peer connection method</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · migration</p>
+    <h1>Migration shim</h1>
+    <p class="lede">Got an old softphone or call-centre bundle that still calls <code>pc.createDTMFSender(track)</code>? On the intent thread, the Chrome WebRTC team posted a shim that rebuilds the method on top of the standard <code>RTCRtpSender.dtmf</code> and reproduces Chromium&rsquo;s own exceptions. This page runs real legacy code against a simulated Chrome 160, installs that shim, and checks its error behaviour against the native method case by case.</p>
+  </header>
+
+  <div class="note warn" role="note"><strong>Simulation, clearly labelled:</strong> there is no flag that removes <code>createDTMFSender</code> early, so &ldquo;Simulate Chrome 160&rdquo; deletes the method from <code>RTCPeerConnection.prototype</code> in <em>this tab only</em> (and puts it back when unticked). On a browser where the method is already gone, the toggle is unavailable and the page runs against the real removal.</div>
+
+  <div class="stage">
+    <h2>1 · Set up this tab</h2>
+    <p class="state" id="native-state">Checking for the native method&hellip;</p>
+    <label class="toggle"><input type="checkbox" id="simulate"> Simulate Chrome 160 (remove the native method in this tab)</label>
+    <label class="toggle"><input type="checkbox" id="shim"> Install the blink-dev shim</label>
+    <p class="state" id="impl-state" role="status" aria-live="polite">—</p>
+  </div>
+
+  <div class="stage">
+    <h2>2 · Run the legacy dialler</h2>
+    <p>Unmodified legacy code on a real loopback call: <code>pc.createDTMFSender(track).insertDTMF("123#")</code>.</p>
+    <div class="controls">
+      <button type="button" id="run-legacy">Run legacy code</button>
+    </div>
+    <div class="readout" id="legacy-out" role="status" aria-live="polite">Not run yet.</div>
+  </div>
+
+  <div class="stage">
+    <h2>3 · Error parity: native vs shim</h2>
+    <p>Each case calls the native method (when this browser still has it) and the shim&rsquo;s logic directly, and compares the result. Apps that catch specific exception names need these to match.</p>
+    <div class="controls">
+      <button type="button" id="run-parity">Compare all cases</button>
+    </div>
+    <div class="tablewrap" tabindex="0" role="region" aria-label="Error parity table (scrolls horizontally on narrow screens)">
+      <table>
+        <caption>createDTMFSender(…) outcome: native vs shim</caption>
+        <thead><tr><th scope="col">case</th><th scope="col">native</th><th scope="col">shim</th><th scope="col">match</th></tr></thead>
+        <tbody id="parity-rows"><tr><td colspan="4">Press &ldquo;Compare all cases&rdquo;.</td></tr></tbody>
+      </table>
+    </div>
+    <p class="state" id="parity-summary" role="status" aria-live="polite">—</p>
+  </div>
+
+  <section>
+    <h2>the shim (from the intent thread)</h2>
+    <pre tabindex="0"><code>if (window.RTCPeerConnection &amp;&amp; !RTCPeerConnection.prototype.createDTMFSender &amp;&amp;
+    window.RTCRtpSender &amp;&amp; "dtmf" in RTCRtpSender.prototype) {
+  RTCPeerConnection.prototype.createDTMFSender = function (track) {
+    if (!(track instanceof MediaStreamTrack)) throw new TypeError("…");
+    if (this.signalingState === "closed")
+      throw new DOMException("…", "InvalidStateError");
+    if (track.kind !== "audio") throw new DOMException("…", "SyntaxError");
+    const sender = this.getSenders().find((s) =&gt; s.track === track);
+    if (!sender) throw new DOMException("…", "SyntaxError");
+    if (!sender.dtmf) throw new DOMException("…", "SyntaxError");
+    return sender.dtmf;
+  };
+}</code></pre>
+    <h2>better: the two-line rewrite</h2>
+    <pre tabindex="0"><code>// const dtmf = pc.createDTMFSender(track);                 // before
+const dtmf = pc.getSenders().find((s) =&gt; s.track === track)?.dtmf;  // after
+if (dtmf?.canInsertDTMF) dtmf.insertDTMF("123#");</code></pre>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Deprecate and remove WebRTC peer connection method</a> &mdash; feature index</li>
+      <li><a href="../removal-probe/">Removal probe</a></li>
+      <li><a href="../dtmf-keypad/">DTMF keypad (the replacement)</a></li>
+      <li><a href="../tone-buffer-inspector/">Tone-buffer inspector</a></li>
+      <li><a href="../ivr-decoder/">IVR decoder</a></li>
+      <li><a href="https://chromestatus.com/feature/5160724576993280" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://groups.google.com/a/chromium.org/d/msgid/blink-dev/6a9a9bad.81999fdc.db953.0066.GAE%40google.com" target="_blank" rel="noopener">blink-dev intent thread (shim source)</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  (function () {
+    var nativeState = document.getElementById("native-state");
+    var implState = document.getElementById("impl-state");
+    var simBox = document.getElementById("simulate");
+    var shimBox = document.getElementById("shim");
+    var runLegacy = document.getElementById("run-legacy");
+    var legacyOut = document.getElementById("legacy-out");
+    var runParity = document.getElementById("run-parity");
+    var parityRows = document.getElementById("parity-rows");
+    var paritySummary = document.getElementById("parity-summary");
+
+    var supported = typeof window.RTCPeerConnection === "function" && typeof window.RTCRtpSender === "function" && ("dtmf" in RTCRtpSender.prototype);
+    var proto = supported ? RTCPeerConnection.prototype : null;
+    var nativeDesc = proto ? Object.getOwnPropertyDescriptor(proto, "createDTMFSender") : undefined;
+    var nativeFn = nativeDesc && typeof nativeDesc.value === "function" ? nativeDesc.value : null;
+
+    // The shim's logic, verbatim from the blink-dev intent thread (Guido Urdaneta, 2026-09-21).
+    function shimCreateDTMFSender(track) {
+      if (!(track instanceof MediaStreamTrack)) {
+        throw new TypeError(
+          "Failed to execute 'createDTMFSender' on 'RTCPeerConnection': parameter 1 is not of type 'MediaStreamTrack'."
+        );
+      }
+      if (this.signalingState === "closed") {
+        throw new DOMException(
+          "Failed to execute 'createDTMFSender' on 'RTCPeerConnection': The RTCPeerConnection's signalingState is 'closed'.",
+          "InvalidStateError"
+        );
+      }
+      if (track.kind !== "audio") {
+        throw new DOMException(
+          "Failed to execute 'createDTMFSender' on 'RTCPeerConnection': track.kind is not 'audio'.",
+          "SyntaxError"
+        );
+      }
+      var sender = this.getSenders().find(function (s) { return s.track === track; });
+      if (!sender) {
+        throw new DOMException(
+          "Failed to execute 'createDTMFSender' on 'RTCPeerConnection': No RTCRtpSender is available for the track provided.",
+          "SyntaxError"
+        );
+      }
+      if (!sender.dtmf) {
+        throw new DOMException(
+          "Failed to execute 'createDTMFSender' on 'RTCPeerConnection': Unable to create DTMF sender for track",
+          "SyntaxError"
+        );
+      }
+      return sender.dtmf;
+    }
+
+    var shimInstalled = false;
+
+    function currentImpl() {
+      if (!proto) return "unsupported";
+      var d = Object.getOwnPropertyDescriptor(proto, "createDTMFSender");
+      if (!d) return "missing";
+      if (d.value === shimCreateDTMFSender) return "shim";
+      if (nativeFn && d.value === nativeFn) return "native";
+      return "other";
+    }
+
+    function describe() {
+      var impl = currentImpl();
+      var text = {
+        native: "pc.createDTMFSender is the NATIVE Chromium method (pre-160 behaviour).",
+        shim: "pc.createDTMFSender is the SHIM, built on RTCRtpSender.dtmf.",
+        missing: "pc.createDTMFSender is MISSING — legacy code will throw TypeError (Chrome 160 behaviour" + (nativeFn ? ", simulated" : "") + ").",
+        other: "pc.createDTMFSender was replaced by some other script on this page.",
+        unsupported: "No RTCPeerConnection / RTCRtpSender.dtmf in this browser."
+      }[impl];
+      implState.textContent = "Now: " + text;
+      return impl;
+    }
+
+    if (!supported) {
+      nativeState.textContent = "Unsupported: this browser has no RTCPeerConnection / RTCRtpSender.dtmf, so neither the legacy method nor the shim can run.";
+      simBox.disabled = true; shimBox.disabled = true; runLegacy.disabled = true; runParity.disabled = true;
+      describe();
+      return;
+    }
+
+    nativeState.textContent = nativeFn
+      ? "This browser still ships the native createDTMFSender (pre-160)."
+      : "This browser has no native createDTMFSender — the removal is real here, no simulation needed.";
+    if (!nativeFn) {
+      simBox.checked = true;
+      simBox.disabled = true;
+      simBox.parentElement.title = "Already removed natively";
+    }
+
+    simBox.addEventListener("change", function () {
+      if (!nativeFn) return;
+      if (simBox.checked) {
+        if (currentImpl() === "native") delete proto.createDTMFSender;
+      } else {
+        if (currentImpl() === "shim") { delete proto.createDTMFSender; shimInstalled = false; shimBox.checked = false; }
+        if (!Object.getOwnPropertyDescriptor(proto, "createDTMFSender")) Object.defineProperty(proto, "createDTMFSender", nativeDesc);
+      }
+      describe();
+    });
+
+    shimBox.addEventListener("change", function () {
+      if (shimBox.checked) {
+        // The shim's own guard: only install when the method is missing.
+        if (!RTCPeerConnection.prototype.createDTMFSender && "dtmf" in RTCRtpSender.prototype) {
+          RTCPeerConnection.prototype.createDTMFSender = shimCreateDTMFSender;
+          shimInstalled = true;
+          describe();
+        } else {
+          shimInstalled = false;
+          describe();
+          implState.textContent += " The shim's guard skipped installation because a createDTMFSender already exists — tick “Simulate Chrome 160” first to see it take over.";
+        }
+      } else {
+        if (currentImpl() === "shim") delete proto.createDTMFSender;
+        shimInstalled = false;
+        describe();
+      }
+      window.showcaseTelemetry?.assert("shim-guard-respected", shimBox.checked ? (shimInstalled === (currentImpl() === "shim")) : currentImpl() !== "shim",
+        { impl: currentImpl(), shimInstalled: shimInstalled });
+    });
+
+    describe();
+
+    function waitConnected(pc, ms) {
+      return new Promise(function (resolve, reject) {
+        if (pc.connectionState === "connected") return resolve();
+        var t = setTimeout(function () { reject(new Error("timed out waiting for 'connected' (now '" + pc.connectionState + "')")); }, ms);
+        pc.addEventListener("connectionstatechange", function on() {
+          if (pc.connectionState === "connected") { clearTimeout(t); pc.removeEventListener("connectionstatechange", on); resolve(); }
+          else if (pc.connectionState === "failed") { clearTimeout(t); reject(new Error("connectionState 'failed'")); }
+        });
+      });
+    }
+
+    function silentTrack() {
+      var ac = new AudioContext();
+      var dest = ac.createMediaStreamDestination();
+      var osc = ac.createOscillator();
+      var g = ac.createGain();
+      g.gain.value = 0;
+      osc.connect(g).connect(dest);
+      osc.start();
+      return { ac: ac, stream: dest.stream, track: dest.stream.getAudioTracks()[0] };
+    }
+
+    // ---- 2. legacy dialler -------------------------------------------------
+    runLegacy.addEventListener("click", async function () {
+      runLegacy.disabled = true;
+      runLegacy.setAttribute("aria-busy", "true");
+      var impl = currentImpl();
+      var lines = ["implementation in place: " + impl, "negotiating loopback…"];
+      legacyOut.textContent = lines.join("\n");
+      var src = silentTrack();
+      var pc1 = new RTCPeerConnection();
+      var pc2 = new RTCPeerConnection();
+      var outcome = "error";
+      try {
+        await src.ac.resume();
+        pc1.onicecandidate = function (e) { if (e.candidate) pc2.addIceCandidate(e.candidate).catch(function () {}); };
+        pc2.onicecandidate = function (e) { if (e.candidate) pc1.addIceCandidate(e.candidate).catch(function () {}); };
+        pc1.addTrack(src.track, src.stream);
+        await pc1.setLocalDescription();
+        await pc2.setRemoteDescription(pc1.localDescription);
+        await pc2.setLocalDescription();
+        await pc1.setRemoteDescription(pc2.localDescription);
+        await waitConnected(pc1, 10000);
+        // canInsertDTMF can lag a tick behind "connected" (transport/DTMF readiness) — wait up to 3 s so controls never race it.
+        await (async function (d) { for (var i = 0; i < 60 && d && !d.canInsertDTMF; i++) await new Promise(function (r) { setTimeout(r, 50); }); })(pc1.getSenders()[0].dtmf);
+        lines.push("connected.");
+        // ---- the legacy code, unmodified ----
+        try {
+          var dtmf = pc1.createDTMFSender(src.track);
+          var tones = [];
+          await new Promise(function (resolve) {
+            var to = setTimeout(resolve, 3000);
+            dtmf.ontonechange = function (e) {
+              tones.push(e.tone === "" ? "\"\"" : e.tone);
+              if (e.tone === "") { clearTimeout(to); resolve(); }
+            };
+            dtmf.insertDTMF("123#", 80, 50);
+          });
+          outcome = "worked";
+          lines.push("pc1.createDTMFSender(track) → RTCDTMFSender (" + impl + ")");
+          lines.push("tonechange: " + tones.join(" → "));
+          lines.push("RESULT: legacy code works.");
+        } catch (e) {
+          outcome = "threw " + e.name;
+          lines.push("pc1.createDTMFSender(track) threw " + e.name + ": " + e.message);
+          lines.push("RESULT: legacy code BREAKS here" + (impl === "missing" ? " — this is what Chrome 160 does to unshimmed code. Tick “Install the blink-dev shim” and run again." : "."));
+        }
+      } catch (e) {
+        lines.push("loopback failed: " + e.message + " — press Run to retry.");
+      } finally {
+        pc1.close(); pc2.close(); src.track.stop(); src.ac.close();
+        legacyOut.textContent = lines.join("\n");
+        runLegacy.disabled = false;
+        runLegacy.removeAttribute("aria-busy");
+      }
+      var expectWorks = impl === "native" || impl === "shim";
+      window.showcaseTelemetry?.assert("legacy-outcome-matches-impl",
+        expectWorks ? outcome === "worked" : outcome === "threw TypeError", { impl: impl, outcome: outcome });
+    });
+
+    // ---- 3. error parity ---------------------------------------------------
+    function outcomeOf(fn, pc, arg) {
+      try {
+        var r = fn.call(pc, arg);
+        return { ok: true, text: "returned " + Object.prototype.toString.call(r), value: r };
+      } catch (e) {
+        return { ok: false, text: "threw " + e.name, name: e.name };
+      }
+    }
+
+    function videoTrack() {
+      var c = document.createElement("canvas");
+      c.width = 2; c.height = 2;
+      c.getContext("2d").fillRect(0, 0, 2, 2);
+      return c.captureStream(1).getVideoTracks()[0];
+    }
+
+    runParity.addEventListener("click", function () {
+      var src = silentTrack();
+      var vt = typeof HTMLCanvasElement.prototype.captureStream === "function" ? videoTrack() : null;
+      var cases = [];
+      // A: not a MediaStreamTrack
+      var pcA = new RTCPeerConnection();
+      cases.push({ label: "argument is {} (not a track)", pc: pcA, arg: {} });
+      // B: video track that IS added
+      var pcB = new RTCPeerConnection();
+      if (vt) { pcB.addTrack(vt); cases.push({ label: "video track (added)", pc: pcB, arg: vt }); }
+      // C: audio track never added to this connection
+      var pcC = new RTCPeerConnection();
+      cases.push({ label: "audio track not added to pc", pc: pcC, arg: src.track });
+      // D: closed connection
+      var pcD = new RTCPeerConnection();
+      pcD.addTrack(src.track, src.stream);
+      pcD.close();
+      cases.push({ label: "signalingState \"closed\"", pc: pcD, arg: src.track });
+      // E: happy path
+      var pcE = new RTCPeerConnection();
+      var senderE = pcE.addTrack(src.track, src.stream);
+      cases.push({ label: "audio track added (happy path)", pc: pcE, arg: src.track, sender: senderE });
+
+      var html = "";
+      var matches = 0, compared = 0;
+      cases.forEach(function (c) {
+        var s = outcomeOf(shimCreateDTMFSender, c.pc, c.arg);
+        var shimText = s.text + (c.sender && s.ok ? (s.value === c.sender.dtmf ? " (=== sender.dtmf)" : " (≠ sender.dtmf)") : "");
+        var nText, match;
+        if (nativeFn) {
+          var n = outcomeOf(nativeFn, c.pc, c.arg);
+          nText = n.text + (c.sender && n.ok ? (n.value === c.sender.dtmf ? " (=== sender.dtmf)" : " (≠ sender.dtmf)") : "");
+          match = n.ok === s.ok && (n.ok ? n.value === s.value : n.name === s.name);
+          compared++;
+          if (match) matches++;
+        } else {
+          nText = "n/a — method removed in this browser";
+          match = null;
+        }
+        html += "<tr><th scope=\"row\">" + c.label + "</th><td>" + nText + "</td><td>" + shimText + "</td>" +
+          (match === null ? "<td>shim only</td>" : match ? "<td class=\"match\">match</td>" : "<td class=\"mismatch\">differs</td>") + "</tr>";
+      });
+      if (!vt) html += "<tr><th scope=\"row\">video track</th><td colspan=\"3\">skipped: canvas.captureStream() unavailable</td></tr>";
+      parityRows.innerHTML = html;
+      [pcA, pcB, pcC, pcE].forEach(function (p) { p.close(); });
+      src.track.stop(); src.ac.close();
+      if (vt) vt.stop();
+
+      paritySummary.textContent = nativeFn
+        ? matches + "/" + compared + " cases match the native method exactly (same exception name, or the same returned object)."
+        : "Native method is removed here, so only the shim column is meaningful: it throws the same exception names Chromium used to.";
+      window.showcaseTelemetry?.assert("shim-parity", nativeFn ? matches === compared : true, { matches: matches, compared: compared, native: !!nativeFn });
+    });
+  })();
+</script>
+</body>
+</html>

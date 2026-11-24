@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Error taxonomy — Distinct TypeError for cancelled race-network-and-fetch-handler fetch() — Chrome 159</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Distinct TypeError message for cancelled race-network-and-fetch-handler fetch()</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · service worker · edge cases &amp; migration</p>
+    <h1>Error taxonomy</h1>
+    <p class="lede">The new message is narrow on purpose: Chromium only uses it for <code>net::ERR_ABORTED</code> on the raced, deduplicated request. Everything else that can go wrong under the same route keeps the generic <q>Failed to fetch</q>. Run each situation for real and see which message the worker&rsquo;s <code>fetch(event.request)</code> produces, what the page saw, and what a version-tolerant classifier concludes.</p>
+  </header>
+
+  <div class="note" id="status" role="status">Registering this feature&rsquo;s service worker&hellip;</div>
+
+  <div class="stage">
+    <h2>Run the situations</h2>
+    <div class="actions">
+      <button type="button" id="run-all">Run all automatic situations</button>
+    </div>
+    <p class="note" id="online-note">Network state: <span id="online">checking…</span>. To exercise the offline row, switch the browser offline (DevTools → Network → Offline, or airplane mode) and run that row on its own.</p>
+
+    <div tabindex="0" role="region" aria-labelledby="tax-caption" class="table-wrapper">
+      <table>
+        <caption id="tax-caption">Same race route, different causes</caption>
+        <thead><tr><th scope="col">Situation</th><th scope="col">Run</th><th scope="col">Worker fetch(event.request)</th><th scope="col">Page saw</th><th scope="col">Classifier</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="readout" id="summary" role="status" aria-live="polite">No situation run yet.</div>
+  </div>
+
+  <section>
+    <h2>a classifier that works before and after 159</h2>
+    <pre tabindex="0"><code>const RACE_CANCELLED =
+  "The service worker race-network-and-fetch-handler request was cancelled before 'fetch()' settled.";
+
+// Inside the fetch handler, you know whether YOU settled respondWith() first.
+function classify(error, { answeredFirst }) {
+  if (error?.name === "AbortError") return "aborted-by-us";
+  if (!(error instanceof TypeError)) return "bug";
+  if (error.message === RACE_CANCELLED) return "race-cancelled";     // Chrome 159+: certain
+  if (answeredFirst) return "probably-race-cancelled";               // older Chrome: inferred
+  return "network-error";
+}</code></pre>
+    <p>Two cautions. TypeError messages are implementation-defined (that is why WPT only asserts the type), so treat the string as a Chromium-specific hint, never as the only way to stay correct. And the inference fallback is a guess &mdash; on older Chrome a genuine failure that happens to land after your fallback timer is indistinguishable from a cancellation, which is precisely the ambiguity Chrome 159 removes.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../fallback-timer-race/">Fallback-timer race</a></li>
+      <li><a href="../fetch-shape-inspector/">Fetch-shape inspector</a></li>
+      <li><a href="../telemetry-noise-filter/">Telemetry noise filter</a></li>
+      <li><a href="../app-shell-revalidation/">App-shell revalidation</a></li>
+      <li><a href="https://chromestatus.com/feature/5124748525830144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://crbug.com/584504247" target="_blank" rel="noopener">crbug.com/584504247</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script type="module">
+  import { run, RACE_CANCELLED_MESSAGE } from "../harness.js";
+  import { showStatus, esc, verdictFor } from "../ui.js";
+
+  const SITUATIONS = [
+    { id: "timer", label: "Fallback timer answered first (cancellation)", mode: "fallback", opts: { delay: 800, fb: 120 }, auto: true, expect: "race-cancelled" },
+    { id: "shell", label: "Handler answered immediately from cache (cancellation)", mode: "shell", opts: { delay: 800 }, auto: true, expect: "race-cancelled" },
+    { id: "genuine", label: "Genuine failure: 301 requested with redirect: \"error\"", mode: "genuine", opts: {}, auto: true, expect: "network-error" },
+    { id: "page-abort", label: "Page aborted its own fetch at 150 ms", mode: "await", opts: { delay: 800, pageAbortMs: 150 }, auto: true, expect: "fulfilled" },
+    { id: "success", label: "Fast server, nothing cancelled", mode: "await", opts: { delay: 0 }, auto: true, expect: "fulfilled" },
+    { id: "offline", label: "Browser offline (manual: go offline first)", mode: "fallback", opts: { delay: 0, fb: 5000 }, auto: false, expect: "network-error" },
+  ];
+
+  function classify(f, answeredFirst) {
+    if (f.settled === "fulfilled") return "no error";
+    if (f.name === "AbortError") return "aborted-by-us";
+    if (f.name !== "TypeError") return "bug";
+    if (f.message === RACE_CANCELLED_MESSAGE) return "race-cancelled";
+    if (answeredFirst) return "probably-race-cancelled";
+    return "network-error";
+  }
+
+  const $ = (id) => document.getElementById(id);
+  const rows = $("rows");
+  const results = new Map();
+  for (const s of SITUATIONS) {
+    const tr = document.createElement("tr");
+    tr.id = `row-${s.id}`;
+    tr.innerHTML = `<th scope="row">${esc(s.label)}</th>
+      <td data-label="Run"><button type="button" class="secondary run-row" data-id="${s.id}" aria-label="Run: ${esc(s.label)}">Run</button></td>
+      <td data-label="Worker fetch()" class="out">not run</td>
+      <td data-label="Page saw" class="page">—</td>
+      <td data-label="Classifier" class="cls">—</td>`;
+    rows.append(tr);
+  }
+
+  const showOnline = () => { $("online").textContent = navigator.onLine ? "online" : "OFFLINE"; };
+  addEventListener("online", showOnline);
+  addEventListener("offline", showOnline);
+  showOnline();
+
+  await showStatus($("status"));
+
+  async function runSituation(s) {
+    const tr = $(`row-${s.id}`);
+    tr.querySelector(".out").textContent = "running…";
+    const r = await run(s.mode, s.opts);
+    results.set(s.id, r);
+    const f = r.worker.fetches?.[0];
+    if (!f) {
+      tr.querySelector(".out").textContent = r.worker.error ?? "no report";
+    } else {
+      const v = verdictFor(f);
+      tr.querySelector(".out").innerHTML = `<span class="verdict ${v.cls}">${esc(v.text)}</span> (${f.ms} ms)` +
+        (f.settled === "rejected" ? `<br><code>${esc(f.name)}: ${esc(f.message)}</code>` : "");
+      const answeredFirst = ["fallback-timer", "cache-shell"].includes(r.worker.responder);
+      tr.querySelector(".cls").innerHTML = `<code>${esc(classify(f, answeredFirst))}</code>`;
+    }
+    tr.querySelector(".page").textContent = r.page.ok
+      ? `HTTP ${r.page.status} · ${r.page.servedBy}`
+      : `${r.page.name}: ${r.page.message}`;
+    return r;
+  }
+
+  function summarise() {
+    const lines = [];
+    for (const s of SITUATIONS) {
+      const f = results.get(s.id)?.worker.fetches?.[0];
+      if (!f) continue;
+      const got = f.settled === "fulfilled" ? "fulfilled" : f.classification;
+      lines.push(`${s.label}: ${got}${got === s.expect ? "" : `  (Chrome 159+ with the feature on would give ${s.expect})`}`);
+    }
+    $("summary").textContent = lines.join("\n") || "No situation run yet.";
+  }
+
+  rows.addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-id]");
+    if (!button) return;
+    const s = SITUATIONS.find((x) => x.id === button.dataset.id);
+    button.disabled = true;
+    try { await runSituation(s); } catch (error) { $(`row-${s.id}`).querySelector(".out").textContent = error.message; }
+    button.disabled = false;
+    summarise();
+  });
+
+  $("run-all").addEventListener("click", async () => {
+    const all = $("run-all");
+    all.disabled = true;
+    try {
+      for (const s of SITUATIONS.filter((x) => x.auto)) await runSituation(s);
+      const genuine = results.get("genuine")?.worker.fetches?.[0];
+      window.showcaseTelemetry?.assert("genuine-error-keeps-generic-message", genuine?.settled === "rejected" && genuine.message !== RACE_CANCELLED_MESSAGE, {
+        genuine: genuine?.message,
+        timer: results.get("timer")?.worker.fetches?.[0]?.message,
+        pageAbort: results.get("page-abort")?.worker.fetches?.[0]?.settled,
+      });
+    } catch (error) {
+      $("summary").textContent = `Run failed: ${error.message}`;
+      window.showcaseTelemetry?.assert("genuine-error-keeps-generic-message", false, { error: error.message });
+    } finally {
+      all.disabled = false;
+      summarise();
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Worker error relay — WebTransportError API alignment and serialization — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); min-width: 0; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .wte-btn { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; max-width: 100%; text-align: left; }
+    .wte-btn.light { background: var(--bg-paper); color: var(--text-black); }
+    .wte-btn:focus-visible, input:focus-visible, select:focus-visible, [tabindex="0"]:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    .actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); overflow-wrap: anywhere; margin: 0; }
+    .verdict.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald); }
+    .verdict.no { color: var(--accent-rose); border-color: var(--accent-rose); }
+    .pipe { display: grid; grid-template-columns: 1fr auto 1fr; gap: var(--space-2); align-items: center; text-align: center; font-weight: 700; }
+    .pipe span { border: 2px solid var(--border-black); padding: var(--space-2); background: var(--bg-stone); }
+    .pipe .arrow { border: none; background: none; font-family: var(--font-mono); }
+    dl.readout { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); margin: 0; background: var(--bg-stone); border: 2px solid var(--border-black); padding: var(--space-3); min-width: 0; }
+    dl.readout dt { font-weight: 700; }
+    dl.readout dd { margin: 0; font-family: var(--font-mono); overflow-wrap: anywhere; }
+    .field { display: grid; gap: var(--space-1); min-width: 0; }
+    .field label { font-weight: 700; color: var(--text-black); }
+    .field input, .field select { font: inherit; min-height: 44px; padding: var(--space-2); border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); width: 100%; box-sizing: border-box; }
+    .form-grid { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); }
+    ol.log { margin: 0; padding-left: 1.5rem; font-family: var(--font-mono); font-size: 0.82rem; max-height: 16rem; overflow-y: auto; background: var(--bg-stone); border: 2px solid var(--border-black); padding-block: var(--space-2); }
+    ol.log li { overflow-wrap: anywhere; margin-bottom: var(--space-1); }
+    @media (max-width: 30rem) { dl.readout { grid-template-columns: 1fr; } dl.readout dd { margin-bottom: var(--space-1); } }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransportError API alignment and serialization</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · webtransport · practical</p>
+    <h1>Worker error relay</h1>
+    <p class="lede">A common architecture keeps the <code>WebTransport</code> session in a Worker so parsing and back-pressure never block the UI. When the session fails, the page needs to know <em>why</em>: was it the session or a single stream, and which application code did the peer send? With <code>[Serializable]</code> in Chrome 159, the worker can simply <code>postMessage(error)</code> and the page receives a real <code>WebTransportError</code> with <code>source</code> and <code>streamErrorCode</code> intact.</p>
+  </header>
+
+  <p class="note">Serialization ships enabled in <strong>Chrome 159</strong> behind a writer-side runtime switch, <code>WebTransportErrorSerialization</code>; if your build has it off, relaunch with <code>--enable-blink-features=WebTransportErrorSerialization</code> (or turn on <code>chrome://flags/#enable-experimental-web-platform-features</code> in a developer-trial build). Without it, <code>postMessage</code> throws <code>DataCloneError</code> in the <em>sender</em>; this page then shows the plain-record fallback the worker sends instead, labelled as a fallback. The failing session is real: it targets <code>https://127.0.0.1:44443/never</code>, which nothing answers, so Chrome itself logs a &ldquo;Failed to establish a connection&rdquo; console error each time &mdash; that line is expected.</p>
+
+  <section class="stage" aria-labelledby="w2p-title">
+    <h2 id="w2p-title">Worker &rarr; page</h2>
+    <div class="pipe" aria-hidden="true"><span>Worker (owns WebTransport)</span><span class="arrow">postMessage &rarr;</span><span>Page (UI)</span></div>
+    <div class="actions">
+      <button type="button" class="wte-btn" id="fail-session">Fail a real session in the worker</button>
+    </div>
+    <div class="form-grid">
+      <div class="field">
+        <label for="w-msg">message</label>
+        <input id="w-msg" type="text" value="peer reset stream 4" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="w-source">source</label>
+        <select id="w-source"><option value="stream">"stream"</option><option value="session">"session"</option></select>
+      </div>
+      <div class="field">
+        <label for="w-code">streamErrorCode</label>
+        <input id="w-code" type="text" inputmode="numeric" value="70000" autocomplete="off">
+      </div>
+    </div>
+    <div class="actions">
+      <button type="button" class="wte-btn light" id="make-in-worker">Raise this stream error in the worker</button>
+    </div>
+    <dl class="readout" aria-label="What the page received">
+      <dt>delivered as</dt><dd id="r-kind">nothing yet</dd>
+      <dt>constructor</dt><dd id="r-ctor">&mdash;</dd>
+      <dt>instanceof WebTransportError</dt><dd id="r-wte">&mdash;</dd>
+      <dt>message</dt><dd id="r-message">&mdash;</dd>
+      <dt>source</dt><dd id="r-source">&mdash;</dd>
+      <dt>streamErrorCode</dt><dd id="r-sec">&mdash;</dd>
+    </dl>
+    <p class="verdict" id="w2p-verdict" role="status" aria-live="polite">Not run yet.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="p2w-title">
+    <h2 id="p2w-title">Page &rarr; worker</h2>
+    <p>The other direction matters too: the UI may decide to abort a stream and hand the reason to the worker that owns the writer. This builds the error in the page (standard constructor, falling back to the legacy one) and posts it; the worker reports what arrived in <em>its</em> realm.</p>
+    <div class="actions"><button type="button" class="wte-btn light" id="send-to-worker">Post an error to the worker</button></div>
+    <p class="verdict" id="p2w-verdict" role="status" aria-live="polite">Not run yet.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="log-title">
+    <h2 id="log-title">Message log</h2>
+    <ol class="log" id="log" tabindex="0" aria-label="Messages exchanged with the worker"></ol>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5158277221580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#web-transport-error-serialization" target="_blank" rel="noopener">Spec &sect;12.4: WebTransportError serialization</a></li>
+    <li><a href="https://html.spec.whatwg.org/multipage/structured-data.html#serializable-objects" target="_blank" rel="noopener">HTML: serializable objects</a></li>
+    <li><a href="./relay-worker.js">This page&rsquo;s worker source</a></li>
+    <li><a href="../persisted-error-log/">Persisted error log</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wte:relay]';
+  const hasWTE = typeof WebTransportError === 'function';
+  const $ = (id) => document.getElementById(id);
+  const fmt = (v) => v === null ? 'null' : v === undefined ? 'undefined' : typeof v === 'string' ? JSON.stringify(v) : String(v);
+
+  // Independent serialization probe, using the legacy constructor so it does not depend on
+  // the constructor change. Can return false: legacy builds throw DataCloneError.
+  function probeSerialization() {
+    if (!hasWTE) return false;
+    try {
+      const c = structuredClone(new WebTransportError({ message: 'probe', streamErrorCode: 7 }));
+      return c instanceof WebTransportError && c.message === 'probe' && c.streamErrorCode === 7 && c.source === 'stream';
+    } catch { return false; }
+  }
+  const canSerialize = probeSerialization();
+
+  function log(text) {
+    const li = document.createElement('li');
+    li.textContent = new Date().toLocaleTimeString() + ' ' + text;
+    $('log').append(li);
+    $('log').scrollTop = $('log').scrollHeight;
+  }
+
+  let worker = null;
+  let pending = null;
+  try {
+    worker = new Worker('./relay-worker.js');
+    worker.addEventListener('message', (ev) => onWorkerMessage(ev.data));
+    worker.addEventListener('messageerror', () => log('page: messageerror — received a message it could not deserialize'));
+    worker.addEventListener('error', (ev) => { ev.preventDefault(); log('worker error: ' + (ev.message || 'failed to load')); });
+  } catch (e) {
+    log('could not start the worker: ' + e.name);
+  }
+
+  function setReadout(kind, obj) {
+    $('r-kind').textContent = kind;
+    $('r-ctor').textContent = obj ? (obj.ctor || (obj.constructor && obj.constructor.name)) : '—';
+    $('r-wte').textContent = obj ? String(hasWTE && obj instanceof WebTransportError) : '—';
+    $('r-message').textContent = obj ? fmt(obj.message) : '—';
+    $('r-source').textContent = obj ? fmt(obj.source) : '—';
+    $('r-sec').textContent = obj ? fmt(obj.streamErrorCode) : '—';
+  }
+
+  function onWorkerMessage(data) {
+    const v = $('w2p-verdict');
+    if (data.kind === 'error-object') {
+      const e = data.error;
+      const isWTE = hasWTE && e instanceof WebTransportError;
+      setReadout('the error object itself (structured clone)', e);
+      log('worker → page: ' + (e && e.constructor && e.constructor.name) + ' from ' + data.origin + ' — source ' + fmt(e.source) + ', streamErrorCode ' + fmt(e.streamErrorCode));
+      v.className = 'verdict ' + (isWTE ? 'yes' : 'no');
+      v.textContent = isWTE
+        ? 'Received a real WebTransportError in the page realm (' + data.origin + '): source ' + fmt(e.source) + ', streamErrorCode ' + fmt(e.streamErrorCode) + '. No hand-copying of fields needed.'
+        : 'Something arrived, but it is not a WebTransportError in this realm — the clone lost its type.';
+      globalThis.showcaseTelemetry?.assert('wte-relay-object-delivered', isWTE && canSerialize, { origin: data.origin, canSerialize });
+      settle(isWTE);
+    } else if (data.kind === 'clone-failed') {
+      setReadout('FALLBACK plain record (the error itself could not be cloned)', Object.assign({}, data.record, { ctor: 'Object (fields hand-copied from a ' + data.record.ctor + ')' }));
+      log('worker: postMessage(error) threw ' + data.cloneError.name + ' — sent a plain record instead');
+      v.className = 'verdict no';
+      v.textContent = 'Fallback: the worker’s postMessage(error) threw ' + data.cloneError.name + ' (' + data.cloneError.message + '). The page only has a hand-copied plain object — instanceof WebTransportError is false. This build cannot serialize WebTransportError.';
+      globalThis.showcaseTelemetry?.assert('wte-relay-clone-failed-fallback', !canSerialize, { origin: data.origin, canSerialize, cloneError: data.cloneError.name });
+      settle(false);
+    } else if (data.kind === 'inspected') {
+      const r = data.record;
+      log('worker received: ' + r.ctor + ' — instanceof WebTransportError ' + data.isWTE + ', source ' + fmt(r.source) + ', streamErrorCode ' + fmt(r.streamErrorCode));
+      $('p2w-verdict').className = 'verdict ' + (data.isWTE ? 'yes' : 'no');
+      $('p2w-verdict').textContent = data.isWTE
+        ? 'The worker received a WebTransportError in its own realm: message ' + fmt(r.message) + ', source ' + fmt(r.source) + ', streamErrorCode ' + fmt(r.streamErrorCode) + '.'
+        : 'The worker received a ' + r.ctor + ', not a WebTransportError.';
+    } else if (data.kind === 'note') {
+      log('worker: ' + data.detail);
+    } else if (data.kind === 'unsupported') {
+      log('worker: ' + data.detail);
+      v.className = 'verdict no';
+      v.textContent = data.detail;
+      settle(false);
+    } else if (data.kind === 'unexpected-ready') {
+      log('worker: the session to the dead endpoint unexpectedly became ready');
+      settle(false);
+    } else if (data.kind === 'messageerror') {
+      log('worker: ' + data.detail);
+    }
+  }
+
+  function settle(ok) {
+    if (pending) { pending.btn.removeAttribute('aria-busy'); pending.btn.disabled = false; pending = null; }
+    console.log(LOG, 'settled', ok, 'canSerialize=' + canSerialize);
+  }
+  function start(btn, label) {
+    if (!worker) { $('w2p-verdict').className = 'verdict no'; $('w2p-verdict').textContent = 'The worker could not be started.'; return false; }
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    pending = { btn };
+    $('w2p-verdict').className = 'verdict';
+    $('w2p-verdict').textContent = label;
+    return true;
+  }
+
+  $('fail-session').addEventListener('click', (ev) => {
+    if (!start(ev.currentTarget, 'Worker is opening a session to https://127.0.0.1:44443/never …')) return;
+    log('page → worker: connect');
+    worker.postMessage({ cmd: 'connect' });
+  });
+
+  $('make-in-worker').addEventListener('click', (ev) => {
+    if (!start(ev.currentTarget, 'Worker is constructing the error …')) return;
+    const raw = $('w-code').value.trim();
+    const code = raw === '' ? null : Number(raw);
+    log('page → worker: make ' + JSON.stringify({ source: $('w-source').value, code }));
+    worker.postMessage({ cmd: 'make', message: $('w-msg').value, source: $('w-source').value, code });
+  });
+
+  $('send-to-worker').addEventListener('click', () => {
+    const v = $('p2w-verdict');
+    if (!worker || !hasWTE) { v.className = 'verdict no'; v.textContent = !hasWTE ? 'WebTransportError is not defined here.' : 'The worker could not be started.'; return; }
+    let err;
+    let how;
+    try { err = new WebTransportError('ui cancelled upload', { source: 'stream', streamErrorCode: 4242 }); how = 'standard'; }
+    catch { err = new WebTransportError({ message: 'ui cancelled upload', streamErrorCode: 42 }); how = 'legacy'; }
+    try {
+      worker.postMessage({ cmd: 'inspect', error: err });
+      log('page → worker: posted a WebTransportError (' + how + ' constructor)');
+      v.className = 'verdict';
+      v.textContent = 'Posted; waiting for the worker to report what it received …';
+      globalThis.showcaseTelemetry?.assert('wte-relay-page-post-matches-probe', canSerialize, { how });
+    } catch (e) {
+      log('page: postMessage(error) threw ' + e.name);
+      v.className = 'verdict no';
+      v.textContent = 'Fallback: postMessage threw ' + e.name + ' (' + e.message + ') in the page before anything was sent. This build cannot serialize WebTransportError.';
+      globalThis.showcaseTelemetry?.assert('wte-relay-page-post-failed-fallback', !canSerialize, { how, error: e.name });
+    }
+  });
+
+  log('serialization probe (structuredClone of a legacy-constructed error): ' + (canSerialize ? 'supported' : 'not supported'));
+})();
+</script>
+</body>
+</html>

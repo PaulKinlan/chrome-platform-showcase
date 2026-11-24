@@ -26,6 +26,8 @@
     .transcript { border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); min-height: 3rem; font-family: var(--font-mono); white-space: pre-wrap; }
     .sample-tag { display: inline-block; background: var(--text-black); color: var(--bg-ivory); font-family: var(--font-mono); font-size: 0.8rem; padding: 2px 6px; }
     pre { overflow-x: auto; }
+    /* 44px tap targets on every control (WCAG 2.5.5; modern-web-guidance form-factor-adaptation). */
+    main button, main input[type="range"] { min-block-size: 44px; }
   </style>
 </head>
 <body>
@@ -34,11 +36,11 @@
   <header class="lede-block">
     <p class="eyebrow">v153 · speechrecognitionresult timestamps</p>
     <h1>On-device latency monitor</h1>
-    <p class="lede">On-device speech recognition trades server cost and privacy for a dependency on the visitor's hardware. <code>audioEndTime</code> tells you when a phrase <em>ended in the audio</em>; comparing it with the result event's <code>timeStamp</code> (when the transcript <em>arrived</em>) gives you the processing lag. Crossing an application-defined threshold can inform a configured fallback decision; the timing signal does not itself provide or authorize a cloud backend.</p>
+    <p class="lede">On-device speech recognition trades server cost and privacy for a dependency on the visitor's hardware. <code>speechEndTime</code> tells you when a phrase <em>ended in the audio</em>, in seconds from the moment recognition started consuming audio; anchoring that to the <code>audiostart</code> event's <code>timeStamp</code> and comparing it with the result event's <code>timeStamp</code> (when the transcript <em>arrived</em>) gives you the processing lag. Crossing an application-defined threshold can inform a configured fallback decision; the timing signal does not itself provide or authorize a cloud backend.</p>
   </header>
 
-  <div class="note">
-    <strong>To read real timestamps:</strong> you need a build that implements the proposal (PR #192, unmerged; the v153 listing records a developer trial at 153, but the attributes are not yet in Chromium main's IDL as of 2026-07-24 and no dedicated runtime flag exists yet) plus a recognition backend that reports segment timing (on-device needs its speech model downloaded). If your engine returns <code>null</code> for <code>audioEndTime</code>, this page says so and will not invent a latency number. Use the sample walkthrough to see the gauge move.
+  <div class="note" role="note" aria-label="How to enable the timestamps">
+    <strong>Enable it:</strong> the attributes sit behind the Blink runtime flag <code>WebSpeechTimestamps</code>. In Chrome 153&ndash;159 it is <em>experimental</em>: turn on <code>chrome://flags/#enable-experimental-web-platform-features</code>, or launch Chrome with <code>--enable-blink-features=WebSpeechTimestamps</code>. Chromium main (after the M159 branch) enables it by default on Windows, macOS and Linux; Android and ChromeOS still need the flag. The spec names are <code>speechStartTime</code> / <code>speechEndTime</code> (Chrome 156+): seconds on the <em>session audio timeline</em>, not a clock reading, so this page anchors them to <code>audiostart</code>. Chrome 153&ndash;155 expose an earlier draft, <code>audioStartTime</code> / <code>audioEndTime</code> (nullable ms on the time origin); the page uses those only when the spec names are absent and labels the reading as draft. If neither yields a number it says so and will not invent a latency. Use the sample walkthrough to see the gauge move.
   </div>
 
   <section class="stage" aria-labelledby="demo-title">
@@ -65,12 +67,18 @@
 recognition.continuous = true;
 recognition.interimResults = true;
 
+let audioOriginMs = 0;                               // session audio timeline t = 0
+recognition.onaudiostart = (event) =&gt; { audioOriginMs = event.timeStamp; };
+
 recognition.onresult = (event) =&gt; {
   const result = event.results[event.resultIndex];
-  if (result.audioEndTime == null) return;          // engine did not supply timing
-  const lagMs = event.timeStamp - result.audioEndTime;
+  // speechEndTime: seconds since audiostart, on the session audio timeline.
+  const endMs = audioOriginMs + result.speechEndTime * 1000;
+  const lagMs = event.timeStamp - endMs;
   if (lagMs &gt; failoverThresholdMs) switchToCloudBackend();
-};</code></pre>
+};
+// The audio timeline counts consumed audio, not wall-clock time, so this is an
+// estimate for live microphone input and meaningless for faster-than-real-time input.</code></pre>
   </section>
 
   <section>
@@ -102,6 +110,7 @@ recognition.onresult = (event) =&gt; {
   let recognition = null;
   let listening = false;
   let sampleTimers = [];
+  let audioOriginMs = null; // audiostart event.timeStamp: t = 0 of the session audio timeline
 
   function placeMarker() {
     marker.style.left = (Math.min(thresholdEl.value, MAX) / MAX * 100) + '%';
@@ -145,21 +154,35 @@ recognition.onresult = (event) =&gt; {
     recognition.continuous = true;
     recognition.interimResults = true;
     let sawTimestamp = false;
+    audioOriginMs = null;
+    recognition.onaudiostart = (event) => { audioOriginMs = event.timeStamp; };
     recognition.onresult = (event) => {
       const result = event.results[event.resultIndex];
       const line = result[0] ? result[0].transcript : '';
       transcript.textContent = line + (result.isFinal ? ' ✔' : ' …');
-      const end = ('audioEndTime' in result) ? result.audioEndTime : undefined;
-      if (end == null) {
+      // Spec (Chrome 156+): seconds on the session audio timeline, t = 0 at audiostart.
+      // Draft (Chrome 153–155 only): ms on the time-origin clock, nullable.
+      let endMs = null;
+      let source = 'none';
+      if ('speechEndTime' in result && Number.isFinite(result.speechEndTime) && audioOriginMs !== null) {
+        endMs = audioOriginMs + result.speechEndTime * 1000;
+        source = 'speechEndTime';
+      } else if ('audioEndTime' in result && result.audioEndTime != null) {
+        endMs = result.audioEndTime;
+        source = 'audioEndTime (draft)';
+      }
+      if (endMs == null) {
         verdict.className = 'verdict';
-        verdict.textContent = 'Recognition is running, but this engine returned ' + (end === null ? 'null' : 'no') + ' audioEndTime, so processing lag cannot be measured here. The proposal may not be implemented in this build or its backend may not supply timing.';
+        verdict.textContent = 'speechEndTime' in result
+          ? 'Recognition is running and speechEndTime is exposed, but no audiostart event arrived to anchor the session audio timeline, so processing lag cannot be measured here.'
+          : 'Recognition is running, but this result exposes ' + ('audioEndTime' in result ? 'a null draft audioEndTime' : 'neither speechEndTime nor the draft audioEndTime') + ', so processing lag cannot be measured here. WebSpeechTimestamps may be off in this build (see the enable steps above) or the backend may not supply timing.';
         latencyEl.textContent = '— ms';
-        window.showcaseTelemetry?.assert('speechts-latency-null-timestamp', true, { hasProp: 'audioEndTime' in result });
+        window.showcaseTelemetry?.assert('speechts-latency-null-timestamp', true, { hasSpec: 'speechEndTime' in result, hasDraft: 'audioEndTime' in result });
         return;
       }
       sawTimestamp = true;
-      showLatency(event.timeStamp - end, Number(thresholdEl.value), true);
-      window.showcaseTelemetry?.assert('speechts-latency-measured', true, { lagMs: Math.round(event.timeStamp - end) });
+      showLatency(event.timeStamp - endMs, Number(thresholdEl.value), true, source === 'speechEndTime' ? '(from speechEndTime, anchored to audiostart)' : '(from the draft audioEndTime — Chrome 153–155 only)');
+      window.showcaseTelemetry?.assert('speechts-latency-measured', true, { lagMs: Math.round(event.timeStamp - endMs), source });
     };
     recognition.onerror = (event) => {
       verdict.className = 'verdict';

@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Point editor — SVG Path Data API — Chrome 160</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .flag-banner {
+      background: var(--bg-stone);
+      border: 2px solid var(--border-black);
+      border-left: 6px solid var(--accent-blue);
+      padding: var(--space-3) var(--space-4);
+      margin: var(--space-4) 0;
+      font-size: 0.85rem;
+      overflow-wrap: anywhere;
+    }
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+      min-inline-size: 0;
+    }
+    .seg { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-2) 0 var(--space-3); }
+    .seg button, .nudge button {
+      min-height: 44px; min-inline-size: 44px;
+      background: var(--bg-ivory); color: var(--text-black);
+      border: 2px solid var(--border-black); font-family: var(--font-mono); font-size: 0.8rem;
+      padding: 0 var(--space-3);
+    }
+    .seg button[aria-pressed="true"] {
+      background: var(--text-black); color: var(--bg-ivory);
+      outline: 3px solid var(--accent-blue); outline-offset: 2px;
+    }
+    .seg button:disabled, .nudge button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .canvas { inline-size: 100%; block-size: auto; aspect-ratio: 3 / 2; background: var(--bg-ivory); border: 2px dashed var(--border-black); display: block; touch-action: none; }
+    .canvas .shape { fill: var(--bg-stone); stroke: var(--text-black); stroke-width: 2; }
+    .canvas .guide { stroke: var(--accent-blue); stroke-width: 1; stroke-dasharray: 3 3; }
+    .canvas .h-anchor { fill: var(--bg-paper); stroke: var(--text-black); stroke-width: 2; cursor: grab; }
+    .canvas .h-control { fill: var(--accent-blue); stroke: var(--bg-paper); stroke-width: 1.5; cursor: grab; }
+    .canvas .h-hit { fill: transparent; cursor: grab; }
+    .canvas g.handle:focus { outline: none; }
+    .canvas g.handle:focus-visible .h-ring, .canvas g.handle.sel .h-ring { stroke: var(--accent-rose); stroke-width: 3; fill: none; }
+    .canvas g.handle .h-ring { fill: none; stroke: none; }
+    .canvas g.handle.dragging { cursor: grabbing; }
+    .editor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: var(--space-4); align-items: start; }
+    label { display: block; font-weight: 700; font-size: 0.85rem; }
+    select { min-height: 44px; inline-size: 100%; font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-ivory); color: var(--text-black); border: 2px solid var(--border-black); }
+    .nudge { display: grid; grid-template-columns: repeat(3, minmax(44px, 1fr)); gap: var(--space-2); max-inline-size: 14rem; margin-top: var(--space-2); }
+    .readout {
+      font-family: var(--font-mono); font-size: 0.78rem;
+      background: var(--bg-stone); border: 2px solid var(--border-black);
+      padding: var(--space-3); margin-top: var(--space-3);
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    .v-yes { color: var(--accent-emerald-dark); font-weight: 700; }
+    .v-no { color: var(--accent-rose); font-weight: 700; }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v160/svg-path-data-api/">&larr; SVG Path Data API</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · dom · svg</p>
+    <h1>Point editor</h1>
+    <p class="lede">What SVG editors such as Boxy SVG and SVG-Edit needed a polyfill for: import a path, turn it into points you can grab, and write the edit back. Import here is <code>getPathData({normalize: true})</code>, so arcs and quadratics arrive as plain cubic control points; every drag or arrow-key nudge mutates one number in that array and calls <code>setPathData()</code>. The <code>d</code> string below is never built by this page &mdash; it is the browser&rsquo;s own serialisation.</p>
+  </header>
+
+  <div class="flag-banner" role="note">
+    <strong>Chrome 160+ ships this by default.</strong> Earlier Chrome/Canary: enable <code>chrome://flags/#enable-experimental-web-platform-features</code>, or launch with <code>--enable-blink-features=SVGPathDataAPI</code> (also <code>--enable-features=SVGPathDataAPI</code> or <code>--enable-experimental-web-platform-features</code>).
+    <div id="support" role="status" class="readout">Probing this browser&hellip;</div>
+  </div>
+
+  <div class="stage">
+    <h2>Import a shape</h2>
+    <div class="seg" role="group" aria-label="shape to import" id="presets">
+      <button type="button" aria-pressed="true" data-d="M 150 170 Q 40 110 70 60 A 40 40 0 0 1 150 70 A 40 40 0 0 1 230 60 Q 260 110 150 170 Z">heart (Q + A)</button>
+      <button type="button" aria-pressed="false" data-d="M 60 40 h 180 v 120 h -180 z">box (relative h/v)</button>
+      <button type="button" aria-pressed="false" data-d="M 40 150 C 40 40, 150 40, 150 100 S 260 160, 260 50">wave (C + S)</button>
+    </div>
+
+    <div class="editor-grid">
+      <div>
+        <svg class="canvas" id="canvas" viewBox="0 0 300 200" role="group" aria-labelledby="canvas-label">
+          <title id="canvas-label">Path editing canvas. Each handle is a focusable button; arrow keys move it, Shift with arrows moves 10 units.</title>
+          <path id="subject" class="shape"></path>
+          <g id="guides" aria-hidden="true"></g>
+          <g id="handles"></g>
+        </svg>
+      </div>
+      <div>
+        <label for="point-select">Selected point (touch &amp; keyboard alternative to dragging)</label>
+        <select id="point-select"></select>
+        <div class="nudge" role="group" aria-label="move selected point">
+          <span></span><button type="button" data-dx="0" data-dy="-5" aria-label="Move point up 5">&uarr;</button><span></span>
+          <button type="button" data-dx="-5" data-dy="0" aria-label="Move point left 5">&larr;</button>
+          <button type="button" id="reset" aria-label="Reset to imported shape">reset</button>
+          <button type="button" data-dx="5" data-dy="0" aria-label="Move point right 5">&rarr;</button>
+          <span></span><button type="button" data-dx="0" data-dy="5" aria-label="Move point down 5">&darr;</button><span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="readout" id="readout" role="status" aria-live="polite">Import a shape to start editing.</div>
+    <div class="readout" id="dout" aria-label="current d attribute serialised by the browser">d = </div>
+  </div>
+
+  <section>
+    <h2>the editor loop</h2>
+    <pre tabindex="0"><code>// import: one call turns any path into M/L/C/Z with explicit control points
+let model = path.getPathData({ normalize: true });
+
+// edit: points are just numbers in plain objects
+model[i].values[k] = x;  model[i].values[k + 1] = y;
+
+// write back: no string building, no parser
+path.setPathData(model);
+path.getAttribute("d");   // the browser's serialisation of your model
+
+// setPathData goes through the attribute pipeline,
+// so MutationObserver sees attributeName === "d"</code></pre>
+    <p>Why normalise on import? An editor that keeps <code>h</code>, <code>q</code> or <code>a</code> has to understand twenty command letters and their implied points; after normalisation every handle is either an endpoint or a cubic control point. The trade-off: arcs become cubic approximations and the original command letters are gone, so the <a href="../segment-inspector/">segment inspector</a> shows both forms.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">SVG Path Data API</a> &mdash; feature index</li>
+      <li><a href="../segment-inspector/">Segment inspector</a></li>
+      <li><a href="../segment-at-length/">Segment at length</a></li>
+      <li><a href="../validation-and-base-value/">Validation &amp; base value</a></li>
+      <li><a href="../path-morph/">Path morph</a></li>
+      <li><a href="https://chromestatus.com/feature/4787972240179200" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://w3c.github.io/svgwg/specs/paths/#InterfaceSVGPathData" target="_blank" rel="noopener">Spec &mdash; SVGPathData mixin</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(function () {
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var canvas = document.getElementById("canvas");
+  var subject = document.getElementById("subject");
+  var guides = document.getElementById("guides");
+  var handles = document.getElementById("handles");
+  var sel = document.getElementById("point-select");
+  var readout = document.getElementById("readout");
+  var dout = document.getElementById("dout");
+  var support = document.getElementById("support");
+  var presets = document.getElementById("presets");
+
+  var hasGet = typeof subject.getPathData === "function";
+  var hasSet = typeof subject.setPathData === "function";
+  var supported = hasGet && hasSet;
+  support.innerHTML =
+    '<span class="' + (hasGet ? "v-yes" : "v-no") + '">' + (hasGet ? "available" : "missing") + "</span>  getPathData\n" +
+    '<span class="' + (hasSet ? "v-yes" : "v-no") + '">' + (hasSet ? "available" : "missing") + "</span>  setPathData" +
+    (supported ? "" : "\nUnsupported: the shape is drawn with setAttribute('d') but no handles are created, because editing needs both methods. The movement buttons are disabled for that reason only.");
+
+  var model = [];
+  var importedD = "";
+  var points = [];   // {seg, k, kind}
+  var selected = 0;
+  var mutations = 0;
+  var writes = 0;
+
+  new MutationObserver(function (recs) {
+    recs.forEach(function (r) { if (r.attributeName === "d") mutations++; });
+  }).observe(subject, { attributes: true, attributeFilter: ["d"] });
+
+  function r2(v) { return Math.round(v * 10) / 10; }
+
+  function collectPoints() {
+    points = [];
+    model.forEach(function (s, i) {
+      if (s.type === "M" || s.type === "L") points.push({ seg: i, k: 0, kind: "anchor" });
+      else if (s.type === "C") {
+        points.push({ seg: i, k: 0, kind: "control 1" });
+        points.push({ seg: i, k: 2, kind: "control 2" });
+        points.push({ seg: i, k: 4, kind: "anchor" });
+      }
+    });
+  }
+
+  function label(p) {
+    var s = model[p.seg];
+    return "segment " + p.seg + " " + s.type + " " + p.kind + " at " + r2(s.values[p.k]) + ", " + r2(s.values[p.k + 1]);
+  }
+
+  function prevAnchor(i) {
+    for (var j = i - 1; j >= 0; j--) {
+      var v = model[j].values;
+      if (model[j].type === "M" || model[j].type === "L") return [v[0], v[1]];
+      if (model[j].type === "C") return [v[4], v[5]];
+    }
+    return null;
+  }
+
+  function drawGuides() {
+    guides.textContent = "";
+    model.forEach(function (s, i) {
+      if (s.type !== "C") return;
+      var a = prevAnchor(i);
+      var v = s.values;
+      var lines = [];
+      if (a) lines.push([a[0], a[1], v[0], v[1]]);
+      lines.push([v[4], v[5], v[2], v[3]]);
+      lines.forEach(function (l) {
+        var ln = document.createElementNS(SVGNS, "line");
+        ln.setAttribute("class", "guide");
+        ln.setAttribute("x1", l[0]); ln.setAttribute("y1", l[1]); ln.setAttribute("x2", l[2]); ln.setAttribute("y2", l[3]);
+        guides.appendChild(ln);
+      });
+    });
+  }
+
+  function positionHandles() {
+    var gs = handles.querySelectorAll("g.handle");
+    for (var n = 0; n < gs.length; n++) {
+      var p = points[n], v = model[p.seg].values;
+      gs[n].setAttribute("transform", "translate(" + v[p.k] + " " + v[p.k + 1] + ")");
+      gs[n].setAttribute("aria-label", label(p) + ". Arrow keys move.");
+      gs[n].classList.toggle("sel", n === selected);
+    }
+    for (var o = 0; o < sel.options.length; o++) sel.options[o].textContent = label(points[o]);
+    sel.selectedIndex = selected;
+    drawGuides();
+  }
+
+  function buildHandles() {
+    handles.textContent = "";
+    sel.textContent = "";
+    points.forEach(function (p, n) {
+      var g = document.createElementNS(SVGNS, "g");
+      g.setAttribute("class", "handle");
+      g.setAttribute("tabindex", "0");
+      g.setAttribute("role", "button");
+      var hit = document.createElementNS(SVGNS, "circle");
+      hit.setAttribute("r", "14"); hit.setAttribute("class", "h-hit");
+      var ring = document.createElementNS(SVGNS, "circle");
+      ring.setAttribute("r", "10"); ring.setAttribute("class", "h-ring");
+      var dot = document.createElementNS(SVGNS, p.kind === "anchor" ? "rect" : "circle");
+      if (p.kind === "anchor") {
+        dot.setAttribute("x", "-5"); dot.setAttribute("y", "-5"); dot.setAttribute("width", "10"); dot.setAttribute("height", "10");
+        dot.setAttribute("class", "h-anchor");
+      } else {
+        dot.setAttribute("r", "5"); dot.setAttribute("class", "h-control");
+      }
+      g.appendChild(hit); g.appendChild(ring); g.appendChild(dot);
+      wireHandle(g, n);
+      handles.appendChild(g);
+      var opt = document.createElement("option");
+      opt.value = String(n);
+      sel.appendChild(opt);
+    });
+    positionHandles();
+  }
+
+  function commit(source) {
+    subject.setPathData(model);
+    writes++;
+    var back = subject.getPathData({ normalize: true });
+    var ok = back.length === model.length;
+    dout.textContent = "d = " + subject.getAttribute("d");
+    var p = points[selected];
+    readout.textContent = "setPathData() write #" + writes + " (" + source + "): moved " + label(p) + "\n" +
+      "MutationObserver saw " + mutations + " change(s) to attribute \"d\" (setPathData runs the setAttribute pipeline).\n" +
+      "read-back getPathData({normalize:true}).length = " + back.length + " vs model " + model.length + (ok ? " — round-trip intact" : " — MISMATCH");
+    if (source !== "drag") window.showcaseTelemetry?.assert("point-editor-setpathdata-roundtrip", ok, { segments: model.length, source: source });
+    positionHandles();
+  }
+
+  function move(n, dx, dy, absolute, source) {
+    if (!supported || !points[n]) return;
+    var p = points[n], v = model[p.seg].values;
+    if (absolute) { v[p.k] = r2(dx); v[p.k + 1] = r2(dy); }
+    else { v[p.k] = r2(v[p.k] + dx); v[p.k + 1] = r2(v[p.k + 1] + dy); }
+    selected = n;
+    commit(source);
+  }
+
+  function toSvg(ev) {
+    var pt = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(canvas.getScreenCTM().inverse());
+    return { x: Math.max(0, Math.min(300, pt.x)), y: Math.max(0, Math.min(200, pt.y)) };
+  }
+
+  function wireHandle(g, n) {
+    g.addEventListener("pointerdown", function (ev) {
+      if (ev.button !== 0) return;
+      selected = n;
+      g.setPointerCapture(ev.pointerId);
+      g.focus();
+      positionHandles();
+    });
+    g.addEventListener("pointermove", function (ev) {
+      if (!g.hasPointerCapture(ev.pointerId)) return;
+      g.classList.add("dragging");
+      var pt = toSvg(ev);
+      move(n, pt.x, pt.y, true, "drag");
+    });
+    g.addEventListener("lostpointercapture", function () {
+      if (g.classList.contains("dragging")) {
+        var ok = subject.getPathData({ normalize: true }).length === model.length;
+        window.showcaseTelemetry?.assert("point-editor-setpathdata-roundtrip", ok, { segments: model.length, source: "drag-end" });
+      }
+      g.classList.remove("dragging");
+    });
+    g.addEventListener("focus", function () { selected = n; positionHandles(); });
+    g.addEventListener("keydown", function (ev) {
+      var step = ev.shiftKey ? 10 : 2;
+      var d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[ev.key];
+      if (!d) return;
+      ev.preventDefault();
+      move(n, d[0], d[1], false, "keyboard");
+    });
+  }
+
+  function load(d) {
+    importedD = d;
+    subject.setAttribute("d", d);
+    if (!supported) {
+      readout.textContent = "Unsupported: imported with setAttribute only. No handles — getPathData/setPathData are required to edit.";
+      dout.textContent = "d = " + subject.getAttribute("d");
+      window.showcaseTelemetry?.assert("point-editor-unsupported-fallback", !supported, { labelled: "honest-unsupported" });
+      return;
+    }
+    var raw = subject.getPathData();
+    model = subject.getPathData({ normalize: true });
+    collectPoints();
+    selected = 0;
+    buildHandles();
+    dout.textContent = "d = " + subject.getAttribute("d") + "   (as imported)";
+    readout.textContent = "Imported " + raw.length + " authored segments (" + raw.map(function (s) { return s.type; }).join(" ") + ") as " +
+      model.length + " normalised segments (" + model.map(function (s) { return s.type; }).join(" ") + ") → " + points.length + " editable points.\nDrag a handle, focus one and use arrow keys, or use the buttons.";
+  }
+
+  presets.addEventListener("click", function (ev) {
+    var b = ev.target.closest("button[data-d]");
+    if (!b) return;
+    var all = presets.querySelectorAll("button");
+    for (var i = 0; i < all.length; i++) all[i].setAttribute("aria-pressed", "false");
+    b.setAttribute("aria-pressed", "true");
+    load(b.getAttribute("data-d"));
+  });
+  sel.addEventListener("change", function () { selected = sel.selectedIndex; positionHandles(); });
+  document.querySelector(".nudge").addEventListener("click", function (ev) {
+    var b = ev.target.closest("button[data-dx]");
+    if (!b) return;
+    move(selected, Number(b.getAttribute("data-dx")), Number(b.getAttribute("data-dy")), false, "button");
+  });
+  document.getElementById("reset").addEventListener("click", function () { load(importedD); });
+
+  if (!supported) {
+    var btns = document.querySelectorAll(".nudge button");
+    for (var i = 0; i < btns.length; i++) if (btns[i].id !== "reset") btns[i].disabled = true;
+    sel.disabled = true;
+  }
+  load(presets.querySelector("button").getAttribute("data-d"));
+})();
+</script>
+</body>
+</html>

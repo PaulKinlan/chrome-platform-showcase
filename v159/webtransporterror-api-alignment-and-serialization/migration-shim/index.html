@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Migration shim — WebTransportError API alignment and serialization — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .stage { background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); padding: var(--space-4); margin: var(--space-4) 0; display: grid; gap: var(--space-3); min-width: 0; }
+    .note { background: var(--bg-stone); border: 2px solid var(--accent-amber); padding: var(--space-3); color: var(--text-charcoal); }
+    .wte-btn { border: 2px solid var(--border-black); background: var(--text-black); color: var(--bg-ivory); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; min-height: 44px; cursor: pointer; max-width: 100%; text-align: left; justify-self: start; }
+    .wte-btn.light { background: var(--bg-paper); color: var(--text-black); }
+    .wte-btn:focus-visible, input:focus-visible, select:focus-visible, [tabindex="0"]:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    .caps { display: grid; gap: var(--space-2); grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); margin: 0; padding: 0; list-style: none; }
+    .caps li { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-3); display: grid; gap: var(--space-1); }
+    .caps .label { font-weight: 700; }
+    .caps .val { font-family: var(--font-mono); font-weight: 700; }
+    .caps .val.yes { color: var(--accent-emerald-dark); }
+    .caps .val.no { color: var(--accent-rose); }
+    .caps code { font-size: 0.8rem; overflow-wrap: anywhere; }
+    .form-grid { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); }
+    .field { display: grid; gap: var(--space-1); min-width: 0; }
+    .field label { font-weight: 700; color: var(--text-black); }
+    .field input, .field select { font: inherit; min-height: 44px; padding: var(--space-2); border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); width: 100%; box-sizing: border-box; }
+    pre { margin: 0; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-black); padding: var(--space-3); overflow-x: auto; font-size: 0.8rem; }
+    .verdict { border: 2px solid var(--border-black); padding: var(--space-3); font-weight: 700; background: var(--bg-stone); color: var(--text-charcoal); overflow-wrap: anywhere; margin: 0; }
+    .verdict.yes { color: var(--accent-emerald-dark); border-color: var(--accent-emerald); }
+    .verdict.no { color: var(--accent-rose); border-color: var(--accent-rose); }
+    ol.steps { margin: 0; padding-left: 1.5rem; font-family: var(--font-mono); font-size: 0.82rem; background: var(--bg-stone); border: 2px solid var(--border-black); padding-block: var(--space-2); }
+    ol.steps li { overflow-wrap: anywhere; margin-bottom: var(--space-1); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; WebTransportError API alignment and serialization</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v159 · webtransport · migration</p>
+    <h1>Migration shim</h1>
+    <p class="lede">Your code will run on Chrome builds before and after 159 for a long while. The two halves of this change are independent &mdash; the constructor overload has no flag, while serialization has its own writer-side runtime switch &mdash; so detect each one separately, never from the browser version. This page runs the probes, then a small constructor shim and clone helper that use the native path when it exists and say exactly what they lost when it does not.</p>
+  </header>
+
+  <p class="note">Everything below is live. On <strong>Chrome 159</strong> all three probes should pass and the shim takes the native path. In a developer-trial build turn on <code>chrome://flags/#enable-experimental-web-platform-features</code>; if only serialization is off, relaunch with <code>--enable-blink-features=WebTransportErrorSerialization</code>. On older builds the shim falls back to the legacy dictionary constructor and a plain-record clone, and reports each downgrade.</p>
+
+  <section class="stage" aria-labelledby="probe-title">
+    <h2 id="probe-title">1 · Three independent probes</h2>
+    <p>Each probe calls the exact surface it names and can return false. None looks at <code>navigator.userAgent</code>.</p>
+    <ul class="caps" aria-live="polite">
+      <li><span class="label">Standard constructor</span><span class="val" id="cap-std">&mdash;</span><code>new WebTransportError("p", {source: "session", streamErrorCode: 70000})</code></li>
+      <li><span class="label">Serialization</span><span class="val" id="cap-ser">&mdash;</span><code>structuredClone(legacyError) instanceof WebTransportError</code></li>
+      <li><span class="label">Legacy constructor still accepted</span><span class="val" id="cap-legacy">&mdash;</span><code>new WebTransportError({message: "p", streamErrorCode: 9})</code></li>
+    </ul>
+    <button type="button" class="wte-btn light" id="reprobe">Run the probes again</button>
+  </section>
+
+  <section class="stage" aria-labelledby="shim-title">
+    <h2 id="shim-title">2 · A constructor shim that admits what it dropped</h2>
+    <pre tabindex="0" aria-label="Shim source"><code>function createWebTransportError(message = "", { source = "stream", streamErrorCode = null } = {}) {
+  try {
+    return { error: new WebTransportError(message, { source, streamErrorCode }), native: true, downgrades: [] };
+  } catch (e) {
+    if (e.name !== "TypeError") throw e;          // e.g. an invalid source is a real bug
+    const downgrades = [];
+    const init = { message };
+    if (streamErrorCode !== null) init.streamErrorCode = streamErrorCode;
+    const error = new WebTransportError(init);    // legacy: [Clamp] octet, no source
+    if (source !== error.source) downgrades.push(`source "${source}" became "${error.source}"`);
+    if (streamErrorCode !== error.streamErrorCode) downgrades.push(`streamErrorCode ${streamErrorCode} became ${error.streamErrorCode}`);
+    return { error, native: false, downgrades };
+  }
+}</code></pre>
+    <div class="form-grid">
+      <div class="field"><label for="s-msg">message</label><input id="s-msg" type="text" value="quota exceeded" autocomplete="off" spellcheck="false"></div>
+      <div class="field"><label for="s-source">source</label><select id="s-source"><option value="stream">"stream"</option><option value="session" selected>"session"</option></select></div>
+      <div class="field"><label for="s-code">streamErrorCode</label><input id="s-code" type="text" inputmode="numeric" value="1000" autocomplete="off"></div>
+    </div>
+    <button type="button" class="wte-btn" id="run-shim">Create through the shim</button>
+    <p class="verdict" id="shim-verdict" role="status" aria-live="polite">Not run yet.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="clone-title">
+    <h2 id="clone-title">3 · A clone helper with an honest fallback</h2>
+    <pre tabindex="0" aria-label="Clone helper source"><code>function toCloneable(error) {
+  try { structuredClone(error); return error; }    // native [Serializable]
+  catch (e) {
+    if (e.name !== "DataCloneError") throw e;
+    return { __webTransportError: true, message: error.message,
+             source: error.source, streamErrorCode: error.streamErrorCode };
+  }
+}
+function fromCloned(value) {                        // receiving side
+  return value?.__webTransportError ? value /* plain record, not a WebTransportError */ : value;
+}</code></pre>
+    <button type="button" class="wte-btn" id="run-clone">Clone the shim&rsquo;s error and compare</button>
+    <ol class="steps" id="clone-steps" aria-label="Clone steps"></ol>
+    <p class="verdict" id="clone-verdict" role="status" aria-live="polite">Not run yet.</p>
+  </section>
+
+  <section class="stage" aria-labelledby="nested-title">
+    <h2 id="nested-title">4 · Edge: an error inside an error&rsquo;s <code>cause</code></h2>
+    <p>Applications often wrap transport failures: <code>new Error("upload failed", { cause: wtError })</code>. Cloning the wrapper clones its <code>cause</code> too, so a non-serializable <code>WebTransportError</code> can break the whole message. This clones the wrapper and reports what the <code>cause</code> became.</p>
+    <button type="button" class="wte-btn light" id="run-nested">Clone an Error whose cause is a WebTransportError</button>
+    <p class="verdict" id="nested-verdict" role="status" aria-live="polite">Not run yet.</p>
+  </section>
+
+  <section><h2>see also</h2><ul>
+    <li><a href="https://chromestatus.com/feature/5158277221580800" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://www.w3.org/TR/webtransport/#web-transport-error-interface" target="_blank" rel="noopener">Spec &sect;12: WebTransportError interface</a></li>
+    <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/modules/webtransport/web_transport_error.idl" target="_blank" rel="noopener">Chromium IDL: the legacy constructor is [MeasureAs=WebTransportErrorLegacyConstructor]</a></li>
+    <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/WebTransportError/WebTransportError" target="_blank" rel="noopener">MDN: WebTransportError() constructor</a></li>
+    <li><a href="../constructor-overloads/">Constructor overloads</a></li>
+    <li><a href="../">Feature overview</a></li>
+  </ul></section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="/public/demo-telemetry.js" defer></script>
+<script>
+(() => {
+  'use strict';
+  const LOG = '[wte:shim]';
+  const hasWTE = typeof WebTransportError === 'function';
+  const $ = (id) => document.getElementById(id);
+  const fmt = (v) => v === null ? 'null' : v === undefined ? 'undefined' : typeof v === 'string' ? JSON.stringify(v) : String(v);
+
+  function probeStandard() {
+    if (!hasWTE) return false;
+    try {
+      const e = new WebTransportError('p', { source: 'session', streamErrorCode: 70000 });
+      return e.message === 'p' && e.source === 'session' && e.streamErrorCode === 70000;
+    } catch { return false; }
+  }
+  function probeSerialization() {
+    if (!hasWTE) return false;
+    try {
+      const c = structuredClone(new WebTransportError({ message: 'p', streamErrorCode: 9 }));
+      return c instanceof WebTransportError && c.message === 'p' && c.streamErrorCode === 9 && c.source === 'stream';
+    } catch { return false; }
+  }
+  function probeLegacy() {
+    if (!hasWTE) return false;
+    try {
+      const e = new WebTransportError({ message: 'p', streamErrorCode: 9 });
+      return e.message === 'p' && e.streamErrorCode === 9 && e.source === 'stream';
+    } catch { return false; }
+  }
+  let caps = {};
+  function runProbes() {
+    caps = { standard: probeStandard(), serialization: probeSerialization(), legacy: probeLegacy() };
+    for (const [id, ok] of [['cap-std', caps.standard], ['cap-ser', caps.serialization], ['cap-legacy', caps.legacy]]) {
+      $(id).textContent = hasWTE ? (ok ? 'yes' : 'no') : 'no (no WebTransportError)';
+      $(id).className = 'val ' + (ok ? 'yes' : 'no');
+    }
+    console.log(LOG, 'probes', JSON.stringify(caps));
+  }
+
+  function createWebTransportError(message = '', { source = 'stream', streamErrorCode = null } = {}) {
+    try {
+      return { error: new WebTransportError(message, { source, streamErrorCode }), native: true, downgrades: [] };
+    } catch (e) {
+      if (e.name !== 'TypeError') throw e;
+      const downgrades = [];
+      const init = { message };
+      if (streamErrorCode !== null) init.streamErrorCode = streamErrorCode;
+      const error = new WebTransportError(init);
+      if (source !== error.source) downgrades.push('source "' + source + '" became "' + error.source + '"');
+      if (streamErrorCode !== error.streamErrorCode) downgrades.push('streamErrorCode ' + streamErrorCode + ' became ' + error.streamErrorCode);
+      return { error, native: false, downgrades };
+    }
+  }
+  function toCloneable(error) {
+    try { structuredClone(error); return error; } catch (e) {
+      if (e.name !== 'DataCloneError') throw e;
+      return { __webTransportError: true, message: error.message, source: error.source, streamErrorCode: error.streamErrorCode };
+    }
+  }
+
+  let lastError = null;
+  function shimFromForm() {
+    const raw = $('s-code').value.trim();
+    return createWebTransportError($('s-msg').value, { source: $('s-source').value, streamErrorCode: raw === '' ? null : Number(raw) });
+  }
+
+  $('reprobe').addEventListener('click', runProbes);
+
+  $('run-shim').addEventListener('click', () => {
+    const v = $('shim-verdict');
+    if (!hasWTE) { v.className = 'verdict no'; v.textContent = 'WebTransportError is not defined here.'; return; }
+    try {
+      const { error, native, downgrades } = shimFromForm();
+      lastError = error;
+      const desc = 'message ' + fmt(error.message) + ', source ' + fmt(error.source) + ', streamErrorCode ' + fmt(error.streamErrorCode);
+      v.className = 'verdict ' + (native ? 'yes' : 'no');
+      v.textContent = native
+        ? 'Native path: ' + desc + '. Nothing was dropped.'
+        : 'Fallback: the standard constructor threw, so the shim used the legacy dictionary — ' + desc + '. ' + (downgrades.length ? 'Lost: ' + downgrades.join('; ') + '.' : 'These particular values fit the legacy shape, so nothing was lost this time.');
+      globalThis.showcaseTelemetry?.assert('wte-shim-native-iff-standard', native === caps.standard, { standard: caps.standard, native, downgrades: downgrades.length });
+      console.log(LOG, 'shim', desc, downgrades);
+    } catch (e) {
+      v.className = 'verdict no';
+      v.textContent = 'The shim rethrew ' + e.name + ': ' + e.message;
+    }
+  });
+
+  $('run-clone').addEventListener('click', () => {
+    const v = $('clone-verdict');
+    const steps = $('clone-steps');
+    steps.replaceChildren();
+    const step = (t) => { const li = document.createElement('li'); li.textContent = t; steps.append(li); };
+    if (!hasWTE) { v.className = 'verdict no'; v.textContent = 'WebTransportError is not defined here.'; return; }
+    const { error } = lastError ? { error: lastError } : shimFromForm();
+    step('original: ' + error.constructor.name + ' — source ' + fmt(error.source) + ', streamErrorCode ' + fmt(error.streamErrorCode));
+    const sendable = toCloneable(error);
+    step('toCloneable → ' + (sendable === error ? 'the error itself (native serialization)' : 'a plain record (DataCloneError caught)'));
+    const received = structuredClone(sendable);
+    const isWTE = received instanceof WebTransportError;
+    step('after structuredClone: ' + (received.constructor ? received.constructor.name : typeof received) + ', instanceof WebTransportError ' + isWTE);
+    const same = received.message === error.message && received.source === error.source && received.streamErrorCode === error.streamErrorCode;
+    step('message/source/streamErrorCode equal to the original: ' + same);
+    v.className = 'verdict ' + (isWTE && same ? 'yes' : 'no');
+    v.textContent = isWTE && same
+      ? 'Native clone: the receiver gets a WebTransportError with every field intact.'
+      : same
+        ? 'Fallback: the fields survived in a plain record, but the receiver must check __webTransportError instead of instanceof WebTransportError.'
+        : 'Fields changed across the clone — this is a bug worth reporting.';
+    globalThis.showcaseTelemetry?.assert('wte-shim-clone-matches-probe', isWTE === caps.serialization && same, { serialization: caps.serialization, isWTE, same });
+  });
+
+  $('run-nested').addEventListener('click', () => {
+    const v = $('nested-verdict');
+    if (!hasWTE) { v.className = 'verdict no'; v.textContent = 'WebTransportError is not defined here.'; return; }
+    const inner = new WebTransportError({ message: 'stream reset', streamErrorCode: 7 });
+    const outer = new Error('upload failed', { cause: inner });
+    try {
+      const c = structuredClone(outer);
+      const cause = c.cause;
+      const causeDesc = cause === undefined ? 'undefined (cause not carried)'
+        : (cause && cause.constructor ? cause.constructor.name : typeof cause) + (hasWTE && cause instanceof WebTransportError ? ' with streamErrorCode ' + fmt(cause.streamErrorCode) : '');
+      v.className = 'verdict ' + (cause instanceof WebTransportError ? 'yes' : 'no');
+      v.textContent = 'The wrapper cloned as ' + c.constructor.name + ' ("' + c.message + '"); its cause became ' + causeDesc + '.';
+    } catch (e) {
+      v.className = 'verdict no';
+      v.textContent = 'Cloning the wrapper Error threw ' + e.name + ' (' + e.message + '): one non-serializable cause breaks the whole message. Serialize the cause with the clone helper first.';
+    }
+    console.log(LOG, 'nested', v.textContent);
+  });
+
+  runProbes();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediaSession: Return Promise&lt;undefined&gt; from setMicrophoneActive() and setCameraActive() — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.9rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .v-yes { color: var(--accent-emerald-dark); font-weight: 700; }
+    .v-no { color: var(--accent-rose); font-weight: 700; }
+    pre { overflow-x: auto; }
+  </style>
+</head>
+<body>
+<!--
+RESEARCH RECORD (weekly-hardening-builder, 2026-11-22)
+Feature id: 5188639100370944 · listing name "MediaSession: Return Promise<undefined> from
+  setMicrophoneActive() and setCameraActive()" (milestone 159 listing; feature_type "Chromium catches up").
+Spec: https://w3c.github.io/mediasession/#dom-mediasession-setmicrophoneactive
+  IDL:  Promise<undefined> setMicrophoneActive(boolean active);
+        Promise<undefined> setCameraActive(boolean active);
+        Promise<undefined> setScreenshareActive(boolean active);   (spec only; NOT in Chromium IDL)
+  "update capture state" algorithm:
+    1. If document is not fully active, return a promise rejected with InvalidStateError.
+    2. If active is true and visibility state is not "visible", UA MAY reject with InvalidStateError.
+    3..  In parallel: a UA with a capture pause policy may prompt and may reject with NotAllowedError;
+         otherwise update capture UI and resolve p with undefined (queued on the user interaction task source).
+Explainer/spec change: https://github.com/w3c/mediasession/pull/312 (void -> Promise<undefined>).
+Chromium ground truth (gitiles main, 2026-11-22):
+  third_party/blink/renderer/modules/mediasession/media_session.idl —
+    [Measure, CallWith=ScriptState, RaisesException] Promise<undefined> setMicrophoneActive(boolean active);
+    [Measure, CallWith=ScriptState, RaisesException] Promise<undefined> setCameraActive(boolean active);
+  media_session.cc — if (!window || !document()->IsActive()) ThrowDOMException(kInvalidStateError,
+    "The document is not fully active.") (bindings convert to a rejected promise for promise-returning ops);
+    otherwise service->SetMicrophoneState(kUnmuted/kMuted) / SetCameraState(kTurnedOn/kTurnedOff) and
+    return ToResolvedUndefinedPromise(). Chromium never prompts, never applies a pause policy, never rejects
+    with NotAllowedError.
+  Flag: NONE. The interface is gated only by RuntimeEnabled=MediaSession (stable, public) — no
+    runtime_enabled_features.json5 entry for the return-type change; chromestatus flag_name null,
+    finch_name null, rollout "Will ship enabled for all users". Test on Chrome 159+ (Canary/Dev/Beta).
+Pre-159 ground truth (Chrome 153.0.8010.12 headless in this container, 2026-11-22):
+  setMicrophoneActive(false) / setCameraActive(true) -> undefined (tag [object Undefined]);
+  setMicrophoneActive() -> synchronous TypeError; setMicrophoneActive.call({}, true) -> synchronous TypeError;
+  detached-iframe mediaSession.setMicrophoneActive(true) -> returns undefined silently (no error at all);
+  setCameraActive('no') -> undefined (boolean coercion); .length === 1 for both; setScreenshareActive absent.
+Compat note (chromestatus interop_compat_risks): fire-and-forget callers are unaffected; the promise only
+  rejects with InvalidStateError for a not-fully-active document, or TypeError for too few args / bad receiver
+  (WebIDL: promise-returning operations convert thrown exceptions into rejected promises). Safari already
+  ships Promise<undefined>; Firefox positive and implementing.
+WPT: mediasession/idlharness.window.html (4 subtests fixed), setmicrophoneactive.html, setcameraactive.html.
+MDN sample: https://developer.mozilla.org/en-US/docs/Web/API/MediaSession/setMicrophoneActive
+Use-case portfolio:
+  1. basic/canonical        -> return-shape-probe (call each method, inspect the raw return value, await it)
+  2. inspection tooling     -> idl-contract-inspector (every observable IDL consequence in one table)
+  3. practical product      -> video-call-mute-controls (call control bar that awaits the browser's
+                               acknowledgement + togglemicrophone/togglecamera/hangup action handlers)
+  4. edge/failure           -> detached-document-rejection (InvalidStateError from a detached iframe's session)
+  5. migration/advanced     -> caller-pattern-matrix (fire-and-forget / try-catch / await-catch / shim callers
+                               run against valid, too-few-args and detached scenarios: which errors each catches)
+-->
+<main>
+  <p class="crumbs"><a href="/v159/">&larr; Chrome 159</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · dom · media session</p>
+    <h1>MediaSession: Return Promise&lt;undefined&gt; from setMicrophoneActive() and setCameraActive()</h1>
+    <p class="lede">Video-call sites tell the browser &ldquo;my mic is muted&rdquo; or &ldquo;my camera is off&rdquo; with <code>navigator.mediaSession.setMicrophoneActive()</code> and <code>setCameraActive()</code>, so the browser&rsquo;s own capture UI can offer matching <code>togglemicrophone</code> / <code>togglecamera</code> buttons. Since Chrome&nbsp;93 those methods returned <code>undefined</code>. The W3C spec (<a href="https://github.com/w3c/mediasession/pull/312" target="_blank" rel="noopener">PR&nbsp;#312</a>) made them return <code>Promise&lt;undefined&gt;</code> so a browser can prompt or apply a capture-pause policy asynchronously &mdash; and Chrome&nbsp;159 catches up with Safari. The return shape changes, and so does <em>how errors arrive</em>.</p>
+  </header>
+
+  <div class="note" id="support-note" role="status">Probing this browser&hellip;</div>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./return-shape-probe/">Return-shape probe</a></h3>
+      <p>The canonical observation. Call each method with <code>true</code> or <code>false</code> and look at exactly what comes back &mdash; <code>typeof</code>, its <code>Symbol.toStringTag</code>, <code>instanceof Promise</code> &mdash; then await it and see it settle with <code>undefined</code>. No camera or microphone permission needed.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./idl-contract-inspector/">IDL contract inspector</a></h3>
+      <p>Every observable consequence of the new WebIDL signature in one table: return type, <code>.length</code>, boolean coercion, too-few-arguments and wrong-receiver errors (synchronous throw vs rejected promise), and the spec-only <code>setScreenshareActive()</code> sibling Chromium has not shipped.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./video-call-mute-controls/">Video-call mute controls</a></h3>
+      <p>The real product case: a call control bar whose mute and camera buttons <em>await</em> the browser&rsquo;s acknowledgement before updating, and which registers <code>togglemicrophone</code>, <code>togglecamera</code> and <code>hangup</code> action handlers so the browser&rsquo;s capture UI can drive it. One normalising line keeps it working on pre-159 browsers.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./detached-document-rejection/">Detached-document rejection</a></h3>
+      <p>The spec&rsquo;s first step: a session whose document is not fully active must return a promise rejected with <code>InvalidStateError</code>. Build an iframe, keep its <code>mediaSession</code>, remove the frame, and call it &mdash; pre-159 Chrome silently returned <code>undefined</code>.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./caller-pattern-matrix/">Caller-pattern migration matrix</a></h3>
+      <p>Four ways existing code calls these methods &mdash; fire-and-forget, <code>try/catch</code>, <code>await</code> inside <code>try</code>, and a normalising shim &mdash; run for real against three scenarios. See which errors each pattern catches, which become unhandled rejections, and which code needs migrating.</p>
+    </li>
+  </ol></section>
+
+  <section>
+    <h2>why it shipped</h2>
+    <p>The spec&rsquo;s <em>update capture state</em> algorithm runs &ldquo;in parallel&rdquo;: a user agent that pauses all microphones from its own UI may wait, prompt the user, and reject with <code>NotAllowedError</code> if the page asks to re-activate capture without permission. A synchronous <code>void</code> method cannot express that, so the spec changed the return type. Chromium does not prompt or apply a pause policy &mdash; its implementation updates the capture state through the media session service and returns an already-resolved promise &mdash; but returning a promise aligns the IDL with Safari and the spec and fixes four WPT <code>idlharness</code> subtests.</p>
+    <p>Compatibility risk is low: code that ignores the return value keeps working, because in a fully active document the promise always resolves. What does change is error delivery. WebIDL converts exceptions in promise-returning operations into rejected promises, so a missing argument or wrong receiver that used to <em>throw</em> now <em>rejects</em>, and calling into a detached document &mdash; previously a silent no-op &mdash; now rejects with <code>InvalidStateError</code>.</p>
+    <p><strong>Flag:</strong> none. There is no <code>runtime_enabled_features.json5</code> entry for this change; it ships enabled for everyone in Chrome&nbsp;159. To try it before stable, use Chrome Canary, Dev or Beta at version 159 or later.</p>
+  </section>
+
+  <section>
+    <h2>the API</h2>
+    <pre tabindex="0" aria-label="IDL and usage example"><code>// WebIDL (W3C Media Session, Chromium 159+)
+Promise&lt;undefined&gt; setMicrophoneActive(boolean active);
+Promise&lt;undefined&gt; setCameraActive(boolean active);
+
+const r = navigator.mediaSession.setMicrophoneActive(false);
+r instanceof Promise   // Chrome ≤158: false (r === undefined)
+                       // Chrome 159+: true
+await r;               // resolves with undefined in a fully active document
+
+// Works on both: normalise before chaining
+await Promise.resolve(navigator.mediaSession.setCameraActive(true));</code></pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5188639100370944" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://w3c.github.io/mediasession/#dom-mediasession-setmicrophoneactive" target="_blank" rel="noopener">W3C Media Session &mdash; setMicrophoneActive() and the update capture state algorithm</a></li>
+      <li><a href="https://github.com/w3c/mediasession/pull/312" target="_blank" rel="noopener">w3c/mediasession PR #312 &mdash; return Promise&lt;undefined&gt;</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaSession/setMicrophoneActive" target="_blank" rel="noopener">MDN: MediaSession.setMicrophoneActive()</a></li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/MediaSession/setCameraActive" target="_blank" rel="noopener">MDN: MediaSession.setCameraActive()</a></li>
+      <li><a href="https://crbug.com/576328036" target="_blank" rel="noopener">crbug.com/576328036 &mdash; implementation tracking</a></li>
+      <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/modules/mediasession/media_session.idl" target="_blank" rel="noopener">Chromium source: media_session.idl</a></li>
+      <li><a href="https://wpt.fyi/results/mediasession/idlharness.window.html" target="_blank" rel="noopener">WPT: mediasession/idlharness.window.html</a></li>
+      <li><a href="https://bugs.webkit.org/show_bug.cgi?id=277421" target="_blank" rel="noopener">WebKit bug 277421</a> &middot; <a href="https://github.com/mozilla/standards-positions/issues/504" target="_blank" rel="noopener">Mozilla standards position #504</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  (function () {
+    var note = document.getElementById("support-note");
+    var ms = navigator.mediaSession;
+    if (!ms || typeof ms.setMicrophoneActive !== "function") {
+      note.innerHTML = '<span class="v-no">navigator.mediaSession.setMicrophoneActive is not available here</span> &mdash; this browser has no Media Session capture-state methods, so every concept will show its unsupported state.';
+      window.showcaseTelemetry?.assert("mediasession-promise-index-probe", false, { reason: "no setMicrophoneActive" });
+      return;
+    }
+    var r = ms.setMicrophoneActive(false);
+    var isPromise = r instanceof Promise;
+    if (isPromise) r.catch(function () {});
+    note.innerHTML = isPromise
+      ? '<span class="v-yes">This browser returns a Promise</span> from <code>setMicrophoneActive(false)</code> &mdash; the Chrome 159 / W3C behaviour.'
+      : '<span class="v-no">This browser returns ' + (r === undefined ? "undefined" : String(r)) + '</span> from <code>setMicrophoneActive(false)</code> &mdash; the pre-159 behaviour. The concepts still run and show exactly what this browser does; use Chrome 159+ (Canary/Dev/Beta) to see the promise path. There is no flag.';
+    window.showcaseTelemetry?.assert("mediasession-promise-index-probe", isPromise === true || r === undefined, { returned: Object.prototype.toString.call(r) });
+  })();
+</script>
+</body>
+</html>

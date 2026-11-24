@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent boundary matrix — Deprecate and stop firing events during subframe removal — Chrome 156</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    .actions button, td button { min-height: 44px; }
+    td button { background: var(--bg-ivory); color: var(--text-black); border: 2px solid var(--border-black); padding-inline: 0.75rem; font-size: 0.8rem; }
+    .bench { display: flex; flex-wrap: wrap; gap: var(--space-2); min-block-size: 3.5rem; border: 2px dashed var(--border-black); background: var(--bg-ivory); padding: var(--space-2); margin: var(--space-3) 0; }
+    .bench iframe { inline-size: 9rem; block-size: 3rem; border: 1px solid var(--border-black); background: var(--bg-paper); }
+    .bench-empty { font-size: 0.8rem; color: var(--text-muted); margin: 0; }
+    .tablewrap { overflow-x: auto; max-inline-size: 100%; border: 2px solid var(--border-black); margin-top: var(--space-3); }
+    .tablewrap:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    table { border-collapse: collapse; inline-size: 100%; min-inline-size: 36rem; font-size: 0.78rem; background: var(--bg-paper); }
+    caption { caption-side: top; text-align: left; font-size: 0.8rem; font-weight: 700; padding: 0.4rem 0.5rem; background: var(--bg-paper); color: var(--text-black); }
+    th, td { border: 1px solid var(--border-black); padding: 0.4rem 0.5rem; text-align: left; vertical-align: top; }
+    thead th { background: var(--bg-stone); color: var(--text-black); }
+    tbody th { font-weight: 600; }
+    .v-yes { color: var(--accent-emerald-dark); font-weight: 700; }
+    .v-no { color: var(--accent-rose); font-weight: 700; }
+    .verdict { font-weight: 700; margin-top: var(--space-3); }
+    pre { overflow-x: auto; max-inline-size: 100%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v156/deprecate-and-stop-firing-events-during-subframe-removal/">&larr; Deprecate and stop firing events during subframe removal</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v156 · dom · feature removal</p>
+    <h1>Agent boundary matrix</h1>
+    <p class="lede">Chrome does not drop the events for every subframe. <code>ChildFrameDisconnector::ShouldFireUnloadEvents()</code> omits them only when the frame being destroyed is in the <strong>same agent</strong> as the document whose DOM is being mutated &mdash; the only frames whose handlers could synchronously re-enter it. This matrix removes eight real frame configurations and checks each one against both models.</p>
+  </header>
+
+  <div class="note" role="note">
+    <strong>Flag:</strong> <code>--enable-blink-features=OmitSubframeDetachmentEventsOnRemoval</code> on Chrome 156+
+    (Finch name <code>--enable-features=OmitSubframeDetachmentEventsOnRemoval</code>; not covered by
+    <code>--enable-experimental-web-platform-features</code>). Opaque frames report through a <code>MessageChannel</code>:
+    a <code>parent.postMessage()</code> sent from a frame that is being destroyed is dropped, but a transferred port still delivers.
+  </div>
+
+  <div class="stage">
+    <h2>Run the matrix</h2>
+    <div class="actions">
+      <button type="button" id="run-all">Remove all eight configurations</button>
+    </div>
+    <div class="bench" id="bench" aria-label="test bench where probe frames load before removal">
+      <p class="bench-empty" id="bench-empty">Probe frames load here, then get removed.</p>
+    </div>
+    <p class="verdict" id="verdict" role="status" aria-live="polite">Not run yet.</p>
+
+    <div class="tablewrap" tabindex="0" role="region" aria-label="agent boundary matrix, scrolls horizontally on narrow screens">
+      <table>
+        <caption>Events seen when each configuration is removed (pagehide / visibilitychange / unload)</caption>
+        <thead><tr>
+          <th scope="col">configuration</th>
+          <th scope="col">same agent as parent?</th>
+          <th scope="col">legacy Chrome</th>
+          <th scope="col">156 gate (flag on)</th>
+          <th scope="col">observed here</th>
+          <th scope="col">matches</th>
+          <th scope="col">run</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <section>
+    <h2>what the gate is</h2>
+    <pre tabindex="0"><code>// third_party/blink/renderer/core/dom/child_frame_disconnector.cc (main, 2026-11)
+bool ChildFrameDisconnector::ShouldFireUnloadEvents(const Document&amp; document) {
+  if (!RuntimeEnabledFeatures::OmitSubframeDetachmentEventsOnRemovalEnabled())
+    return true;
+  for (disconnector = last_; disconnector; disconnector = disconnector-&gt;previous_) {
+    if (disconnector-&gt;disconnect_reason_ == kDisconnectSelf &amp;&amp;
+        InSameAgent(document, disconnector-&gt;Root().GetDocument()))
+      return false;   // same agent → no pagehide / visibilitychange / unload
+  }
+  return true;        // other agent (cross-origin, opaque) → events still fire
+}</code></pre>
+    <p>The HTML Standard omits the events for <em>every</em> subframe. Chrome&rsquo;s narrower gate is a compatibility choice: cross-origin and opaque frames can&rsquo;t touch the parent&rsquo;s DOM synchronously anyway, and their handlers carry most of the real-world telemetry (the compat study found ~1.2% of mobile pages affected by the all-frames option vs ~0.026% for the same-agent gate). So the <em>sandbox without allow-same-origin</em> and <em>data:</em> rows are expected to keep firing even with the flag on, while the spec says they shouldn&rsquo;t.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Deprecate and stop firing events during subframe removal</a> &mdash; feature index</li>
+      <li><a href="../removal-event-recorder/">Removal event recorder</a></li>
+      <li><a href="../navigation-move-and-focus/">Navigation, moves &amp; focus</a></li>
+      <li><a href="../explicit-teardown-handshake/">Explicit teardown handshake</a></li>
+      <li><a href="../reentrancy-hazard/">Re-entrancy hazard</a></li>
+      <li><a href="https://chromestatus.com/feature/5754395122860032" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://chromium.googlesource.com/chromium/src/+/main/third_party/blink/web_tests/fast/frames/subframe-detachment-events-on-removal.html" target="_blank" rel="noopener">Blink web test covering these cases</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(() => {
+  const bench = document.getElementById("bench");
+  const benchEmpty = document.getElementById("bench-empty");
+  const rowsEl = document.getElementById("rows");
+  const verdictEl = document.getElementById("verdict");
+  const runAllBtn = document.getElementById("run-all");
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Script for frames the parent cannot script: report over a transferred port.
+  const PORT_SCRIPT = "<script>onmessage=function(e){var p=e.ports[0];if(!p)return;" +
+    "addEventListener('pagehide',function(){p.postMessage('pagehide')});" +
+    "document.addEventListener('visibilitychange',function(){p.postMessage('visibilitychange')});" +
+    "addEventListener('unload',function(){p.postMessage('unload')});p.postMessage('ready')}<\/script>";
+
+  function load(f, parent) {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("load timed out")), 6000);
+      f.addEventListener("load", () => { clearTimeout(t); resolve(f); }, { once: true });
+      parent.append(f);
+    });
+  }
+  function hookDirect(win, doc) {
+    const ev = [];
+    win.addEventListener("pagehide", () => ev.push("pagehide"));
+    doc.addEventListener("visibilitychange", () => ev.push("visibilitychange"));
+    win.addEventListener("unload", () => ev.push("unload"));
+    return ev;
+  }
+  function hookPort(f) {
+    return new Promise((resolve, reject) => {
+      const ev = [];
+      const { port1, port2 } = new MessageChannel();
+      const t = setTimeout(() => reject(new Error("opaque frame never reported ready")), 4000);
+      port1.onmessage = (e) => {
+        if (e.data === "ready") { clearTimeout(t); resolve(ev); } else ev.push(e.data);
+      };
+      f.contentWindow.postMessage("init", "*", [port2]);
+    });
+  }
+  function frame(title) {
+    const f = document.createElement("iframe");
+    f.title = title;
+    return f;
+  }
+
+  const CASES = [
+    {
+      id: "same-origin-srcdoc", label: "same-origin srcdoc iframe", agent: "yes",
+      frames: ["frame"], legacy: "fires", gated: "omitted",
+      async run() {
+        const f = frame("same-origin srcdoc probe");
+        f.srcdoc = "<p>same-origin</p>";
+        await load(f, bench);
+        const ev = hookDirect(f.contentWindow, f.contentDocument);
+        f.remove();
+        return { frame: ev };
+      },
+    },
+    {
+      id: "initial-about-blank", label: "initial about:blank (no src)", agent: "yes",
+      frames: ["frame"], legacy: "fires", gated: "omitted",
+      async run() {
+        const f = frame("initial about:blank probe");
+        bench.append(f); // initial about:blank is created synchronously
+        const ev = hookDirect(f.contentWindow, f.contentDocument);
+        f.remove();
+        return { frame: ev };
+      },
+    },
+    {
+      id: "nested-same-origin", label: "nested same-origin (outer removed)", agent: "yes",
+      frames: ["outer", "inner"], legacy: "fires", gated: "omitted",
+      async run() {
+        const outer = frame("nested outer probe");
+        outer.srcdoc = "<p>outer</p>";
+        await load(outer, bench);
+        const inner = outer.contentDocument.createElement("iframe");
+        inner.srcdoc = "<p>inner</p>";
+        await load(inner, outer.contentDocument.body);
+        const evO = hookDirect(outer.contentWindow, outer.contentDocument);
+        const evI = hookDirect(inner.contentWindow, inner.contentDocument);
+        outer.remove();
+        return { outer: evO, inner: evI };
+      },
+    },
+    {
+      id: "object-element", label: "<object type=text/html>", agent: "yes",
+      frames: ["frame"], legacy: "fires", gated: "omitted",
+      async run() {
+        const o = document.createElement("object");
+        o.type = "text/html";
+        o.data = URL.createObjectURL(new Blob(["<p>object document</p>"], { type: "text/html" }));
+        o.setAttribute("aria-label", "object element probe");
+        o.style.cssText = "inline-size:9rem;block-size:3rem;border:1px solid var(--border-black)";
+        await load(o, bench);
+        URL.revokeObjectURL(o.data);
+        if (!o.contentDocument) throw new Error("object has no contentDocument");
+        const ev = hookDirect(o.contentWindow, o.contentDocument);
+        o.remove();
+        return { frame: ev };
+      },
+    },
+    {
+      id: "sandbox-same-origin", label: "sandbox=\"allow-scripts allow-same-origin\"", agent: "yes",
+      frames: ["frame"], legacy: "fires", gated: "omitted",
+      async run() {
+        const f = frame("sandbox with allow-same-origin probe");
+        f.sandbox = "allow-scripts allow-same-origin";
+        f.srcdoc = "<p>sandboxed, same origin</p>";
+        await load(f, bench);
+        const ev = hookDirect(f.contentWindow, f.contentDocument);
+        f.remove();
+        return { frame: ev };
+      },
+    },
+    {
+      id: "sandbox-opaque", label: "sandbox=\"allow-scripts\" (opaque origin)", agent: "no",
+      frames: ["frame"], legacy: "fires", gated: "fires", async: true,
+      async run() {
+        const f = frame("opaque sandboxed probe");
+        f.sandbox = "allow-scripts";
+        f.srcdoc = PORT_SCRIPT + "<p>opaque</p>";
+        await load(f, bench);
+        const ev = await hookPort(f);
+        f.remove();
+        await wait(400);
+        return { frame: ev };
+      },
+    },
+    {
+      id: "data-url", label: "data: URL iframe (opaque origin)", agent: "no",
+      frames: ["frame"], legacy: "fires", gated: "fires", async: true,
+      async run() {
+        const f = frame("data URL probe");
+        f.src = "data:text/html;charset=utf-8," + encodeURIComponent(PORT_SCRIPT + "<p>data:</p>");
+        await load(f, bench);
+        const ev = await hookPort(f);
+        f.remove();
+        await wait(400);
+        return { frame: ev };
+      },
+    },
+    {
+      id: "sandwich", label: "A1 → B (data:, opaque) → A2 (same origin as A1)", agent: "B: no · A2: yes",
+      frames: ["B", "A2"], legacy: "fires", gated: { B: "fires", A2: "omitted" }, async: true,
+      async run() {
+        const a2Events = [];
+        let a2Ready;
+        const a2ReadyP = new Promise((r) => { a2Ready = r; });
+        window.__sandwichA2 = (type) => { if (type === "ready") a2Ready(); else a2Events.push(type); };
+        const a2Url = URL.createObjectURL(new Blob(["<script>" +
+          "addEventListener('pagehide',function(){top.__sandwichA2('pagehide')});" +
+          "document.addEventListener('visibilitychange',function(){top.__sandwichA2('visibilitychange')});" +
+          "addEventListener('unload',function(){top.__sandwichA2('unload')});" +
+          "addEventListener('load',function(){top.__sandwichA2('ready')});<\/script><p>A2</p>"], { type: "text/html" }));
+        const b = frame("sandwich middle B probe");
+        b.src = "data:text/html;charset=utf-8," + encodeURIComponent(PORT_SCRIPT +
+          "<body><p>B</p><iframe title='A2'></iframe></body>");
+        await load(b, bench);
+        const bEvents = await hookPort(b);
+        b.contentWindow[0].location = a2Url; // an ancestor may navigate a descendant frame
+        await Promise.race([a2ReadyP, wait(4000).then(() => { throw new Error("A2 never loaded"); })]);
+        b.remove();
+        await wait(400);
+        URL.revokeObjectURL(a2Url);
+        delete window.__sandwichA2;
+        return { B: bEvents, A2: a2Events };
+      },
+    },
+  ];
+
+  const state = new Map();
+
+  function expectedFor(c, name) {
+    return typeof c.gated === "object" ? c.gated[name] : c.gated;
+  }
+  function classify(ev) {
+    if (ev.length === 0) return "omitted";
+    if (["pagehide", "visibilitychange", "unload"].every((t) => ev.includes(t))) return "fires";
+    return "partial";
+  }
+  function rowFor(c) {
+    const tr = document.createElement("tr");
+    tr.id = "row-" + c.id;
+    const th = document.createElement("th");
+    th.scope = "row";
+    th.textContent = c.label;
+    const agent = document.createElement("td");
+    agent.textContent = c.agent;
+    const legacy = document.createElement("td");
+    legacy.textContent = c.frames.length > 1 ? c.frames.map((n) => n + ": fires").join(" · ") : "fires";
+    const gated = document.createElement("td");
+    gated.textContent = c.frames.length > 1 ? c.frames.map((n) => n + ": " + expectedFor(c, n)).join(" · ") : expectedFor(c, "frame");
+    const observed = document.createElement("td");
+    observed.className = "observed";
+    observed.textContent = "—";
+    const matches = document.createElement("td");
+    matches.className = "matches";
+    matches.textContent = "—";
+    const runTd = document.createElement("td");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Remove";
+    btn.setAttribute("aria-label", "Remove: " + c.label);
+    btn.addEventListener("click", () => runCases([c]));
+    runTd.append(btn);
+    tr.append(th, agent, legacy, gated, observed, matches, runTd);
+    return tr;
+  }
+  for (const c of CASES) rowsEl.append(rowFor(c));
+
+  function judge(c, result) {
+    const obs = {};
+    for (const name of Object.keys(result)) obs[name] = classify(result[name]);
+    const names = Object.keys(obs);
+    const legacyOk = names.every((n) => obs[n] === "fires");
+    const gatedOk = names.every((n) => obs[n] === expectedFor(c, n === "frame" ? "frame" : n));
+    let match = "unexpected";
+    if (legacyOk && gatedOk) match = "both models";
+    else if (legacyOk) match = "legacy";
+    else if (gatedOk) match = "156 gate";
+    return { obs, match };
+  }
+
+  let busy = false;
+  async function runCases(list) {
+    if (busy) return;
+    busy = true;
+    for (const b of document.querySelectorAll("button")) b.disabled = true;
+    benchEmpty.hidden = true;
+    verdictEl.textContent = "Running " + list.length + " configuration(s)…";
+    try {
+      for (const c of list) {
+        const tr = document.getElementById("row-" + c.id);
+        let judged;
+        try {
+          const result = await c.run();
+          judged = judge(c, result);
+          tr.querySelector(".observed").textContent = Object.entries(result)
+            .map(([n, ev]) => (n === "frame" ? "" : n + ": ") + (ev.length ? ev.join(", ") : "none")).join(" · ");
+        } catch (err) {
+          judged = { obs: {}, match: "could not run" };
+          tr.querySelector(".observed").textContent = "error: " + err.message;
+        }
+        const m = tr.querySelector(".matches");
+        m.textContent = judged.match;
+        m.className = "matches " + (judged.match === "unexpected" || judged.match === "could not run" ? "v-no" : "v-yes");
+        state.set(c.id, judged);
+      }
+      summarise();
+    } finally {
+      for (const el of bench.querySelectorAll("iframe, object")) el.remove();
+      benchEmpty.hidden = false;
+      for (const b of document.querySelectorAll("button")) b.disabled = false;
+      busy = false;
+    }
+  }
+
+  function summarise() {
+    const done = CASES.filter((c) => state.has(c.id));
+    const matches = done.map((c) => state.get(c.id).match);
+    const sameAgent = done.filter((c) => c.agent === "yes");
+    const legacyCount = matches.filter((m) => m === "legacy").length;
+    const gatedCount = matches.filter((m) => m === "156 gate").length;
+    const bad = matches.filter((m) => m === "unexpected" || m === "could not run").length;
+    let text;
+    if (bad) text = bad + " configuration(s) matched neither model — read the observed column.";
+    else if (gatedCount && !legacyCount) text = "156 gate active: same-agent frames omitted the events, other-agent frames still fired them.";
+    else if (legacyCount && !gatedCount) text = "Legacy behaviour: every removed frame fired pagehide, visibilitychange and unload. OmitSubframeDetachmentEventsOnRemoval is not active.";
+    else if (!legacyCount && !gatedCount) text = "Only configurations both models agree on have run so far.";
+    else text = "Mixed: some same-agent frames fired and some did not.";
+    verdictEl.textContent = done.length + "/" + CASES.length + " run. " + text;
+    window.showcaseTelemetry?.assert("agent-matrix-consistent", bad === 0 && !(legacyCount && gatedCount),
+      { run: done.length, legacy: legacyCount, gated: gatedCount, bad, sameAgentRun: sameAgent.length });
+  }
+
+  runAllBtn.addEventListener("click", () => runCases(CASES));
+})();
+</script>
+</body>
+</html>

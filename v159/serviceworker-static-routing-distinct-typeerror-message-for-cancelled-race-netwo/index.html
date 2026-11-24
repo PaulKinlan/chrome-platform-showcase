@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ServiceWorker Static Routing: Distinct TypeError message for cancelled race-network-and-fetch-handler fetch() requests — Chrome 159 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="./demo.css">
+</head>
+<body>
+<!--
+RESEARCH RECORD (weekly-hardening-builder, 2026-11-22)
+Feature id: 5124748525830144 · listing name (milestone 159) "ServiceWorker Static Routing: Distinct
+TypeError message for cancelled race-network-and-fetch-handler fetch() requests"
+Owner sisidovski@chromium.org · Blink>ServiceWorker · tracking bug https://crbug.com/584504247
+Spec (unchanged by this feature): https://w3c.github.io/ServiceWorker/#dom-routersourceenum-race-network-and-fetch-handler
+No IDL or spec change: TypeError messages are implementation-defined; WPT asserts only the type
+(chromestatus wpt_descr). Chromium tests: content/browser/service_worker/service_worker_browsertest.cc,
+third_party/blink/renderer/modules/service_worker/service_worker_global_scope_test.cc.
+
+Exact implementation (third_party/blink/renderer/modules/service_worker/service_worker_global_scope.cc,
+ServiceWorkerGlobalScope::GetCustomFetchErrorMessage, read via gitiles main 2026-11-22):
+  returns the custom message only when ALL hold:
+   - net_error_code == net::ERR_ABORTED
+   - the request carries a ServiceWorkerRaceNetworkRequestToken (fetch(event.request) or a Request
+     copied from it — observed: fetch(new Request(event.request)) qualifies too)
+   - the token's loader state is kRaceLoaderUsed (a SECOND fetch(event.request) falls back to the
+     default loader and flips the state to kFallbackDueToAlreadyConsumed — observed: the first call's
+     cancellation is then reported as the generic message)
+   - base::FeatureList::IsEnabled(features::kServiceWorkerRaceNetworkRequestAbortedErrorMessage)
+  message: "The service worker race-network-and-fetch-handler request was cancelled before 'fetch()' settled."
+  sibling (Navigation Preload, pre-existing): "The service worker navigation preload request was
+  cancelled before 'preloadResponse' settled."
+Flag: base::Feature (content/common/features.cc) kServiceWorkerRaceNetworkRequestAbortedErrorMessage,
+  FEATURE_ENABLED_BY_DEFAULT on main. chromestatus finch_name = ServiceWorkerRaceNetworkRequestAbortedErrorMessage,
+  flag_name null; not in chrome/browser/about_flags.cc (no chrome://flags entry); not in
+  runtime_enabled_features.json5. Force: --enable-features=ServiceWorkerRaceNetworkRequestAbortedErrorMessage.
+
+Ground truth in this container (headless Chrome for Testing, this folder's sw.js, 2026-11-22):
+  Chrome 153.0.8010.12           → every cancellation: TypeError "Failed to fetch"
+  Chrome 159.0.8154.13 (no Finch)→ "Failed to fetch" (feature default-off in the 159 build)
+  Chrome 159 + --enable-features=ServiceWorkerRaceNetworkRequestAbortedErrorMessage → distinct message
+  Chrome 160.0.8176.2 (Canary)   → distinct message by default
+  Cases on 160: fallback-timer cancel → distinct; immediate respondWith(shell) → distinct;
+  new Request(event.request) → distinct; 2x fetch(event.request) → 1st "Failed to fetch", 2nd fulfils;
+  fetch(event.request.url) → independent request, fulfils; redirect:'error' genuine error under the
+  same race route → "Failed to fetch"; DevTools/Playwright offline → "Failed to fetch"; page-side
+  AbortController abort → the worker's fetch(event.request) still FULFILS (not cancelled);
+  Resource Timing workerMatchedRouterSource = "race-network-and-fetch-handler", workerFinalRouterSource
+  = "fetch-event" when the handler answered, "network" when the deduped network response was used.
+
+Server routes used (published, durable, not owned by this folder):
+  /v151/cpu-performance-api/capability-echo?delay=0..1200 — waits BEFORE sending headers (the
+    pre-settlement window), routes/release-endpoints.ts renderV151CapabilityEcho.
+  /v150/disable-svg-filters-on-plugins-and-cross-origin-or-restricted-iframes/ — a 301 alias from
+    migrations.json; requested with redirect:'error' it is a genuine network failure.
+  TODO (manual, server.ts): a header-delaying route INSIDE this folder (e.g. v159/<slug>/slow-nav)
+    would let a concept race a NAVIGATION and cancel it before headers; the worker can only intercept
+    navigations within its own scope, and every in-scope file here answers in ~1 ms.
+
+Use-case portfolio:
+  1. basic/canonical → fallback-timer-race (the chromestatus scenario: offline-fallback timer wins)
+  2. inspection tool  → fetch-shape-inspector (which fetch() call shapes get the message)
+  3. practical product → telemetry-noise-filter (migration from Navigation Preload: suppress expected
+     cancellations, still alert on genuine failures)
+  4. advanced composition → app-shell-revalidation (cache-first shell + background refresh under a
+     race route: fetch(event.request) is cancelled, fetch(event.request.url) is not)
+  5. edge/failure/migration → error-taxonomy (cancellation vs genuine redirect error vs page abort vs
+     offline vs success, plus a version-tolerant classifier)
+-->
+<main>
+  <p class="crumbs"><a href="/v159/">&larr; Chrome 159</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · service worker · static routing</p>
+    <h1>ServiceWorker Static Routing: Distinct TypeError message for cancelled race-network-and-fetch-handler fetch() requests</h1>
+    <p class="lede">With a static route whose source is <code>"race-network-and-fetch-handler"</code>, Chrome starts the network request itself and fires your fetch handler in parallel; a <code>fetch(event.request)</code> inside the handler is deduplicated onto that same network request. If the browser cancels it before response headers arrive &mdash; because your offline-fallback timer answered <code>respondWith()</code> first, say &mdash; the promise used to reject with the generic <code>TypeError("Failed to fetch")</code>, indistinguishable from a real outage. From Chrome 159 it rejects with <code>TypeError("The service worker race-network-and-fetch-handler request was cancelled before 'fetch()' settled.")</code>, mirroring what Navigation Preload already does for <code>event.preloadResponse</code>.</p>
+  </header>
+
+  <div class="note warn">
+    <strong>How to see the new message.</strong> Chrome 160+ and Canary: on by default. Chrome 159: the change is a Chromium feature, <code>ServiceWorkerRaceNetworkRequestAbortedErrorMessage</code>, that was still default-off in Chrome for Testing 159.0.8154.13 (so it reaches 159 by server-side field trial). To force it, relaunch Chrome with <code>--enable-features=ServiceWorkerRaceNetworkRequestAbortedErrorMessage</code>. There is <strong>no chrome://flags entry</strong>, and it is not a Blink runtime feature, so <code>--enable-experimental-web-platform-features</code> does not switch it on. Every demo still runs elsewhere and reports exactly which message your browser produced.
+  </div>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./fallback-timer-race/">Fallback-timer race</a></h3>
+      <p>The canonical scenario. Dial how long the server holds back its headers and how soon your offline-fallback timer fires, run a real raced request, and read the exact <code>TypeError</code> the worker&rsquo;s <code>fetch(event.request)</code> rejected with &mdash; or watch it fulfil when the network wins.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./fetch-shape-inspector/">Fetch-shape inspector</a></h3>
+      <p>An inspection table: <code>fetch(event.request)</code>, <code>fetch(new Request(event.request))</code>, <code>fetch(event.request.url)</code>, calling <code>fetch(event.request)</code> twice, and an un-cancelled control &mdash; which shapes are deduplicated onto the raced request, and which of them get the distinct message.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./telemetry-noise-filter/">Telemetry noise filter</a></h3>
+      <p>Why it shipped: an app migrating from Navigation Preload filtered expected cancellations out of its error reports by message. Replay a session of real cancelled, successful and genuinely failing requests through a legacy and a message-aware classifier and count the false alarms each one would page you with.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./app-shell-revalidation/">App-shell revalidation</a></h3>
+      <p>Cache-first app shell plus a background refresh, under a race route. Refreshing with <code>fetch(event.request)</code> is silently cancelled the moment the shell answers &mdash; now with a message that says so &mdash; and the cache never updates; refreshing with <code>fetch(event.request.url)</code> is an independent request that completes. Cache contents shown live.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./error-taxonomy/">Error taxonomy</a></h3>
+      <p>The edge cases: race cancellation, a genuine network error on the same raced route, the page aborting its own request, going offline, and a clean success &mdash; side by side with the message each produces, plus a version-tolerant classifier for codebases that must run on Chrome before and after 159.</p>
+    </li>
+  </ol></section>
+
+  <section>
+    <h2>the API surface</h2>
+    <pre tabindex="0"><code>// sw.js — nothing new to call: the change is the message on an existing rejection.
+self.addEventListener("install", (event) =&gt; {
+  event.addRoutes({
+    condition: { urlPattern: { pathname: "/api/feed" } },
+    source: "race-network-and-fetch-handler",
+  });
+});
+
+self.addEventListener("fetch", (event) =&gt; {
+  const network = fetch(event.request);            // deduplicated onto the raced request
+  const fallback = new Promise((r) =&gt; setTimeout(() =&gt; r(offlinePage()), 3000));
+  event.respondWith(Promise.race([network, fallback]));
+
+  network.catch((error) =&gt; {
+    if (error.message ===
+        "The service worker race-network-and-fetch-handler request was cancelled before 'fetch()' settled.") {
+      return;                                     // expected: we answered first (Chrome 159+)
+    }
+    reportNetworkError(error);                    // a real failure — or a cancellation on Chrome &lt; 159
+  });
+});</code></pre>
+    <p>Only the <em>message</em> changed; the rejection is still a <code>TypeError</code>, so <code>catch</code> blocks that test <code>instanceof TypeError</code> behave exactly as before. The message appears only for <code>net::ERR_ABORTED</code> on the raced, deduplicated request &mdash; genuine failures (DNS, offline, blocked redirects, CORS) keep <code>"Failed to fetch"</code>.</p>
+  </section>
+
+  <section>
+    <h2>why it shipped</h2>
+    <p>Navigation Preload already rejects <code>event.preloadResponse</code> with <q>The service worker navigation preload request was cancelled before 'preloadResponse' settled.</q> when the preload is cancelled early, and offline-capable apps key their error telemetry on that string. Moving to static routing&rsquo;s race source collapsed the same situation into <q>Failed to fetch</q>, so migrating produced false-positive network-error spikes and could even trip offline fallbacks. Chrome 159 gives the race path the matching treatment, with no IDL or specification change &mdash; and because web apps can observe the string, it went straight to an Intent to Ship for compatibility review.</p>
+  </section>
+
+  <section>
+    <h2>what this demo depends on</h2>
+    <p>All requests are real and same-origin. The slow side of each race is the published <code>/v151/cpu-performance-api/capability-echo?delay=N</code> route, which waits up to 1.2&nbsp;s <em>before</em> sending headers; the genuine-failure case requests the published 301 alias <code>/v150/disable-svg-filters-on-plugins-and-cross-origin-or-restricted-iframes/</code> with <code>redirect: "error"</code>. The worker (<a href="./sw.js"><code>sw.js</code></a>, scoped to this folder) and the page harness (<a href="./harness.js"><code>harness.js</code></a>) are plain files you can read.</p>
+    <p class="note"><strong>Not covered yet (needs a server route):</strong> cancelling a raced <em>navigation</em> before headers. A worker only intercepts navigations inside its own scope, and every file in this folder answers in about a millisecond, so there is no pre-header window to cancel. A header-delaying route inside this folder (for example <code>v159/&lt;slug&gt;/slow-nav</code>, wired in <code>server.ts</code>) would make that concept possible.</p>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5124748525830144" target="_blank" rel="noopener">ChromeStatus entry (5124748525830144)</a></li>
+      <li><a href="https://w3c.github.io/ServiceWorker/#dom-routersourceenum-race-network-and-fetch-handler" target="_blank" rel="noopener">Service Workers spec &mdash; RouterSourceEnum "race-network-and-fetch-handler"</a></li>
+      <li><a href="https://crbug.com/584504247" target="_blank" rel="noopener">crbug.com/584504247 &mdash; tracking bug</a></li>
+      <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/modules/service_worker/service_worker_global_scope.cc" target="_blank" rel="noopener">Chromium: ServiceWorkerGlobalScope::GetCustomFetchErrorMessage</a></li>
+      <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:content/common/features.cc" target="_blank" rel="noopener">Chromium: kServiceWorkerRaceNetworkRequestAbortedErrorMessage (content/common/features.cc)</a></li>
+      <li><a href="https://developer.chrome.com/blog/service-worker-static-routing" target="_blank" rel="noopener">Chrome for Developers blog &mdash; Service Worker Static Routing API</a></li>
+      <li><a href="https://developer.mozilla.org/docs/Web/API/InstallEvent/addRoutes" target="_blank" rel="noopener">MDN: InstallEvent.addRoutes()</a></li>
+      <li><a href="https://developer.mozilla.org/docs/Web/API/FetchEvent/preloadResponse" target="_blank" rel="noopener">MDN: FetchEvent.preloadResponse (the Navigation Preload precedent)</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>
