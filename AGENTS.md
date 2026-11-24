@@ -153,12 +153,12 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
     of the exact shipped surface, enable flags/OT steps, common errors & fixes, zero bloat.
   - **Track B — Hypothesis-Driven Experiments (no ceiling; every distinct angle):** every experiment
     asks a concrete, falsifiable question; push the limits of the API (build stress/boundary tests
-    even when expected to fail, let them fail visibly, record empirical findings with Chrome version
-    + date, try alternatives one after another, state `"not verified"` if not run); include at least
-    one surprising **Cross-API Composition** combining the feature with another modern platform
-    primitive (Shadow DOM, `OffscreenCanvas`/Worker, WebGPU/WebGL, View Transitions, Popover/Anchor
-    Positioning, Streams, Compression, Web Audio, CSS `shape()`/`@scope`) transforming real page
-    content rather than an isolated synthetic box.
+    even when expected to fail, let them fail visibly, record empirical findings with Chrome
+    version/date, try alternatives one after another, state `"not verified"` if not run); include at
+    least one surprising **Cross-API Composition** combining the feature with another modern
+    platform primitive (Shadow DOM, `OffscreenCanvas`/Worker, WebGPU/WebGL, View Transitions,
+    Popover/Anchor Positioning, Streams, Compression, Web Audio, CSS `shape()`/`@scope`)
+    transforming real page content rather than an isolated synthetic box.
 - Add optional/additive per-concept `page.json` metadata on new or upgraded concepts (`title`,
   `blurb`, `kind`: `starter` | `experiment` | `stress` | `composition` | `migration`, `question`,
   `result`, `testedIn`, `api`, `composesWith`, and `friction`: `summary`, `kind`, `repro`,
@@ -375,16 +375,15 @@ APIs.
 > existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
 > Per-demo support lives in git-tracked per-feature `v<N>/<feature-slug>/_support.json` sidecars
 > (defaulting existing demos to `untested`), managed via `npm run responsive-support` and
-> `npm run responsive-check -- <id> --merge`, and merged into the route manifest.
-> Validate with `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts
-> no horizontal overflow + console/network clean and screenshots both classes; a
-> genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
-> `npm run overflow-scan` (cheap seed → `needs-review`, never `ok`). Report coverage with
-> `npm run responsive-support -- report`; the gate (`npm run check-routes`) reports the
-> mobile/desktop denominators and enforces the rules above before every push. The
-> modern-web-guidance skill source + version + update path is recorded in `MODERN_WEB_GUIDANCE.md`
-> (canonical skill `modern-web-guidance`, scripted fallback `npx -y modern-web-guidance@latest`; no
-> vendored copy).
+> `npm run responsive-check -- <id> --merge`, and merged into the route manifest. Validate with
+> `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts no horizontal
+> overflow + console/network clean and screenshots both classes; a genuinely-unavailable class is
+> `blocked` with evidence, NEVER a fake pass) and `npm run overflow-scan` (cheap seed →
+> `needs-review`, never `ok`). Report coverage with `npm run responsive-support -- report`; the gate
+> (`npm run check-routes`) reports the mobile/desktop denominators and enforces the rules above
+> before every push. The modern-web-guidance skill source + version + update path is recorded in
+> `MODERN_WEB_GUIDANCE.md` (canonical skill `modern-web-guidance`, scripted fallback
+> `npx -y modern-web-guidance@latest`; no vendored copy).
 
 ## Demo Quality
 

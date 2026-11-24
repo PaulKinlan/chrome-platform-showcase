@@ -155,16 +155,15 @@ APIs.
 > existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
 > Per-demo support lives in git-tracked per-feature `v<N>/<feature-slug>/_support.json` sidecars
 > (defaulting existing demos to `untested`), managed via `npm run responsive-support` and
-> `npm run responsive-check -- <id> --merge`, and merged into the route manifest.
-> Validate with `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts
-> no horizontal overflow + console/network clean and screenshots both classes; a
-> genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
-> `npm run overflow-scan` (cheap seed → `needs-review`, never `ok`). Report coverage with
-> `npm run responsive-support -- report`; the gate (`npm run check-routes`) reports the
-> mobile/desktop denominators and enforces the rules above before every push. The
-> modern-web-guidance skill source + version + update path is recorded in `MODERN_WEB_GUIDANCE.md`
-> (canonical skill `modern-web-guidance`, scripted fallback `npx -y modern-web-guidance@latest`; no
-> vendored copy).
+> `npm run responsive-check -- <id> --merge`, and merged into the route manifest. Validate with
+> `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts no horizontal
+> overflow + console/network clean and screenshots both classes; a genuinely-unavailable class is
+> `blocked` with evidence, NEVER a fake pass) and `npm run overflow-scan` (cheap seed →
+> `needs-review`, never `ok`). Report coverage with `npm run responsive-support -- report`; the gate
+> (`npm run check-routes`) reports the mobile/desktop denominators and enforces the rules above
+> before every push. The modern-web-guidance skill source + version + update path is recorded in
+> `MODERN_WEB_GUIDANCE.md` (canonical skill `modern-web-guidance`, scripted fallback
+> `npx -y modern-web-guidance@latest`; no vendored copy).
 
 ## Modes
 
@@ -322,9 +321,9 @@ published routes):
    **`/experiments/`** cross-API explorer.
 4. **Live-source `<details class="show-code">` and out-of-flow Live Checks:** Prefer
    `<details class="show-code">` hydrated by `/public/show-code.js` (wrapping key demo code in
-   `// --- demo ---` / `// --- /demo ---` markers) over hand-copied `<pre><code>` blocks that
-   drift. Follow the standard experiment section order: Banner + Lede + About box → **Live
-   interactive demo first** → `<details class="show-code">` → **How it works** → **Live checks**
+   `// --- demo ---` / `// --- /demo ---` markers) over hand-copied `<pre><code>` blocks that drift.
+   Follow the standard experiment section order: Banner + Lede + About box → **Live interactive demo
+   first** → `<details class="show-code">` → **How it works** → **Live checks**
    (`<details class="live-checks">`, out-of-flow fixtures so the page holds still with zero CLS) →
    **Findings** (empirical, dated, browser-versioned).
 5. **Direct engineering writing:** No AI-slop filler ("delve", "unlock the power", "seamless",

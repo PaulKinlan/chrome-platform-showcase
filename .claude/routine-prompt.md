@@ -246,16 +246,15 @@ APIs.
 > existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
 > Per-demo support lives in git-tracked per-feature `v<N>/<feature-slug>/_support.json` sidecars
 > (defaulting existing demos to `untested`), managed via `npm run responsive-support` and
-> `npm run responsive-check -- <id> --merge`, and merged into the route manifest.
-> Validate with `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts
-> no horizontal overflow + console/network clean and screenshots both classes; a
-> genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
-> `npm run overflow-scan` (cheap seed → `needs-review`, never `ok`). Report coverage with
-> `npm run responsive-support -- report`; the gate (`npm run check-routes`) reports the
-> mobile/desktop denominators and enforces the rules above before every push. The
-> modern-web-guidance skill source + version + update path is recorded in `MODERN_WEB_GUIDANCE.md`
-> (canonical skill `modern-web-guidance`, scripted fallback `npx -y modern-web-guidance@latest`; no
-> vendored copy).
+> `npm run responsive-check -- <id> --merge`, and merged into the route manifest. Validate with
+> `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts no horizontal
+> overflow + console/network clean and screenshots both classes; a genuinely-unavailable class is
+> `blocked` with evidence, NEVER a fake pass) and `npm run overflow-scan` (cheap seed →
+> `needs-review`, never `ok`). Report coverage with `npm run responsive-support -- report`; the gate
+> (`npm run check-routes`) reports the mobile/desktop denominators and enforces the rules above
+> before every push. The modern-web-guidance skill source + version + update path is recorded in
+> `MODERN_WEB_GUIDANCE.md` (canonical skill `modern-web-guidance`, scripted fallback
+> `npx -y modern-web-guidance@latest`; no vendored copy).
 
 ## Toolset & verification environment (READ — this is how you run standalone in the cloud)
 
@@ -680,10 +679,9 @@ experiment machine-discoverable across the site:
 }
 ```
 
-`page.json` is additive (older concept pages without it keep working) and powers three site
-surfaces automatically: the **"About this experiment"** box injected under `<p class="lede">`, the
-site-wide **`/friction/`** browser-bug and API-limit ledger, and the **`/experiments/`** cross-API
-explorer.
+`page.json` is additive (older concept pages without it keep working) and powers three site surfaces
+automatically: the **"About this experiment"** box injected under `<p class="lede">`, the site-wide
+**`/friction/`** browser-bug and API-limit ledger, and the **`/experiments/`** cross-API explorer.
 
 ## Step 8: Commit per feature, push, move on
 

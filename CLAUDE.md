@@ -326,16 +326,15 @@ APIs.
 > existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
 > Per-demo support lives in git-tracked per-feature `v<N>/<feature-slug>/_support.json` sidecars
 > (defaulting existing demos to `untested`), managed via `npm run responsive-support` and
-> `npm run responsive-check -- <id> --merge`, and merged into the route manifest.
-> Validate with `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts
-> no horizontal overflow + console/network clean and screenshots both classes; a
-> genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
-> `npm run overflow-scan` (cheap seed → `needs-review`, never `ok`). Report coverage with
-> `npm run responsive-support -- report`; the gate (`npm run check-routes`) reports the
-> mobile/desktop denominators and enforces the rules above before every push. The
-> modern-web-guidance skill source + version + update path is recorded in `MODERN_WEB_GUIDANCE.md`
-> (canonical skill `modern-web-guidance`, scripted fallback `npx -y modern-web-guidance@latest`; no
-> vendored copy).
+> `npm run responsive-check -- <id> --merge`, and merged into the route manifest. Validate with
+> `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts no horizontal
+> overflow + console/network clean and screenshots both classes; a genuinely-unavailable class is
+> `blocked` with evidence, NEVER a fake pass) and `npm run overflow-scan` (cheap seed →
+> `needs-review`, never `ok`). Report coverage with `npm run responsive-support -- report`; the gate
+> (`npm run check-routes`) reports the mobile/desktop denominators and enforces the rules above
+> before every push. The modern-web-guidance skill source + version + update path is recorded in
+> `MODERN_WEB_GUIDANCE.md` (canonical skill `modern-web-guidance`, scripted fallback
+> `npx -y modern-web-guidance@latest`; no vendored copy).
 
 ## Critical invariants (read these — every one has bitten us)
 
@@ -446,9 +445,9 @@ A "concept" is supposed to be hands-on. The shape depends on what the feature ac
   `v<N>/<slug>/echo`) and surfaces the negotiated headers, status, and response body in-page. Run
   `npm run gen:feature-servers` after adding or removing any `_server.ts` so
   `routes/_feature-servers.generated.ts` stays in sync for Cloudflare Workers bundling (checked by
-  `npm run check-feature-servers`; locally Node also resolves `_server.ts` dynamically). Because
-  the routine is fenced out of `routes/`, a routine run may author `v<N>/<slug>/_server.ts` and
-  flag the PR for a `npm run gen:feature-servers` run on merge.
+  `npm run check-feature-servers`; locally Node also resolves `_server.ts` dynamically). Because the
+  routine is fenced out of `routes/`, a routine run may author `v<N>/<slug>/_server.ts` and flag the
+  PR for a `npm run gen:feature-servers` run on merge.
 - **Origin trial / behind-a-flag features** → ship the interactive demo anyway, with a clearly
   visible "to actually run this, enable chrome://flags/#X or join the origin trial" banner up top.
   Visitors will read it. Don't skip the demo because the API might not resolve — the demo should
@@ -517,12 +516,13 @@ repurpose published routes or concepts), structure every feature across two trac
   configuration/inspection tooling, practical product use cases, stress/boundary/migration behavior,
   and cross-API compositions. Every experiment asks a **concrete, falsifiable question** about the
   API's limits, interactions, or edge cases. **Push the limits of the API:** build stress/boundary
-  tests even when expected to fail, let them fail visibly, record empirical findings (Chrome version
-  + date), and try alternatives one after another — never invent results (state `"not verified"` if
-  not run). Include at least one genuinely surprising **Cross-API Composition** combining the
-  feature with another modern platform primitive (e.g., Shadow DOM, `OffscreenCanvas`/Worker,
-  WebGPU/WebGL, View Transitions, Popover/Anchor Positioning, Streams, Compression, Web Audio, CSS
-  `shape()`/`@scope`) — transforming real page content rather than an isolated synthetic box.
+  tests even when expected to fail, let them fail visibly, record empirical findings (Chrome
+  version/date), and try alternatives one after another — never invent results (state
+  `"not verified"` if not run). Include at least one genuinely surprising **Cross-API Composition**
+  combining the feature with another modern platform primitive (e.g., Shadow DOM,
+  `OffscreenCanvas`/Worker, WebGPU/WebGL, View Transitions, Popover/Anchor Positioning, Streams,
+  Compression, Web Audio, CSS `shape()`/`@scope`) — transforming real page content rather than an
+  isolated synthetic box.
 
 Build every applicable angle on its own additive stable route; record a source-backed reason for any
 non-applicable angle. Two near-duplicate playgrounds do not satisfy two angles, and a syntax probe
