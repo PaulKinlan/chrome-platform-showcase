@@ -1,3 +1,4 @@
+import { platform } from "../lib/platform.ts";
 import { renderBreadcrumbs } from "../lib/breadcrumbs.ts";
 import { getChannels } from "../lib/chromestatus.ts";
 import { handleFeatureRequest as handleDpoServer } from "../v151/declarative-performance-observer/_server.ts";
@@ -57,7 +58,7 @@ async function resolveFeatureServer(
   }
 
   try {
-    const stat = await Deno.stat(`./${key}/_server.ts`);
+    const stat = await platform().stat(`./${key}/_server.ts`);
     if (!stat.isFile) {
       dynamicFeatureServerCache.set(key, null);
       return null;
@@ -117,7 +118,7 @@ async function fileExists(path: string): Promise<boolean> {
   const cached = fileExistsCache.get(path);
   if (cached !== undefined) return cached;
   try {
-    const ok = (await Deno.stat(path)).isFile;
+    const ok = (await platform().stat(path)).isFile;
     fileExistsCache.set(path, ok);
     return ok;
   } catch {
@@ -130,7 +131,7 @@ let gendnRoutesPromise: Promise<Set<string>> | undefined;
 
 function gendnRoutes(): Promise<Set<string>> {
   if (!gendnRoutesPromise) {
-    gendnRoutesPromise = Deno.readTextFile("./gendn-links.json")
+    gendnRoutesPromise = platform().readTextFile("./gendn-links.json")
       .then((text) => new Set<string>((JSON.parse(text).routes ?? []) as string[]))
       .catch(() => new Set<string>());
   }
@@ -214,7 +215,7 @@ async function getFeatureHeading(release: string, featureSlug: string): Promise<
   const cached = featureHeadingCache.get(cacheKey);
   if (cached !== undefined) return cached;
   try {
-    const featureHTML = await Deno.readTextFile(`./${release}/${featureSlug}/index.html`);
+    const featureHTML = await platform().readTextFile(`./${release}/${featureSlug}/index.html`);
     const title = headingText(featureHTML);
     featureHeadingCache.set(cacheKey, title);
     return title;
@@ -298,7 +299,7 @@ async function readReleaseAssetFromDisk(
   if (key.endsWith("_server.ts")) return null;
 
   try {
-    const file = await Deno.readFile(`./${release}/${key}`);
+    const file = await platform().readFile(`./${release}/${key}`);
     const ext = key.split(".").pop() ?? "";
     if (ext === "html") {
       const html = new TextDecoder().decode(file);

@@ -9,6 +9,8 @@
 // migrations.json is the single source of truth for both this live redirect and
 // the `scripts/check-routes.mjs` regression gate.
 
+import migrationRecords from "../migrations.json" with { type: "json" };
+
 interface MigrationRecord {
   id?: string;
   action?: string;
@@ -29,8 +31,9 @@ function normalizeBase(route: string): string {
 function loadAliases(): Array<{ from: string; to: string }> {
   const out: Array<{ from: string; to: string }> = [];
   try {
-    const raw = Deno.readTextFileSync(new URL("../migrations.json", import.meta.url));
-    const records = JSON.parse(raw) as MigrationRecord[];
+    // Imported as a JSON module (not read from disk) so it is bundled into the
+    // Cloudflare Worker, which has no filesystem and no synchronous reads.
+    const records = migrationRecords as unknown as MigrationRecord[];
     if (!Array.isArray(records)) return out;
     for (const record of records) {
       if (record.action !== "alias" && record.action !== "move") continue;

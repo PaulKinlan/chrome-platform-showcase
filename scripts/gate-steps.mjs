@@ -38,7 +38,7 @@ export const GATE_STEPS = [
     id: "typecheck",
     task: "typecheck",
     tier: "static",
-    what: "deno check server.ts and the two gate-side scripts",
+    what: "deno check server.ts, the Worker entry and the two gate-side scripts",
   },
   { id: "fmt-check", task: "fmt-check", tier: "static", what: "deno fmt --check" },
   {
@@ -171,6 +171,12 @@ export const GATE_STEPS = [
     task: "test-auth-throttle",
     tier: "affected",
     what: "auth throttle + demo telemetry",
+  },
+  {
+    id: "test-worker-platform",
+    task: "test-worker-platform",
+    tier: "affected",
+    what: "Cloudflare Worker host seams (no direct Deno host APIs, KV adapter, asset staging)",
   },
   {
     id: "audit-strict",

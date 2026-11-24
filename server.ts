@@ -1,55 +1,16 @@
 // chrome-platform-showcase
-// Deno HTTP entry. Route implementations live in ./routes so each URL group
-// can evolve independently while this file stays as the dispatcher.
+// Deno HTTP entry (local dev, tests, `deno task start`). The route table lives
+// in routes/dispatch.ts, shared with the Cloudflare Worker entry
+// (worker/index.ts), so this file only binds a port.
 
-import { handleAliasRoute } from "./routes/aliases.ts";
-import { handleCategoriesRoute } from "./routes/categories.ts";
-import { handleConformanceRoute } from "./routes/conformance.ts";
-import { handleCritiquesRoute } from "./routes/critiques.ts";
-import { handleFeaturesRoute } from "./routes/features.ts";
-import { handleFaviconRoute } from "./routes/favicon.ts";
-import { handleDemoTelemetryRoute } from "./routes/demo-telemetry.ts";
-import { handleFedCmWellKnownRoute } from "./routes/fedcm-well-known.ts";
-import { handleIndexRoute } from "./routes/index.ts";
-import { handleProfileTelemetryRoute } from "./routes/profile-telemetry.ts";
-import { handlePublicRoute } from "./routes/public.ts";
-import { handleEchoSocketRoute } from "./routes/echo-socket.ts";
-import { handleReleaseRoute } from "./routes/release.ts";
+import { dispatch, type RouteContext } from "./routes/dispatch.ts";
 
 const PORT = Number(Deno.env.get("PORT") ?? 3000);
 
-// The connection context a route may use for per-source decisions. `remoteAddr`
-// is the socket peer, which a client cannot forge (see lib/auth-throttle.ts).
-type RouteContext = { remoteAddr?: string | null };
-type RouteHandler = (
-  req: Request,
-  context?: RouteContext,
-) => Response | Promise<Response | null> | null;
-
-const routes: RouteHandler[] = [
-  handleAliasRoute,
-  handleIndexRoute,
-  handleFeaturesRoute,
-  handleConformanceRoute,
-  handleCritiquesRoute,
-  handleCategoriesRoute,
-  handleFaviconRoute,
-  handleEchoSocketRoute,
-  handlePublicRoute,
-  handleProfileTelemetryRoute,
-  handleDemoTelemetryRoute,
-  handleFedCmWellKnownRoute,
-  handleReleaseRoute,
-];
-
-Deno.serve({ port: PORT }, async (req, info) => {
+Deno.serve({ port: PORT }, (req, info) => {
+  // The socket peer, which a client cannot forge (see lib/auth-throttle.ts).
   const context: RouteContext = { remoteAddr: info?.remoteAddr?.hostname ?? null };
-  for (const route of routes) {
-    const response = await route(req, context);
-    if (response) return response;
-  }
-
-  return new Response("Not found", { status: 404 });
+  return dispatch(req, context);
 });
 
 console.log(`Listening on http://localhost:${PORT}`);

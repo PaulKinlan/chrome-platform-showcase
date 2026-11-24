@@ -7,7 +7,15 @@
 //   on every request. Process restarts (and Deno Deploy isolate restarts) will
 //   refetch.
 
+import { platform } from "./platform.ts";
+
 const BASE = "https://chromestatus.com/api/v0";
+// Operator-only override (an env var / Worker var, never request input) so the
+// Deno server and the Worker can be exercised against a local fixture where
+// chromestatus.com is unreachable (sandboxes, offline CI).
+function apiBase(): string {
+  return platform().env("CHROMESTATUS_API_BASE") || BASE;
+}
 const TTL_MS = 5 * 60 * 1000;
 const XSSI_PREFIX = ")]}'";
 
@@ -20,7 +28,7 @@ async function fetchAndCache<T>(path: string): Promise<T> {
 
   const promise = (async () => {
     try {
-      const res = await fetch(BASE + path, { headers: { accept: "application/json" } });
+      const res = await fetch(apiBase() + path, { headers: { accept: "application/json" } });
       if (!res.ok) throw new Error(`chromestatus ${path} returned ${res.status}`);
       let text = await res.text();
       if (text.startsWith(XSSI_PREFIX)) text = text.slice(XSSI_PREFIX.length).trimStart();

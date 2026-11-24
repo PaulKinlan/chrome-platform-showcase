@@ -1,3 +1,4 @@
+import { platform } from "../lib/platform.ts";
 import { renderBreadcrumbs } from "../lib/breadcrumbs.ts";
 import { chromeStatusUrl, getMilestoneFeatures, slugify } from "../lib/chromestatus.ts";
 import type { Channel, Channels, FeatureSummary, MilestoneFeatures } from "../lib/chromestatus.ts";
@@ -20,7 +21,14 @@ async function getLatestCommit(): Promise<CommitInfo | null> {
   try {
     const res = await fetch(
       "https://api.github.com/repos/PaulKinlan/chrome-platform-showcase/commits/main",
-      { headers: { accept: "application/vnd.github+json" } },
+      // GitHub rejects requests without a User-Agent. Deno sends one by
+      // default; Cloudflare Workers does not.
+      {
+        headers: {
+          accept: "application/vnd.github+json",
+          "user-agent": "chrome-platform-showcase",
+        },
+      },
     );
     if (!res.ok) {
       commitCache = { at: Date.now(), value: null };
@@ -191,7 +199,7 @@ export async function renderIndex(channels: Channels): Promise<string> {
   // no longer mentions it.
   const seen = new Set(releases.map((r) => r.mstone));
   try {
-    for await (const entry of Deno.readDir(".")) {
+    for await (const entry of platform().readDir(".")) {
       if (entry.isDirectory && /^v\d+$/.test(entry.name)) {
         const m = Number(entry.name.slice(1));
         if (!seen.has(m)) {
@@ -916,13 +924,13 @@ async function getBuiltDirs(): Promise<Set<string>> {
   }
   const dirs = new Set<string>();
   try {
-    for await (const entry of Deno.readDir(".")) {
+    for await (const entry of platform().readDir(".")) {
       if (!entry.isDirectory || !/^v\d+$/.test(entry.name)) continue;
       const release = entry.name;
-      for await (const fd of Deno.readDir(release)) {
+      for await (const fd of platform().readDir(release)) {
         if (!fd.isDirectory) continue;
         try {
-          const st = await Deno.stat(`./${release}/${fd.name}/index.html`);
+          const st = await platform().stat(`./${release}/${fd.name}/index.html`);
           if (st.isFile) dirs.add(`${release}/${fd.name}`);
         } catch {
           // ignore
@@ -941,7 +949,7 @@ async function featureHasDemo(release: string, feature: FeatureSummary): Promise
   const dirs = await getBuiltDirs();
   if (dirs.size > 0) return dirs.has(`${release}/${slug}`);
   try {
-    await Deno.stat(`./${release}/${slug}/index.html`);
+    await platform().stat(`./${release}/${slug}/index.html`);
     return true;
   } catch {
     return false;
@@ -956,7 +964,7 @@ async function getDemoIndexData(): Promise<DemoIndexData> {
     return demoIndexCache.data;
   }
   try {
-    const parsed = JSON.parse(await Deno.readTextFile("./demo-index.json"));
+    const parsed = JSON.parse(await platform().readTextFile("./demo-index.json"));
     const data: DemoIndexData = {
       demos: (parsed?.demos ?? {}) as Record<string, string>,
       probes: (parsed?.probes ?? {}) as Record<string, DemoProbe>,
@@ -1799,7 +1807,7 @@ export async function knownReleaseMilestones(channels: Channels): Promise<Set<nu
     channels.dev.mstone,
   ]);
   try {
-    for await (const entry of Deno.readDir(".")) {
+    for await (const entry of platform().readDir(".")) {
       if (entry.isDirectory && /^v\d+$/.test(entry.name)) {
         set.add(Number(entry.name.slice(1)));
       }

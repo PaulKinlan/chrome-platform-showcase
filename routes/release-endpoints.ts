@@ -1,6 +1,7 @@
 // Legacy per-release server endpoints extracted from routes/release.ts.
 // New features should prefer co-located v<N>/<feature-slug>/_server.ts modules.
 
+import { platform } from "../lib/platform.ts";
 import { p256PublicJwkForStorage } from "../lib/jwk.ts";
 import { readBoundedBody, readBoundedText } from "../lib/request-body.ts";
 import {
@@ -3374,7 +3375,7 @@ function renderWebSocketBfcacheRoute(req: Request, sub: string): Response | null
     return jsonResponse({ error: "Expected WebSocket upgrade." }, { status: 426 });
   }
 
-  const { socket, response } = Deno.upgradeWebSocket(req);
+  const { socket, response } = platform().upgradeWebSocket(req);
   const id = randomBase64Url(6);
   let heartbeat: ReturnType<typeof setInterval> | undefined;
 

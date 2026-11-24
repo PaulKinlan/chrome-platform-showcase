@@ -1,10 +1,11 @@
+import { platform } from "../lib/platform.ts";
 import type { CritiqueReport } from "../lib/critique.ts";
 import { scoreVerdicts } from "../lib/critique.ts";
 import { escapeHTML } from "./html.ts";
 
 export async function readCritique(path: string): Promise<CritiqueReport | null> {
   try {
-    const text = await Deno.readTextFile(path);
+    const text = await platform().readTextFile(path);
     return JSON.parse(text) as CritiqueReport;
   } catch {
     return null;
@@ -20,16 +21,16 @@ async function scanCritiques(): Promise<CritiqueReport[]> {
   critiquesInFlight = (async () => {
     const out: CritiqueReport[] = [];
     try {
-      for await (const entry of Deno.readDir(".")) {
+      for await (const entry of platform().readDir(".")) {
         if (!entry.isDirectory || !/^v\d+$/.test(entry.name)) continue;
         const release = entry.name;
-        for await (const fd of Deno.readDir(release)) {
+        for await (const fd of platform().readDir(release)) {
           if (!fd.isDirectory) continue;
           const featureSlug = fd.name;
           const featureCrit = await readCritique(`${release}/${featureSlug}/_questions.json`);
           if (featureCrit) out.push(featureCrit);
           try {
-            for await (const cd of Deno.readDir(`${release}/${featureSlug}`)) {
+            for await (const cd of platform().readDir(`${release}/${featureSlug}`)) {
               if (!cd.isDirectory) continue;
               const conceptCrit = await readCritique(
                 `${release}/${featureSlug}/${cd.name}/_questions.json`,
