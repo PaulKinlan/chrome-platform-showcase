@@ -1,9 +1,10 @@
+import { platform } from "../lib/platform.ts";
 import type { ConformanceSuite } from "../lib/conformance.ts";
 import { escapeHTML } from "./html.ts";
 
 export async function readConformance(path: string): Promise<ConformanceSuite | null> {
   try {
-    const text = await Deno.readTextFile(path);
+    const text = await platform().readTextFile(path);
     return JSON.parse(text) as ConformanceSuite;
   } catch {
     return null;
@@ -19,17 +20,17 @@ async function scanConformanceSuites(): Promise<ConformanceSuite[]> {
   suitesInFlight = (async () => {
     const out: ConformanceSuite[] = [];
     try {
-      for await (const entry of Deno.readDir(".")) {
+      for await (const entry of platform().readDir(".")) {
         if (!entry.isDirectory || !/^v\d+$/.test(entry.name)) continue;
         const release = entry.name;
-        for await (const fd of Deno.readDir(release)) {
+        for await (const fd of platform().readDir(release)) {
           if (!fd.isDirectory) continue;
           const featureSuite = await readConformance(
             `${release}/${fd.name}/conformance.json`,
           );
           if (featureSuite) out.push(featureSuite);
           try {
-            for await (const cd of Deno.readDir(`${release}/${fd.name}`)) {
+            for await (const cd of platform().readDir(`${release}/${fd.name}`)) {
               if (!cd.isDirectory) continue;
               const conceptSuite = await readConformance(
                 `${release}/${fd.name}/${cd.name}/conformance.json`,

@@ -10,6 +10,8 @@
 // It echoes text frames and closes on request. Nothing is stored, and the
 // connection is bounded so a forgotten tab cannot hold a socket open forever.
 
+import { platform } from "../lib/platform.ts";
+
 const MAX_LIFETIME_MS = 5 * 60 * 1000;
 const MAX_FRAME_BYTES = 64 * 1024;
 
@@ -44,7 +46,7 @@ export function handleEchoSocketRoute(req: Request): Response | null {
   // invalidates the request and reading a header from it throws.
   const origin = req.headers.get("origin");
 
-  const { socket, response } = Deno.upgradeWebSocket(
+  const { socket, response } = platform().upgradeWebSocket(
     req,
     chosen ? { protocol: chosen } : undefined,
   );

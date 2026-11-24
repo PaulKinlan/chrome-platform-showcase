@@ -1,3 +1,5 @@
+import { platform } from "../lib/platform.ts";
+
 const MIME: Record<string, string> = {
   html: "text/html; charset=utf-8",
   css: "text/css; charset=utf-8",
@@ -25,7 +27,9 @@ const MIME: Record<string, string> = {
   woff2: "font/woff2",
 };
 
-const PUBLIC_ROOT_URL = new URL("../public/", import.meta.url);
+// A fixed, host-independent base used only for lexical containment: the read
+// itself goes through platform(), relative to the repository root.
+const PUBLIC_ROOT_URL = new URL("file:///showcase-root/public/");
 
 async function readPublicAsset(path: string, url: URL): Promise<Response> {
   try {
@@ -38,19 +42,22 @@ async function readPublicAsset(path: string, url: URL): Promise<Response> {
     if (!target.href.startsWith(PUBLIC_ROOT_URL.href)) {
       return new Response("Not found", { status: 404 });
     }
-    let filePath = target.pathname;
+    const filePath = `public/${target.pathname.slice(PUBLIC_ROOT_URL.pathname.length)}`;
     try {
-      const realRoot = Deno.realPathSync(PUBLIC_ROOT_URL.pathname);
-      const realTarget = await Deno.realPath(filePath);
-      if (realTarget !== realRoot && !realTarget.startsWith(`${realRoot}/`)) {
+      const realRoot = await platform().realPath("public");
+      const realTarget = await platform().realPath(filePath);
+      if (
+        realRoot && realTarget && realTarget !== realRoot &&
+        !realTarget.startsWith(`${realRoot}/`)
+      ) {
         return new Response("Not found", { status: 404 });
       }
-      filePath = realTarget;
     } catch {
-      // realPath is unavailable on some runtimes; lexical containment above
-      // still holds, and a missing file fails the read below.
+      // realPath is unavailable on some runtimes (the Workers asset store has
+      // no symlinks); lexical containment above still holds, and a missing file
+      // fails the read below.
     }
-    const file = await Deno.readFile(filePath);
+    const file = await platform().readFile(filePath);
     const ext = path.split(".").pop() ?? "";
     const headers: Record<string, string> = {
       "content-type": MIME[ext] ?? "application/octet-stream",
