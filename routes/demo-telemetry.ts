@@ -53,6 +53,9 @@ const allowedKinds = new Set([
   "assert.pass",
   "assert.fail",
   "browser.report",
+  "report.deprecation",
+  "report.intervention",
+  "api.support",
 ]);
 let kvPromise: Promise<MinimalKv | null> | null = null;
 
@@ -300,6 +303,15 @@ interface FlatEvent {
   featureSlug: string | null;
   conceptSlug: string | null;
   signature: string;
+  chrome: number | null;
+  payload: JsonRecord;
+}
+
+// Chrome major version: the client's UA-CH snapshot (batch `env.chrome`) first, else the stored UA.
+function chromeMajorOf(env: JsonRecord, userAgent: string): number | null {
+  if (typeof env.chrome === "number" && Number.isFinite(env.chrome)) return Math.trunc(env.chrome);
+  const match = userAgent.match(/Chrom(?:e|ium)\/(\d+)/);
+  return match ? Number(match[1]) : null;
 }
 
 // Client telemetry arrives batched: a stored `demo.batch` event carries the real console/runtime/
@@ -312,9 +324,12 @@ function flattenEvents(stored: DemoTelemetryEvent[]): FlatEvent[] {
     page: string,
     receivedAt: string,
     payload: JsonRecord,
+    chrome: number | null,
   ) => {
     const parts = parsePageParts(page);
     flat.push({
+      chrome,
+      payload,
       receivedAt,
       kind,
       severity,
@@ -326,15 +341,16 @@ function flattenEvents(stored: DemoTelemetryEvent[]): FlatEvent[] {
     });
   };
   for (const event of stored) {
+    const chrome = chromeMajorOf(objectValue(event.payload.env), event.userAgent ?? "");
     if (event.kind === "demo.batch" && Array.isArray(event.payload.events)) {
       for (const raw of event.payload.events as unknown[]) {
         const inner = objectValue(raw);
         const kind = stringValue(inner.kind, 80) ?? "demo.telemetry";
         const page = stringValue(inner.page, 1000) || event.page;
-        push(kind, stringValue(inner.severity, 40), page, event.receivedAt, inner);
+        push(kind, stringValue(inner.severity, 40), page, event.receivedAt, inner, chrome);
       }
     } else {
-      push(event.kind, event.severity, event.page, event.receivedAt, event.payload);
+      push(event.kind, event.severity, event.page, event.receivedAt, event.payload, chrome);
     }
   }
   return flat;
@@ -367,6 +383,16 @@ function isFailure(event: FlatEvent): boolean {
     event.kind === "resource.error";
 }
 
+function demoKeyOf(f: FlatEvent): string {
+  return f.release
+    ? [f.release, f.featureSlug ?? "", f.conceptSlug ?? ""].join("/")
+    : f.page || "(unknown)";
+}
+
+function bump(record: Record<string, number>, key: string): void {
+  record[key] = (record[key] ?? 0) + 1;
+}
+
 interface TriageGroup {
   key: string;
   release: string | null;
@@ -374,14 +400,34 @@ interface TriageGroup {
   conceptSlug: string | null;
   failures: number;
   kinds: Record<string, number>;
+  // Failures per Chrome major version, so "only fails before Chrome N" is visible at a glance.
+  chrome: Record<string, number>;
   topSignatures: { signature: string; count: number }[];
 }
 
-function buildTriage(stored: DemoTelemetryEvent[]): {
+interface SupportSummary {
+  api: string;
+  demos: string[];
+  states: Record<string, number>;
+  // state counts per Chrome major: { "142": { unsupported: 3 }, "144": { supported: 9 } }
+  byChrome: Record<string, Record<string, number>>;
+}
+
+interface DeprecationSummary {
+  type: string;
+  id: string;
+  message: string;
+  count: number;
+  demos: string[];
+}
+
+export function buildTriage(stored: DemoTelemetryEvent[]): {
   scanned: number;
   failures: number;
   demos: TriageGroup[];
   signatures: { signature: string; count: number; demos: string[] }[];
+  support: SupportSummary[];
+  deprecations: DeprecationSummary[];
 } {
   const flat = flattenEvents(stored);
   const failures = flat.filter(isFailure);
@@ -392,9 +438,7 @@ function buildTriage(stored: DemoTelemetryEvent[]): {
   const bySignature = new Map<string, { count: number; demos: Set<string> }>();
 
   for (const f of failures) {
-    const demoKey = f.release
-      ? [f.release, f.featureSlug ?? "", f.conceptSlug ?? ""].join("/")
-      : f.page || "(unknown)";
+    const demoKey = demoKeyOf(f);
     let entry = byDemo.get(demoKey);
     if (!entry) {
       entry = {
@@ -405,6 +449,7 @@ function buildTriage(stored: DemoTelemetryEvent[]): {
           conceptSlug: f.conceptSlug,
           failures: 0,
           kinds: {},
+          chrome: {},
           topSignatures: [],
         },
         sigs: new Map(),
@@ -413,6 +458,7 @@ function buildTriage(stored: DemoTelemetryEvent[]): {
     }
     entry.group.failures++;
     entry.group.kinds[f.kind] = (entry.group.kinds[f.kind] ?? 0) + 1;
+    bump(entry.group.chrome, f.chrome === null ? "unknown" : String(f.chrome));
     entry.sigs.set(f.signature, (entry.sigs.get(f.signature) ?? 0) + 1);
 
     const sig = bySignature.get(f.signature) ?? { count: 0, demos: new Set<string>() };
@@ -436,7 +482,55 @@ function buildTriage(stored: DemoTelemetryEvent[]): {
     .sort((a, b) => b.count - a.count)
     .slice(0, 50);
 
-  return { scanned: flat.length, failures: failures.length, demos, signatures };
+  const supportByApi = new Map<string, { summary: SupportSummary; demos: Set<string> }>();
+  const deprecationByKey = new Map<string, { summary: DeprecationSummary; demos: Set<string> }>();
+  for (const f of flat) {
+    if (f.kind === "api.support") {
+      const api = stringValue(f.payload.id, 120) ?? "(unnamed)";
+      const state = stringValue(f.payload.state, 20) ?? "error";
+      const chromeKey = f.chrome === null ? "unknown" : String(f.chrome);
+      let entry = supportByApi.get(api);
+      if (!entry) {
+        entry = { summary: { api, demos: [], states: {}, byChrome: {} }, demos: new Set() };
+        supportByApi.set(api, entry);
+      }
+      bump(entry.summary.states, state);
+      bump(entry.summary.byChrome[chromeKey] ??= {}, state);
+      entry.demos.add(demoKeyOf(f));
+    } else if (f.kind === "report.deprecation" || f.kind === "report.intervention") {
+      const type = f.kind.slice("report.".length);
+      const id = stringValue(f.payload.id, 120) ?? "";
+      const message = stringValue(f.payload.message, 300) ?? "";
+      const key = `${type}:${id || message}`;
+      let entry = deprecationByKey.get(key);
+      if (!entry) {
+        entry = { summary: { type, id, message, count: 0, demos: [] }, demos: new Set() };
+        deprecationByKey.set(key, entry);
+      }
+      entry.summary.count++;
+      entry.demos.add(demoKeyOf(f));
+    }
+  }
+  const support = [...supportByApi.values()]
+    .map(({ summary, demos }) => ({ ...summary, demos: [...demos].slice(0, 10) }))
+    .sort((a, b) =>
+      Object.values(b.states).reduce((n, v) => n + v, 0) -
+      Object.values(a.states).reduce((n, v) => n + v, 0)
+    )
+    .slice(0, 100);
+  const deprecations = [...deprecationByKey.values()]
+    .map(({ summary, demos }) => ({ ...summary, demos: [...demos].slice(0, 10) }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 50);
+
+  return {
+    scanned: flat.length,
+    failures: failures.length,
+    demos,
+    signatures,
+    support,
+    deprecations,
+  };
 }
 
 function renderAdminDashboard(

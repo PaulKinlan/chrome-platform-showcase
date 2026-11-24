@@ -141,6 +141,17 @@ telemetry. Its job is the depth work the daily build routine is too busy to do:
   worst-first, and clusters errors by normalised signature across visitors. This is the query the
   weekly routine consumes. (`routes/demo-telemetry.ts`.)
 - `GET /telemetry/demo/admin` — HTML dashboard, now including the top-failing-demos triage panel.
+- `deno task telemetry-digest` (needs `SHOWCASE_PASSWORD`; `--base`, `--input`, `--stdout`) turns
+  the triage window into `reports/telemetry/latest.md`: top failing demos with their Chrome-version
+  spread, error patterns seen on more than one demo, per-API support outcomes by Chrome version, and
+  deprecation/intervention reports. Read it before choosing build work: fix broken demos first, and
+  treat each recurring pattern as a build rule for new demos.
+- The client collector (`public/demo-telemetry.js`) attaches a coarse `env` snapshot to each batch
+  (Chrome major, platform, mobile, viewport class, DPR, memory, connection; nothing identifying),
+  records `ReportingObserver` deprecation/intervention reports, DOMException names on errors, and
+  the heaviest script behind each long animation frame. Demos should call
+  `window.showcaseTelemetry?.support("<exact API>", "supported"|"flag"|"unsupported"|"denied"|"error", details)`
+  from their capability check so triage can tell "missing in old Chrome" from a real bug.
 - KV events self-expire after 90 days (`TELEMETRY_TTL_MS`) so the store no longer grows unbounded.
 - **Failed authentication is throttled per source** (`lib/auth-throttle.ts`): 10 failures, then one
   further attempt per 10 seconds (while that address's entry stays resident - churn from other
