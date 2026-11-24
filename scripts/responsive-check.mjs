@@ -326,6 +326,7 @@ async function checkPage(conn, url, cls) {
   const probes = [];
   const probeRequests = new Set();
   const probeUrls = ["conformance-runner.js", "conformance-panel.js"];
+  let conformanceProbeActive = false;
 
   let targetId = null;
   let sessionId = null;
@@ -381,14 +382,23 @@ async function checkPage(conn, url, cls) {
     if (msg.sessionId !== sessionId) return;
     if (msg.method === "Runtime.exceptionThrown") {
       consoleErrors.push(msg.params?.exceptionDetails?.exception?.description ?? "exception");
+    } else if (msg.method === "Runtime.consoleAPICalled" && msg.params?.type === "debug") {
+      const marker = msg.params.args?.[0]?.value;
+      if (marker === "[showcase-conformance-probe:start]") conformanceProbeActive = true;
+      else if (marker === "[showcase-conformance-probe:end]") conformanceProbeActive = false;
     } else if (msg.method === "Runtime.consoleAPICalled" && msg.params?.type === "error") {
       consoleErrors.push(
         (msg.params.args ?? []).map((a) => a.value ?? a.description ?? "").join(" "),
       );
     } else if (msg.method === "Log.entryAdded" && msg.params?.entry?.level === "error") {
       const e = msg.params.entry;
-      // network 4xx/5xx surface here too; capture same-origin demo failures
-      if (
+      const fromProbeStack = (e.stackTrace?.callFrames ?? []).some((f) =>
+        probeUrls.some((probe) => (f.url ?? "").includes(probe))
+      );
+      if (conformanceProbeActive || fromProbeStack) {
+        probes.push(`${e.text}`);
+      } else if (
+        // network 4xx/5xx surface here too; capture same-origin demo failures
         (e.source === "network" || e.source === "javascript") && e.url &&
         e.url.includes("localhost")
       ) {

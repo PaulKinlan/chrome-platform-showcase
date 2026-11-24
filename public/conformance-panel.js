@@ -59,6 +59,10 @@ async function renderPanel() {
     let blocked = 0;
 
     for (const assertion of suite.assertions || []) {
+      // Bracket each assertion so browser-level diagnostic logs emitted by
+      // negative conformance probes (e.g. FedCM abort or invalid-MIME module
+      // import) can be attributed to the probe instead of the demo page.
+      console.debug("[showcase-conformance-probe:start]", assertion.id);
       // The probe's own rejections are captured here so they do not surface as
       // page errors; `captured` is reported below rather than discarded.
       const { value: result, captured } = await withProbeRejectionsCaptured(() =>
@@ -68,6 +72,7 @@ async function renderPanel() {
           assertion.expect,
         )
       );
+      console.debug("[showcase-conformance-probe:end]", assertion.id);
       const status = statusFor(result);
       if (status === "pass") pass++;
       else if (status === "fail") fail++;
