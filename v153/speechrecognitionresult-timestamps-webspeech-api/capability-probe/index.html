@@ -26,6 +26,8 @@
     .bad-recipe { border-left: 6px solid var(--accent-rose); }
     .good-recipe { border-left: 6px solid var(--accent-emerald); }
     .recipe { background: var(--bg-stone); padding: var(--space-2) var(--space-3); margin: var(--space-2) 0; }
+    /* 44px tap targets on every control (WCAG 2.5.5; modern-web-guidance form-factor-adaptation). */
+    main button, main input[type="range"] { min-block-size: 44px; }
   </style>
 </head>
 <body>
@@ -37,8 +39,8 @@
     <p class="lede">Feature-detecting these attributes has a trap: <code>SpeechRecognitionResult</code> is declared <code>[LegacyNoInterfaceObject]</code>, so there is <em>no</em> <code>window.SpeechRecognitionResult</code> constructor to probe. You must inspect a live result instance. This demo runs the real checks and shows the correct detection recipe alongside the one that silently fails.</p>
   </header>
 
-  <div class="note">
-    <strong>Reading real values needs</strong> a build that implements the proposal (web-speech-api PR #192, unmerged; the v153 listing records a developer trial at 153, but the attributes are not yet in Chromium main's IDL as of 2026-07-24 and no dedicated runtime flag exists yet) plus a timing-capable recognition backend. Even then the attributes are <strong>nullable</strong>: a supported engine that has no timing for a segment returns <code>null</code>, which is not the same as &ldquo;unsupported&rdquo;.
+  <div class="note" role="note" aria-label="How to enable the timestamps">
+    <strong>Enable it:</strong> the attributes sit behind the Blink runtime flag <code>WebSpeechTimestamps</code>. In Chrome 153&ndash;159 it is <em>experimental</em>: turn on <code>chrome://flags/#enable-experimental-web-platform-features</code>, or launch Chrome with <code>--enable-blink-features=WebSpeechTimestamps</code>. Chromium main (after the M159 branch) enables it by default on Windows, macOS and Linux; Android and ChromeOS still need the flag. <strong>The names changed on the way:</strong> Chrome 153&ndash;155 expose an earlier draft, <code>audioStartTime</code> / <code>audioEndTime</code> (nullable milliseconds on the page's time origin). Chrome 156+ and the editor's draft (web-speech-api PR #192) use <code>speechStartTime</code> / <code>speechEndTime</code> &mdash; non-nullable <code>double</code> seconds on the <em>session audio timeline</em>, where 0 is the first audio frame the recognizer consumed. This page reads the spec names first and reports the draft names, labelled as such, if that is all your build has. Real values also need a recognition backend that supplies segment timing.
   </div>
 
   <section class="stage" aria-labelledby="demo-title">
@@ -67,17 +69,21 @@
     <h2>detection recipe</h2>
     <div class="recipe bad-recipe">
       <p><strong>Does not work</strong> &mdash; there is no constructor, so this throws or is always false:</p>
-      <pre tabindex="0"><code>'audioStartTime' in SpeechRecognitionResult.prototype   // ReferenceError: not defined</code></pre>
+      <pre tabindex="0"><code>'speechStartTime' in SpeechRecognitionResult.prototype   // ReferenceError: not defined</code></pre>
     </div>
     <div class="recipe good-recipe">
       <p><strong>Works</strong> &mdash; probe a real result instance inside <code>onresult</code>:</p>
       <pre tabindex="0"><code>recognition.onresult = (event) =&gt; {
   const result = event.results[event.resultIndex];
-  const hasTimestamps = 'audioEndTime' in result;        // capability
-  const timed = hasTimestamps &amp;&amp; result.audioEndTime !== null;  // actually populated
+  if ('speechEndTime' in result) {              // spec name, Chrome 156+
+    const startS = result.speechStartTime;       // seconds on the session audio timeline
+    const endS = result.speechEndTime;
+  } else if ('audioEndTime' in result) {        // earlier draft, Chrome 153–155 only
+    const endMs = result.audioEndTime;           // ms on the time origin, may be null
+  }
 };</code></pre>
     </div>
-    <p>Values are rounded to <strong>2&nbsp;ms</strong> precision to reduce fingerprinting (mirroring <code>HTMLMediaElement.currentTime</code>), so do not expect sub-millisecond timing.</p>
+    <p>The spec leaves precision implementation-defined; the explainer says implementations such as Chromium coarsen raw engine timestamps (for example to <strong>2&nbsp;ms</strong> buckets) to reduce fingerprinting, mirroring <code>HTMLMediaElement.currentTime</code>. Do not expect sub-millisecond timing.</p>
   </section>
 
   <section>
@@ -85,6 +91,8 @@
     <ul>
       <li><a href="https://chromestatus.com/feature/5811907077472256" target="_blank" rel="noopener">ChromeStatus entry</a></li>
       <li><a href="https://github.com/WebAudio/web-speech-api/blob/main/explainers/speech-recognition-result-timestamps.md#security-and-privacy-considerations" target="_blank" rel="noopener">Fingerprinting mitigation (explainer)</a></li>
+      <li><a href="https://webaudio.github.io/web-speech-api/#dom-speechrecognitionresult-speechstarttime" target="_blank" rel="noopener">speechStartTime / speechEndTime in the Web Speech API spec</a></li>
+      <li><a href="https://chromium.googlesource.com/chromium/src/+/main/third_party/blink/renderer/modules/speech/speech_recognition_result.idl" target="_blank" rel="noopener">Chromium speech_recognition_result.idl</a></li>
       <li><a href="../latency-monitor/">&larr; On-device latency monitor</a></li>
     </ul>
   </section>
@@ -100,6 +108,7 @@
   const live = document.getElementById('live');
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let recognition = null;
+  let noSpeechTimer = 0;
 
   function row(check, ok, value) {
     const tr = document.createElement('tr');
@@ -139,34 +148,54 @@
     stopBtn.disabled = false;
     live.textContent = 'Listening for one phrase… speak now.';
     let reported = false;
+    // Without a microphone or speech, some engines never fire result, error or
+    // end. Give up after 12s with a message instead of listening forever.
+    clearTimeout(noSpeechTimer);
+    noSpeechTimer = setTimeout(() => {
+      if (reported) return;
+      live.textContent = 'No speech was recognised within 12 seconds, so there is no result to inspect. Check the microphone and try again; the static surface probe above is unaffected.';
+      window.showcaseTelemetry?.assert('speechts-inspect-timeout', true, {});
+      try { recognition.abort(); } catch (e) { /* noop */ }
+      inspectBtn.disabled = false;
+      stopBtn.disabled = true;
+    }, 12000);
     recognition.onresult = (event) => {
       if (reported) return;
       reported = true;
+      clearTimeout(noSpeechTimer);
       const result = event.results[event.resultIndex];
+      // Spec names (Chrome 156+): seconds on the session audio timeline.
+      const hasSpeechStart = 'speechStartTime' in result;
+      const hasSpeechEnd = 'speechEndTime' in result;
+      // Earlier draft names (Chrome 153–155 only): ms on the time origin, nullable.
       const hasStart = 'audioStartTime' in result;
       const hasEnd = 'audioEndTime' in result;
-      const startVal = hasStart ? result.audioStartTime : '(property absent)';
-      const endVal = hasEnd ? result.audioEndTime : '(property absent)';
+      const show = (has, name) => has ? String(result[name]) : '(property absent)';
       live.textContent = [
         'Inspected a live SpeechRecognitionResult:',
-        "  'audioStartTime' in result = " + hasStart + '  ->  ' + startVal,
-        "  'audioEndTime'   in result = " + hasEnd + '  ->  ' + endVal,
+        "  spec   'speechStartTime' in result = " + hasSpeechStart + '  ->  ' + show(hasSpeechStart, 'speechStartTime') + (hasSpeechStart ? ' s' : ''),
+        "  spec   'speechEndTime'   in result = " + hasSpeechEnd + '  ->  ' + show(hasSpeechEnd, 'speechEndTime') + (hasSpeechEnd ? ' s' : ''),
+        "  draft  'audioStartTime'  in result = " + hasStart + '  ->  ' + show(hasStart, 'audioStartTime') + (hasStart && result.audioStartTime !== null ? ' ms' : ''),
+        "  draft  'audioEndTime'    in result = " + hasEnd + '  ->  ' + show(hasEnd, 'audioEndTime') + (hasEnd && result.audioEndTime !== null ? ' ms' : ''),
         '  result.isFinal = ' + result.isFinal,
         '',
-        (hasEnd && result.audioEndTime !== null)
-          ? 'Timestamps are exposed and populated on this engine.'
-          : hasEnd
-            ? 'Property exists but is null — the engine did not supply timing for this segment (supported, just no value).'
-            : 'Property is absent — this result does not expose the proposal. The implementation may be absent, or this backend/build may not supply the proposed surface.',
+        hasSpeechEnd
+          ? 'The spec attributes are exposed: speechStartTime/speechEndTime are seconds from the first audio frame the recognizer consumed.'
+          : (hasEnd && result.audioEndTime !== null)
+            ? 'Only the earlier draft (audioStartTime/audioEndTime, Chrome 153–155) is exposed and populated. Code written to the spec will not find it.'
+            : hasEnd
+              ? 'Only the earlier draft is exposed, and it is null — the engine did not supply timing for this segment (supported, just no value).'
+              : 'Neither name is present — WebSpeechTimestamps is off in this build (see the enable steps above) or the build predates it.',
       ].join('\n');
-      window.showcaseTelemetry?.assert('speechts-inspect-reported', true, { hasStart, hasEnd, endNull: hasEnd ? result.audioEndTime === null : null });
+      window.showcaseTelemetry?.assert('speechts-inspect-reported', true, { hasSpeechStart, hasSpeechEnd, hasStart, hasEnd, endNull: hasEnd ? result.audioEndTime === null : null });
       try { recognition.stop(); } catch (e) { /* noop */ }
     };
     recognition.onerror = (event) => {
+      clearTimeout(noSpeechTimer);
       live.textContent = 'Recognition error: ' + event.error + '.\nThis is a microphone/engine availability problem (common in headless), not a timestamps-API result. The static surface probe above is unaffected.';
       window.showcaseTelemetry?.assert('speechts-inspect-error', true, { error: event.error });
     };
-    recognition.onend = () => { inspectBtn.disabled = false; stopBtn.disabled = true; };
+    recognition.onend = () => { clearTimeout(noSpeechTimer); inspectBtn.disabled = false; stopBtn.disabled = true; };
     try {
       recognition.start();
     } catch (err) {
