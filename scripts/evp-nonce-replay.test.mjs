@@ -54,8 +54,8 @@ import {
   EVP_NONCE_REPLAY_TTL_MS,
   EVP_SAMPLE_TOKEN_TTL_SECONDS,
   evpNonceReplayCacheIsFull,
-  handleLegacyReleaseEndpoints,
-} from "../routes/release-endpoints.ts";
+  handleFeatureRequest,
+} from "../v150/email-verification-protocol/_server.ts";
 
 const RELEASE = "v150";
 const PREFIX = "/email-verification-protocol/server-validator/api";
@@ -79,7 +79,10 @@ async function post(path, body) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  const res = await handleLegacyReleaseEndpoints(req, RELEASE, `${PREFIX}${path}`, NO_ASSET);
+  const res = await handleFeatureRequest(req, `${PREFIX}${path}`, {
+    release: RELEASE,
+    readReleaseAsset: NO_ASSET,
+  });
   assert(res, `${path} should be handled by the release router`);
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }

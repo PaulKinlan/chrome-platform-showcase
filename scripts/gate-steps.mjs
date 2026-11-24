@@ -277,6 +277,12 @@ export const GATE_STEPS = [
     tier: "static",
     what: "demo-index.json matches the folders on disk",
   },
+  {
+    id: "check-feature-servers",
+    task: "check-feature-servers",
+    tier: "static",
+    what: "routes/_feature-servers.generated.ts matches v*/*/_server.ts on disk",
+  },
 ];
 
 /** Step ids that always run, in order. */

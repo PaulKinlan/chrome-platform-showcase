@@ -51,10 +51,8 @@
 // compares against itself.
 
 import { test } from "node:test";
-import {
-  handleLegacyReleaseEndpoints,
-  WEBAUTHN_SIGNAL_MAX_CREDENTIALS,
-} from "../routes/release-endpoints.ts";
+import { dispatchFeatureServer as handleLegacyReleaseEndpoints } from "../routes/release.ts";
+import { WEBAUTHN_SIGNAL_MAX_CREDENTIALS } from "../v130/webauthn-signal-api/_server.ts";
 import { BoundedSessionStore } from "../lib/session-store.ts";
 
 // Well above any sane per-store cap, so the assertions do not depend on the

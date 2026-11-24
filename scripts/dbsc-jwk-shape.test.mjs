@@ -41,7 +41,7 @@
 // Run: npm run test-dbsc-jwk-shape   (needs --v8-flags=--expose-gc)
 
 import { test } from "node:test";
-import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
+import { handleFeatureRequest } from "../v145/device-bound-session-credentials/_server.ts";
 import { P256_PUBLIC_JWK_FIELDS, p256PublicJwkForStorage } from "../lib/jwk.ts";
 
 const PREFIX = "/device-bound-session-credentials";
@@ -104,7 +104,10 @@ async function call(sub, { body, cookie } = {}) {
     headers,
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  const res = await handleLegacyReleaseEndpoints(req, RELEASE, sub, NO_ASSET);
+  const res = await handleFeatureRequest(req, sub, {
+    release: RELEASE,
+    readReleaseAsset: NO_ASSET,
+  });
   assert(res, `${sub} should be handled by the release router`);
   return { res, body: await res.json().catch(() => ({})) };
 }

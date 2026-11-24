@@ -9,18 +9,19 @@
 //      under Node and throws on Workers. Guarded by a static scan.
 //   2. The Deno KV -> Workers KV adapter mis-orders or mis-matches keys, so
 //      telemetry lists come back in the wrong order or bleed across prefixes.
-//   3. The asset staging step ships something it must not (a `_server.ts`), or
-//      the manifest the Worker lists directories from disagrees with disk.
+//   3. The asset staging step ships something it must not (`_server.ts` or
+//      `_support.json`), duplicates bundled files as individual assets, or the
+//      manifest the Worker lists directories from disagrees with disk.
 //
 // Run: npm run test-worker-platform
 
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { cloudflareKv, decodeKey, encodeKey } from "../worker/kv.ts";
-import { buildIndex, normalize } from "../worker/fs.ts";
+import { buildIndex, BUNDLED_NAMES, bundleFor, normalize } from "../worker/fs.ts";
 
 const ROOT = new URL("../", import.meta.url);
 
@@ -197,52 +198,198 @@ test("fs: paths normalise, and climbing out of the asset root is refused", () =>
   assertEquals(idx.dirs.get("v1/a").get("index.html").isFile, true, "file entry");
 });
 
-test("staging copies every served file, no _server.ts, and a matching manifest", async () => {
-  const out = await mkdtemp(join(tmpdir(), "worker-assets-"));
-  try {
-    const run = spawnSync(process.execPath, ["scripts/build-worker-assets.mjs", "--out", out], {
-      cwd: ROOT,
-      encoding: "utf8",
-    });
-    const stderr = run.stderr;
-    assert(run.status === 0, `build-worker-assets failed:\n${stderr}`);
-
-    const manifest = JSON.parse(await readFile(`${out}/_worker/fs-manifest.json`, "utf8"));
-    const files = new Set(manifest.files);
-    for (const required of ["demo-index.json", "gendn-links.json", "public/styles.css"]) {
-      assert(files.has(required), `manifest is missing ${required}`);
-    }
-    assert(
-      ![...files].some((f) => f.endsWith("_server.ts")),
-      "_server.ts handlers must be bundled as code, never staged as public assets",
-    );
-    assert(
-      ![...files].some((f) => /^(lib|routes|scripts|worker|tests)\//.test(f)),
-      "server source must never be staged",
-    );
-    // Every v<N>/<feature>/index.html on disk is in the manifest.
-    for (const release of await readdir(ROOT, { withFileTypes: true })) {
-      if (!release.isDirectory() || !/^v\d+$/.test(release.name)) continue;
-      for (
-        const feature of await readdir(new URL(`${release.name}/`, ROOT), { withFileTypes: true })
-      ) {
-        if (!feature.isDirectory()) continue;
-        const page = `${release.name}/${feature.name}/index.html`;
-        let exists = false;
-        try {
-          exists = (await stat(new URL(page, ROOT))).isFile();
-        } catch { /* no index */ }
-        if (exists) assert(files.has(page), `manifest is missing ${page}`);
-      }
-    }
-    // And the manifest names only files that were actually staged.
-    for (const f of [...files].slice(0, 200)) {
-      assert((await stat(`${out}/${f}`)).isFile(), `${f} listed but not staged`);
-    }
-  } finally {
-    await rm(out, { recursive: true, force: true });
+async function listRelFiles(rootDir, currentDir = rootDir, out = []) {
+  for (const entry of await readdir(currentDir, { withFileTypes: true })) {
+    const full = join(currentDir, entry.name);
+    if (entry.isDirectory()) await listRelFiles(rootDir, full, out);
+    else if (entry.isFile()) out.push(relative(rootDir, full).split("\\").join("/"));
   }
-});
+  return out;
+}
+
+test(
+  "staging copies non-bundled served files, skips _server.ts and _support.json, and omits individual bundled files",
+  async () => {
+    const out = await mkdtemp(join(tmpdir(), "worker-assets-"));
+    try {
+      const run = spawnSync(process.execPath, ["scripts/build-worker-assets.mjs", "--out", out], {
+        cwd: ROOT,
+        encoding: "utf8",
+      });
+      const stderr = run.stderr;
+      assert(run.status === 0, `build-worker-assets failed:\n${stderr}`);
+
+      const manifest = JSON.parse(await readFile(`${out}/_worker/fs-manifest.json`, "utf8"));
+      const files = new Set(manifest.files);
+      const staged = new Set(await listRelFiles(out));
+
+      for (const required of ["demo-index.json", "gendn-links.json", "public/styles.css"]) {
+        assert(files.has(required), `manifest is missing ${required}`);
+        assert(staged.has(required), `staged assets missing ${required}`);
+      }
+      assert(
+        ![...files].some((f) => f === "_server.ts" || f.endsWith("/_server.ts")),
+        "_server.ts handlers must be bundled as code, never in fs-manifest.json",
+      );
+      assert(
+        ![...staged].some((f) => f === "_server.ts" || f.endsWith("/_server.ts")),
+        "_server.ts handlers must never be staged as public assets",
+      );
+      assert(
+        ![...files].some((f) => f === "_support.json" || f.endsWith("/_support.json")),
+        "_support.json metadata must never be in fs-manifest.json",
+      );
+      assert(
+        ![...staged].some((f) => f === "_support.json" || f.endsWith("/_support.json")),
+        "_support.json metadata must never be staged as public assets",
+      );
+      assert(
+        ![...files].some((f) => /^(lib|routes|scripts|worker|tests)\//.test(f)),
+        "server source must never be in fs-manifest.json",
+      );
+      assert(
+        ![...staged].some((f) => /^(lib|routes|scripts|worker|tests)\//.test(f)),
+        "server source must never be staged",
+      );
+
+      // Every v<N>/<feature>/index.html on disk is in the manifest and staged.
+      for (const release of await readdir(ROOT, { withFileTypes: true })) {
+        if (!release.isDirectory() || !/^v\d+$/.test(release.name)) continue;
+        for (
+          const feature of await readdir(new URL(`${release.name}/`, ROOT), { withFileTypes: true })
+        ) {
+          if (!feature.isDirectory()) continue;
+          const page = `${release.name}/${feature.name}/index.html`;
+          let exists = false;
+          try {
+            exists = (await stat(new URL(page, ROOT))).isFile();
+          } catch { /* no index */ }
+          if (exists) {
+            assert(files.has(page), `manifest is missing ${page}`);
+            assert(staged.has(page), `staged assets missing ${page}`);
+          }
+        }
+      }
+
+      // Non-bundled manifest entries must be staged individually; bundled entries
+      // must remain in fs-manifest.json (for stat/readDir) but NOT be duplicated
+      // as individual files in dist/worker-assets/.
+      const expectedStaged = new Set([
+        "_worker/fs-manifest.json",
+        ...BUNDLED_NAMES.map((name) => `_worker/bundle-${name}`),
+      ]);
+      const bundledCounts = new Map(BUNDLED_NAMES.map((name) => [name, 0]));
+      for (const f of files) {
+        const bundle = bundleFor(f);
+        if (bundle) {
+          assert(!staged.has(f), `bundled file ${f} must not be duplicated individually in ${out}`);
+          const name = f.slice(f.lastIndexOf("/") + 1);
+          bundledCounts.set(name, (bundledCounts.get(name) ?? 0) + 1);
+        } else {
+          assert(staged.has(f), `non-bundled served file ${f} listed in manifest but not staged`);
+          expectedStaged.add(f);
+        }
+      }
+      for (const name of BUNDLED_NAMES) {
+        assert(
+          (bundledCounts.get(name) ?? 0) > 0,
+          `expected manifest to include ${name} entries`,
+        );
+      }
+      assertEquals(
+        [...staged].sort(),
+        [...expectedStaged].sort(),
+        "staged files must be exactly non-bundled served files plus _worker metadata/bundles",
+      );
+    } finally {
+      await rm(out, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "staging fixture actively skips _server.ts and _support.json and bundles _questions.json/conformance.json without duplicating them",
+  async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "worker-assets-fixture-"));
+    const fixtureRoot = join(tmp, "repo");
+    const out = join(tmp, "out");
+    try {
+      await mkdir(join(fixtureRoot, "public"), { recursive: true });
+      await mkdir(join(fixtureRoot, "v151", "sample-demo"), { recursive: true });
+      const questionsBody = JSON.stringify({ feature: "sample-demo", questions: [] });
+      const conformanceBody = JSON.stringify({ feature: "sample-demo", tests: [] });
+      await writeFile(join(fixtureRoot, "demo-index.json"), "{}");
+      await writeFile(join(fixtureRoot, "gendn-links.json"), "{}");
+      await writeFile(join(fixtureRoot, "public", "styles.css"), "body {}");
+      await writeFile(join(fixtureRoot, "v151", "sample-demo", "index.html"), "<h1>ok</h1>");
+      await writeFile(
+        join(fixtureRoot, "v151", "sample-demo", "_server.ts"),
+        "export default () => new Response('secret');",
+      );
+      await writeFile(
+        join(fixtureRoot, "v151", "sample-demo", "_support.json"),
+        JSON.stringify({ desktop: "ok", mobile: "ok" }),
+      );
+      await writeFile(join(fixtureRoot, "v151", "sample-demo", ".DS_Store"), "junk");
+      await writeFile(join(fixtureRoot, "v151", "sample-demo", "_questions.json"), questionsBody);
+      await writeFile(
+        join(fixtureRoot, "v151", "sample-demo", "conformance.json"),
+        conformanceBody,
+      );
+
+      const run = spawnSync(
+        process.execPath,
+        ["scripts/build-worker-assets.mjs", "--root", fixtureRoot, "--out", out],
+        { cwd: ROOT, encoding: "utf8" },
+      );
+      assert(run.status === 0, `build-worker-assets failed on fixture:\n${run.stderr}`);
+
+      const manifest = JSON.parse(await readFile(`${out}/_worker/fs-manifest.json`, "utf8"));
+      const staged = (await listRelFiles(out)).sort();
+
+      assertEquals(
+        manifest.files,
+        [
+          "demo-index.json",
+          "gendn-links.json",
+          "public/styles.css",
+          "v151/sample-demo/_questions.json",
+          "v151/sample-demo/conformance.json",
+          "v151/sample-demo/index.html",
+        ],
+        "manifest must omit _server.ts, _support.json, .DS_Store and keep bundled files",
+      );
+      assertEquals(
+        staged,
+        [
+          "_worker/bundle-_questions.json",
+          "_worker/bundle-conformance.json",
+          "_worker/fs-manifest.json",
+          "demo-index.json",
+          "gendn-links.json",
+          "public/styles.css",
+          "v151/sample-demo/index.html",
+        ],
+        "staged output must contain only non-bundled files plus _worker metadata/bundles",
+      );
+
+      const qBundle = JSON.parse(await readFile(`${out}/_worker/bundle-_questions.json`, "utf8"));
+      const cBundle = JSON.parse(await readFile(`${out}/_worker/bundle-conformance.json`, "utf8"));
+      assertEquals(
+        qBundle["v151/sample-demo/_questions.json"],
+        questionsBody,
+        "_questions.json must be byte-for-byte in its bundle",
+      );
+      assertEquals(
+        cBundle["v151/sample-demo/conformance.json"],
+        conformanceBody,
+        "conformance.json must be byte-for-byte in its bundle",
+      );
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  },
+);
 
 // ---- 4. Deno KV -> D1 adapter (the Worker's telemetry store) ------------
 
@@ -294,8 +441,7 @@ test("D1 adapter: prefix ranges, reverse, limit and paging match Deno KV", async
   assertEquals(deep.at(-1).value, 504, "reverse paging continues past the first page");
 });
 
-test("bundles hold every _questions.json and conformance.json, byte for byte", async () => {
-  const { bundleFor } = await import("../worker/fs.ts");
+test("bundles hold every _questions.json and conformance.json, byte for byte, without individual copies", async () => {
   assertEquals(
     bundleFor("v151/x/y/_questions.json"),
     "_worker/bundle-_questions.json",
@@ -312,12 +458,19 @@ test("bundles hold every _questions.json and conformance.json, byte for byte", a
     });
     assert(run.status === 0, run.stderr);
     const manifest = JSON.parse(await readFile(`${out}/_worker/fs-manifest.json`, "utf8"));
-    for (const name of ["_questions.json", "conformance.json"]) {
+    for (const name of BUNDLED_NAMES) {
       const bundle = JSON.parse(await readFile(`${out}/_worker/bundle-${name}`, "utf8"));
-      const expected = manifest.files.filter((f) => f.endsWith(`/${name}`));
+      const expected = manifest.files.filter((f) => f === name || f.endsWith(`/${name}`));
       assertEquals(Object.keys(bundle).length, expected.length, `${name}: one entry per file`);
       for (const f of expected.slice(0, 50)) {
         assertEquals(bundle[f], await readFile(new URL(f, ROOT), "utf8"), `${f} differs`);
+        let stagedIndividually = true;
+        try {
+          await stat(`${out}/${f}`);
+        } catch {
+          stagedIndividually = false;
+        }
+        assert(!stagedIndividually, `${f} must not be duplicated individually outside its bundle`);
       }
     }
   } finally {

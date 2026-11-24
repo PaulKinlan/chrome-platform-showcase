@@ -1,47 +1,16 @@
 import { platform } from "../lib/platform.ts";
 import { renderBreadcrumbs } from "../lib/breadcrumbs.ts";
 import { getChannels } from "../lib/chromestatus.ts";
-import { handleFeatureRequest as handleDpoServer } from "../v151/declarative-performance-observer/_server.ts";
-import { handleFeatureRequest as handleXmlMimeServer } from "../v158/spec-compliant-xml-mime-type-detection/_server.ts";
-import { handleFeatureRequest as handleRedirectChainServer } from "../v151/cross-origin-redirect-timing-opt-in/_server.ts";
-import { handleFeatureRequest as handlePolicyEchoServer } from "../v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/_server.ts";
-import { handleFeatureRequest as handleDelayedEchoServer } from "../v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields/_server.ts";
-import { handleFeatureRequest as handleCssUrlRequestModifiersServer } from "../v150/css-url-request-modifiers/_server.ts";
-import { handleFeatureRequest as handleUaChMigrationServer } from "../v145/reduced-user-agent-strings-by-default/_server.ts";
-import { handleFeatureRequest as handleConnectionAllowlistServer } from "../v157/connection-allowlists-embedded-enforcement/_server.ts";
-import { handleFeatureRequest as handleGpcServer } from "../v157/global-privacy-control-in-chrome/_server.ts";
+import type {
+  AssetReader,
+  FeatureServerContext,
+  FeatureServerHandler,
+} from "../lib/feature-servers/http-helpers.ts";
+import { GENERATED_FEATURE_SERVERS } from "./_feature-servers.generated.ts";
 import { escapeHTML } from "./html.ts";
 import { knownReleaseMilestones, renderReleasePage } from "./pages.ts";
-import {
-  handleLegacyReleaseEndpoints,
-  renderFedCmWellKnown,
-  renderProfileTelemetryRoute,
-} from "./release-endpoints.ts";
 
-export { renderFedCmWellKnown, renderProfileTelemetryRoute };
-
-export type FeatureServerHandler = (
-  req: Request,
-  sub: string,
-) => Response | Promise<Response | null> | null;
-
-// Static registry of co-located `v<N>/<feature-slug>/_server.ts` handlers so
-// Deno Deploy's static module graph includes them, plus a dynamic import
-// fallback for newly created `v<N>/<feature-slug>/_server.ts` modules in local
-// or routine sessions.
-const STATIC_FEATURE_SERVERS: Record<string, FeatureServerHandler> = {
-  "v151/declarative-performance-observer": handleDpoServer,
-  "v158/spec-compliant-xml-mime-type-detection": handleXmlMimeServer,
-  "v151/cross-origin-redirect-timing-opt-in": handleRedirectChainServer,
-  "v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-":
-    handlePolicyEchoServer,
-  "v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields":
-    handleDelayedEchoServer,
-  "v150/css-url-request-modifiers": handleCssUrlRequestModifiersServer,
-  "v145/reduced-user-agent-strings-by-default": handleUaChMigrationServer,
-  "v157/connection-allowlists-embedded-enforcement": handleConnectionAllowlistServer,
-  "v157/global-privacy-control-in-chrome": handleGpcServer,
-};
+export type { AssetReader, FeatureServerContext, FeatureServerHandler };
 
 const dynamicFeatureServerCache = new Map<string, FeatureServerHandler | null>();
 
@@ -52,7 +21,7 @@ async function resolveFeatureServer(
   const firstSegment = sub.replace(/^\/+/, "").split("/")[0];
   if (!firstSegment || firstSegment.includes(".")) return null;
   const key = `${release}/${firstSegment}`;
-  if (STATIC_FEATURE_SERVERS[key]) return STATIC_FEATURE_SERVERS[key];
+  if (GENERATED_FEATURE_SERVERS[key]) return GENERATED_FEATURE_SERVERS[key];
   if (dynamicFeatureServerCache.has(key)) {
     return dynamicFeatureServerCache.get(key) ?? null;
   }
@@ -75,6 +44,17 @@ async function resolveFeatureServer(
     dynamicFeatureServerCache.set(key, null);
     return null;
   }
+}
+
+export async function dispatchFeatureServer(
+  req: Request,
+  release: string,
+  sub: string,
+  readReleaseAsset: AssetReader = async () => null,
+): Promise<Response | null> {
+  const featureServer = await resolveFeatureServer(release, sub);
+  if (!featureServer) return null;
+  return await featureServer(req, sub, { release, readReleaseAsset });
 }
 
 const MIME: Record<string, string> = {
@@ -356,17 +336,10 @@ export async function handleReleaseRoute(req: Request): Promise<Response | null>
   }
 
   // 1. Co-located per-feature server handler (`v<N>/<feature-slug>/_server.ts`)
-  const featureServer = await resolveFeatureServer(release, sub);
-  if (featureServer) {
-    const response = await featureServer(req, sub);
-    if (response) return response;
-  }
-
-  // 2. Extracted legacy per-release server endpoints (`routes/release-endpoints.ts`)
-  const endpointResponse = await handleLegacyReleaseEndpoints(req, release, sub, readReleaseAsset);
+  const endpointResponse = await dispatchFeatureServer(req, release, sub, readReleaseAsset);
   if (endpointResponse) return endpointResponse;
 
-  // 3. Static asset + HTML shell injection
+  // 2. Static asset + HTML shell injection
   return (await readReleaseAsset(release, sub)) ??
     new Response("Not found", { status: 404 });
 }

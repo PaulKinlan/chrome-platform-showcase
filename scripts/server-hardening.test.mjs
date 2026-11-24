@@ -18,10 +18,8 @@ import { renderConformancePage } from "../routes/conformance-renderers.ts";
 import { renderCritiqueDetail, renderCritiquesIndex } from "../routes/critique-renderers.ts";
 import { renderConformanceRunAllPage } from "../routes/conformance-renderers.ts";
 import { handlePublicRoute } from "../routes/public.ts";
-import {
-  handleLegacyReleaseEndpoints,
-  renderProfileTelemetryRoute,
-} from "../routes/release-endpoints.ts";
+import { dispatchFeatureServer as handleLegacyReleaseEndpoints } from "../routes/release.ts";
+import { renderProfileTelemetryRoute } from "../routes/profile-telemetry.ts";
 
 const failures = [];
 const sections = [];

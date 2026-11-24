@@ -33,7 +33,7 @@
 // Run: npm run test-spc-bbk-device-name
 
 import { test } from "node:test";
-import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
+import { handleFeatureRequest } from "../v145/secure-payment-confirmation-browser-bound-keys/_server.ts";
 
 // What this suite expects the bound to be. The demo's own names are at most 32
 // characters, so anything in this region preserves the fixture's UX.
@@ -69,7 +69,10 @@ async function enroll(deviceName) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  const res = await handleLegacyReleaseEndpoints(req, "v145", ENROLL_SUB, noAsset);
+  const res = await handleFeatureRequest(req, ENROLL_SUB, {
+    release: "v145",
+    readReleaseAsset: noAsset,
+  });
   assert(res, "the SPC BBK enroll route should be handled by the release router");
   return { res, body: await res.json() };
 }
@@ -79,7 +82,10 @@ async function storedState(enrollmentId) {
   const req = new Request(`http://localhost:3000/v145${STATE_SUB}`, {
     headers: { cookie: `${COOKIE}=${enrollmentId}` },
   });
-  const res = await handleLegacyReleaseEndpoints(req, "v145", STATE_SUB, noAsset);
+  const res = await handleFeatureRequest(req, STATE_SUB, {
+    release: "v145",
+    readReleaseAsset: noAsset,
+  });
   assert(res, "the SPC BBK state route should be handled");
   return await res.json();
 }

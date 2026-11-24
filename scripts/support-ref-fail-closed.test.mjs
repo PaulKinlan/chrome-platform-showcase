@@ -39,11 +39,12 @@
 
 import { runSync } from "./lib/run.mjs";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  loadSidecar,
   loadSidecarFromRef,
   SUPPORT_MAP_INTRODUCED_IN,
   SupportSnapshotError,
@@ -425,7 +426,13 @@ test("support-ref fail-closed snapshot and gate contract", async () => {
       // a temp dir. An orphaned scratch is bounded residue (~185MB) named
       // support-ref-scratch-* under the OS temp dir; do NOT assume the OS cleans
       // it promptly — operators may remove support-ref-scratch-* by hand.
-      const realSidecar = join(REPO_ROOT, "responsive-support.json");
+      const realData = loadSidecar(REPO_ROOT);
+      const targetKey = Object.keys(realData).find((k) => realData[k]?.mobile === "ok");
+      assert(targetKey, "could not find key with mobile=ok");
+      const realPerFeature = join(REPO_ROOT, targetKey, "_support.json");
+      const realSidecar = existsSync(realPerFeature)
+        ? realPerFeature
+        : join(REPO_ROOT, "responsive-support.json");
       const realBefore = readFileSync(realSidecar);
       const scratch = mkdtempSync(join(tmpdir(), "support-ref-scratch-"));
       const gitIn = (cwd, args) => {
@@ -485,17 +492,26 @@ test("support-ref fail-closed snapshot and gate contract", async () => {
           `scratch origin/main ${scratchMain.stdout} != source ${srcMain.stdout}`,
         );
 
-        const scratchSidecar = join(scratchRoot, "responsive-support.json");
-        assert(
-          realpathSync(scratchSidecar) !== realpathSync(realSidecar),
-          "scratch sidecar resolves to the real tracked file",
-        );
-
-        const data = JSON.parse(readFileSync(scratchSidecar, "utf8"));
-        const targetKey = Object.keys(data).find((k) => data[k]?.mobile === "ok");
-        assert(targetKey, "could not find key with mobile=ok");
-        data[targetKey].mobile = "needs-review";
-        writeFileSync(scratchSidecar, JSON.stringify(data, null, 2) + "\n");
+        const scratchPerFeature = join(scratchRoot, targetKey, "_support.json");
+        const scratchLegacy = join(scratchRoot, "responsive-support.json");
+        if (existsSync(scratchPerFeature)) {
+          assert(
+            realpathSync(scratchPerFeature) !== realpathSync(realSidecar),
+            "scratch sidecar resolves to the real tracked file",
+          );
+          const rec = JSON.parse(readFileSync(scratchPerFeature, "utf8"));
+          rec.mobile = "needs-review";
+          writeFileSync(scratchPerFeature, JSON.stringify(rec, null, 2) + "\n");
+        } else {
+          assert(
+            realpathSync(scratchLegacy) !== realpathSync(realSidecar),
+            "scratch sidecar resolves to the real tracked file",
+          );
+          const data = JSON.parse(readFileSync(scratchLegacy, "utf8"));
+          assert(data[targetKey]?.mobile === "ok", `scratch ${targetKey} is not mobile=ok`);
+          data[targetKey].mobile = "needs-review";
+          writeFileSync(scratchLegacy, JSON.stringify(data, null, 2) + "\n");
+        }
 
         // Node gate run (cwd: scratch)
         const nodeOut = runSync("node", {
