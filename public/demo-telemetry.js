@@ -71,6 +71,35 @@
     );
   }
 
+  // One small, non-identifying snapshot of the browser per batch, so triage can tell "API missing in
+  // Chrome 138" apart from a real demo bug. Major version + coarse device class only.
+  function chromeMajor() {
+    const brands = navigator.userAgentData?.brands || [];
+    const brand = brands.find((b) => /^(Google Chrome|Chromium|Microsoft Edge)$/.test(b.brand));
+    if (brand) return Number(brand.version) || null;
+    const match = navigator.userAgent.match(/Chrom(?:e|ium)\/(\d+)/);
+    return match ? Number(match[1]) : null;
+  }
+
+  const env = (() => {
+    try {
+      return {
+        chrome: chromeMajor(),
+        platform: clamp(navigator.userAgentData?.platform || navigator.platform || "", 40),
+        mobile: navigator.userAgentData?.mobile ??
+          matchMedia("(pointer: coarse) and (max-width: 820px)").matches,
+        viewport: innerWidth < 640 ? "narrow" : "wide",
+        dpr: Math.round((devicePixelRatio || 1) * 10) / 10,
+        memory: navigator.deviceMemory ?? null,
+        connection: navigator.connection?.effectiveType ?? null,
+        secure: isSecureContext,
+        crossOriginIsolated: Boolean(globalThis.crossOriginIsolated),
+      };
+    } catch {
+      return {};
+    }
+  })();
+
   function baseEvent(kind, data = {}) {
     return {
       kind,
@@ -101,6 +130,7 @@
       page: location.pathname,
       sessionId,
       duration: Math.round(performance.now() - startedAt),
+      env,
       events: queue.slice(-maxEvents),
     });
     try {
@@ -123,8 +153,12 @@
   }
 
   function safeReason(reason) {
-    if (reason instanceof Error) {
-      return { message: clamp(reason.message), stack: clamp(reason.stack, 1200) };
+    if (reason instanceof Error || reason instanceof DOMException) {
+      return {
+        errorName: clamp(reason.name, 80),
+        message: clamp(reason.message),
+        stack: clamp(reason.stack, 1200),
+      };
     }
     return { message: clamp(reason) };
   }
@@ -162,6 +196,7 @@
       source: clamp(event.filename),
       line: event.lineno,
       column: event.colno,
+      errorName: clamp(event.error?.name, 80),
       stack: clamp(event.error?.stack, 1200),
     });
   }, true);
@@ -239,17 +274,64 @@
   } catch {}
   try {
     new PerformanceObserver((list) =>
-      list.getEntries().forEach((entry) =>
+      list.getEntries().forEach((entry) => {
+        // Attribute the frame to its heaviest script so triage can name the culprit.
+        const top = [...(entry.scripts || [])].sort((a, b) => b.duration - a.duration)[0];
         track("perf.long-animation-frame", {
           severity: "warning",
           value: Math.round(entry.duration),
-        })
-      )
+          blocking: Math.round(entry.blockingDuration || 0),
+          script: top
+            ? {
+              source: clamp(String(top.sourceURL || "").split("?")[0], 300),
+              invoker: clamp(top.invoker, 160),
+              duration: Math.round(top.duration),
+            }
+            : null,
+        });
+      })
     ).observe({ type: "long-animation-frame", buffered: true });
   } catch {}
 
+  // Deprecation and intervention reports are only visible in-page (they never reach the
+  // Reporting-Endpoints header). These say "Chrome changed or blocked what this demo did".
+  try {
+    if (typeof ReportingObserver === "function") {
+      new ReportingObserver((reports) => {
+        for (const report of reports) {
+          const body = report.body || {};
+          track(`report.${report.type}`, {
+            severity: "warning",
+            id: clamp(body.id, 120),
+            message: clamp(body.message, 600),
+            source: clamp(String(body.sourceFile || "").split("?")[0], 300),
+            line: body.lineNumber ?? null,
+            column: body.columnNumber ?? null,
+            anticipatedRemoval: body.anticipatedRemoval
+              ? clamp(String(body.anticipatedRemoval), 40)
+              : null,
+          });
+        }
+      }, { types: ["deprecation", "intervention"], buffered: true }).observe();
+    }
+  } catch {}
+
+  const supportStates = new Set(["supported", "flag", "unsupported", "denied", "error"]);
+
   window.showcaseTelemetry = Object.assign(window.showcaseTelemetry || {}, {
     track,
+    // Record the outcome of a demo's capability check for the exact API it demonstrates, e.g.
+    // support("navigator.modelContext", "unsupported", "no global") or support(api, "denied").
+    support(api, state, details = "") {
+      const outcome = supportStates.has(state) ? state : "error";
+      track("api.support", {
+        severity: outcome === "error" ? "error" : "info",
+        id: clamp(api, 120),
+        state: outcome,
+        details: clamp(typeof details === "string" ? details : JSON.stringify(details), 300),
+      });
+      return outcome;
+    },
     assert(id, condition, details = {}) {
       const ok = Boolean(condition);
       track(ok ? "assert.pass" : "assert.fail", {
