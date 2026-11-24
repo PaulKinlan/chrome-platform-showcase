@@ -1,7 +1,7 @@
 // Strict CDP teardown contract (bead chrome_platform_showcase-1w1, Stage 1 of 3gt).
 //
 // `launchChrome` used to leak its temp profile on both of its own failure paths —
-// the spawn that throws after `Deno.makeTempDir`, and the branch that kills the
+// the spawn that throws after `mkdtemp`, and the branch that kills the
 // child and throws when the devtools endpoint never comes up — and
 // `cleanupChrome` swallowed both the kill and the removal, so a profile that
 // survived left no trace anywhere in the evidence. The pre-existing
@@ -13,7 +13,7 @@
 // fake children plus real temp directories rather than a browser.
 //
 // What this suite does NOT claim, and the code must not either:
-//   * `Deno.remove` has no cancellation, so the timeout path reports an
+//   * `fs.rm` has no cancellation, so the timeout path reports an
 //     UNCONFIRMED deletion instead of a failure it cannot distinguish from a
 //     slow success, and nothing here pretends the IO stopped;
 //   * a SIGKILL is a request, so a child unresolved after the second bound is
@@ -29,8 +29,13 @@
 // so it never reads, counts or deletes the pre-existing /tmp/cps-cdp-* profiles,
 // and a leak shows up as a leftover entry in its own root instead.
 //
-// Run: deno task test-cdp-cleanup
+// Run: npm run test-cdp-cleanup
 
+import { test } from "node:test";
+import { readdirSync } from "node:fs";
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 
 import {
@@ -40,8 +45,8 @@ import {
   teardownChrome,
 } from "./lib/cdp.mjs";
 
-const root = await Deno.makeTempDir({ prefix: "dty1w1-cdp-root-" });
-Deno.env.set("TMPDIR", root);
+const root = await mkdtemp(join(tmpdir(), "dty1w1-cdp-root-"));
+process.env["TMPDIR"] = root;
 
 // A stand-in for a Chrome child: the strict teardown only ever calls `kill` and
 // reads `status`, so a double is honest here in a way it would not be for a
@@ -61,29 +66,27 @@ function fakeChild({ status = Promise.resolve(0), kill } = {}) {
   };
 }
 
-const entriesInRoot = () => [...Deno.readDirSync(root)].map((e) => e.name).sort();
+const entriesInRoot = () => readdirSync(root).sort();
 
 // Whether the mode actually blocks a recursive removal is MEASURED rather than
-// assumed: for root (and for filesystems that ignore modes) it does not, and
-// `Deno.uid()` would need a sys permission this task deliberately does not
-// grant. The probe owns and removes its own directory either way.
+// assumed: for root (and for filesystems that ignore modes) it does not. The probe owns and removes its own directory either way.
 async function modeBlocksRemoval() {
-  const probe = await Deno.makeTempDir({ prefix: "cps-cdp-probe-" });
-  await Deno.writeTextFile(`${probe}/held-open`, "content");
-  await Deno.chmod(probe, 0o500);
+  const probe = await mkdtemp(join(tmpdir(), "cps-cdp-probe-"));
+  await writeFile(`${probe}/held-open`, "content");
+  await chmod(probe, 0o500);
   try {
-    await Deno.remove(probe, { recursive: true });
+    await rm(probe, { recursive: true, force: true });
     return false;
   } catch {
-    await Deno.chmod(probe, 0o700);
-    await Deno.remove(probe, { recursive: true });
+    await chmod(probe, 0o700);
+    await rm(probe, { recursive: true, force: true });
     return true;
   }
 }
 
-Deno.test("teardownChrome reaps a live child and removes the profile it owns", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "cps-cdp-" });
-  await Deno.writeTextFile(`${dir}/marker`, "profile content");
+test("teardownChrome reaps a live child and removes the profile it owns", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cps-cdp-"));
+  await writeFile(`${dir}/marker`, "profile content");
   const { child, signals } = fakeChild();
 
   const result = await teardownChrome({ child, userDataDir: dir });
@@ -91,13 +94,13 @@ Deno.test("teardownChrome reaps a live child and removes the profile it owns", a
   assert.deepEqual(result, { childReaped: true, profileRemoved: true, failures: [] });
   assert.deepEqual(signals, ["SIGTERM"], "a child that exits must not be SIGKILLed");
   await assert.rejects(
-    Deno.stat(dir),
-    (err) => err instanceof Deno.errors.NotFound,
+    stat(dir),
+    (err) => err.code === "ENOENT",
     "the profile must be gone",
   );
 });
 
-Deno.test("teardownChrome escalates SIGTERM to SIGKILL and reports a child that never exits", async () => {
+test("teardownChrome escalates SIGTERM to SIGKILL and reports a child that never exits", async () => {
   const { child, signals } = fakeChild({ status: new Promise(() => {}) });
 
   const started = Date.now();
@@ -117,7 +120,7 @@ Deno.test("teardownChrome escalates SIGTERM to SIGKILL and reports a child that 
   );
 });
 
-Deno.test("teardownChrome names an unremovable profile instead of swallowing it", async () => {
+test("teardownChrome names an unremovable profile instead of swallowing it", async () => {
   const { child } = fakeChild();
 
   await assert.rejects(
@@ -125,11 +128,11 @@ Deno.test("teardownChrome names an unremovable profile instead of swallowing it"
     (err) =>
       err instanceof CdpTeardownError &&
       /could not be removed after \d+ attempts/.test(err.message) &&
-      /Not a directory/.test(err.message),
+      /not a directory/i.test(err.message),
   );
 });
 
-Deno.test("a removal that never settles is reported UNCONFIRMED, never as deleted", async () => {
+test("a removal that never settles is reported UNCONFIRMED, never as deleted", async () => {
   const { child } = fakeChild();
   const never = () => new Promise(() => {});
 
@@ -153,14 +156,14 @@ Deno.test("a removal that never settles is reported UNCONFIRMED, never as delete
   );
 });
 
-Deno.test("an already-reaped child and an already-absent profile are success", async () => {
-  const dir = await Deno.makeTempDir({ prefix: "cps-cdp-" });
-  await Deno.remove(dir, { recursive: true });
-  await assert.rejects(Deno.stat(dir), (err) => err instanceof Deno.errors.NotFound);
+test("an already-reaped child and an already-absent profile are success", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cps-cdp-"));
+  await rm(dir, { recursive: true, force: true });
+  await assert.rejects(stat(dir), (err) => err.code === "ENOENT");
   const { child } = fakeChild({
     status: Promise.resolve(0),
     kill: () => {
-      throw new Deno.errors.BadResource("child already reaped");
+      throw Object.assign(new Error("child already reaped"), { code: "ESRCH" });
     },
   });
 
@@ -173,7 +176,7 @@ Deno.test("an already-reaped child and an already-absent profile are success", a
   );
 });
 
-Deno.test("a child whose exit cannot be read is reported, not counted as reaped", async () => {
+test("a child whose exit cannot be read is reported, not counted as reaped", async () => {
   const { child, signals } = fakeChild({ status: Promise.reject(new Error("status poll failed")) });
 
   await assert.rejects(
@@ -190,7 +193,7 @@ Deno.test("a child whose exit cannot be read is reported, not counted as reaped"
   );
 });
 
-Deno.test("a profile the suite OWNS that cannot be removed is a named failure", async () => {
+test("a profile the suite OWNS that cannot be removed is a named failure", async () => {
   // A real failure inside the suite's own root rather than a path trick: a
   // non-empty directory whose mode denies writing cannot be emptied, so the
   // recursive removal genuinely fails with PermissionDenied. Run as root that is
@@ -201,9 +204,9 @@ Deno.test("a profile the suite OWNS that cannot be removed is a named failure", 
     );
     return;
   }
-  const dir = await Deno.makeTempDir({ prefix: "cps-cdp-" });
-  await Deno.writeTextFile(`${dir}/held-open`, "content");
-  await Deno.chmod(dir, 0o500);
+  const dir = await mkdtemp(join(tmpdir(), "cps-cdp-"));
+  await writeFile(`${dir}/held-open`, "content");
+  await chmod(dir, 0o500);
   const { child } = fakeChild();
 
   try {
@@ -216,12 +219,12 @@ Deno.test("a profile the suite OWNS that cannot be removed is a named failure", 
       "a removal that really fails must be named, with the reason it failed",
     );
   } finally {
-    await Deno.chmod(dir, 0o700);
-    await Deno.remove(dir, { recursive: true });
+    await chmod(dir, 0o700);
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
-Deno.test("the primary error survives a teardown it cannot be annotated with", async () => {
+test("the primary error survives a teardown it cannot be annotated with", async () => {
   if (!await modeBlocksRemoval()) {
     console.warn(
       "skip: this platform does not let a mode-0500 directory block removal (running as root?)",
@@ -230,9 +233,9 @@ Deno.test("the primary error survives a teardown it cannot be annotated with", a
   }
   const { child } = fakeChild();
   const primary = Object.freeze(new Error("original failure"));
-  const locked = await Deno.makeTempDir({ prefix: "cps-cdp-" });
-  await Deno.writeTextFile(`${locked}/held-open`, "content");
-  await Deno.chmod(locked, 0o500);
+  const locked = await mkdtemp(join(tmpdir(), "cps-cdp-"));
+  await writeFile(`${locked}/held-open`, "content");
+  await chmod(locked, 0o500);
   const reported = [];
   const realError = console.error;
   console.error = (...args) => reported.push(args.join(" "));
@@ -252,8 +255,8 @@ Deno.test("the primary error survives a teardown it cannot be annotated with", a
     );
   } finally {
     console.error = realError;
-    await Deno.chmod(locked, 0o700);
-    await Deno.remove(locked, { recursive: true });
+    await chmod(locked, 0o700);
+    await rm(locked, { recursive: true, force: true });
   }
   assert.ok(
     reported.some((line) =>
@@ -265,7 +268,7 @@ Deno.test("the primary error survives a teardown it cannot be annotated with", a
   );
 });
 
-Deno.test("the error that caused a teardown stays the error the caller sees", async () => {
+test("the error that caused a teardown stays the error the caller sees", async () => {
   const { child } = fakeChild();
   const primary = new Error("primary failure: the sweep could not finish");
 
@@ -288,14 +291,14 @@ Deno.test("the error that caused a teardown stays the error the caller sees", as
   );
 });
 
-Deno.test("launchChrome removes the profile it created when the binary cannot start", async () => {
+test("launchChrome removes the profile it created when the binary cannot start", async () => {
   const before = entriesInRoot();
 
   await assert.rejects(
     launchChrome({ bin: `${root}/no-such-chrome`, tries: 1, intervalMs: 1, boundMs: 200 }),
     (err) =>
       !(err instanceof CdpTeardownError) &&
-      /No such file|NotFound/.test(err.message),
+      /No such file|NotFound|ENOENT/.test(err.message),
     "an unspawnable binary must surface as its own error, not a teardown error",
   );
 
@@ -306,10 +309,10 @@ Deno.test("launchChrome removes the profile it created when the binary cannot st
   );
 });
 
-Deno.test("launchChrome removes the profile it created when Chrome never answers", async () => {
+test("launchChrome removes the profile it created when Chrome never answers", async () => {
   const fake = `${root}/fake-chrome`;
-  await Deno.writeTextFile(fake, "#!/bin/sh\nexit 0\n");
-  await Deno.chmod(fake, 0o755);
+  await writeFile(fake, "#!/bin/sh\nexit 0\n");
+  await chmod(fake, 0o755);
   const before = entriesInRoot();
 
   try {
@@ -326,21 +329,21 @@ Deno.test("launchChrome removes the profile it created when Chrome never answers
       "the profile of a Chrome that never answered must not be left behind",
     );
   } finally {
-    await Deno.remove(fake);
+    await rm(fake, { recursive: true, force: true });
   }
 });
 
 // The bound is part of the contract, so a silent change to it is a finding.
-Deno.test("the published teardown bound is the one the suite measured against", () => {
+test("the published teardown bound is the one the suite measured against", () => {
   assert.equal(typeof CDP_TEARDOWN_BOUND_MS, "number");
   assert.ok(CDP_TEARDOWN_BOUND_MS > 0 && CDP_TEARDOWN_BOUND_MS <= 10000);
 });
 
-Deno.test("the suite left no profile behind in the temp root it owns", async () => {
+test("the suite left no profile behind in the temp root it owns", async () => {
   assert.deepEqual(
     entriesInRoot(),
     [],
     "a leftover entry here is exactly the leak this suite exists to catch",
   );
-  await Deno.remove(root, { recursive: true });
+  await rm(root, { recursive: true, force: true });
 });

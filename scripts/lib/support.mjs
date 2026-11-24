@@ -57,31 +57,6 @@ export class TouchedSetError extends Error {
 }
 
 function gitIn(root, args) {
-  if (typeof Deno !== "undefined" && typeof Deno.Command === "function") {
-    // Deno.Command rather than node's execFileSync: the latter needs --allow-env
-    // merely to spawn, so a caller that did not grant it got a permission error
-    // that looked like a missing git object. A read-only git query should need
-    // only --allow-run.
-    const out = new Deno.Command("git", {
-      args,
-      cwd: root,
-      stdout: "piped",
-      stderr: "piped",
-    }).outputSync();
-    if (out.code !== 0) {
-      const cause = new TextDecoder().decode(out.stderr).trim().split("\n")[0] ?? "";
-      const err = new Error(
-        `git ${args.join(" ")} exited ${out.code}${cause ? `: ${cause}` : ""}`,
-      );
-      err.status = out.code;
-      throw err;
-    }
-    return new TextDecoder().decode(out.stdout);
-  }
-
-  // Node runtime branch: use node:child_process execFileSync.
-  // Guarded so Deno does not run this path (Deno's node:child_process polyfill
-  // requires --allow-env merely to spawn).
   try {
     return execFileSync("git", args, {
       cwd: root,
@@ -266,8 +241,6 @@ export function changedFeatureIds(ref, root = REPO_ROOT) {
   let changed;
   let untracked;
   try {
-    // gitIn is the shared dual-runtime transport (Deno.Command under Deno,
-    // execFileSync under Node), so this path stays portable across both.
     changed = gitIn(root, ["diff", "--name-only", ref]);
     untracked = gitIn(root, ["ls-files", "--others", "--exclude-standard"]);
   } catch (err) {

@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-net --allow-env
+#!/usr/bin/env node
 // Build feature-lineage.json — the map from a ChromeStatus feature id to every
 // milestone folder that hosts it.
 //
@@ -14,8 +14,9 @@
 // portfolio. `scripts/check-duplicate-features.mjs` reads this file and fails
 // on any duplication that is not already recorded here.
 //
-// Usage: deno task feature-lineage
+// Usage: npm run feature-lineage
 
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { getFeature } from "../lib/chromestatus.ts";
 
 const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
@@ -23,25 +24,25 @@ const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
 /** Every `v<N>/<slug>` folder that has an index.html, with its feature id. */
 async function scanFolders() {
   const out = [];
-  for await (const rel of Deno.readDir(ROOT)) {
-    if (!rel.isDirectory || !/^v\d+$/.test(rel.name)) continue;
+  for (const rel of await readdir(ROOT, { withFileTypes: true })) {
+    if (!rel.isDirectory() || !/^v\d+$/.test(rel.name)) continue;
     const milestone = Number(rel.name.slice(1));
-    for await (const feat of Deno.readDir(`${ROOT}/${rel.name}`)) {
-      if (!feat.isDirectory) continue;
+    for (const feat of await readdir(`${ROOT}/${rel.name}`, { withFileTypes: true })) {
+      if (!feat.isDirectory()) continue;
       const dir = `${rel.name}/${feat.name}`;
       let html;
       try {
-        html = await Deno.readTextFile(`${ROOT}/${dir}/index.html`);
+        html = await readFile(`${ROOT}/${dir}/index.html`, "utf8");
       } catch {
         continue;
       }
       const id = html.match(/chromestatus\.com\/feature\/(\d+)/)?.[1];
       if (!id) continue;
       let concepts = 0;
-      for await (const c of Deno.readDir(`${ROOT}/${dir}`)) {
-        if (!c.isDirectory) continue;
+      for (const c of await readdir(`${ROOT}/${dir}`, { withFileTypes: true })) {
+        if (!c.isDirectory()) continue;
         try {
-          await Deno.stat(`${ROOT}/${dir}/${c.name}/index.html`);
+          await stat(`${ROOT}/${dir}/${c.name}/index.html`);
           concepts++;
         } catch { /* not a concept page */ }
       }
@@ -127,7 +128,7 @@ for (const [id, list] of duplicated) {
 }
 
 const payload = {
-  // Regenerate with `deno task feature-lineage`. Hand edits are allowed for the
+  // Regenerate with `npm run feature-lineage`. Hand edits are allowed for the
   // `canonical` field only — the rest is derived.
   generated: new Date().toISOString().slice(0, 10),
   totalFolders: folders.length,
@@ -135,7 +136,7 @@ const payload = {
   duplicatedFeatures: duplicated.length,
   features: Object.fromEntries(Object.entries(features).sort()),
 };
-await Deno.writeTextFile(`${ROOT}/feature-lineage.json`, JSON.stringify(payload, null, 2) + "\n");
+await writeFile(`${ROOT}/feature-lineage.json`, JSON.stringify(payload, null, 2) + "\n");
 
 const relistings = Object.values(features).reduce(
   (n, f) => n + f.folders.filter((x) => x.role === "relisting").length,

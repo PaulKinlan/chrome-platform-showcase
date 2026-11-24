@@ -16,9 +16,9 @@
 // is scripts/entity-escaped-script.test.mjs (task test-entity-scripts), which
 // walks every demo file and reports file:line.
 //
-// Run: deno task test-webxr-depth-router
+// Run: npm run test-webxr-depth-router
 //
-// Migrated in place to ONE synchronous native Deno.test case (Stage 23 of the
+// Migrated in place to ONE synchronous node:test case (Stage 23 of the
 // dty proposal, bead chrome_platform_showcase-dty.30), under the dty.19 policy
 // for this class of suite: the body, the labels, the `failures` counter and the
 // exact order are unchanged, so every failing subject still reports and no check
@@ -29,13 +29,16 @@
 // `Object.getOwnPropertyDescriptor`/`defineProperty` and restores the original
 // property (or deletes it) in its own per-call `finally`, with the demo's inline
 // script still evaluated by `new Function(scriptBodies)()`. The trailing
-// `Deno.exit(1)` became a named throw because exiting inside a case kills the
-// test process before Deno can report it; the legacy success line still prints.
+// `process.exit(1)` became a named throw because exiting inside a case kills the
+// test process before the test runner can report it; the legacy success line still prints.
+
+import { test } from "node:test";
+import { readFileSync } from "node:fs";
 
 const REPO = new URL("..", import.meta.url).pathname;
 const PAGE = "v139/webxr-depth-sensing-performance-improvements/raw-vs-smooth-router/index.html";
-Deno.test("the raw-vs-smooth router renders the repaired recipe table and readable recommendations", () => {
-  const html = Deno.readTextFileSync(`${REPO}${PAGE}`);
+test("the raw-vs-smooth router renders the repaired recipe table and readable recommendations", () => {
+  const html = readFileSync(`${REPO}${PAGE}`, "utf8");
 
   let failures = 0;
   function check(label, ok, detail = "") {
@@ -270,7 +273,7 @@ Deno.test("the raw-vs-smooth router renders the repaired recipe table and readab
   // emerald (ratio 1.0).
   function tokenValue(name) {
     const match = new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{3,8})`).exec(
-      Deno.readTextFileSync(`${REPO}public/styles.css`),
+      readFileSync(`${REPO}public/styles.css`, "utf8"),
     );
     return match ? match[1] : null;
   }
@@ -322,8 +325,8 @@ Deno.test("the raw-vs-smooth router renders the repaired recipe table and readab
     }
   }
 
-  // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
-  // live inside a case - it kills the test process before Deno can report the case -
+  // The legacy tail exited the process on a non-zero counter. `process.exit(1)` cannot
+  // live inside a case - it kills the test process before the test runner can report the case -
   // so the counter is carried into the named failure instead, and the legacy success
   // line below still prints on a clean run.
   if (failures > 0) {

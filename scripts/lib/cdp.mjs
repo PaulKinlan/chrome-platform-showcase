@@ -1,8 +1,14 @@
-// Minimal Chrome DevTools Protocol client (Deno) shared by the responsive
+// Minimal Chrome DevTools Protocol client (Node) shared by the responsive
 // harnesses. Launches headless Chrome and drives it over a flat CDP session.
 // Portable across the responsive-check matrix and the cheap overflow-scan.
 
-export const CHROME_BIN = Deno.env.get("CHROME_BIN") ??
+import { spawn } from "node:child_process";
+import { statSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+export const CHROME_BIN = process.env["CHROME_BIN"] ??
   [
     "/usr/bin/google-chrome-stable",
     "/usr/bin/chromium",
@@ -12,7 +18,7 @@ export const CHROME_BIN = Deno.env.get("CHROME_BIN") ??
   ]
     .find((p) => {
       try {
-        Deno.statSync(p);
+        statSync(p);
         return true;
       } catch {
         return false;
@@ -25,35 +31,65 @@ export const CHROME_BIN = Deno.env.get("CHROME_BIN") ??
 // endpoint-never-up path without waiting the real ten seconds, and `bin` lets a
 // test aim at a binary that cannot start. The defaults are the previous
 // behaviour exactly (40 tries, 250ms apart, the module's CHROME_BIN).
+// A spawned process with a `status` promise (settles on exit, rejects when it
+// could not start) and a `kill` that throws an ESRCH-coded error once the
+// process is gone, so callers can tell "already exited" from a real failure.
+export function spawnChild(bin, args, options = {}) {
+  const proc = spawn(bin, args, { stdio: "ignore", ...options });
+  let exited = false;
+  const status = new Promise((resolve, reject) => {
+    proc.once("error", (err) => {
+      exited = true;
+      reject(err);
+    });
+    proc.once("exit", (code, signal) => {
+      exited = true;
+      resolve({ code, signal, success: code === 0 });
+    });
+  });
+  status.catch(() => {}); // observed by callers that care; never unhandled
+  return {
+    pid: proc.pid,
+    process: proc,
+    stdout: proc.stdout,
+    stderr: proc.stderr,
+    status,
+    kill(signal = "SIGTERM") {
+      if (exited || proc.exitCode !== null || proc.signalCode !== null) {
+        const err = new Error("process already exited");
+        err.code = "ESRCH";
+        throw err;
+      }
+      proc.kill(signal);
+    },
+  };
+}
+
 export async function launchChrome({
   bin = CHROME_BIN,
   tries = 40,
   intervalMs = 250,
   boundMs = CDP_TEARDOWN_BOUND_MS,
 } = {}) {
-  const userDataDir = await Deno.makeTempDir({ prefix: "cps-cdp-" });
+  const userDataDir = await mkdtemp(join(tmpdir(), "cps-cdp-"));
   let child = null;
   try {
     const port = 9200 + Math.floor(Math.random() * 400);
-    child = new Deno.Command(bin, {
-      args: [
-        "--headless=new",
-        "--disable-gpu",
-        "--no-sandbox",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--hide-scrollbars",
-        `--remote-debugging-port=${port}`,
-        `--user-data-dir=${userDataDir}`,
-        // Extra switches for flag-gated verification. A demo that claims a
-        // feature is available behind a flag has to be driven behind that flag,
-        // so CHROME_FLAGS carries them in rather than needing a second harness.
-        ...(Deno.env.get("CHROME_FLAGS") ?? "").split(" ").filter(Boolean),
-        "about:blank",
-      ],
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
+    child = spawnChild(bin, [
+      "--headless=new",
+      "--disable-gpu",
+      "--no-sandbox",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--hide-scrollbars",
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${userDataDir}`,
+      // Extra switches for flag-gated verification. A demo that claims a
+      // feature is available behind a flag has to be driven behind that flag,
+      // so CHROME_FLAGS carries them in rather than needing a second harness.
+      ...(process.env["CHROME_FLAGS"] ?? "").split(" ").filter(Boolean),
+      "about:blank",
+    ]);
     let wsUrl = null;
     for (let i = 0; i < tries; i++) {
       try {
@@ -67,7 +103,12 @@ export async function launchChrome({
       }
       await new Promise((r) => setTimeout(r, intervalMs));
     }
-    if (!wsUrl) throw new Error("chrome devtools endpoint never came up");
+    if (!wsUrl) {
+      // A binary that could not start rejects `status`; say that, not "never came up".
+      const early = await boundedWait(child.status, 0);
+      if (early.status === "rejected") throw early.error;
+      throw new Error("chrome devtools endpoint never came up");
+    }
     return { child, wsUrl, userDataDir };
   } catch (err) {
     // The temp profile this call created is ours to remove, whether the spawn
@@ -87,7 +128,7 @@ export async function cleanupChrome(chrome) {
     // ignore
   }
   try {
-    await Deno.remove(chrome.userDataDir, { recursive: true });
+    await rm(chrome.userDataDir, { recursive: true, force: true });
   } catch {
     // ignore
   }
@@ -109,7 +150,7 @@ export async function cleanupChrome(chrome) {
 // failure attached as context, never replaced.
 //
 // Limits that are stated rather than papered over:
-//   * `Deno.remove` cannot be cancelled. Racing it against a deadline reports a
+//   * `fs.rm` cannot be cancelled. Racing it against a deadline reports a
 //     named failure and leaves the deletion UNCONFIRMED; it does not stop the IO.
 //   * A SIGKILL is a request, not a fact. If the child is still unresolved after
 //     the second bounded wait, that is reported and NOT claimed as cleaned up.
@@ -132,8 +173,7 @@ export class CdpTeardownError extends Error {
 // Killing an already-reaped child and removing an already-absent profile are the
 // normal success end of a race, not failures.
 function alreadyGone(err) {
-  return err instanceof Deno.errors.BadResource ||
-    err instanceof Deno.errors.NotFound;
+  return err?.code === "ESRCH" || err?.code === "ENOENT";
 }
 
 // Bounded wait shared by the reap and the removal. The deadline is created
@@ -227,7 +267,7 @@ async function removeProfile(dir, boundMs, remove) {
     if (outcome.status === "timeout") {
       failures.push(
         `profile ${dir} was not confirmed removed within ${boundMs}ms ` +
-          `(Deno.remove cannot be cancelled, so its deletion is UNCONFIRMED)`,
+          `(fs.rm cannot be cancelled, so its deletion is UNCONFIRMED)`,
       );
       return { confirmable: false, failures };
     }
@@ -250,7 +290,7 @@ async function removeProfile(dir, boundMs, remove) {
 // has none of its own), so a cleanup problem can never hide the real one.
 export async function teardownChrome(
   chrome,
-  { primaryError = null, boundMs = CDP_TEARDOWN_BOUND_MS, remove = Deno.remove } = {},
+  { primaryError = null, boundMs = CDP_TEARDOWN_BOUND_MS, remove = rm } = {},
 ) {
   const target = chrome ?? {};
   const reap = await reapChild(target.child ?? null, boundMs);

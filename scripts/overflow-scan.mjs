@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-run --allow-net --allow-env
+#!/usr/bin/env node
 // Cheap automated mobile-overflow scan for the mobile + desktop parity invariant.
 //
 // A fast sweep that loads each demo and checks only
@@ -34,22 +34,32 @@
 // sidecar is a separate decision.
 //
 // Usage:
-//   deno task overflow-scan --sample 60          # spread across milestones
-//   deno task overflow-scan --milestone v153
-//   deno task overflow-scan --all                # every built demo (slow)
-//   deno task overflow-scan --sample 60 --merge  # write needs-review into sidecar
-//   deno task overflow-scan --concepts --sample 40 --classes both
-//   deno task overflow-scan --concepts --milestone v151 --stride 3 --classes both
+//   npm run overflow-scan -- --sample 60          # spread across milestones
+//   npm run overflow-scan -- --milestone v153
+//   npm run overflow-scan -- --all                # every built demo (slow)
+//   npm run overflow-scan -- --sample 60 --merge  # write needs-review into sidecar
+//   npm run overflow-scan -- --concepts --sample 40 --classes both
+//   npm run overflow-scan -- --concepts --milestone v151 --stride 3 --classes both
 //
 // Without --base the harness picks a FREE port, so concurrent lanes cannot
 // collide. With --base it honours the port exactly and aborts if something else
 // already holds it — measuring another lane's server is never a useful result
 // (beads chrome-platform-showcase-bn2 and -7b0).
 
+import { createServer } from "node:net";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
-import { cdpConnection, cleanupChrome, launchChrome, openPageSession } from "./lib/cdp.mjs";
+import {
+  cdpConnection,
+  cleanupChrome,
+  launchChrome,
+  openPageSession,
+  spawnChild,
+} from "./lib/cdp.mjs";
 
-const args = [...Deno.args];
+const args = [...process.argv.slice(2)];
 function flag(name) {
   const i = args.indexOf(name);
   if (i < 0) return null;
@@ -81,13 +91,13 @@ const classList = classesArg === "both"
   : classesArg.split(",").map((c) => c.trim()).filter((c) => CLASSES[c]);
 if (!classList.length) {
   console.error("--classes must be mobile, desktop or both");
-  Deno.exit(2);
+  process.exit(2);
 }
 if (concepts && doMerge) {
   console.error(
     "--merge is not available with --concepts: the sidecar is keyed by feature folder. Concept results go to reports/responsive/concept-overflow-scan.json.",
   );
-  Deno.exit(2);
+  process.exit(2);
 }
 // Feature mode also refuses --merge while the sidecar's existing records predate the
 // layout-viewport signal (bead ayg). The signal is right and stays; what must not
@@ -102,23 +112,27 @@ if (doMerge && !concepts) {
     "--merge is disabled for the feature-mode sweep until the ayg re-verification wave lands.\n" +
       "The measured signal is correct (layout viewport), but the existing sidecar records predate it, so a bulk write\n" +
       "would flip ok -> needs-review/broken for pages no caller touched and fail every lane's check-routes gate.\n" +
-      "Record a specific demo you are actually working on with: deno task responsive-check <id> --merge",
+      "Record a specific demo you are actually working on with: npm run responsive-check <id> --merge",
   );
-  Deno.exit(2);
+  process.exit(2);
 }
 
 // Concept pages: any v<N>/<feature>/<concept>/index.html.
 async function conceptPages() {
   const pages = [];
-  for await (const release of Deno.readDir(REPO_ROOT)) {
-    if (!release.isDirectory || !/^v\d+$/.test(release.name)) continue;
-    for await (const feature of Deno.readDir(`${REPO_ROOT}/${release.name}`)) {
-      if (!feature.isDirectory) continue;
-      for await (const concept of Deno.readDir(`${REPO_ROOT}/${release.name}/${feature.name}`)) {
-        if (!concept.isDirectory) continue;
+  for (const release of await readdir(REPO_ROOT, { withFileTypes: true })) {
+    if (!release.isDirectory() || !/^v\d+$/.test(release.name)) continue;
+    for (const feature of await readdir(`${REPO_ROOT}/${release.name}`, { withFileTypes: true })) {
+      if (!feature.isDirectory()) continue;
+      for (
+        const concept of await readdir(`${REPO_ROOT}/${release.name}/${feature.name}`, {
+          withFileTypes: true,
+        })
+      ) {
+        if (!concept.isDirectory()) continue;
         const rel = `${release.name}/${feature.name}/${concept.name}`;
         try {
-          await Deno.stat(`${REPO_ROOT}/${rel}/index.html`);
+          await stat(`${REPO_ROOT}/${rel}/index.html`);
           pages.push(rel);
         } catch {
           // not a demo folder
@@ -143,7 +157,7 @@ if (concepts) {
     console.error(
       "Concept mode needs a scope: --all, --milestone v<N>, --sample <n> or --stride <n> (3,893 pages is a long run).",
     );
-    Deno.exit(2);
+    process.exit(2);
   }
 } else if (all) targets = manifest.map((m) => m.id);
 else if (milestone) {
@@ -153,11 +167,11 @@ else if (milestone) {
   targets = manifest.filter((_, i) => i % step === 0).slice(0, sampleN).map((m) => m.id);
 } else {
   console.error("Specify --all, --milestone v<N>, --sample <n>, or --concepts with one of those.");
-  Deno.exit(2);
+  process.exit(2);
 }
 if (!targets.length) {
   console.error("No matching built demos.");
-  Deno.exit(2);
+  process.exit(2);
 }
 
 // ── Whole-run deadline ───────────────────────────────────────────────────────
@@ -186,21 +200,19 @@ console.log(
 // ── Server guards (bn2 / 7b0 port collision & identity verification) ─────────
 let serverChild = null;
 
+// Bind-and-release, the way the server will bind (all interfaces).
 function portIsFree(port) {
-  try {
-    const listener = Deno.listen({ port });
-    listener.close();
-    return true;
-  } catch (e) {
-    if (e instanceof Deno.errors.AddrInUse) return false;
-    throw e;
-  }
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", (e) => (e.code === "EADDRINUSE" ? resolve(false) : reject(e)));
+    probe.listen(port, () => probe.close(() => resolve(true)));
+  });
 }
 
-function findFreePort() {
+async function findFreePort() {
   for (let i = 0; i < 64; i++) {
     const port = 3400 + Math.floor(Math.random() * 600);
-    if (portIsFree(port)) return port;
+    if (await portIsFree(port)) return port;
   }
   throw new Error("no free port found in 3400-3999 after 64 attempts");
 }
@@ -231,7 +243,7 @@ async function bootServer() {
     return;
   }
   const requested = explicitBase ? Number(new URL(base).port) || 3000 : null;
-  if (requested !== null && !portIsFree(requested)) {
+  if (requested !== null && !(await portIsFree(requested))) {
     throw new Error(
       `port ${requested} is already in use, so this run would have measured whatever ` +
         `is listening there instead of this worktree.\n` +
@@ -239,14 +251,12 @@ async function bootServer() {
         `server deliberately with --base http://localhost:${requested} --no-server.`,
     );
   }
-  const port = requested ?? findFreePort();
+  const port = requested ?? await findFreePort();
   base = `http://localhost:${port}`;
-  serverChild = new Deno.Command("deno", {
-    args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
-    env: { PORT: String(port) },
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
+  serverChild = spawnChild(process.execPath, ["server.ts"], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: ["ignore", "ignore", "ignore"],
+  });
 
   for (let i = 0; i < 40; i++) {
     try {
@@ -295,7 +305,7 @@ try {
       // ignore
     }
   }
-  Deno.exit(2);
+  process.exit(2);
 }
 
 const PROBE =
@@ -526,9 +536,9 @@ try {
   }
 
   const dir = `${REPO_ROOT}/reports/responsive`;
-  await Deno.mkdir(dir, { recursive: true });
+  await mkdir(dir, { recursive: true });
   const reportPath = concepts ? `${dir}/concept-overflow-scan.json` : `${dir}/overflow-scan.json`;
-  await Deno.writeTextFile(
+  await writeFile(
     reportPath,
     JSON.stringify(
       {
@@ -575,23 +585,13 @@ try {
   // cannot write partial results into the sidecar. Do not add that condition now:
   // it would be untested code guarding dead code.
   if (doMerge && Object.keys(update).length) {
-    const tmp = await Deno.makeTempFile({ suffix: ".json" });
-    await Deno.writeTextFile(tmp, JSON.stringify(update, null, 2));
-    await new Deno.Command("deno", {
-      args: [
-        "run",
-        "--allow-read",
-        "--allow-write",
-        "--allow-run",
-        "--allow-env",
-        "scripts/responsive-support.mjs",
-        "merge",
-        tmp,
-      ],
-      stdout: "inherit",
-      stderr: "inherit",
-    }).spawn().status;
-    await Deno.remove(tmp).catch(() => {});
+    const tmp = join(await mkdtemp(join(tmpdir(), "support-merge-")), "update.json");
+    await writeFile(tmp, JSON.stringify(update, null, 2));
+    await spawnChild(process.execPath, ["scripts/responsive-support.mjs", "merge", tmp], {
+      cwd: REPO_ROOT,
+      stdio: "inherit",
+    }).status;
+    await rm(dirname(tmp), { recursive: true, force: true }).catch(() => {});
   }
 
   // Last, so a partial run still records the pages it did measure: the rows above
@@ -620,4 +620,4 @@ try {
   }
 }
 
-Deno.exit(deadlineExit ? 1 : 0);
+process.exit(deadlineExit ? 1 : 0);

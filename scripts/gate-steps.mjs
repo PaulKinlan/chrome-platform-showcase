@@ -1,7 +1,7 @@
 // The gate plan — ONE ordered list, the source of truth for both tiers.
 //
-//   deno task check            → the FULL gate: every step below, in order.
-//   deno task check:affected   → the FAST gate: the `static` steps plus the
+//   npm run check              → the FULL gate: every step below, in order.
+//   npm run check:affected     → the FAST gate: the `static` steps plus the
 //                                `affected` steps that scripts/affected-tests.mjs
 //                                selects for the change being tested.
 //
@@ -22,7 +22,7 @@
 //   id    stable identifier — this is what affected-tests.mjs rules name, and
 //         what the runner prints. Keep it equal to the task name unless the
 //         task takes an argument (see responsive-support-report).
-//   task  deno.json task that runs the step.
+//   task  package.json script that runs the step.
 //   args  extra arguments appended to that task's command.
 //   tier  "static"   always runs, in both the fast and the full gate.
 //         "affected" runs when the change selects it; always runs in the full gate.
@@ -38,20 +38,19 @@ export const GATE_STEPS = [
     id: "typecheck",
     task: "typecheck",
     tier: "static",
-    what: "deno check server.ts, the Worker entry and the two gate-side scripts",
+    what: "tsc: server.ts, the Worker entry and the two gate-side scripts",
   },
-  { id: "fmt-check", task: "fmt-check", tier: "static", what: "deno fmt --check" },
+  {
+    id: "fmt-check",
+    task: "fmt-check",
+    tier: "static",
+    what: "dprint check (the formatter deno fmt used)",
+  },
   {
     id: "test-gate-parity",
     task: "test-gate-parity",
     tier: "static",
     what: "local gate vs CI parity + every suite is named by a task",
-  },
-  {
-    id: "test-gate-fixture-matrix",
-    task: "test-gate-fixture-matrix",
-    tier: "static",
-    what: "entrypoint/parity spoof fixtures run the real guard in temp copies",
   },
   {
     id: "test-cdp-cleanup",
@@ -60,16 +59,16 @@ export const GATE_STEPS = [
     what: "strict CDP teardown is bounded, fail-visible and never masks the primary error",
   },
   {
-    id: "test-run-gate-plan",
-    task: "test-run-gate-plan",
-    tier: "static",
-    what: "the declared gate plan is the plan that is selected and executed (stub harness)",
-  },
-  {
     id: "test-affected-tests",
     task: "test-affected-tests",
     tier: "static",
     what: "the affected-file map's own guards (fail-closed, no orphaned suite)",
+  },
+  {
+    id: "test:unit",
+    task: "test:unit",
+    tier: "static",
+    what: "unit suites in tests/unit (node --test)",
   },
   {
     id: "check-routes",
@@ -176,7 +175,7 @@ export const GATE_STEPS = [
     id: "test-worker-platform",
     task: "test-worker-platform",
     tier: "affected",
-    what: "Cloudflare Worker host seams (no direct Deno host APIs, KV adapter, asset staging)",
+    what: "Cloudflare Worker host seams (no direct host APIs, KV adapter, asset staging)",
   },
   {
     id: "audit-strict",

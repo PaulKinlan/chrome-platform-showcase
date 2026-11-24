@@ -168,14 +168,14 @@ delete existing ones):
   `v<N>/<feature-slug>`, existing demos default to `untested`), merged into the route manifest by
   `scripts/lib/manifest.mjs`.
 - **Harness + gate commands:**
-  - `deno task responsive-check <id|--sample N|--milestone vN> --merge` — mobile ≈360×740 DPR3
+  - `npm run responsive-check -- <id|--sample N|--milestone vN> --merge` — mobile ≈360×740 DPR3
     touch + desktop ≈1280×800; asserts no horizontal overflow + console/network clean, screenshots
     both classes, writes `ok`/`broken` (device-unavailable = `blocked`, never a pass) into the
     sidecar.
-  - `deno task overflow-scan --sample N --merge` — cheap mobile-overflow seed → `needs-review`
+  - `npm run overflow-scan -- --sample N --merge` — cheap mobile-overflow seed → `needs-review`
     (never `ok`).
-  - `deno task responsive-support report` — mobile/desktop coverage denominators.
-  - `deno task check-routes` — route + parity gate: reports coverage and FAILS on a demo recorded
+  - `npm run responsive-support -- report` — mobile/desktop coverage denominators.
+  - `npm run check-routes` — route + parity gate: reports coverage and FAILS on a demo recorded
     broken on a supported class, a touched demo left untested/broken on a supported class, a
     non-monotonic support regression, or a touched demo with an empty `guidanceConsulted`.
 - **Guidance source of record:** `MODERN_WEB_GUIDANCE.md` (canonical skill `modern-web-guidance`,
@@ -197,7 +197,7 @@ browser pass is blocked rather than downgraded to a different browser tool. Cove
 > For milestone **v<N>**, walk every concept page (`v<N>/<feature>/<concept>/index.html`). **Skip
 > any page that already has a sibling `_questions.json`** — idempotent resume. For each remaining
 > page: read its HTML, read the feature index, fetch `chromestatus.com/api/v0/features/<id>` (strip
-> the `)]}'` prefix) and the spec if linked. Start the local server (`deno task start`) in the
+> the `)]}'` prefix) and the spec if linked. Start the local server (`npm run start`) in the
 > background, then use `chrome-devtools-mcp` to navigate to the concept page and test its actual
 > interactivity/changes in Chrome or Chrome Canary. Click/type/drag every visible control, verify
 > the live DOM/readout changes after each interaction, inspect console and network logs, and open
@@ -243,8 +243,8 @@ add and commit is minimal, and never `git add -A`. If a push races, the agent sh
 ### Verify after every pass
 
 ```bash
-deno fmt        # NOT --check — see fmt gotcha below; this normalises the new JSON
-deno check server.ts
+npm run fmt        # NOT --check — see fmt gotcha below; this normalises the new JSON
+npm run typecheck
 git add -A && git commit -m "fmt" && git push   # if fmt changed anything
 ```
 
@@ -309,9 +309,9 @@ conformance coverage**: v140 (2!), v130, v131, v147, v150.
   quota. On 2026-06-01 ~13 subagents bricked with "out of extra usage". Run in smaller batches (4–6
   milestones) and watch the quota, or accept that a sweep takes multiple sessions. Because the
   passes are idempotent (skip-if-file-exists), re-launching after a reset just fills the gaps.
-- **fmt exclude doesn't catch the JSON.** `deno.json`'s `fmt.exclude` has `v[0-9]*/**/*.json` but it
+- **fmt exclude doesn't catch the JSON.** `dprint.json`'s `excludes` has `v[0-9]*/**/*.json` but it
   does not reliably match `_questions.json` / `conformance.json`, so freshly-written files trip
-  `deno fmt --check`. Don't fight it — just run plain `deno fmt` after a pass to normalise them,
+  `npm run fmt-check`. Don't fight it — just run plain `npm run fmt` after a pass to normalise them,
   then commit. (If you want a real fix: investigate why the glob misses these names, or add explicit
   `**/_questions.json` + `**/conformance.json` patterns and confirm `--check` goes green.)
 - **Stream watchdog stalls.** Long-running subagents occasionally stall with "no progress for 600s".

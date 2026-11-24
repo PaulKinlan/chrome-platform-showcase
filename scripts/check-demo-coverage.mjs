@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-net --allow-env
+#!/usr/bin/env node
 // "I never want to be in a state where there is no demo." — Paul, 2026-08-25
 //
 // Every feature listed on a milestone page must resolve to a demo somewhere:
@@ -11,6 +11,7 @@
 // runs alongside `check-routes` before a push rather than inside `deno task
 // check`. A fetch failure fails the gate: an unverifiable claim is not a pass.
 
+import { readdir, stat } from "node:fs/promises";
 import { getChannels, getMilestoneFeatures, slugify } from "../lib/chromestatus.ts";
 import { buildIndex } from "./build-demo-index.mjs";
 
@@ -22,8 +23,8 @@ milestones.add(channels.stable.mstone - 1);
 milestones.add(channels.stable.mstone);
 milestones.add(channels.beta.mstone);
 milestones.add(channels.dev.mstone);
-for await (const entry of Deno.readDir(".")) {
-  if (entry.isDirectory && /^v\d+$/.test(entry.name)) milestones.add(Number(entry.name.slice(1)));
+for (const entry of await readdir(".", { withFileTypes: true })) {
+  if (entry.isDirectory() && /^v\d+$/.test(entry.name)) milestones.add(Number(entry.name.slice(1)));
 }
 
 const missing = [];
@@ -38,7 +39,7 @@ for (const m of [...milestones].sort((a, b) => b - a)) {
   } catch (err) {
     console.error(`FAIL — could not read the Chrome ${m} listing: ${err.message}`);
     console.error("  Coverage is unverified, which this gate treats as a failure.");
-    Deno.exit(1);
+    process.exit(1);
   }
   const seen = new Set();
   for (const group of feats.groups) {
@@ -49,7 +50,7 @@ for (const m of [...milestones].sort((a, b) => b - a)) {
       listed++;
       let own = false;
       try {
-        await Deno.stat(`./v${m}/${slug}/index.html`);
+        await stat(`./v${m}/${slug}/index.html`);
         own = true;
       } catch { /* not built here */ }
       if (own) sameMilestone++;
@@ -73,7 +74,7 @@ if (missing.length) {
     "\nBuild a demo for each, or — if the feature is already covered under another " +
       "name — link its folder to the feature id so demo-index.json can find it.",
   );
-  Deno.exit(1);
+  process.exit(1);
 }
 
 console.log("PASS — every listed feature resolves to a demo.");

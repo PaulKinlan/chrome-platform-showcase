@@ -1,10 +1,10 @@
-// Conformance assertion runner — migrated in place to native Deno.test (Stage 1 of
+// Conformance assertion runner — migrated in place to node:test (Stage 1 of
 // the dty proposal, bead 0a0).
 //
 // Same file path, same task id (`test-conformance-runner`), same ordered gate step,
 // same subject: the browser-shared runConformanceAssertion. What changed is the
 // wrapper around the assertions — eight top-level awaits with a hand-rolled
-// `assert()` that threw became eight named Deno.test cases, so a failure now names
+// `assert()` that threw became eight named node:test cases, so a failure now names
 // the case that failed and the run reports a real count.
 //
 // The legacy output contract (`PASS — shared conformance assertion runner` as the
@@ -16,6 +16,7 @@
 //
 // Nothing here needs a permission: it imports a local module and compares values,
 // so the task grants the child process none (proven by running it with no flags).
+import { test } from "node:test";
 import { runConformanceAssertion } from "../public/conformance-runner.js";
 
 function assert(condition, message) {
@@ -27,7 +28,7 @@ const environment = {
   ExactFeature: { method() {} },
 };
 
-Deno.test("ok — exact CSS syntax passes", async () => {
+test("ok — exact CSS syntax passes", async () => {
   const cssPass = await runConformanceAssertion(
     "css-supports",
     "animation-trigger: --demo play",
@@ -37,7 +38,7 @@ Deno.test("ok — exact CSS syntax passes", async () => {
   assert(cssPass.ok && !cssPass.blocked, "exact CSS syntax should pass");
 });
 
-Deno.test("ok — invalid CSS syntax fails without blocking", async () => {
+test("ok — invalid CSS syntax fails without blocking", async () => {
   const cssFail = await runConformanceAssertion(
     "css-supports",
     "animation-trigger: view() play",
@@ -47,7 +48,7 @@ Deno.test("ok — invalid CSS syntax fails without blocking", async () => {
   assert(!cssFail.ok && !cssFail.blocked, "invalid CSS syntax should fail");
 });
 
-Deno.test("ok — dotted existence check passes", async () => {
+test("ok — dotted existence check passes", async () => {
   const exists = await runConformanceAssertion(
     "exists",
     "ExactFeature.method",
@@ -57,7 +58,7 @@ Deno.test("ok — dotted existence check passes", async () => {
   assert(exists.ok, "dotted existence check should pass");
 });
 
-Deno.test("ok — typeof check reports its result", async () => {
+test("ok — typeof check reports its result", async () => {
   const type = await runConformanceAssertion(
     "typeof",
     "ExactFeature.method",
@@ -67,17 +68,17 @@ Deno.test("ok — typeof check reports its result", async () => {
   assert(type.ok && type.detail === "typeof = function", "typeof check should report its result");
 });
 
-Deno.test("ok — manual checks stay blocked", async () => {
+test("ok — manual checks stay blocked", async () => {
   const manual = await runConformanceAssertion("manual", "Requires Chrome 151 on device");
   assert(!manual.ok && manual.blocked, "manual checks must remain blocked");
 });
 
-Deno.test("ok — truthy scripts pass", async () => {
+test("ok — truthy scripts pass", async () => {
   const script = await runConformanceAssertion("script", "1 + 1 === 2");
   assert(script.ok, "truthy scripts should pass");
 });
 
-Deno.test("ok — throws checks report the thrown type", async () => {
+test("ok — throws checks report the thrown type", async () => {
   const throws = await runConformanceAssertion(
     "throws",
     "(() => { throw new TypeError('expected') })()",

@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write
+#!/usr/bin/env node
 // Write the lineage note into every feature index page that shares its
 // ChromeStatus feature id with another milestone.
 //
@@ -10,14 +10,16 @@
 //
 // Routes are durable: nothing is moved or deleted, the note is added in place.
 // Idempotent — an existing note is replaced, so this can be re-run after
-// `deno task feature-lineage`.
+// `npm run feature-lineage`.
 //
-// Usage: deno task apply-lineage [--check]
+// Usage: npm run apply-lineage [--check]
+
+import { readFile, writeFile } from "node:fs/promises";
 
 const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
-const CHECK = Deno.args.includes("--check");
+const CHECK = process.argv.slice(2).includes("--check");
 
-const lineage = JSON.parse(await Deno.readTextFile(`${ROOT}/feature-lineage.json`));
+const lineage = JSON.parse(await readFile(`${ROOT}/feature-lineage.json`, "utf8"));
 
 const NOTE_RE = /\n[ \t]*<aside class="lineage-note"[\s\S]*?<\/aside>\n/;
 
@@ -80,7 +82,7 @@ for (const [id, feature] of Object.entries(lineage.features)) {
     const path = `${ROOT}/${self.dir}/index.html`;
     let html;
     try {
-      html = await Deno.readTextFile(path);
+      html = await readFile(path, "utf8");
     } catch {
       missingCrumbs.push(`${self.dir} (no index.html)`);
       continue;
@@ -103,7 +105,7 @@ for (const [id, feature] of Object.entries(lineage.features)) {
       stale.push(self.dir);
       continue;
     }
-    await Deno.writeTextFile(path, next);
+    await writeFile(path, next);
     written++;
   }
 }
@@ -117,12 +119,12 @@ if (CHECK) {
       `${stale.length} feature pages have a missing or out-of-date lineage note:\n  ` +
         stale.slice(0, 20).join("\n  ") +
         (stale.length > 20 ? `\n  … and ${stale.length - 20} more` : "") +
-        `\nRun: deno task feature-lineage && deno task apply-lineage`,
+        `\nRun: npm run feature-lineage && npm run apply-lineage`,
     );
-    Deno.exit(1);
+    process.exit(1);
   }
   console.log("every duplicated feature page carries its lineage note");
 } else {
   console.log(`lineage note written to ${written} feature pages`);
 }
-if (missingCrumbs.length) Deno.exit(1);
+if (missingCrumbs.length) process.exit(1);

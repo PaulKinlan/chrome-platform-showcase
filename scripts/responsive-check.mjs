@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-run --allow-net --allow-env
+#!/usr/bin/env node
 // Responsive-check harness for the mobile + desktop parity invariant.
 //
 // Exercises each published feature demo at TWO device classes and asserts the
@@ -21,11 +21,11 @@
 // fallback is the correct constrained-class result.
 //
 // Usage:
-//   deno task responsive-check --sample 12            # representative spread
-//   deno task responsive-check v153/some-feature ...  # explicit ids
-//   deno task responsive-check --milestone v153       # a whole milestone
-//   deno task responsive-check --sample 12 --merge     # fold results into sidecar
-//   deno task responsive-check --base http://localhost:4000 --no-server  # reuse a server
+//   npm run responsive-check -- --sample 12            # representative spread
+//   npm run responsive-check v153/some-feature ...  # explicit ids
+//   npm run responsive-check -- --milestone v153       # a whole milestone
+//   npm run responsive-check -- --sample 12 --merge     # fold results into sidecar
+//   npm run responsive-check -- --base http://localhost:4000 --no-server  # reuse a server
 //
 // Without --base the harness picks a FREE port, so concurrent lanes cannot
 // collide. With --base it honours the port exactly and aborts if something else
@@ -36,15 +36,19 @@
 // reports/responsive/last-run.json. With --merge it also updates
 // responsive-support.json (ok/broken only; blocked never flips a class).
 
+import { createServer } from "node:net";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { buildFromDisk, REPO_ROOT } from "./lib/manifest.mjs";
-import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
+import { cdpConnection, cleanupChrome, launchChrome, spawnChild } from "./lib/cdp.mjs";
 
 const CLASSES = {
   desktop: { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false },
   mobile: { width: 360, height: 740, deviceScaleFactor: 3, mobile: true },
 };
 
-const args = [...Deno.args];
+const args = [...process.argv.slice(2)];
 function flag(name, { boolean = false } = {}) {
   const i = args.indexOf(name);
   if (i < 0) return null;
@@ -113,11 +117,11 @@ if (explicitIds.length) {
   targets = manifest.filter((_, i) => i % step === 0).slice(0, sampleN);
 } else {
   console.error("Specify ids, --milestone v<N>, --next <n>, or --sample <n>.");
-  Deno.exit(2);
+  process.exit(2);
 }
 if (!targets.length) {
   console.error("No matching built demos.");
-  Deno.exit(2);
+  process.exit(2);
 }
 
 // ── boot a local server unless told to reuse one ──────────────────────────────
@@ -141,24 +145,22 @@ if (!targets.length) {
 //      --no-server, where the caller may point at the wrong server by hand.
 let serverChild = null;
 
+// Bind-and-release, the way the server will bind (all interfaces).
 function portIsFree(port) {
-  try {
-    const listener = Deno.listen({ port });
-    listener.close();
-    return true;
-  } catch (e) {
-    if (e instanceof Deno.errors.AddrInUse) return false;
-    throw e;
-  }
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", (e) => (e.code === "EADDRINUSE" ? resolve(false) : reject(e)));
+    probe.listen(port, () => probe.close(() => resolve(true)));
+  });
 }
 
 // Only used when the caller did not pin a port. There is a small window between
 // the probe closing and the server binding; guard 2 catches the consequence if
 // anything slips into it.
-function findFreePort() {
+async function findFreePort() {
   for (let i = 0; i < 64; i++) {
     const port = 3400 + Math.floor(Math.random() * 600);
-    if (portIsFree(port)) return port;
+    if (await portIsFree(port)) return port;
   }
   throw new Error("no free port found in 3400-3999 after 64 attempts");
 }
@@ -190,7 +192,7 @@ async function bootServer() {
     return;
   }
   const requested = explicitBase ? Number(new URL(base).port) || 3000 : null;
-  if (requested !== null && !portIsFree(requested)) {
+  if (requested !== null && !(await portIsFree(requested))) {
     throw new Error(
       `port ${requested} is already in use, so this run would have measured whatever ` +
         `is listening there instead of this worktree.\n` +
@@ -198,14 +200,12 @@ async function bootServer() {
         `server deliberately with --base http://localhost:${requested} --no-server.`,
     );
   }
-  const port = requested ?? findFreePort();
+  const port = requested ?? await findFreePort();
   base = `http://localhost:${port}`;
-  serverChild = new Deno.Command("deno", {
-    args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
-    env: { PORT: String(port) },
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
+  serverChild = spawnChild(process.execPath, ["server.ts"], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: ["ignore", "ignore", "ignore"],
+  });
   // wait for readiness
   for (let i = 0; i < 40; i++) {
     try {
@@ -459,8 +459,8 @@ async function checkPage(conn, url, cls) {
           const dir = `${REPO_ROOT}/reports/responsive/${
             url.replace(base, "").replace(/^\/+|\/+$/g, "") || "root"
           }`;
-          await Deno.mkdir(dir, { recursive: true });
-          await Deno.writeFile(
+          await mkdir(dir, { recursive: true });
+          await writeFile(
             `${dir}/${cls}.png`,
             Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0)),
           );
@@ -516,7 +516,7 @@ async function main() {
         // ignore
       }
     }
-    Deno.exit(2);
+    process.exit(2);
   }
   let chrome;
   try {
@@ -528,7 +528,7 @@ async function main() {
     for (const t of targets) blockedReport[t.id] = { desktop: "blocked", mobile: "blocked" };
     await writeReport(blockedReport, {});
     if (serverChild) serverChild.kill();
-    Deno.exit(1);
+    process.exit(1);
   }
   const conn = await cdpConnection(chrome.wsUrl);
 
@@ -589,31 +589,21 @@ async function main() {
   }
 
   if (doMerge && Object.keys(sidecarUpdate).length) {
-    const tmp = await Deno.makeTempFile({ suffix: ".json" });
-    await Deno.writeTextFile(tmp, JSON.stringify(sidecarUpdate, null, 2));
-    const p = new Deno.Command("deno", {
-      args: [
-        "run",
-        "--allow-read",
-        "--allow-write",
-        "--allow-run",
-        "--allow-env",
-        "scripts/responsive-support.mjs",
-        "merge",
-        tmp,
-      ],
-      stdout: "inherit",
-      stderr: "inherit",
-    }).spawn();
+    const tmp = join(await mkdtemp(join(tmpdir(), "support-merge-")), "update.json");
+    await writeFile(tmp, JSON.stringify(sidecarUpdate, null, 2));
+    const p = spawnChild(process.execPath, ["scripts/responsive-support.mjs", "merge", tmp], {
+      cwd: REPO_ROOT,
+      stdio: "inherit",
+    });
     await p.status;
-    await Deno.remove(tmp).catch(() => {});
+    await rm(dirname(tmp), { recursive: true, force: true }).catch(() => {});
   }
 }
 
 async function writeReport(summary, full) {
   const dir = `${REPO_ROOT}/reports/responsive`;
-  await Deno.mkdir(dir, { recursive: true });
-  await Deno.writeTextFile(
+  await mkdir(dir, { recursive: true });
+  await writeFile(
     `${dir}/last-run.json`,
     JSON.stringify(
       {
@@ -631,4 +621,4 @@ async function writeReport(summary, full) {
 }
 
 await main();
-Deno.exit(0);
+process.exit(0);

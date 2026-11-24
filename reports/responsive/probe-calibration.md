@@ -40,7 +40,7 @@ value) so the reference is never implicit.
 A page that the old signal called clean and the new one must call broken:
 
 ```bash
-deno task responsive-check v131/nested-pseudo-elements-styling --no-server
+npm run responsive-check -- v131/nested-pseudo-elements-styling --no-server
 ```
 
 ```
@@ -94,5 +94,5 @@ fixes its page.
 ## Scope note
 
 This is a report, not a CI test: the proof needs a real Chrome and a served page, which
-`deno task check` deliberately does not require. If a headless-browser test gate is wanted later,
-this file names the two pages and the exact expected verdicts to assert.
+`npm run check` deliberately does not require. If a headless-browser test gate is wanted later, this
+file names the two pages and the exact expected verdicts to assert.

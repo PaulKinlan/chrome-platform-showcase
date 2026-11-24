@@ -18,10 +18,10 @@
 // reject a value outside the grammar the fixture actually uses, with a 4xx, and
 // never 500.
 //
-// Migrated in place to named Deno.test cases (Stage 6 of the dty proposal, bead
+// Migrated in place to named node:test cases (Stage 6 of the dty proposal, bead
 // dty.6): same file path, same task id `test-header-grammar`, same ordered gate
 // step, same seven subjects and the same assertions — the custom `section()`
-// registry, its trailing loop and the legacy `Deno.exit(1)` branch are gone, so a
+// registry, its trailing loop and the legacy `process.exit(1)` branch are gone, so a
 // failure names the sidecar behaviour it broke and Deno's runner owns the exit code.
 //
 // The child needs NO permission (the two sidecar modules are imported, not read), so
@@ -38,8 +38,9 @@
 // modules directly. Only the module graph this suite loads shrinks; the subjects,
 // assertions, task id, gate step and sidecar mappings are unchanged.
 //
-// Run: deno task test-header-grammar
+// Run: npm run test-header-grammar
 
+import { test } from "node:test";
 import { handleFeatureRequest as handlePolicyEchoFeatureRequest } from "../v151/permission-policy-merger-direct-sockets-private-with-local-network-and-loopback-/_server.ts";
 import { handleFeatureRequest as handleDelayedEchoFeatureRequest } from "../v151/resource-timing-add-spec-compliant-service-worker-router-timing-fields/_server.ts";
 import { handleFeatureRequest as handleUaChMigrationFeatureRequest } from "../v145/reduced-user-agent-strings-by-default/_server.ts";
@@ -79,7 +80,7 @@ const EXPECTED_BAD_STATUS = 400;
 // ---------------------------------------------------------------------------
 // Server-Timing: desc="<label>"
 
-Deno.test("ok — delayed-echo keeps the demo's own label working", async () => {
+test("ok — delayed-echo keeps the demo's own label working", async () => {
   const res = await callDelayedEchoSidecar(DELAY_SUB, "?label=run-1759988000000-1&delay=0");
   assert(res.status === 200, `a normal demo label should still work, got ${res.status}`);
   const timing = res.headers.get("server-timing");
@@ -90,7 +91,7 @@ Deno.test("ok — delayed-echo keeps the demo's own label working", async () => 
   );
 });
 
-Deno.test("ok — delayed-echo never 500s on a CR/LF label", async () => {
+test("ok — delayed-echo never 500s on a CR/LF label", async () => {
   const res = await callDelayedEchoSidecar(
     DELAY_SUB,
     `?label=a${CRLF_ENC}X-Injected:%20yes&delay=0`,
@@ -105,7 +106,7 @@ Deno.test("ok — delayed-echo never 500s on a CR/LF label", async () => {
   );
 });
 
-Deno.test("ok — delayed-echo rejects a label that breaks the desc quoted-string", async () => {
+test("ok — delayed-echo rejects a label that breaks the desc quoted-string", async () => {
   const res = await callDelayedEchoSidecar(
     DELAY_SUB,
     `?label=${encodeURIComponent('a", evil;dur=1')}&delay=0`,
@@ -116,7 +117,7 @@ Deno.test("ok — delayed-echo rejects a label that breaks the desc quoted-strin
   );
 });
 
-Deno.test("ok — delayed-echo bounds the label length", async () => {
+test("ok — delayed-echo bounds the label length", async () => {
   const res = await callDelayedEchoSidecar(
     DELAY_SUB,
     `?label=${"l".repeat(4096)}&delay=0`,
@@ -130,7 +131,7 @@ Deno.test("ok — delayed-echo bounds the label length", async () => {
 // ---------------------------------------------------------------------------
 // Permissions-Policy: local-network=(<local>), loopback-network=(<loopback>)
 
-Deno.test("ok — policy-echo keeps the demo's own allowlist values working", async () => {
+test("ok — policy-echo keeps the demo's own allowlist values working", async () => {
   const selfStar = await callPolicyEchoSidecar(
     POLICY_SUB,
     "?local=self&loopback=*&allow=trusted",
@@ -151,7 +152,7 @@ Deno.test("ok — policy-echo keeps the demo's own allowlist values working", as
   );
 });
 
-Deno.test("ok — policy-echo never 500s on a CR/LF value", async () => {
+test("ok — policy-echo never 500s on a CR/LF value", async () => {
   const res = await callPolicyEchoSidecar(
     POLICY_SUB,
     `?local=a${CRLF_ENC}X-Injected:%20yes&loopback=self`,
@@ -166,7 +167,7 @@ Deno.test("ok — policy-echo never 500s on a CR/LF value", async () => {
   );
 });
 
-Deno.test("ok — policy-echo rejects a value that rewrites the demonstrated header", async () => {
+test("ok — policy-echo rejects a value that rewrites the demonstrated header", async () => {
   const res = await callPolicyEchoSidecar(
     POLICY_SUB,
     `?local=${encodeURIComponent("self), loopback-network=(*")}`,
@@ -187,7 +188,7 @@ async function callUaChSidecar(sub, query, headers = {}) {
   return await handleUaChMigrationFeatureRequest(req, sub);
 }
 
-Deno.test("ok — client-hints-echo opts in to the two default high-entropy hints", async () => {
+test("ok — client-hints-echo opts in to the two default high-entropy hints", async () => {
   const res = await callUaChSidecar(UA_CH_SUB, "");
   assert(res && res.status === 200, `expected 200, got ${res?.status}`);
   assert(
@@ -211,7 +212,7 @@ Deno.test("ok — client-hints-echo opts in to the two default high-entropy hint
   assert(res.headers.get("cache-control") === "no-store", "must be no-store");
 });
 
-Deno.test("ok — client-hints-echo parses repeated and comma-split hint params, deduped, invalid dropped", async () => {
+test("ok — client-hints-echo parses repeated and comma-split hint params, deduped, invalid dropped", async () => {
   const res = await callUaChSidecar(
     UA_CH_SUB,
     "?hint=Sec-CH-UA-Arch&hint=Sec-CH-UA-Arch,%20Not-A-Hint",
@@ -227,7 +228,7 @@ Deno.test("ok — client-hints-echo parses repeated and comma-split hint params,
   );
 });
 
-Deno.test("ok — client-hints-echo ?hints=none omits Accept-CH entirely", async () => {
+test("ok — client-hints-echo ?hints=none omits Accept-CH entirely", async () => {
   const res = await callUaChSidecar(UA_CH_SUB, "?hints=none");
   assert(
     res.headers.get("accept-ch") === null,
@@ -241,7 +242,7 @@ Deno.test("ok — client-hints-echo ?hints=none omits Accept-CH entirely", async
   );
 });
 
-Deno.test("ok — client-hints-echo reports missingOptedInHints against the request headers", async () => {
+test("ok — client-hints-echo reports missingOptedInHints against the request headers", async () => {
   const res = await callUaChSidecar(
     UA_CH_SUB,
     "?hint=Sec-CH-UA-Arch&hint=Sec-CH-UA-Model",
@@ -258,7 +259,7 @@ Deno.test("ok — client-hints-echo reports missingOptedInHints against the requ
   );
 });
 
-Deno.test("ok — the v145 sidecar returns null for every path but the echo route", async () => {
+test("ok — the v145 sidecar returns null for every path but the echo route", async () => {
   for (
     const sub of [
       "/reduced-user-agent-strings-by-default/ua-ch-migration",
@@ -298,7 +299,7 @@ async function callReferrerEcho(
   );
 }
 
-Deno.test("ok — the referrer-echo route echoes policy, method, and fetch headers", async () => {
+test("ok — the referrer-echo route echoes policy, method, and fetch headers", async () => {
   const res = await callReferrerEcho(
     "/css-url-request-modifiers/referrer-echo",
     "?policy=strict-origin-when-cross-origin&nonce=1730000000000",
@@ -331,7 +332,7 @@ Deno.test("ok — the referrer-echo route echoes policy, method, and fetch heade
   );
 });
 
-Deno.test("ok — the referrer-echo route defaults policy and empty headers honestly", async () => {
+test("ok — the referrer-echo route defaults policy and empty headers honestly", async () => {
   const res = await callReferrerEcho(
     "/css-url-request-modifiers/referrer-echo",
     "",
@@ -348,7 +349,7 @@ Deno.test("ok — the referrer-echo route defaults policy and empty headers hone
   );
 });
 
-Deno.test("ok — the v150 sidecar returns null for every sibling/asset path", async () => {
+test("ok — the v150 sidecar returns null for every sibling/asset path", async () => {
   for (
     const sub of [
       "/css-url-request-modifiers",

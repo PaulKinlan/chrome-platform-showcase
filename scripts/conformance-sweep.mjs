@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-run --allow-net --allow-env
+#!/usr/bin/env node
 // Conformance sweep — run EVERY feature/concept suite in one real Chrome and
 // record the per-assertion verdicts to reports/conformance-sweep.json.
 //
@@ -25,13 +25,14 @@
 // is treated as real.
 //
 // Usage:
-//   deno run -A scripts/conformance-sweep.mjs                 # boot/reuse localhost:3000
-//   deno run -A scripts/conformance-sweep.mjs --base http://localhost:3000 --no-server
-//   deno run -A scripts/conformance-sweep.mjs --skip-recheck  # pass 1 only (fast, losier)
+//   node scripts/conformance-sweep.mjs                 # boot/reuse localhost:3000
+//   node scripts/conformance-sweep.mjs --base http://localhost:3000 --no-server
+//   node scripts/conformance-sweep.mjs --skip-recheck  # pass 1 only (fast, losier)
 
-import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
+import { readdir, readFile, writeFile } from "node:fs/promises";
+import { cdpConnection, cleanupChrome, launchChrome, spawnChild } from "./lib/cdp.mjs";
 
-const args = [...Deno.args];
+const args = [...process.argv.slice(2)];
 function flag(name, fallback = null) {
   const at = args.indexOf(name);
   if (at < 0) return fallback;
@@ -61,12 +62,10 @@ let serverChild = null;
 if (!(await reachable(`${base}/`))) {
   if (noServer) throw new Error(`${base} is not reachable and --no-server was given`);
   const port = Number(new URL(base).port || 3000);
-  serverChild = new Deno.Command("deno", {
-    args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
-    env: { PORT: String(port) },
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
+  serverChild = spawnChild(process.execPath, ["server.ts"], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: ["ignore", "ignore", "ignore"],
+  });
   for (let i = 0; i < 40; i++) {
     if (await reachable(`${base}/`)) break;
     await new Promise((r) => setTimeout(r, 500));
@@ -80,7 +79,7 @@ const assertionMeta = new Map();
 for await (const entry of walk(".")) {
   if (!entry.endsWith("/conformance.json")) continue;
   try {
-    const suite = JSON.parse(await Deno.readTextFile(entry));
+    const suite = JSON.parse(await readFile(entry, "utf8"));
     for (const assertion of suite.assertions ?? []) {
       assertionMeta.set(assertion.id, {
         test: String(assertion.test ?? "").slice(0, 300),
@@ -93,10 +92,10 @@ for await (const entry of walk(".")) {
   }
 }
 async function* walk(dir) {
-  for await (const entry of Deno.readDir(dir)) {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
     if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
     const path = dir === "." ? entry.name : `${dir}/${entry.name}`;
-    if (entry.isDirectory) {
+    if (entry.isDirectory()) {
       if (/^v\d+$/.test(entry.name) || dir !== ".") yield* walk(path);
     } else if (entry.name === "conformance.json") yield path;
   }
@@ -323,7 +322,7 @@ try {
     instrumentFalsePositives: group(falsePositives),
   };
 
-  await Deno.writeTextFile(outJson, JSON.stringify(report, null, 2) + "\n");
+  await writeFile(outJson, JSON.stringify(report, null, 2) + "\n");
 
   const md = [
     "# Conformance sweep",
@@ -361,7 +360,7 @@ try {
         report.recheckErrors.map((e) => `- \`${e.href}\`: ${e.reason}`).join("\n") + "\n"
       : "",
   ].join("\n");
-  await Deno.writeTextFile("reports/conformance-sweep.md", md);
+  await writeFile("reports/conformance-sweep.md", md);
 
   console.log(
     `conformance-sweep: ${report.totals.assertions} assertions · pass ${report.totals.pass} · fail ${report.totals.fail} · blocked ${report.totals.blocked} · future ${report.totals.future} → after re-check: ${report.totals.realFailures} real fail, ${report.totals.realBlocked} real blocked, ${report.totals.instrumentFalsePositives} instrument false positive · ${report.realFeaturesWithIssues} feature(s) with real issues`,

@@ -18,16 +18,16 @@
 // output, noticing that it exited, refusing a port that already answers, and
 // saying which of the observed things happened without inventing a cause.
 //
-// Run: deno task test-server-boot
+// Run: npm run test-server-boot
 //
-// Migrated in place to ONE native Deno.test case (Stage 29 of the dty proposal,
+// Migrated in place to ONE node:test case (Stage 29 of the dty proposal,
 // bead chrome_platform_showcase-dty.36), under the dty.19 policy that this class
 // of suite is one aggregate case and not one case per section. The fourteen
 // existing top-level sections still run, in their original order, through the
 // same `section`/`asyncSection` helpers, so every label, every inline `FAIL`
 // line, the failing-section counter and both legacy tail lines are unchanged;
-// only the final `Deno.exit(1)` became a named throw, because exiting inside a
-// case kills the test process before Deno can report it.
+// only the final `process.exit(1)` became a named throw, because exiting inside a
+// case kills the test process before the test runner can report it.
 //
 // The other change is teardown. A SIGKILL is a request rather than a fact: the
 // port is only free once the child has actually been reaped, and a listener is
@@ -43,6 +43,9 @@
 // timeout, the reaper or a SIGKILL of this process cannot run a `finally` - and
 // every bounded wait lives well inside the suite's own 20s child deadlines.
 
+import { test } from "node:test";
+import { serve } from "../server/http.ts";
+import { spawnChild } from "./lib/cdp.mjs";
 import {
   appendTail,
   assessReadiness,
@@ -179,7 +182,7 @@ async function closeListener(listener, what) {
 // ONE aggregate case, by the dty.19 policy for this class of suite. The
 // sections below are the original fourteen, in their original order, and they
 // keep printing the same three-space `ok   ` labels and inline `FAIL` lines.
-Deno.test(
+test(
   "the server boot diagnostic contract holds for a real child on a real port",
   async () => {
     section("the captured tail keeps the END of the output, up to the bound", () => {
@@ -263,14 +266,14 @@ Deno.test(
     // port can belong to another lane on this box and make the suite flaky for a
     // reason that has nothing to do with the code under test.
     async function ephemeralPort() {
-      const listener = Deno.serve({ port: 0, hostname: "127.0.0.1" }, () => new Response("probe"));
+      const listener = await serve({ port: 0, hostname: "127.0.0.1" }, () => new Response("probe"));
       const port = listener.addr.port;
       await closeListener(listener, "the ephemeral probe listener");
       return port;
     }
 
     await asyncSection("portIsTaken distinguishes a listener from a free port", async () => {
-      const listener = Deno.serve({ port: 0, hostname: "127.0.0.1" }, () => new Response("here"));
+      const listener = await serve({ port: 0, hostname: "127.0.0.1" }, () => new Response("here"));
       const port = listener.addr.port;
       try {
         assert(await portIsTaken(port), "a bound port must read as taken");
@@ -286,11 +289,10 @@ Deno.test(
     });
 
     await asyncSection("trackBootChild captures output and the exit of a real child", async () => {
-      const child = new Deno.Command("deno", {
-        args: ["eval", 'console.error("boom: child failed"); Deno.exit(3);'],
-        stdout: "piped",
-        stderr: "piped",
-      }).spawn();
+      const child = spawnChild(process.execPath, [
+        "-e",
+        'console.error("boom: child failed"); process.exit(3);',
+      ], { stdio: ["ignore", "pipe", "pipe"] });
       const boot = trackBootChild(child);
       await child.status;
       await new Promise((r) => setTimeout(r, 100)); // let the drains flush
@@ -305,7 +307,7 @@ Deno.test(
         // The bead's mechanism, end to end: hold a port, then start the real server on
         // it exactly as the driver does. Before this change the stderr was thrown away
         // and only "local server did not become ready" survived.
-        const occupier = Deno.serve(
+        const occupier = await serve(
           { port: 0, hostname: "127.0.0.1" },
           () => new Response("occupied"),
         );
@@ -313,12 +315,10 @@ Deno.test(
         let child = null;
         try {
           assert(await portIsTaken(port), "the occupier must be visible to the preflight");
-          child = new Deno.Command("deno", {
-            args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
-            env: { PORT: String(port) },
-            stdout: "piped",
-            stderr: "piped",
-          }).spawn();
+          child = spawnChild(process.execPath, ["server.ts"], {
+            env: { ...process.env, PORT: String(port) },
+            stdio: ["ignore", "pipe", "pipe"],
+          });
           const boot = trackBootChild(child);
           await Promise.race([child.status, new Promise((r) => setTimeout(r, 20000))]);
           assert(boot.exit.exited, "the real server must exit rather than hang on a taken port");
@@ -328,7 +328,7 @@ Deno.test(
           );
           const captured = `${boot.tails.stderr}${boot.tails.stdout}`;
           assert(
-            captured.includes("AddrInUse") || captured.includes("Address already in use"),
+            /AddrInUse|address already in use/i.test(captured),
             `the child's own explanation must be captured, got: ${captured.slice(0, 200)}`,
           );
           const message = describeBootFailure({
@@ -338,7 +338,7 @@ Deno.test(
             stderrTail: boot.tails.stderr,
           });
           assert(
-            message.includes("already in use"),
+            /already in use/i.test(message),
             "the reported failure carries that explanation",
           );
           // The stranger was answering the whole time; readiness must still refuse.
@@ -462,12 +462,10 @@ Deno.test(
         // every drive would break — so the dependency is asserted here rather than
         // discovered in the field.
         const port = await ephemeralPort();
-        const child = new Deno.Command("deno", {
-          args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
-          env: { PORT: String(port) },
-          stdout: "piped",
-          stderr: "piped",
-        }).spawn();
+        const child = spawnChild(process.execPath, ["server.ts"], {
+          env: { ...process.env, PORT: String(port) },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
         const boot = trackBootChild(child);
         try {
           const deadline = Date.now() + 20000;

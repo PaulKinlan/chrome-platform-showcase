@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-run --allow-net --allow-env
+#!/usr/bin/env node
 // Functional acceptance driver for concept demos.
 //
 // "It serves" is not evidence that a demo works. This launches a real headless
@@ -7,16 +7,17 @@
 // clean console execution, and captures screenshot proof before and after interaction.
 //
 // Supports:
-//   deno task drive <spec.mjs> [--base URL]              # Run explicit spec
-//   deno task drive --milestone v150                     # Drive concepts in milestone
-//   deno task drive --feature v150/accentcolor-...       # Drive concepts in feature
-//   deno task drive --sample 10                          # Sample interactive concepts
-//   deno task drive --url /v150/.../contrast-explorer/   # Drive single concept URL
-//   deno task drive --out reports/interactive-proof      # Custom output dir
+//   npm run drive <spec.mjs> [--base URL]              # Run explicit spec
+//   npm run drive -- --milestone v150                     # Drive concepts in milestone
+//   npm run drive -- --feature v150/accentcolor-...       # Drive concepts in feature
+//   npm run drive -- --sample 10                          # Sample interactive concepts
+//   npm run drive -- --url /v150/.../contrast-explorer/   # Drive single concept URL
+//   npm run drive -- --out reports/interactive-proof      # Custom output dir
 
-import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { cdpConnection, cleanupChrome, launchChrome } from "./lib/cdp.mjs";
+import { cdpConnection, cleanupChrome, launchChrome, spawnChild } from "./lib/cdp.mjs";
 import {
   classifyDriveEffect,
   describeActions,
@@ -40,7 +41,7 @@ import {
   trackBootChild,
 } from "./lib/server-boot.mjs";
 
-const args = [...Deno.args];
+const args = [...process.argv.slice(2)];
 function flag(name, fallback = null) {
   const at = args.indexOf(name);
   if (at < 0) return fallback;
@@ -73,7 +74,7 @@ if (
   positional && (positional.endsWith(".mjs") || positional.endsWith(".js")) &&
   existsSync(positional)
 ) {
-  const specPath = positional.startsWith("/") ? positional : `${Deno.cwd()}/${positional}`;
+  const specPath = positional.startsWith("/") ? positional : `${process.cwd()}/${positional}`;
   const imported = await import(`file://${specPath}`);
   specCases = imported.cases ?? [];
 } else if (targetUrl) {
@@ -121,21 +122,19 @@ if (!specCases && targets.length === 0) {
   console.error(
     "No targets found. Specify a spec file, --milestone, --feature, --url, or --sample.",
   );
-  Deno.exit(2);
+  process.exit(2);
 }
 
 // ── Server lifecycle ─────────────────────────────────────────────────────────
 let serverChild = null;
 
 function spawnServer(port) {
-  serverChild = new Deno.Command("deno", {
-    args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
-    env: { PORT: String(port) },
+  serverChild = spawnChild(process.execPath, ["server.ts"], {
+    env: { ...process.env, PORT: String(port) },
     // Captured rather than discarded: the child's own output is the only thing
     // that can explain a failed boot, and a full pipe would block it.
-    stdout: "piped",
-    stderr: "piped",
-  }).spawn();
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   return trackBootChild(serverChild);
 }
 
@@ -451,12 +450,12 @@ try {
     : targets;
 
   console.log(`Driving ${runList.length} showcase demo(s) in headless Chrome...`);
-  await Deno.mkdir(outDir, { recursive: true });
+  await mkdir(outDir, { recursive: true });
 
   for (const item of runList) {
     const fullUrl = item.url.startsWith("http") ? item.url : `${base}${item.url}`;
     const itemDir = join(outDir, item.slug);
-    await Deno.mkdir(itemDir, { recursive: true });
+    await mkdir(itemDir, { recursive: true });
 
     const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
     const { sessionId } = await conn.send("Target.attachToTarget", { targetId, flatten: true });
@@ -502,7 +501,7 @@ try {
       if (shot?.data) {
         initialShotPath = join(itemDir, "01-initial.png");
         initialShotBytes = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
-        await Deno.writeFile(initialShotPath, initialShotBytes);
+        await writeFile(initialShotPath, initialShotBytes);
       }
     } catch {
       // non-fatal
@@ -543,7 +542,7 @@ try {
       if (shot?.data) {
         afterShotPath = join(itemDir, "02-interactive.png");
         afterShotBytes = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
-        await Deno.writeFile(afterShotPath, afterShotBytes);
+        await writeFile(afterShotPath, afterShotBytes);
       }
     } catch {
       // non-fatal
@@ -700,7 +699,7 @@ const mergedMap = new Map();
 // 1. Recover and load existing results from verification-report.json
 if (existsSync(reportPath)) {
   try {
-    const raw = await Deno.readTextFile(reportPath);
+    const raw = await readFile(reportPath, "utf8");
     const existing = JSON.parse(raw);
     for (const r of existing.results ?? []) {
       if (r?.url) mergedMap.set(r.url, r);
@@ -712,8 +711,8 @@ if (existsSync(reportPath)) {
 
 // 2. Discover any valid screenshot directories on disk that may have been orphaned
 try {
-  for (const entry of Deno.readDirSync(outDir)) {
-    if (!entry.isDirectory) continue;
+  for (const entry of readdirSync(outDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
     const initialShot = join(outDir, entry.name, "01-initial.png");
     const afterShot = join(outDir, entry.name, "02-interactive.png");
     if (existsSync(initialShot) && existsSync(afterShot)) {
@@ -788,7 +787,7 @@ const summaryJson = {
   results: allResults,
 };
 
-await Deno.writeTextFile(
+await writeFile(
   reportPath,
   JSON.stringify(summaryJson, null, 2) + "\n",
 );
@@ -866,7 +865,7 @@ if (notDemonstrated.length > 0) {
   }
 }
 
-await Deno.writeTextFile(join(outDir, "REPORT.md"), md);
+await writeFile(join(outDir, "REPORT.md"), md);
 
 console.log(
   `\nVerification complete this run: ${passedCount} passed, ${notDemonstratedCount} not demonstrated, ${failedCount} failed (of ${results.length} tested).`,
@@ -889,4 +888,4 @@ console.log(`Reports merged into ${outDir}/REPORT.md and ${outDir}/verification-
 // A spec case that asserted nothing is a broken spec, not a quiet pass — exit
 // non-zero so it cannot be cited as evidence (bead chrome-platform-showcase-6s3).
 const notAssertedCount = results.filter((r) => r.status === "NOT-ASSERTED").length;
-Deno.exit(failedCount || notAssertedCount ? 1 : 0);
+process.exit(failedCount || notAssertedCount ? 1 : 0);

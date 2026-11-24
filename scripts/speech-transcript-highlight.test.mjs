@@ -8,7 +8,7 @@
 // pre-fix control that still injects - is the chrome-devtools-mcp run recorded
 // on bead chrome_platform_showcase-gvb.
 //
-// Migrated in place to a native Deno.test case (Stage 16 of the dty proposal, bead
+// Migrated in place to a node:test case (Stage 16 of the dty proposal, bead
 // dty.21): same file path, same task id `test-speech-transcript-highlight`, the same
 // ordered gate step 24, the same four `assert` call sites and their messages, and the
 // same first-failure abort - ONE case covers all THREE demos, deliberately, because a
@@ -26,6 +26,9 @@
 // required - the guard reads the three demo files it guards - so it is forwarded rather
 // than dropped. No env, network, port, browser, child process or GC flag, so no
 // `--serial` and no `--dir`.
+
+import { test } from "node:test";
+import { readFileSync } from "node:fs";
 
 const files = {
   "v142/web-speech-api-contextual-biasing/context-phrases/index.html": {
@@ -66,10 +69,10 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-Deno.test("the speech highlight renderers build nodes, in all three demos", () => {
+test("the speech highlight renderers build nodes, in all three demos", () => {
   let assertions = 0;
   for (const [file, { required, forbidden }] of Object.entries(files)) {
-    const src = Deno.readTextFileSync(file);
+    const src = readFileSync(file, "utf8");
     assert(src.length > 1000, `${file}: file is unexpectedly small - guard would be vacuous`);
     assert(
       src.includes("SpeechRecognition"),

@@ -35,5 +35,5 @@ For each milestone:
    `git add <file> && git commit -m "critique: v<N>/<feature>/<concept>" && git push`.
 
 Use subagents if available, one per milestone, with at most four running at once. If a push races,
-pull/rebase and retry the push for the already-created commit. After the pass, run `deno fmt` and
-`deno check server.ts`; commit/push relevant formatting changes only.
+pull/rebase and retry the push for the already-created commit. After the pass, run `npm run fmt` and
+`npm run typecheck`; commit/push relevant formatting changes only.

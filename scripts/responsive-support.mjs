@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-run --allow-env
+#!/usr/bin/env node
 // Responsive support-record tooling for the mobile + desktop parity invariant.
 //
 // The per-demo support record is a git-tracked sidecar `responsive-support.json`
@@ -7,9 +7,9 @@
 // rollup (mobile/desktop tested/total/ok/needs-review/blocked denominators) —
 // the reporting the parity policy requires "before every push".
 //
-//   deno task responsive-support seed     # add any new demos as {desktop,mobile:untested}
-//   deno task responsive-support report   # print coverage denominators (default)
-//   deno task responsive-support merge <results.json>  # fold a harness run in
+//   npm run responsive-support seed     # add any new demos as {desktop,mobile:untested}
+//   npm run responsive-support report   # print coverage denominators (default)
+//   npm run responsive-support merge <results.json>  # fold a harness run in
 //
 // Also runnable with `node scripts/responsive-support.mjs`.
 

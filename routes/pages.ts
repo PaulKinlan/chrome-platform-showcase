@@ -269,7 +269,7 @@ export async function renderIndex(channels: Channels): Promise<string> {
         <li>The routine reads the <a href="https://chromestatus.com/" target="_blank" rel="noopener">chromestatus.com</a> JSON API for current, upcoming, and archived milestones.</li>
         <li>It builds every missing feature directly from the listing name, feature details, specs, docs, samples, and explainers.</li>
         <li>Each feature gets a feature index plus every distinct interactive concept the API needs; 2-3 concepts is a floor, not a cap.</li>
-        <li>The routine commits one feature at a time to <code>main</code>. Deno Deploy redeploys from GitHub.</li>
+        <li>The routine commits one feature at a time to <code>main</code>. Cloudflare Workers Builds redeploys from GitHub.</li>
         <li>Humans review the live output and tighten demos, server routes, and the routine prompt as needed.</li>
       </ol>
       <p class="note">Repo: <a href="https://github.com/PaulKinlan/chrome-platform-showcase" target="_blank" rel="noopener">PaulKinlan/chrome-platform-showcase</a>.</p>
@@ -957,7 +957,7 @@ async function featureHasDemo(release: string, feature: FeatureSummary): Promise
 }
 
 // Feature id → the folder that demonstrates it + primary conformance probe,
-// built by `deno task demo-index` and kept honest by `deno task check-demo-index`.
+// built by `npm run demo-index` and kept honest by `npm run check-demo-index`.
 let demoIndexCache: { at: number; data: DemoIndexData } | null = null;
 async function getDemoIndexData(): Promise<DemoIndexData> {
   if (demoIndexCache && Date.now() - demoIndexCache.at < BUILT_DIRS_TTL_MS) {

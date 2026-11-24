@@ -19,9 +19,9 @@
 // below are too small to reach the baseline stage: that is where the gate's own
 // policy for an unusable baseline is pinned (bead chrome_platform_showcase-jj7).
 //
-// Run: deno task test-check-routes-changed-demos
+// Run: npm run test-check-routes-changed-demos
 //
-// Migrated in place to ONE synchronous native Deno.test case (Stage 24 of the dty
+// Migrated in place to ONE synchronous node:test case (Stage 24 of the dty
 // proposal, bead chrome_platform_showcase-dty.31), under the dty.19 policy for this
 // class of suite. The body, the labels, the three-space `ok   <label>` printing and
 // the inline `FAIL <label>: <msg>` printing are unchanged, so every failing CHECK
@@ -31,11 +31,15 @@
 // order; each temp root is recorded in `created` as it is made, so the `finally`
 // below removes them when a throw escapes the check() wrapper - the three original
 // `Deno.removeSync` calls stay where they were, and they are still the only cleanup
-// on a normal run; and the trailing `Deno.exit(1)` became a named throw carrying the
-// same count, because exiting inside a case kills the test process before Deno can
+// on a normal run; and the trailing `process.exit(1)` became a named throw carrying the
+// same count, because exiting inside a case kills the test process before the runner can
 // report it. The `finally` covers normal throws only - SIGKILL, a fleet timeout and
 // the reaper cannot run it, and the leak is bounded to /tmp.
 
+import { runSync } from "./lib/run.mjs";
+import { test } from "node:test";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { changedFeatureIds, TouchedSetError } from "./lib/support.mjs";
 import { REPO_ROOT } from "./lib/manifest.mjs";
@@ -76,15 +80,13 @@ function assertThrows(fn, match) {
 // be unreachable by the case's `finally` in the migrated guard.
 const created = [];
 function makeFixture(prefix) {
-  const root = Deno.makeTempDirSync({ prefix });
+  const root = mkdtempSync(join(tmpdir(), "tmp-"));
   created.push(root);
   function git(args) {
-    const out = new Deno.Command("git", {
+    const out = runSync("git", {
       args,
       cwd: root,
-      stdout: "piped",
-      stderr: "piped",
-    }).outputSync();
+    });
     return {
       code: out.code,
       stdout: new TextDecoder().decode(out.stdout),
@@ -117,12 +119,12 @@ const sorted = (set) => [...set].sort();
 // Deno.writeTextFileSync does not create parent directories.
 function writeFile(root, relPath, content) {
   const full = join(root, relPath);
-  Deno.mkdirSync(join(root, relPath.split("/").slice(0, -1).join("/")), { recursive: true });
-  Deno.writeTextFileSync(full, content);
+  mkdirSync(join(root, relPath.split("/").slice(0, -1).join("/")), { recursive: true });
+  writeFileSync(full, content);
 }
 
 // ── working cases ───────────────────────────────────────────────────────────
-Deno.test("the touched-demo set fails closed and the real gate rejects a route-less baseline", () => {
+test("the touched-demo set fails closed and the real gate rejects a route-less baseline", () => {
   try {
     const f1 = makeFixture("3rg-changed-");
     writeFile(f1.root, "README.md", "fixture\n");
@@ -178,7 +180,7 @@ Deno.test("the touched-demo set fails closed and the real gate rejects a route-l
       assert(/touched demo set at/.test(err.message), `missing context: ${err.message}`);
     });
 
-    Deno.writeTextFileSync(join(f2.root, ".git/index"), "garbage\n");
+    writeFileSync(join(f2.root, ".git/index"), "garbage\n");
     check("a GIT FAILURE (corrupt index) throws instead of returning an empty set", () => {
       const err = assertThrows(
         () => changedFeatureIds(BASE2, f2.root),
@@ -198,11 +200,9 @@ Deno.test("the touched-demo set fails closed and the real gate rejects a route-l
     // commit (the repository root) without touching the shared refs of the real
     // checkout.
     function cloneGit(cwd, args) {
-      const out = new Deno.Command("git", {
+      const out = runSync("git", {
         args: ["-C", cwd, ...args],
-        stdout: "piped",
-        stderr: "piped",
-      }).outputSync();
+      });
       return {
         code: out.code,
         stdout: new TextDecoder().decode(out.stdout).trim(),
@@ -210,22 +210,20 @@ Deno.test("the touched-demo set fails closed and the real gate rejects a route-l
       };
     }
     function runRealGate(cwd) {
-      const out = new Deno.Command("deno", {
-        args: ["run", "--allow-read", "--allow-run", "--allow-env", "scripts/check-routes.mjs"],
+      const out = runSync(process.execPath, {
+        args: ["scripts/check-routes.mjs"],
         cwd,
-        stdout: "piped",
-        stderr: "piped",
-      }).outputSync();
+      });
       const strip = (b) => new TextDecoder().decode(b).replace(/\x1b\[[0-9;]*m/g, "");
       return { code: out.code, text: strip(out.stdout) + strip(out.stderr) };
     }
-    const gateClone = Deno.makeTempDirSync({ prefix: "3rg-gate-" });
+    const gateClone = mkdtempSync(join(tmpdir(), "3rg-gate-"));
     created.push(gateClone);
     const clone = cloneGit("/tmp", ["clone", "--quiet", "--local", REPO_ROOT, gateClone]);
     assert(clone.code === 0, `git clone failed: ${clone.stderr}`);
     // A clone carries COMMITTED state; copy the file under test so this suite
     // validates the working tree (committed or not) rather than whatever HEAD holds.
-    Deno.copyFileSync(
+    copyFileSync(
       join(REPO_ROOT, "scripts/check-routes.mjs"),
       join(gateClone, "scripts/check-routes.mjs"),
     );
@@ -274,10 +272,10 @@ Deno.test("the touched-demo set fails closed and the real gate rejects a route-l
       const res = runRealGate(gateClone);
       assert(res.code === 0, `expected a clean gate after restoring the baseline, got ${res.code}`);
     });
-    Deno.removeSync(gateClone, { recursive: true });
+    rmSync(gateClone, { recursive: true, force: true });
 
-    Deno.removeSync(f1.root, { recursive: true });
-    Deno.removeSync(f2.root, { recursive: true });
+    rmSync(f1.root, { recursive: true, force: true });
+    rmSync(f2.root, { recursive: true, force: true });
   } finally {
     // Best effort only: a throw OUTSIDE the check() wrapper - the fixture build, the
     // unguarded clone assert, or a git child failing harder than expected - never
@@ -286,14 +284,14 @@ Deno.test("the touched-demo set fails closed and the real gate rejects a route-l
     // timeout or the reaper cannot run it, and the leak is bounded to /tmp.
     for (const dir of created) {
       try {
-        Deno.removeSync(dir, { recursive: true });
+        rmSync(dir, { recursive: true, force: true });
       } catch {
         // already removed by the normal path
       }
     }
   }
-  // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
-  // live inside a case - it kills the test process before Deno can report it - so the
+  // The legacy tail exited the process on a non-zero counter. `process.exit(1)` cannot
+  // live inside a case - it kills the test process before the test runner can report it - so the
   // collected sections are still reported and the count is carried into a named throw,
   // after the three cleanup calls above have run in their original order.
   if (failures.length > 0) {

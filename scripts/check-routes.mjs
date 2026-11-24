@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-run --allow-env
+#!/usr/bin/env node
 // Route regression gate for the durable demo compatibility contract.
 //
 // Enforces: stable URLs, additive evolution, non-destructive demos. It compares
@@ -32,11 +32,11 @@
 //   the same id + identity + live route, and anything listed in migrations.json.
 //
 // Usage:
-//   deno run --allow-read --allow-run --allow-env scripts/check-routes.mjs
 //   node scripts/check-routes.mjs
-//   SHOWCASE_BASELINE_REF=<sha> deno run --allow-read --allow-run --allow-env scripts/check-routes.mjs
+//   node scripts/check-routes.mjs
+//   SHOWCASE_BASELINE_REF=<sha> node scripts/check-routes.mjs
 //
-// `--allow-env` lets Deno resolve `git` on PATH for the drift-proof git
+// git is resolved on PATH for the drift-proof git
 // baseline; without it the gate falls back to .route-manifest.baseline.json.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";

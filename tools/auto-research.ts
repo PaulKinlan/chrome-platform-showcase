@@ -1,8 +1,10 @@
-#!/usr/bin/env deno run --allow-run --allow-read --allow-write --allow-net --allow-env
+#!/usr/bin/env node
 
-import { delay } from "https://deno.land/std@0.224.0/async/delay.ts";
+import { readdir, stat } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 
-const REPO_DIR = Deno.cwd();
+const REPO_DIR = process.cwd();
 const PORT = 3000;
 
 console.log(
@@ -22,11 +24,11 @@ interface FeatureInfo {
 
 async function scanCorpus(): Promise<FeatureInfo[]> {
   const features: FeatureInfo[] = [];
-  for await (const entry of Deno.readDir(".")) {
-    if (!entry.isDirectory || !/^v\d+$/.test(entry.name)) continue;
+  for (const entry of await readdir(".", { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^v\d+$/.test(entry.name)) continue;
     const release = entry.name;
-    for await (const fd of Deno.readDir(release)) {
-      if (!fd.isDirectory) continue;
+    for (const fd of await readdir(release, { withFileTypes: true })) {
+      if (!fd.isDirectory()) continue;
 
       const featureSlug = fd.name;
       const concepts: string[] = [];
@@ -34,18 +36,18 @@ async function scanCorpus(): Promise<FeatureInfo[]> {
       let hasConformance = false;
 
       try {
-        const stat = await Deno.stat(`${release}/${featureSlug}/_questions.json`);
-        if (stat.isFile) hasCritique = true;
+        if ((await stat(`${release}/${featureSlug}/_questions.json`)).isFile()) hasCritique = true;
       } catch {}
 
       try {
-        const stat = await Deno.stat(`${release}/${featureSlug}/conformance.json`);
-        if (stat.isFile) hasConformance = true;
+        if ((await stat(`${release}/${featureSlug}/conformance.json`)).isFile()) {
+          hasConformance = true;
+        }
       } catch {}
 
       try {
-        for await (const cd of Deno.readDir(`${release}/${featureSlug}`)) {
-          if (cd.isDirectory) {
+        for (const cd of await readdir(`${release}/${featureSlug}`, { withFileTypes: true })) {
+          if (cd.isDirectory()) {
             concepts.push(cd.name);
           }
         }
@@ -66,16 +68,12 @@ async function scanCorpus(): Promise<FeatureInfo[]> {
 const features = await scanCorpus();
 console.log(`Scanned repository: found ${features.length} features across all milestones.`);
 
-// 2. Start the Deno server in the background
+// 2. Start the local server in the background
 console.log(`\nStarting local server on http://localhost:${PORT}...`);
-const serverProcess = new Deno.Command("deno", {
-  args: ["run", "--allow-net", "--allow-read", "--allow-env", "server.ts"],
-  stdout: "piped",
-  stderr: "inherit",
-  env: { PORT: String(PORT) },
+const child = spawn(process.execPath, ["server.ts"], {
+  stdio: ["ignore", "ignore", "inherit"],
+  env: { ...process.env, PORT: String(PORT) },
 });
-
-const child = serverProcess.spawn();
 
 // Wait a moment for server to boot
 await delay(3000);
@@ -114,12 +112,12 @@ console.log("   automatically collect all failures, fix the relevant codes, and 
 console.log("==========================================================");
 
 // Clean up server on exit
-Deno.addSignalListener("SIGINT", () => {
+process.on("SIGINT", () => {
   console.log("\nShutting down local server...");
   try {
     child.kill("SIGTERM");
   } catch {}
-  Deno.exit(0);
+  process.exit(0);
 });
 
 // Keep running so the user can browse http://localhost:3000

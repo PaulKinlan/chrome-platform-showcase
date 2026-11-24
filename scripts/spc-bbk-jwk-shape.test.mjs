@@ -13,10 +13,10 @@
 // full enroll -> challenge -> verify payment flow with oversized extras attached,
 // a rotation, and the retained heap cost measured with a real GC.
 //
-// Migrated in place to named Deno.test cases (Stage 3 of the dty proposal, bead
+// Migrated in place to named node:test cases (Stage 3 of the dty proposal, bead
 // dty.2): same file path, same task id `test-spc-bbk-jwk-shape`, same ordered gate
 // step, same five subjects and the same assertions — the custom `section()`
-// registry became five Deno.test cases so a failure names the behaviour. The task
+// registry became five node:test cases so a failure names the behaviour. The task
 // runs through scripts/native-test.mjs, which passes the child exactly the legacy
 // flags (`--allow-read --v8-flags=--expose-gc`) and runs this single file alone
 // (`--serial`), so the runner-wide GC flag can never reach another suite.
@@ -28,8 +28,9 @@
 // read-only audit found no consumer of it (all 14 occurrences repo-wide are the
 // suites' own prints), so no drill needed updating.
 //
-// Run: deno task test-spc-bbk-jwk-shape   (needs --v8-flags=--expose-gc)
+// Run: npm run test-spc-bbk-jwk-shape   (needs --v8-flags=--expose-gc)
 
+import { test } from "node:test";
 import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
 import { p256PublicJwkForStorage } from "../lib/jwk.ts";
 
@@ -110,7 +111,7 @@ async function publicJwkWithExtras(extraChars = 0) {
 
 // ── cases ────────────────────────────────────────────────────────────────
 
-Deno.test("ok — the projection keeps exactly the fields the fixture consumes", () => {
+test("ok — the projection keeps exactly the fields the fixture consumes", () => {
   const source = {
     kty: "EC",
     crv: "P-256",
@@ -135,7 +136,7 @@ Deno.test("ok — the projection keeps exactly the fields the fixture consumes",
   );
 });
 
-Deno.test("ok — a projected key still imports and verifies signatures", async () => {
+test("ok — a projected key still imports and verifies signatures", async () => {
   const { publicJwk, privateKey } = await p256Pair();
   const projected = p256PublicJwkForStorage(
     { ...publicJwk, ext: true, key_ops: ["verify"], junk: "ignored" },
@@ -164,7 +165,7 @@ Deno.test("ok — a projected key still imports and verifies signatures", async 
   assert(verified, "a projected public key must still verify its signatures");
 });
 
-Deno.test("ok — oversized JWK extras do not break the enroll -> challenge -> verify flow", async () => {
+test("ok — oversized JWK extras do not break the enroll -> challenge -> verify flow", async () => {
   const passkey = await p256Pair();
   const browserBound = await p256Pair();
   const extras = OVERSIZED_JWK_CHARS;
@@ -195,7 +196,7 @@ Deno.test("ok — oversized JWK extras do not break the enroll -> challenge -> v
   );
 });
 
-Deno.test("ok — a rotation stores only the consumed fields", async () => {
+test("ok — a rotation stores only the consumed fields", async () => {
   const passkey = await p256Pair();
   const oldBound = await p256Pair();
   const newBound = await p256Pair();
@@ -238,17 +239,17 @@ Deno.test("ok — a rotation stores only the consumed fields", async () => {
   assert(verified.accepted === true, "the rotated browser-bound key must verify");
 });
 
-Deno.test("ok — the extras are not retained across a full store", async () => {
+test("ok — the extras are not retained across a full store", async () => {
   assert(
     typeof globalThis.gc === "function",
-    "this section measures retained heap and needs a real GC: run deno task test-spc-bbk-jwk-shape",
+    "this section measures retained heap and needs a real GC: run npm run test-spc-bbk-jwk-shape",
   );
   const SAMPLES = 24;
   const extras = OVERSIZED_JWK_CHARS; // per JWK, so ~0.75 MiB per enrollment offered
   const offered = (SAMPLES * extras * 2) / (1024 * 1024);
 
   globalThis.gc();
-  const before = Deno.memoryUsage().heapUsed;
+  const before = process.memoryUsage().heapUsed;
   for (let i = 0; i < SAMPLES; i++) {
     const passkey = await p256Pair();
     const browserBound = await p256Pair();
@@ -260,7 +261,7 @@ Deno.test("ok — the extras are not retained across a full store", async () => 
     assert(res.status === 200, `enrollment ${i} should succeed`);
   }
   globalThis.gc();
-  const after = Deno.memoryUsage().heapUsed;
+  const after = process.memoryUsage().heapUsed;
   const retainedMiB = (after - before) / (1024 * 1024);
   // The offers total ~18 MiB of padding; a shape that retains it cannot come
   // close to this ceiling, and a shape that drops it stays far below it.

@@ -18,13 +18,13 @@
 // is guaranteed to supply a socket peer (the per-source property depends on that, and
 // the empirical check is tracked as separate work).
 //
-// Run: deno task test-auth-throttle
+// Run: npm run test-auth-throttle
 //
-// Migrated in place to named Deno.test cases (Stage 14 of the dty proposal, bead
+// Migrated in place to named node:test cases (Stage 14 of the dty proposal, bead
 // dty.18): same file path, same task id, the same ordered gate step 20, the same
 // subjects, the same assertion sites and the same messages - the `section()` and
 // `asyncSection()` registries with their shared `failures` counter, the trailing
-// `Deno.exit(1)` branch and the legacy summary line are gone, so a failure names the
+// `process.exit(1)` branch and the legacy summary line are gone, so a failure names the
 // case it broke and Deno's runner owns the exit code.
 //
 // SEVENTEEN subjects, not nine: this file has TWO registries. There are 11 `section(`
@@ -50,6 +50,7 @@
 // all sections passed` and a repo-wide scan found no consumer, so the task now prints
 // `PASS - auth throttle tests` / `FAIL - ...`, truthfully prefixed in both directions.
 
+import { test } from "node:test";
 import {
   AUTH_THROTTLE_KEY_MAX_CHARS,
   AUTH_THROTTLE_MAX_FAILURES,
@@ -61,7 +62,7 @@ import { handleDemoTelemetryRoute } from "../routes/demo-telemetry.ts";
 // A throwaway value for the local test process. No production credential is read
 // or written anywhere in this suite, and nothing here prints it.
 const TEST_PASSWORD = "test-only-value-not-a-real-credential";
-Deno.env.set("showcase_password", TEST_PASSWORD);
+process.env["showcase_password"] = TEST_PASSWORD;
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -86,14 +87,14 @@ function request(path, { method = "GET", headers = {} } = {}) {
   return new Request(`http://localhost${path}`, { method, headers });
 }
 
-Deno.test("a fresh source may authenticate", () => {
+test("a fresh source may authenticate", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now });
   assert(throttle.check("1.2.3.4").allowed, "an unseen source is allowed");
   assert(throttle.size() >= 1 || throttle.size() === 1, "and is now tracked");
 });
 
-Deno.test("failures are spent exactly to the budget, then the source must wait", () => {
+test("failures are spent exactly to the budget, then the source must wait", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now });
   const key = "5.6.7.8";
@@ -109,7 +110,7 @@ Deno.test("failures are spent exactly to the budget, then the source must wait",
   );
 });
 
-Deno.test("the bucket refills, so an over-budget source recovers without intervention", () => {
+test("the bucket refills, so an over-budget source recovers without intervention", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now, refillMs: 10_000 });
   const key = "9.9.9.9";
@@ -124,7 +125,7 @@ Deno.test("the bucket refills, so an over-budget source recovers without interve
   assert(throttle.check(key).allowed, "and a long idle period refills to full");
 });
 
-Deno.test("a success clears the record, so earlier failures do not accumulate", () => {
+test("a success clears the record, so earlier failures do not accumulate", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now });
   const key = "10.0.0.1";
@@ -140,7 +141,7 @@ Deno.test("a success clears the record, so earlier failures do not accumulate", 
   assert(!throttle.check(key).allowed, "and only then is the budget spent again");
 });
 
-Deno.test("one source exhausting its budget does not affect any other (no shared denial)", () => {
+test("one source exhausting its budget does not affect any other (no shared denial)", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now });
   for (let i = 0; i < 100; i++) throttle.recordFailure("attacker");
@@ -149,7 +150,7 @@ Deno.test("one source exhausting its budget does not affect any other (no shared
   assert(throttle.check("someone-else-2").allowed, "and so is another");
 });
 
-Deno.test("per-source state is bounded, and an idle source is really forgotten", () => {
+test("per-source state is bounded, and an idle source is really forgotten", () => {
   const clock = fakeClock();
   // Room to spare: 3 sources against a cap of 8, so the cap cannot explain what the
   // assertions below observe.
@@ -178,7 +179,7 @@ Deno.test("per-source state is bounded, and an idle source is really forgotten",
   assert(throttle.size() === 8, `the cap must hold under a flood, got ${throttle.size()}`);
 });
 
-Deno.test("the advertised wait is bounded, non-growing, and sufficient at the decision level", () => {
+test("the advertised wait is bounded, non-growing, and sufficient at the decision level", () => {
   const clock = fakeClock();
   const throttle = createAuthThrottle({ now: clock.now, refillMs: 10_000 });
   const key = "203.0.113.200";
@@ -204,7 +205,7 @@ Deno.test("the advertised wait is bounded, non-growing, and sufficient at the de
   );
 });
 
-Deno.test(
+test(
   "eviction: one source cannot churn its own state away, but other peers' churn resets it",
   () => {
     // Coordinator's eviction question, answered precisely — including the part that does
@@ -250,7 +251,7 @@ const PROTECTED = [
   ["/telemetry/demo/reset", "POST"],
 ];
 
-Deno.test("every protected endpoint is throttled after failed attempts", async () => {
+test("every protected endpoint is throttled after failed attempts", async () => {
   const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
   for (const [path, method] of PROTECTED) {
     telemetryAuthThrottle.reset();
@@ -279,7 +280,7 @@ Deno.test("every protected endpoint is throttled after failed attempts", async (
   }
 });
 
-Deno.test(
+test(
   "throttling happens BEFORE the comparison, and a valid credential clears it",
   async () => {
     const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
@@ -320,7 +321,7 @@ Deno.test(
   },
 );
 
-Deno.test("a successful authentication clears the source's failure record", async () => {
+test("a successful authentication clears the source's failure record", async () => {
   const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
   telemetryAuthThrottle.reset();
   const peer = "203.0.113.88";
@@ -359,7 +360,7 @@ Deno.test("a successful authentication clears the source's failure record", asyn
   assert(spent?.status === 429, `and then be throttled, got ${spent?.status}`);
 });
 
-Deno.test("one source's exhaustion leaves another source working", async () => {
+test("one source's exhaustion leaves another source working", async () => {
   const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
   telemetryAuthThrottle.reset();
   const attacker = "192.0.2.10";
@@ -385,7 +386,7 @@ Deno.test("one source's exhaustion leaves another source working", async () => {
   );
 });
 
-Deno.test(
+test(
   "no response echoes the credential, and configured is indistinguishable",
   async () => {
     const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
@@ -407,15 +408,15 @@ Deno.test(
     // whether the surface is configured. (Unrelated and pre-existing: the GET
     // /telemetry/demo docs route publishes passwordConfigured; that is not introduced
     // here and is not what this section claims.)
-    Deno.env.delete("showcase_password");
-    Deno.env.delete("SHOWCASE_PASSWORD");
+    delete process.env["showcase_password"];
+    delete process.env["SHOWCASE_PASSWORD"];
     telemetryAuthThrottle.reset();
     const unconfigured = await handleDemoTelemetryRoute(
       request("/telemetry/demo/events", { headers: basic(wrong) }),
       { remoteAddr: peer },
     );
     const unconfiguredBody = await unconfigured.text();
-    Deno.env.set("showcase_password", TEST_PASSWORD);
+    process.env["showcase_password"] = TEST_PASSWORD;
     assert(
       unconfigured?.status === configured?.status,
       `unconfigured must look like a failed attempt (${unconfigured?.status} vs ${configured?.status})`,
@@ -431,7 +432,7 @@ Deno.test(
   },
 );
 
-Deno.test("a client cannot rotate its own key with x-forwarded-for", async () => {
+test("a client cannot rotate its own key with x-forwarded-for", async () => {
   const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
   telemetryAuthThrottle.reset();
   const peer = "192.0.2.44";
@@ -464,7 +465,7 @@ Deno.test("a client cannot rotate its own key with x-forwarded-for", async () =>
   );
 });
 
-Deno.test("stated limit: while a flood continues, each refilled token is taken by it", () => {
+test("stated limit: while a flood continues, each refilled token is taken by it", () => {
   // The honest, executable statement of what a source-keyed throttle cannot do: two
   // clients behind one address are one source, so an operator sharing an address with
   // a flooding attacker is not guaranteed an attempt while the flood lasts. Asserted
@@ -483,7 +484,7 @@ Deno.test("stated limit: while a flood continues, each refilled token is taken b
   );
 });
 
-Deno.test(
+test(
   "without a peer, every request shares one bounded anonymous bucket",
   async () => {
     const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");
@@ -512,7 +513,7 @@ Deno.test(
   },
 );
 
-Deno.test(
+test(
   "the 429 advertises the decision's own wait, not a formatter's guess",
   async () => {
     const { telemetryAuthThrottle } = await import("../lib/auth-throttle.ts");

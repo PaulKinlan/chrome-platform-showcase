@@ -10,7 +10,8 @@ The site is generated and maintained by an automated routine:
    upcoming, and backfilled Chrome milestones.
 2. For features that do not yet have a demo, the routine builds the feature page and every distinct
    interactive concept it can identify from the ChromeStatus entry, specs, docs, and explainers.
-3. The routine commits one feature at a time directly to `main`. Deno Deploy redeploys from GitHub.
+3. The routine commits one feature at a time directly to `main`. Cloudflare Workers Builds redeploys
+   from GitHub.
 4. Humans review the live output and tighten the routine prompt, demos, or server routes as needed.
 
 ## Why
@@ -24,8 +25,8 @@ The site is generated and maintained by an automated routine:
 
 ```
 chrome-platform-showcase/
-  server.ts              Deno HTTP entry. Routes /v<N>/* to per-release handlers.
-  deno.json              Tasks + fmt config.
+  server.ts              Local Node HTTP entry (production runs worker/index.ts on Cloudflare Workers).
+  package.json           npm scripts + pinned dev tooling (dprint, tsc, wrangler).
   lib/                   Shared streaming helpers and a sibling-file loader.
   public/styles.css      Shared design system: palette, type, surfaces, motion.
   v<N>/                  Per-release directory.
@@ -48,24 +49,27 @@ feature does not get a second one. Folders that predate the rule keep their URLs
 shipped in and linking its siblings.
 
 ```
-deno task feature-lineage   # rebuild the map from ChromeStatus
-deno task apply-lineage     # write the note onto every affected page
-deno task check-duplicates  # gate: no new duplicate folders, no missing notes
+npm run feature-lineage   # rebuild the map from ChromeStatus
+npm run apply-lineage     # write the note onto every affected page
+npm run check-duplicates  # gate: no new duplicate folders, no missing notes
 ```
 
 ## Running it
 
+Needs Node 22.18 or later.
+
 ```
-deno task dev
+npm ci
+npm run dev
 # open http://localhost:3000/
 ```
 
 Useful checks:
 
 ```
-deno task check            # includes the duplication gate
-deno task audit
-deno task check-routes     # durable-URL contract
+npm run check            # includes the duplication gate
+npm run audit
+npm run check-routes     # durable-URL contract
 ```
 
 ## License

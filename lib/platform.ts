@@ -1,15 +1,15 @@
 // Runtime seam between the route handlers and the host.
 //
-// The routes were written against Deno's APIs (filesystem reads, Deno.env,
-// Deno KV, Deno.upgradeWebSocket). The site now also runs on Cloudflare
-// Workers, which has none of those: files come from the static-assets binding,
+// The routes were first written against Deno's APIs (filesystem reads,
+// Deno.env, Deno KV, Deno.upgradeWebSocket), and the interface below keeps that
+// shape. On Cloudflare Workers files come from the static-assets binding,
 // directory listings come from a manifest generated at build time, secrets
 // come from the Worker `env`, and WebSockets come from WebSocketPair.
 //
-// Routes call `platform()` instead of `Deno.*`. Under Deno (local dev, the test
-// suites, `deno task start`) the default implementation below is exactly the
-// old behaviour. The Worker entry (`worker/index.ts`) installs its own
-// implementation with `installPlatform()` before handling any request.
+// Routes call `platform()` instead of touching the host directly. Under Node
+// (local dev, the test suites, `npm start`) the default implementation below
+// reads the repository from disk. The Worker entry (`worker/index.ts`) installs
+// its own implementation with `installPlatform()` before handling any request.
 
 export interface DirEntry {
   name: string;
@@ -40,7 +40,7 @@ export interface UpgradedSocket {
 }
 
 export interface Platform {
-  /** Short name, for diagnostics: "deno" or "cloudflare-workers". */
+  /** Short name, for diagnostics: "node" or "cloudflare-workers". */
   readonly name: string;
   /**
    * All paths are relative to the repository root ("v151/x/index.html",
@@ -66,49 +66,60 @@ export interface Platform {
 }
 
 // The repository root, resolved from this module so it does not depend on the
-// process's working directory. Only read by the Deno implementation.
-function denoRepoPath(path: string): string {
+// process's working directory. Only read by the Node implementation.
+function repoPath(path: string): string {
   const rel = path.replace(/^\.\//, "").replace(/^\/+/, "");
-  return new URL(`../${rel}`, import.meta.url).pathname;
+  return decodeURIComponent(new URL(`../${rel}`, import.meta.url).pathname);
 }
 
-type DenoLike = {
-  readFile(path: string): Promise<Uint8Array<ArrayBuffer>>;
-  readTextFile(path: string): Promise<string>;
-  stat(path: string): Promise<FileStat>;
-  readDir(path: string): AsyncIterable<DirEntry>;
-  realPath(path: string): Promise<string>;
-  env: { get(name: string): string | undefined };
-  openKv?: () => Promise<MinimalKv>;
-  upgradeWebSocket(req: Request, options?: { protocol?: string }): UpgradedSocket;
-};
+type NodeFs = typeof import("node:fs/promises");
 
-function denoPlatform(): Platform {
-  const D = (globalThis as unknown as { Deno: DenoLike }).Deno;
+// The default implementation, for Node (local dev, the test suites,
+// `npm start`). node:fs is loaded through process.getBuiltinModule rather than
+// a static import so this module still bundles for Workers, which installs its
+// own platform before any of this runs. server.ts adds WebSocket upgrades.
+function nodePlatform(): Platform {
+  const proc = (globalThis as unknown as {
+    process?: { getBuiltinModule?(id: string): unknown; env: Record<string, string | undefined> };
+  }).process;
+  if (!proc?.getBuiltinModule) {
+    throw new Error("platform(): no host platform installed and this is not Node");
+  }
+  const fs = proc.getBuiltinModule("node:fs/promises") as NodeFs;
   return {
-    name: "deno",
-    readFile: (path) => D.readFile(denoRepoPath(path)),
-    readTextFile: (path) => D.readTextFile(denoRepoPath(path)),
-    stat: (path) => D.stat(denoRepoPath(path)),
-    readDir: (path) => D.readDir(denoRepoPath(path)),
-    realPath: (path) => D.realPath(denoRepoPath(path)),
-    env: (name) => D.env.get(name),
-    openKv: async () => {
-      if (typeof D.openKv !== "function") return null;
-      return await D.openKv();
+    name: "node",
+    readFile: async (path) => new Uint8Array(await fs.readFile(repoPath(path))),
+    readTextFile: (path) => fs.readFile(repoPath(path), "utf8"),
+    stat: async (path) => {
+      const st = await fs.stat(repoPath(path));
+      return { isFile: st.isFile(), isDirectory: st.isDirectory() };
     },
-    upgradeWebSocket: (req, options) => D.upgradeWebSocket(req, options),
+    readDir: (path) => ({
+      async *[Symbol.asyncIterator]() {
+        for (const entry of await fs.readdir(repoPath(path), { withFileTypes: true })) {
+          // A symlink is neither; realPath() resolves it.
+          yield { name: entry.name, isFile: entry.isFile(), isDirectory: entry.isDirectory() };
+        }
+      },
+    }),
+    realPath: (path) => fs.realpath(repoPath(path)),
+    env: (name) => proc.env[name],
+    // Local runs keep telemetry in memory; Workers stores it in D1.
+    openKv: () => Promise.resolve(null),
+    upgradeWebSocket: () => {
+      throw new Error("WebSocket upgrades need the HTTP server in server.ts");
+    },
   };
 }
 
 let current: Platform | null = null;
 
 export function platform(): Platform {
-  if (!current) current = denoPlatform();
+  if (!current) current = nodePlatform();
   return current;
 }
 
-/** Called once by a non-Deno entry point before it serves any request. */
+/** Called once by an entry point (server.ts, worker/index.ts) before it serves any request. */
 export function installPlatform(next: Platform): void {
   current = next;
 }

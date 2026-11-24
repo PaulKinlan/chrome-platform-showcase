@@ -3,7 +3,7 @@
 // The shared stylesheet must not put a remote stylesheet into the render
 // critical path: no @import of a remote CSS URL, and every @font-face must
 // point at a local font file that exists on disk and declare a font-display
-// strategy. Run by `deno task test-font-loading` (wired into `deno task check`).
+// strategy. Run by `npm run test-font-loading` (wired into `npm run check`).
 
 import { existsSync, readFileSync } from "node:fs";
 

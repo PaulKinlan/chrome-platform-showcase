@@ -16,19 +16,19 @@
 // (chrome_platform_showcase-lri, where an evicting cap let a still-valid token
 // be replayed once 4096 newer nonces had filled the cache).
 //
-// Run: deno task test-evp-nonce-replay   (needs --v8-flags=--expose-gc)
+// Run: npm run test-evp-nonce-replay   (needs --v8-flags=--expose-gc)
 //
-// Migrated in place to named Deno.test cases (Stage 12 of the dty proposal, bead
+// Migrated in place to named node:test cases (Stage 12 of the dty proposal, bead
 // dty.14): same file path, same task id `test-evp-nonce-replay`, the same ordered
 // gate step 15, the same seven subjects and the same assertions — the custom
-// `section()` registry, its trailing loop and the legacy `Deno.exit(1)` branch are
+// `section()` registry, its trailing loop and the legacy `process.exit(1)` branch are
 // gone, so a failure names the case it broke and Deno's runner owns the exit code.
 //
 // ORDER IS LOAD-BEARING in one direction only, and it is why this file must run
 // alone: the memory case ("retained nonce memory stays bounded") asserts that EVERY
 // one of its samples validates, and the last case saturates the module-level replay
 // cache on purpose, so any later sample would be refused. The memory case therefore
-// has to come first and the saturating case has to stay LAST. Deno.test runs the
+// has to come first and the saturating case has to stay LAST. node:test runs the
 // tests of one file serially in declaration order and scripts/native-test.mjs runs
 // exactly one file per process, so the ordering holds; do not add per-test
 // concurrency, do not batch this file with `--dir`, and do not run it with
@@ -48,6 +48,7 @@
 // `FAIL — evp nonce replay tests (1 file(s) failed)` - a neutral label, truthfully
 // prefixed in both directions. A per-suite audit found no consumer of the old text.
 
+import { test } from "node:test";
 import {
   EVP_NONCE_REPLAY_MAX_ENTRIES,
   EVP_NONCE_REPLAY_TTL_MS,
@@ -98,7 +99,7 @@ async function validate(token, nonce, aud = "https://myapp.example.com") {
   return body;
 }
 
-Deno.test("a validated nonce is rejected when it is replayed", async () => {
+test("a validated nonce is rejected when it is replayed", async () => {
   const nonce = `replay-${crypto.randomUUID()}`;
   const token = await sample(nonce);
 
@@ -117,7 +118,7 @@ Deno.test("a validated nonce is rejected when it is replayed", async () => {
   );
 });
 
-Deno.test("replay rejection survives an arbitrarily long nonce", async () => {
+test("replay rejection survives an arbitrarily long nonce", async () => {
   const nonce = "L".repeat(LONG_NONCE_CHARS);
   const token = await sample(nonce);
   assert((await validate(token, nonce)).valid === true, "a long nonce should validate once");
@@ -127,7 +128,7 @@ Deno.test("replay rejection survives an arbitrarily long nonce", async () => {
   );
 });
 
-Deno.test("two long nonces sharing a prefix are still distinct", async () => {
+test("two long nonces sharing a prefix are still distinct", async () => {
   // Guards the choice of fingerprinting over truncation: a truncated key would
   // collide here and reject a nonce that was never seen.
   //
@@ -163,7 +164,7 @@ Deno.test("two long nonces sharing a prefix are still distinct", async () => {
   );
 });
 
-Deno.test("the sample endpoint re-arms a nonce for a deliberate re-run", async () => {
+test("the sample endpoint re-arms a nonce for a deliberate re-run", async () => {
   // The mock mail provider's "send the email again" action: /sample clears the
   // marker for the nonce it mints. That is the fixture's existing behaviour and
   // is deliberately unchanged here - replay rejection still applies to a token
@@ -182,7 +183,7 @@ Deno.test("the sample endpoint re-arms a nonce for a deliberate re-run", async (
   );
 });
 
-Deno.test("the replay TTL outlives the token it guards", () => {
+test("the replay TTL outlives the token it guards", () => {
   // The executable form of "bounding must not weaken replay rejection": an entry
   // may only disappear after any token carrying that nonce has expired anyway.
   assert(
@@ -195,7 +196,7 @@ Deno.test("the replay TTL outlives the token it guards", () => {
   );
 });
 
-Deno.test("the replay cache uses the project's declared policy numbers", () => {
+test("the replay cache uses the project's declared policy numbers", () => {
   // The case above pins the RELATION between the replay TTL and the token
   // lifetime, and the case below pins memory. Neither can see the numbers
   // themselves: both sides of the relation are imported, and the entry count is
@@ -228,10 +229,10 @@ Deno.test("the replay cache uses the project's declared policy numbers", () => {
   );
 });
 
-Deno.test("retained nonce memory stays bounded", async () => {
+test("retained nonce memory stays bounded", async () => {
   assert(
     typeof globalThis.gc === "function",
-    "this case measures retained heap and needs a real GC: run deno task test-evp-nonce-replay",
+    "this case measures retained heap and needs a real GC: run npm run test-evp-nonce-replay",
   );
   const offered = (LONG_SAMPLES * LONG_NONCE_CHARS) / (1024 * 1024);
 
@@ -249,10 +250,10 @@ Deno.test("retained nonce memory stays bounded", async () => {
   // "retained", against a 0.6 MiB reading with it.
   await batch(WARMUP_SAMPLES, 0);
   globalThis.gc();
-  const before = Deno.memoryUsage().heapUsed;
+  const before = process.memoryUsage().heapUsed;
   await batch(LONG_SAMPLES, WARMUP_SAMPLES);
   globalThis.gc();
-  const retainedMiB = (Deno.memoryUsage().heapUsed - before) / (1024 * 1024);
+  const retainedMiB = (process.memoryUsage().heapUsed - before) / (1024 * 1024);
 
   // Measured on this suite: 13.1 MiB retained at the pre-fix commit (204eb184),
   // 0.6 MiB after the change, repeatably. A 4 MiB line sits well clear of both.
@@ -269,7 +270,7 @@ Deno.test("retained nonce memory stays bounded", async () => {
   );
 });
 
-Deno.test("a nonce validated before the entry cap is still rejected after it fills", async () => {
+test("a nonce validated before the entry cap is still rejected after it fills", async () => {
   // Regression for chrome_platform_showcase-lri. The cache is a deny-list, so an
   // evicting entry cap silently defeated replay rejection: once 4096 newer
   // nonces had been validated the oldest marker was gone and a token still

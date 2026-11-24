@@ -21,7 +21,7 @@
 //      COMPLETENESS against the tree, so a page wired to the helper but missing
 //      from the list fails rather than silently losing its assertion.
 //
-// Migrated in place to ONE async native Deno.test case (Stage 20 of the dty
+// Migrated in place to ONE async node:test case (Stage 20 of the dty
 // proposal, bead chrome_platform_showcase-dty.27), under the dty.19 policy for
 // this class of suite: the non-throwing `check(label, ok, detail)` helper, the
 // `failures` counter, the thirteen bodies in their original order and the
@@ -34,16 +34,19 @@
 // `globalThis.navigator` - installed and restored around each behaviour case by
 // its `finally` - still wraps exactly the same calls. Running them inside the
 // case means a read or import failure fails the case loudly instead of aborting
-// the module before any check could report, and the trailing `Deno.exit(1)`
+// the module before any check could report, and the trailing `process.exit(1)`
 // became the counter's failure message because exiting inside a case kills the
-// test process before Deno can report it.
+// test process before the test runner can report it.
 //
-// Run: deno task test-ua-badges
+// Run: npm run test-ua-badges
+
+import { test } from "node:test";
+import { readdirSync, readFileSync } from "node:fs";
 
 const REPO = new URL("..", import.meta.url).pathname;
 
 function read(path) {
-  return Deno.readTextFileSync(`${REPO}${path}`);
+  return readFileSync(`${REPO}${path}`, "utf8");
 }
 
 let failures = 0;
@@ -56,7 +59,7 @@ function check(label, ok, detail = "") {
   }
 }
 
-Deno.test("the UA badge reads Client Hints, never the UA string, and stays honest when the version is unknown", async () => {
+test("the UA badge reads Client Hints, never the UA string, and stays honest when the version is unknown", async () => {
   const HELPER_TAG = '<script src="/public/chrome-compat.js"></script>';
 
   // Pages converted to the UA-CH helper. prototype-inspector is deliberately
@@ -87,9 +90,9 @@ Deno.test("the UA badge reads Client Hints, never the UA string, and stays hones
   // than listed here, so the two can be compared in both directions.
   function pagesLoadingHelper(dir = "v150") {
     const found = [];
-    for (const entry of Deno.readDirSync(`${REPO}${dir}`)) {
+    for (const entry of readdirSync(`${REPO}${dir}`, { withFileTypes: true })) {
       const path = `${dir}/${entry.name}`;
-      if (entry.isDirectory) found.push(...pagesLoadingHelper(path));
+      if (entry.isDirectory()) found.push(...pagesLoadingHelper(path));
       else if (entry.name === "index.html" && read(path).includes(HELPER_TAG)) found.push(path);
     }
     return found.sort();
@@ -319,8 +322,8 @@ Deno.test("the UA badge reads Client Hints, never the UA string, and stays hones
     }
   }
 
-  // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
-  // live inside a case - it kills the test process before Deno can report the case -
+  // The legacy tail exited the process on a non-zero counter. `process.exit(1)` cannot
+  // live inside a case - it kills the test process before the test runner can report the case -
   // so the counter is carried into the failure message instead: every failing label
   // above has already printed, and this makes the case fail loudly with the same
   // wording the guard used before the migration.

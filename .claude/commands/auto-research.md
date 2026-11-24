@@ -46,7 +46,7 @@ Operational rules:
    suite, repair the demo — do not touch the suite.
 6. Commit and push each generated JSON file on its own. Stage only that file; never use `git add -A`
    inside the fan-out.
-7. After the batch, run `deno fmt`, `deno check server.ts`, and commit/push only relevant formatting
+7. After the batch, run `npm run fmt`, `npm run typecheck`, and commit/push only relevant formatting
    changes.
 8. Report commits, pushed refs, routes to inspect (`/critiques`, `/conformance`), exact browser
    verification evidence, and any blocked milestones.

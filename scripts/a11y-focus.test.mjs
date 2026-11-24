@@ -27,7 +27,7 @@
 // inventory, which stay as static guards on purpose: they are cheap, they name
 // the page, and the browser run is the expensive backstop.
 //
-// Migrated in place to ONE synchronous native Deno.test case (Stage 21 of the dty
+// Migrated in place to ONE synchronous node:test case (Stage 21 of the dty
 // proposal, bead chrome_platform_showcase-dty.28), under the dty.19 policy for
 // this class of suite: the non-throwing `check(label, ok, detail)` helper, the
 // `failures` counter, all thirty-two bodies in their original order and the
@@ -42,15 +42,18 @@
 // of aborting the module before any check could report. Two of the
 // thirty-two sites are template labels inside two loops that
 // each walk two page/selector pairs, so a full run prints thirty-four labels.
-// The trailing `Deno.exit(1)` became the counter's failure message because
-// exiting inside a case kills the test process before Deno can report it.
+// The trailing `process.exit(1)` became the counter's failure message because
+// exiting inside a case kills the test process before the test runner can report it.
 //
-// Run: deno task test-a11y-focus
+// Run: npm run test-a11y-focus
+
+import { test } from "node:test";
+import { readFileSync } from "node:fs";
 
 const REPO = new URL("..", import.meta.url).pathname;
 
 function read(path) {
-  return Deno.readTextFileSync(`${REPO}${path}`);
+  return readFileSync(`${REPO}${path}`, "utf8");
 }
 
 let failures = 0;
@@ -77,7 +80,7 @@ function ruleBlock(css, selectorFragment) {
 }
 
 // ── 1 · Global :focus-visible ring in the shared design system ───────────────
-Deno.test("every keyboard-reachable control keeps a visible focus ring and a sound tab order", () => {
+test("every keyboard-reachable control keeps a visible focus ring and a sound tab order", () => {
   {
     const css = read("public/styles.css");
     const block = ruleBlock(css, ":focus-visible");
@@ -351,8 +354,8 @@ Deno.test("every keyboard-reachable control keeps a visible focus ring and a sou
     );
   }
 
-  // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
-  // live inside a case - it kills the test process before Deno can report the case -
+  // The legacy tail exited the process on a non-zero counter. `process.exit(1)` cannot
+  // live inside a case - it kills the test process before the test runner can report the case -
   // so the counter is carried into the failure message instead: every failing label
   // above has already printed, and this makes the case fail loudly with the same
   // wording the guard used before the migration.
