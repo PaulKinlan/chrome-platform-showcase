@@ -533,6 +533,9 @@ async function runHarness({ childMode }) {
       "test-speculation-probe-docs",
       "test-server-boot",
       "test-hardening",
+      // routes/** now also selects the Worker host-API scan: a route that calls a
+      // Deno API directly breaks the Cloudflare Worker (scripts/worker-platform.test.mjs).
+      "test-worker-platform",
     ];
     const expectedAffected = [...STATIC_IDS, ...RELEASE_ENDPOINT_RULE_IDS];
     const explicitSteps = explicit.payload?.selection?.steps ?? [];

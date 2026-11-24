@@ -1,6 +1,8 @@
 // Co-located server handler for v151/declarative-performance-observer
 // Mounted automatically by routes/release.ts for /v151/declarative-performance-observer/*
 
+import { platform } from "../../lib/platform.ts";
+
 function jsonResponse(payload: unknown, init: ResponseInit = {}): Response {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json; charset=utf-8");
@@ -63,10 +65,11 @@ let dpoKvPromise: Promise<DpoKvHandle> | null = null;
 function getDpoKv(): Promise<DpoKvHandle> {
   if (dpoKvPromise) return dpoKvPromise;
   const attempt = (async (): Promise<DpoKvHandle> => {
-    const maybeDeno = Deno as unknown as { openKv?: () => Promise<DpoMinimalKv> };
-    if (typeof maybeDeno.openKv !== "function") return { state: "absent" };
     try {
-      return { state: "kv", kv: await maybeDeno.openKv() };
+      // Deno KV under Deno, Cloudflare KV under Workers (lib/platform.ts).
+      const kv = (await platform().openKv()) as unknown as DpoMinimalKv | null;
+      if (!kv) return { state: "absent" };
+      return { state: "kv", kv };
     } catch {
       // A rejected open is a transient failure of a PRESENT KV API — never a
       // license to fall back to the isolate-local map (a shadow store would

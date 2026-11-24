@@ -1,3 +1,4 @@
+import { platform } from "../lib/platform.ts";
 import { readBoundedText } from "../lib/request-body.ts";
 import { sourceKeyFrom, telemetryAuthThrottle } from "../lib/auth-throttle.ts";
 import { forbiddenResponse, sameOriginRequest } from "../lib/request-guards.ts";
@@ -100,7 +101,7 @@ function randomId(): string {
 }
 
 function configuredPassword(): string | null {
-  return Deno.env.get("showcase_password") || Deno.env.get("SHOWCASE_PASSWORD") || null;
+  return platform().env("showcase_password") || platform().env("SHOWCASE_PASSWORD") || null;
 }
 
 function unauthorizedResponse(): Response {
@@ -166,10 +167,10 @@ function isAuthorized(req: Request): boolean {
 function getDemoKv(): Promise<MinimalKv | null> {
   if (kvPromise) return kvPromise;
   kvPromise = (async () => {
-    const maybeDeno = Deno as unknown as { openKv?: () => Promise<MinimalKv> };
-    if (typeof maybeDeno.openKv !== "function") return null;
+    // Deno KV under Deno; the Cloudflare KV adapter under Workers; null when
+    // neither is configured (telemetry is then accepted but not stored).
     try {
-      return await maybeDeno.openKv();
+      return (await platform().openKv()) as unknown as MinimalKv | null;
     } catch {
       return null;
     }

@@ -95,7 +95,9 @@ const RELEASE_ENDPOINT_STEPS = [
 ];
 
 // The server/behaviour family. Matched by server.ts, routes/** and lib/**.
-const SERVER_STEPS = ["test-hardening", "test-server-boot", "check-routes"];
+// test-worker-platform scans routes/, lib/ and every sidecar for direct Deno host
+// API calls, which would break the Cloudflare Worker.
+const SERVER_STEPS = ["test-hardening", "test-server-boot", "check-routes", "test-worker-platform"];
 
 /**
  * rule shape:
@@ -185,7 +187,7 @@ export const RULES = [
   },
   {
     pattern: "v*/**/_server.ts",
-    steps: ["test-header-grammar", "check-routes"],
+    steps: ["test-header-grammar", "check-routes", "test-worker-platform"],
     note:
       "any feature sidecar change runs the registry-completeness pin (vo6), including sidecars with no per-file rule",
   },
@@ -245,6 +247,28 @@ export const RULES = [
     pattern: "lib/**",
     all: true,
     note: "shared backend library: unproven affected coverage → FULL gate",
+  },
+
+  // ---- Cloudflare Workers host ----------------------------------------
+  {
+    pattern: "worker/**",
+    steps: ["test-worker-platform", "check-routes"],
+    note: "Cloudflare Worker entry + adapters",
+  },
+  {
+    pattern: "wrangler.jsonc",
+    steps: ["test-worker-platform"],
+    note: "Cloudflare Worker config",
+  },
+  {
+    pattern: "migrations/**",
+    steps: ["test-worker-platform"],
+    note: "D1 schema for the Worker's telemetry store",
+  },
+  {
+    pattern: "scripts/build-worker-assets.mjs",
+    steps: ["test-worker-platform"],
+    note: "Worker asset staging",
   },
 
   // ---- gate-side scripts ----------------------------------------------
