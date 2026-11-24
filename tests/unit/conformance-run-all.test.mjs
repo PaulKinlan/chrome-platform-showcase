@@ -29,7 +29,8 @@ const sampleSuites = [
         id: "profiler-constructs",
         description: "Profiler constructs under Document-Policy",
         kind: "script",
-        test: "(()=>{const p=new Profiler({sampleInterval:10,maxBufferSize:10});p.stop();return true;})()",
+        test:
+          "(()=>{const p=new Profiler({sampleInterval:10,maxBufferSize:10});p.stop();return true;})()",
       },
     ],
   },
@@ -53,107 +54,122 @@ const sampleSuites = [
 test(
   "assertionNeedsRouteContext flags route-dependent assertions identically in runner and server",
   () => {
-  const positiveCases = [
-    {
-      kind: "script",
-      test: "(async()=>{const r=await fetch('../trigger-context-id-builder/register-trigger');return r.ok;})()",
-    },
-    {
-      kind: "script",
-      test: '(async()=>{const r=await fetch("./endpoint");return r.ok;})()',
-    },
-    {
-      kind: "script",
-      test: '(async()=>{const r=await fetch(location.href,{method:"HEAD"});return r.ok;})()',
-    },
-    {
-      kind: "script",
-      test: "(()=>{const u=new URL('../worker.js',location.href);return Boolean(u);})()",
-    },
-    {
-      kind: "script",
-      test: "document.featurePolicy && document.featurePolicy.features().includes('attribution-reporting')",
-    },
-    {
-      kind: "script",
-      test: "document.permissionsPolicy.features().includes('web-share')",
-    },
-    {
-      kind: "script",
-      test: "(()=>{const p=new Profiler({sampleInterval:10,maxBufferSize:100});return Boolean(p);})()",
-    },
-    {
-      kind: "throws",
-      test: "(()=>{new self.Profiler({sampleInterval:-1,maxBufferSize:100});})()",
-    },
-    {
-      kind: "script",
-      test: "typeof self.Profiler === 'function'",
-    },
-  ];
+    const positiveCases = [
+      {
+        kind: "script",
+        test:
+          "(async()=>{const r=await fetch('../trigger-context-id-builder/register-trigger');return r.ok;})()",
+      },
+      {
+        kind: "script",
+        test: '(async()=>{const r=await fetch("./endpoint");return r.ok;})()',
+      },
+      {
+        kind: "script",
+        test: '(async()=>{const r=await fetch(location.href,{method:"HEAD"});return r.ok;})()',
+      },
+      {
+        kind: "script",
+        test: "(()=>{const u=new URL('../worker.js',location.href);return Boolean(u);})()",
+      },
+      {
+        kind: "script",
+        test:
+          "document.featurePolicy && document.featurePolicy.features().includes('attribution-reporting')",
+      },
+      {
+        kind: "script",
+        test: "document.permissionsPolicy.features().includes('web-share')",
+      },
+      {
+        kind: "script",
+        test:
+          "(()=>{const p=new Profiler({sampleInterval:10,maxBufferSize:100});return Boolean(p);})()",
+      },
+      {
+        kind: "throws",
+        test: "(()=>{new self.Profiler({sampleInterval:-1,maxBufferSize:100});})()",
+      },
+      {
+        kind: "script",
+        test: "typeof self.Profiler === 'function'",
+      },
+    ];
 
-  for (const assertion of positiveCases) {
-    assert.equal(
-      runnerNeedsContext(assertion),
-      true,
-      `public runner should flag: ${assertion.test}`,
-    );
-    assert.equal(
-      serverNeedsContext(assertion),
-      true,
-      `server helper should flag: ${assertion.test}`,
-    );
-  }
-});
+    for (const assertion of positiveCases) {
+      assert.equal(
+        runnerNeedsContext(assertion),
+        true,
+        `public runner should flag: ${assertion.test}`,
+      );
+      assert.equal(
+        serverNeedsContext(assertion),
+        true,
+        `server helper should flag: ${assertion.test}`,
+      );
+    }
+  },
+);
 
 test(
   "assertionNeedsRouteContext does not flag plain CSS, exists, typeof, manual, or pure JS assertions",
   () => {
-  const negativeCases = [
-    { kind: "css-supports", test: "display: grid" },
-    { kind: "exists", test: "Profiler" },
-    { kind: "typeof", test: "Profiler", expect: "function" },
-    { kind: "manual", test: "Requires new Profiler and document.featurePolicy" },
-    { kind: "script", test: "1 + 1 === 2" },
-    { kind: "script", test: "(async()=>{const r=await fetch('/public/styles.css');return r.ok;})()" },
-    { kind: "script", test: "(async()=>{const r=await fetch('data:text/plain,hi');return r.ok;})()" },
-    { kind: "throws", test: "(()=>{throw new TypeError('x');})()" },
-    null,
-    undefined,
-  ];
+    const negativeCases = [
+      { kind: "css-supports", test: "display: grid" },
+      { kind: "exists", test: "Profiler" },
+      { kind: "typeof", test: "Profiler", expect: "function" },
+      { kind: "manual", test: "Requires new Profiler and document.featurePolicy" },
+      { kind: "script", test: "1 + 1 === 2" },
+      {
+        kind: "script",
+        test: "(async()=>{const r=await fetch('/public/styles.css');return r.ok;})()",
+      },
+      {
+        kind: "script",
+        test: "(async()=>{const r=await fetch('data:text/plain,hi');return r.ok;})()",
+      },
+      { kind: "throws", test: "(()=>{throw new TypeError('x');})()" },
+      null,
+      undefined,
+    ];
 
-  for (const assertion of negativeCases) {
-    assert.equal(
-      runnerNeedsContext(assertion),
-      false,
-      `public runner should not flag: ${JSON.stringify(assertion)}`,
-    );
-    assert.equal(
-      serverNeedsContext(assertion),
-      false,
-      `server helper should not flag: ${JSON.stringify(assertion)}`,
-    );
-  }
-});
+    for (const assertion of negativeCases) {
+      assert.equal(
+        runnerNeedsContext(assertion),
+        false,
+        `public runner should not flag: ${JSON.stringify(assertion)}`,
+      );
+      assert.equal(
+        serverNeedsContext(assertion),
+        false,
+        `server helper should not flag: ${JSON.stringify(assertion)}`,
+      );
+    }
+  },
+);
 
 test(
   "renderConformanceRunAllPage filters suites by release while keeping milestone navigation",
   () => {
-  const html = renderConformanceRunAllPage(sampleSuites, { release: "v153" });
+    const html = renderConformanceRunAllPage(sampleSuites, { release: "v153" });
 
-  assert.match(html, /conformance run-all \(v153\)/);
-  assert.match(html, /href="\/conformance\/run-all\/\?release=v153" aria-current="page">v153<\/a>/);
-  assert.match(html, /href="\/conformance\/run-all\/\?release=v134">v134<\/a>/);
-  assert.match(html, /href="\/conformance\/suites\.json\?release=v153"/);
+    assert.match(html, /conformance run-all \(v153\)/);
+    assert.match(
+      html,
+      /href="\/conformance\/run-all\/\?release=v153" aria-current="page">v153<\/a>/,
+    );
+    assert.match(html, /href="\/conformance\/run-all\/\?release=v134">v134<\/a>/);
+    assert.match(html, /href="\/conformance\/suites\.json\?release=v153"/);
 
-  // Embedded SUITES JSON must contain only v153, not v134.
-  const match = html.match(/const SUITES = (\[[\s\S]*?\]);/);
-  assert.ok(match, "expected embedded SUITES JSON array");
-  const embedded = JSON.parse(match[1]);
-  assert.equal(embedded.length, 1);
-  assert.equal(embedded[0].release, "v153");
-  assert.equal(embedded[0].featureSlug, "js-self-profiling-markers");
-});
+    // Embedded SUITES JSON must contain only v153, not v134.
+    const match = html.match(/const SUITES = (\[[\s\S]*?\]);/);
+    assert.ok(match, "expected embedded SUITES JSON array");
+    const embedded = JSON.parse(match[1]);
+    assert.equal(embedded.length, 1);
+    assert.equal(embedded[0].release, "v153");
+    assert.equal(embedded[0].featureSlug, "js-self-profiling-markers");
+  },
+);
 
 test(
   "renderConformanceRunAllPage strictly escapes hostile release query and suite metadata",

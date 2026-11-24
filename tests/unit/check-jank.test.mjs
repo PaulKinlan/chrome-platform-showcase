@@ -37,42 +37,43 @@ test("scanDvhTraps catches height: 100dvh and min-height: 80dvh in CSS with line
 test(
   "scanDvhTraps catches <style> and inline style traps in HTML, ignores prose/comments/svh",
   () => {
-  const html = [
-    "<!doctype html>",
-    "<html>",
-    "<head>",
-    "  <style>",
-    "    /* height: 100dvh; ignored inside CSS comment */",
-    "    .good-stage { height: 100svh; min-height: 80svh; }",
-    "    .bad-stage {",
-    "      height: 100dvh;",
-    "      min-height: 80dvh;",
-    "    }",
-    "  </style>",
-    "</head>",
-    "<body>",
-    "  <!-- <div style=\"height: 100dvh\">commented out</div> -->",
-    "  <p>Avoid height: 100dvh and min-height: 80dvh; prefer 100svh for canvas stages.</p>",
-    "  <pre><code>.example { height: 100dvh; }</code></pre>",
-    "  <script>const note = 'height: 100dvh';</script>",
-    "  <div class=\"stage\" style=\"min-height: 90dvh;\"></div>",
-    "</body>",
-    "</html>",
-  ].join("\n");
+    const html = [
+      "<!doctype html>",
+      "<html>",
+      "<head>",
+      "  <style>",
+      "    /* height: 100dvh; ignored inside CSS comment */",
+      "    .good-stage { height: 100svh; min-height: 80svh; }",
+      "    .bad-stage {",
+      "      height: 100dvh;",
+      "      min-height: 80dvh;",
+      "    }",
+      "  </style>",
+      "</head>",
+      "<body>",
+      '  <!-- <div style="height: 100dvh">commented out</div> -->',
+      "  <p>Avoid height: 100dvh and min-height: 80dvh; prefer 100svh for canvas stages.</p>",
+      "  <pre><code>.example { height: 100dvh; }</code></pre>",
+      "  <script>const note = 'height: 100dvh';</script>",
+      '  <div class="stage" style="min-height: 90dvh;"></div>',
+      "</body>",
+      "</html>",
+    ].join("\n");
 
-  const findings = scanDvhTraps(html, "v160/example/index.html");
-  assert.equal(findings.length, 3);
-  assert.deepEqual(
-    findings.map((f) => ({ line: f.line, match: f.match })),
-    [
-      { line: 8, match: "height: 100dvh" },
-      { line: 9, match: "min-height: 80dvh" },
-      { line: 18, match: "min-height: 90dvh" },
-    ],
-  );
-  assert.ok(findings.every((f) => f.file === "v160/example/index.html"));
-  assert.ok(findings.every((f) => /svh/i.test(f.advice)));
-});
+    const findings = scanDvhTraps(html, "v160/example/index.html");
+    assert.equal(findings.length, 3);
+    assert.deepEqual(
+      findings.map((f) => ({ line: f.line, match: f.match })),
+      [
+        { line: 8, match: "height: 100dvh" },
+        { line: 9, match: "min-height: 80dvh" },
+        { line: 18, match: "min-height: 90dvh" },
+      ],
+    );
+    assert.ok(findings.every((f) => f.file === "v160/example/index.html"));
+    assert.ok(findings.every((f) => /svh/i.test(f.advice)));
+  },
+);
 
 test("scanDvhTraps ignores svh, vh, lvh, custom properties, and comments", () => {
   const css = [
@@ -152,28 +153,29 @@ test("evaluateJankMetrics fails on URL-bar CLS spike", () => {
 test(
   "evaluateJankMetrics fails on uncaught page errors, console errors, blank canvases, dvh traps",
   () => {
-  const res = evaluateJankMetrics(
-    cleanMetrics({
-      pageErrors: ["ReferenceError: stage is not defined"],
-      consoleErrors: ["WebGL shader compile failed"],
-      blankCanvases: [{ id: "stage", width: 0, height: 0 }],
-      dvhTraps: [
-        {
-          file: "v160/demo/index.html",
-          line: 12,
-          match: "height: 100dvh",
-          advice: "Use svh",
-        },
-      ],
-    }),
-  );
-  assert.equal(res.ok, false);
-  assert.equal(res.reasons.length, 4);
-  assert.ok(res.reasons.some((r) => /uncaught page error/i.test(r)));
-  assert.ok(res.reasons.some((r) => /console error/i.test(r)));
-  assert.ok(res.reasons.some((r) => /blank or lost-context canvas/i.test(r)));
-  assert.ok(res.reasons.some((r) => /dvh height trap/i.test(r)));
-});
+    const res = evaluateJankMetrics(
+      cleanMetrics({
+        pageErrors: ["ReferenceError: stage is not defined"],
+        consoleErrors: ["WebGL shader compile failed"],
+        blankCanvases: [{ id: "stage", width: 0, height: 0 }],
+        dvhTraps: [
+          {
+            file: "v160/demo/index.html",
+            line: 12,
+            match: "height: 100dvh",
+            advice: "Use svh",
+          },
+        ],
+      }),
+    );
+    assert.equal(res.ok, false);
+    assert.equal(res.reasons.length, 4);
+    assert.ok(res.reasons.some((r) => /uncaught page error/i.test(r)));
+    assert.ok(res.reasons.some((r) => /console error/i.test(r)));
+    assert.ok(res.reasons.some((r) => /blank or lost-context canvas/i.test(r)));
+    assert.ok(res.reasons.some((r) => /dvh height trap/i.test(r)));
+  },
+);
 
 test("evaluateJankMetrics honors custom threshold overrides", () => {
   const res = evaluateJankMetrics(
