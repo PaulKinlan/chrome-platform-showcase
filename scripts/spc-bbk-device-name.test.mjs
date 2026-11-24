@@ -12,10 +12,10 @@
 // POST /enroll with two P-256 public JWKs is enough to create an entry and get
 // the stored name echoed back, which is also the reachability claim.
 //
-// Migrated in place to named Deno.test cases (Stage 5 of the dty proposal, bead
+// Migrated in place to named node:test cases (Stage 5 of the dty proposal, bead
 // dty.5): same file path, same task id `test-spc-bbk-device-name`, same ordered
 // gate step, same five subjects and the same assertions — the custom `section()`
-// registry, its trailing loop and the legacy `Deno.exit(1)` branch are gone, so a
+// registry, its trailing loop and the legacy `process.exit(1)` branch are gone, so a
 // failure names the behaviour and Deno's runner owns the exit code.
 //
 // The child needs NO permission at all (probe: `deno run
@@ -30,8 +30,9 @@
 // truthfully prefixed in both directions. The old text `all sections passed` is
 // gone; a read-only audit found no consumer of it.
 //
-// Run: deno task test-spc-bbk-device-name
+// Run: npm run test-spc-bbk-device-name
 
+import { test } from "node:test";
 import { handleLegacyReleaseEndpoints } from "../routes/release-endpoints.ts";
 
 // What this suite expects the bound to be. The demo's own names are at most 32
@@ -85,7 +86,7 @@ async function storedState(enrollmentId) {
 
 // ---------------------------------------------------------------------------
 
-Deno.test("ok — the fixture's own device names are stored and echoed unchanged", async () => {
+test("ok — the fixture's own device names are stored and echoed unchanged", async () => {
   // Every value the published demos send.
   const demoNames = [
     "Primary checkout browser",
@@ -117,7 +118,7 @@ Deno.test("ok — the fixture's own device names are stored and echoed unchanged
   );
 });
 
-Deno.test("ok — the default device name is used when the body omits it", async () => {
+test("ok — the default device name is used when the body omits it", async () => {
   const { res, body } = await enroll(undefined);
   assert(res.status === 200, "enrolling without a deviceName should still succeed");
   assert(
@@ -126,7 +127,7 @@ Deno.test("ok — the default device name is used when the body omits it", async
   );
 });
 
-Deno.test("ok — an oversized device name is not retained in full", async () => {
+test("ok — an oversized device name is not retained in full", async () => {
   // DEMO_BODY_LIMIT is 1 MiB for the whole JSON body, and the two P-256 JWKs
   // plus the JSON envelope take a few hundred bytes of it, so the largest name a
   // caller can actually park here is just under 1 MiB. A name of exactly 1 MiB
@@ -157,7 +158,7 @@ Deno.test("ok — an oversized device name is not retained in full", async () =>
   );
 });
 
-Deno.test("ok — the body ceiling is what caps the raw request, not the name itself", async () => {
+test("ok — the body ceiling is what caps the raw request, not the name itself", async () => {
   // Documents where the pre-existing 1 MiB DEMO_BODY_LIMIT bites: a name of
   // exactly 1 MiB pushes the envelope over the limit, so the request is refused
   // before the name is ever stored. This section is about the ceiling, not the
@@ -169,7 +170,7 @@ Deno.test("ok — the body ceiling is what caps the raw request, not the name it
   );
 });
 
-Deno.test("ok — the retained device-name budget stays small across a full store", async () => {
+test("ok — the retained device-name budget stays small across a full store", async () => {
   // Eight oversized enrollments stand in for a caller filling the store: with
   // no bound this retains ~8 MiB of names alone, and the 512-entry cap (1e5)
   // multiplies it to ~0.5 GiB.

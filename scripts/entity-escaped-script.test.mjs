@@ -14,7 +14,7 @@
 // file:line. Entities inside strings, template text, comments, regex literals,
 // `<pre>`/`<code>` samples and JSON-ish script types are correct and ignored.
 //
-// Migrated in place to ONE native Deno.test case (Stage 18 of the dty proposal,
+// Migrated in place to ONE node:test case (Stage 18 of the dty proposal,
 // bead chrome_platform_showcase-dty.25), under the dty.19 policy for this class
 // of suite: the non-throwing `check(label, ok, detail)` helper, the `failures`
 // counter, the three bodies in their original order and the failure and success
@@ -24,11 +24,14 @@
 // `Deno.readTextFileSync` of every selected file, and the two targeted sample
 // reads) now happen inside the case, in the same order, so a read failure still
 // fails loudly instead of aborting the module before any check could report.
-// The trailing `Deno.exit(1)` is gone because exiting inside a case kills the
-// test process before Deno can report it; the counter now raises the same
+// The trailing `process.exit(1)` is gone because exiting inside a case kills the
+// test process before the test runner can report it; the counter now raises the same
 // message as the case's failure.
 //
-// Run: deno task test-entity-scripts
+// Run: npm run test-entity-scripts
+
+import { test } from "node:test";
+import { readdirSync, readFileSync } from "node:fs";
 
 const REPO = new URL("..", import.meta.url).pathname;
 const RAW_TEXT = new Set(["script", "style", "textarea", "title"]);
@@ -46,12 +49,12 @@ function check(label, ok, detail = "") {
 }
 
 function read(path) {
-  return Deno.readTextFileSync(`${REPO}${path.replace(/^\/+/, "")}`);
+  return readFileSync(`${REPO}${path.replace(/^\/+/, "")}`, "utf8");
 }
 
 function listDemoHtml(dir = REPO, out = [], depth = 0) {
-  for (const e of Deno.readDirSync(dir)) {
-    if (e.isDirectory) {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) {
       if (e.name.startsWith(".") || e.name === "node_modules") continue;
       if (depth === 0 && !/^v\d+$/.test(e.name)) continue;
       listDemoHtml(`${dir}${e.name}/`, out, depth + 1);
@@ -347,13 +350,13 @@ function findingsFor(html) {
   return findings;
 }
 
-Deno.test("the published demos contain no HTML-entity escapes in executable JavaScript", () => {
+test("the published demos contain no HTML-entity escapes in executable JavaScript", () => {
   const files = listDemoHtml();
   let totalFindings = 0;
   const reported = [];
   for (const abs of files) {
     const rel = abs.slice(REPO.length);
-    const text = Deno.readTextFileSync(abs);
+    const text = readFileSync(abs, "utf8");
     const findings = rel.endsWith(".html") ? findingsFor(text) : codeEntities(text).map((h) => ({
       line: text.slice(0, h.index).split("\n").length,
       text: h.text,
@@ -388,8 +391,8 @@ Deno.test("the published demos contain no HTML-entity escapes in executable Java
     "catch-vs-onerror keeps its displayed code sample escaped where it is markup",
     catchDemo.includes("=&gt;"),
   );
-  // The legacy tail exited non-zero on a non-zero counter. `Deno.exit(1)` cannot
-  // live inside a case - it kills the test process before Deno can report the case
+  // The legacy tail exited non-zero on a non-zero counter. `process.exit(1)` cannot
+  // live inside a case - it kills the test process before the test runner can report the case
   // - so the counter is carried into the failure message instead: every failing
   // label above has already printed, and this makes the case fail loudly with the
   // same wording the suite used before the migration.

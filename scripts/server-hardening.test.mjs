@@ -4,6 +4,12 @@
 // asset root containment, alias redirect Location construction, and HTML
 // attribute escaping on generated pages.
 
+import { serve } from "../server/http.ts";
+import { spawnChild } from "./lib/cdp.mjs";
+import { test } from "node:test";
+import { mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { handleDemoTelemetryRoute } from "../routes/demo-telemetry.ts";
 import { readBoundedBody } from "../lib/request-body.ts";
 import { buildAliasLocation, handleAliasRoute } from "../routes/aliases.ts";
@@ -104,9 +110,7 @@ async function closeListener(listener, what) {
   }
   teardownFailed(
     `${what} had not finished closing ${TEARDOWN_BOUND_MS}ms after it was asked to shut down ` +
-      "(a request is still in flight; the listening socket is already closed, and Deno 2.9.7 " +
-      "throws an uncaught BadResource if an abort fires after shutdown, so the listener is left " +
-      "to the runtime rather than force-closed)",
+      "(a request is still in flight; the listening socket is already closed)",
   );
 }
 
@@ -137,10 +141,10 @@ async function reapChild(child, what) {
 async function removeProfile(profile, what) {
   for (let i = 0; i < 20; i++) {
     try {
-      await Deno.remove(profile, { recursive: true });
+      await rm(profile, { recursive: true, force: true });
       return;
     } catch (err) {
-      if (err instanceof Deno.errors.NotFound) return;
+      if (err?.code === "ENOENT") return;
       if (i === 19) {
         teardownFailed(
           `${what} ${profile} could not be removed after 20 attempts: ${err?.message ?? err}`,
@@ -177,6 +181,7 @@ function post(path, body, headers = {}) {
     method: "POST",
     body,
     headers,
+    duplex: "half",
   });
 }
 
@@ -644,7 +649,7 @@ section("public assets stay inside the public root", async () => {
   // A symlink inside public/ pointing at a file outside the root. This is the
   // only construction the URL parser's dot-segment normalisation cannot see.
   const linkPath = new URL("../public/.hardening-test-link", import.meta.url).pathname;
-  await Deno.symlink(
+  await symlink(
     new URL("../server.ts", import.meta.url).pathname,
     linkPath,
   );
@@ -662,7 +667,7 @@ section("public assets stay inside the public root", async () => {
       `${label}: styles.css no longer serves (${normal?.status})`,
     );
   } finally {
-    await Deno.remove(linkPath);
+    await rm(linkPath, { recursive: true, force: true });
   }
 });
 
@@ -830,17 +835,15 @@ section("credentialed CORS echoes the loopback host pair", async () => {
 section("fedcm credentialed CORS browser verdict", async () => {
   const label = "fedcm credentialed CORS browser verdict";
   const chromeCandidates = [
-    Deno.env.get("CHROME_BIN"),
-    `${
-      Deno.env.get("HOME") ?? ""
-    }/.cache/browsers/chrome/linux-154.0.8037.92/chrome-linux64/chrome`,
+    process.env["CHROME_BIN"],
+    `${process.env["HOME"] ?? ""}/.cache/browsers/chrome/linux-154.0.8037.92/chrome-linux64/chrome`,
     "/usr/bin/google-chrome",
     "/usr/bin/chromium",
   ].filter(Boolean);
   let chromeBin = null;
   for (const c of chromeCandidates) {
     try {
-      await Deno.stat(c);
+      await stat(c);
       chromeBin = c;
       break;
     } catch { /* next candidate */ }
@@ -935,7 +938,7 @@ section("fedcm credentialed CORS browser verdict", async () => {
         resolve(reported.get(caseName));
       });
     });
-  const site = Deno.serve(
+  const site = await serve(
     { hostname: "127.0.0.1", port: 0, onListen: ({ port }) => (sitePort = port) },
     (req) => {
       const path = new URL(req.url).pathname;
@@ -955,7 +958,7 @@ section("fedcm credentialed CORS browser verdict", async () => {
       return new Response("not found", { status: 404 });
     },
   );
-  const attacker = Deno.serve(
+  const attacker = await serve(
     { hostname: "127.0.0.1", port: 0, onListen: ({ port }) => (attackerPort = port) },
     (req) => {
       const path = new URL(req.url).pathname;
@@ -978,24 +981,19 @@ section("fedcm credentialed CORS browser verdict", async () => {
     // browser process is killed as soon as the verdict arrives (or after the
     // bound), so nothing here depends on dump timing.
     const driveCase = async (pageUrl, caseName) => {
-      const profile = await Deno.makeTempDir({ prefix: "cors-probe-" });
+      const profile = await mkdtemp(join(tmpdir(), "cors-probe-"));
       let child = null;
       try {
-        child = new Deno.Command(chromeBin, {
-          args: [
-            "--headless=new",
-            "--no-sandbox",
-            "--disable-gpu",
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--no-default-browser-check",
-            `--user-data-dir=${profile}`,
-            pageUrl,
-          ],
-          stdin: "null",
-          stdout: "null",
-          stderr: "null",
-        }).spawn();
+        child = spawnChild(chromeBin, [
+          "--headless=new",
+          "--no-sandbox",
+          "--disable-gpu",
+          "--disable-dev-shm-usage",
+          "--no-first-run",
+          "--no-default-browser-check",
+          `--user-data-dir=${profile}`,
+          pageUrl,
+        ]);
         const verdict = await waitForVerdict(caseName, 120000);
         return verdict;
       } finally {
@@ -1234,17 +1232,15 @@ section("critique detail escapes the severity chip and the ChromeStatus link", a
 section("focus cascade and roving tabindex on use-case sampler", async () => {
   const label = "focus cascade and roving tabindex on use-case sampler";
   const chromeCandidates = [
-    Deno.env.get("CHROME_BIN"),
-    `${
-      Deno.env.get("HOME") ?? ""
-    }/.cache/browsers/chrome/linux-154.0.8037.92/chrome-linux64/chrome`,
+    process.env["CHROME_BIN"],
+    `${process.env["HOME"] ?? ""}/.cache/browsers/chrome/linux-154.0.8037.92/chrome-linux64/chrome`,
     "/usr/bin/google-chrome",
     "/usr/bin/chromium",
   ].filter(Boolean);
   let chromeBin = null;
   for (const c of chromeCandidates) {
     try {
-      await Deno.stat(c);
+      await stat(c);
       chromeBin = c;
       break;
     } catch { /* next candidate */ }
@@ -1258,7 +1254,7 @@ section("focus cascade and roving tabindex on use-case sampler", async () => {
     "../v150/web-speech-api-on-device-recognition-quality/use-case-sampler/index.html",
     import.meta.url,
   ).pathname;
-  const rawHtml = await Deno.readTextFile(pagePath);
+  const rawHtml = await readFile(pagePath, "utf8");
 
   let reportedVerdict = null;
   let reportWaiter = null;
@@ -1274,7 +1270,7 @@ section("focus cascade and roving tabindex on use-case sampler", async () => {
     });
 
   let serverPort = 0;
-  const server = Deno.serve(
+  const server = await serve(
     { hostname: "127.0.0.1", port: 0, onListen: ({ port }) => (serverPort = port) },
     async (req) => {
       const u = new URL(req.url);
@@ -1366,25 +1362,20 @@ window.addEventListener('load', () => {
     },
   );
 
-  const profile = await Deno.makeTempDir({ prefix: "focus-probe-" });
+  const profile = await mkdtemp(join(tmpdir(), "focus-probe-"));
   let child = null;
   try {
     const pageUrl = `http://127.0.0.1:${serverPort}/`;
-    child = new Deno.Command(chromeBin, {
-      args: [
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        "--no-first-run",
-        "--no-default-browser-check",
-        `--user-data-dir=${profile}`,
-        pageUrl,
-      ],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
+    child = spawnChild(chromeBin, [
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--no-first-run",
+      "--no-default-browser-check",
+      `--user-data-dir=${profile}`,
+      pageUrl,
+    ]);
 
     const verdict = await waitForVerdict(120000);
     if (!verdict) {
@@ -1446,17 +1437,15 @@ window.addEventListener('load', () => {
 section("critiques table rendered overflow at 390px", async () => {
   const label = "critiques table rendered overflow at 390px";
   const chromeCandidates = [
-    Deno.env.get("CHROME_BIN"),
-    `${
-      Deno.env.get("HOME") ?? ""
-    }/.cache/browsers/chrome/linux-154.0.8037.92/chrome-linux64/chrome`,
+    process.env["CHROME_BIN"],
+    `${process.env["HOME"] ?? ""}/.cache/browsers/chrome/linux-154.0.8037.92/chrome-linux64/chrome`,
     "/usr/bin/google-chrome",
     "/usr/bin/chromium",
   ].filter(Boolean);
   let chromeBin = null;
   for (const c of chromeCandidates) {
     try {
-      await Deno.stat(c);
+      await stat(c);
       chromeBin = c;
       break;
     } catch { /* next candidate */ }
@@ -1482,7 +1471,7 @@ section("critiques table rendered overflow at 390px", async () => {
     });
 
   let serverPort = 0;
-  const server = Deno.serve(
+  const server = await serve(
     { hostname: "127.0.0.1", port: 0, onListen: ({ port }) => (serverPort = port) },
     async (req) => {
       const u = new URL(req.url);
@@ -1552,27 +1541,22 @@ window.addEventListener('load', () => {
     },
   );
 
-  const profile = await Deno.makeTempDir({ prefix: "critiques-overflow-" });
+  const profile = await mkdtemp(join(tmpdir(), "critiques-overflow-"));
   let child = null;
   try {
     const pageUrl = `http://127.0.0.1:${serverPort}/critiques`;
-    child = new Deno.Command(chromeBin, {
-      args: [
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--window-size=390,740",
-        "--hide-scrollbars",
-        `--app=${pageUrl}`,
-        `--user-data-dir=${profile}`,
-      ],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
+    child = spawnChild(chromeBin, [
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--window-size=390,740",
+      "--hide-scrollbars",
+      `--app=${pageUrl}`,
+      `--user-data-dir=${profile}`,
+    ]);
 
     const verdict = await waitForVerdict(120000);
     if (!verdict) {
@@ -1617,7 +1601,7 @@ window.addEventListener('load', () => {
 // ONE aggregate case: the runner reports a single pass/fail for the suite, while
 // every section still runs even when an earlier one fails, so the failure
 // breadth the legacy footer printed survives inside the case.
-Deno.test("the server hardening contract holds across request caps, origin gates and a real headless browser", async () => {
+test("the server hardening contract holds across request caps, origin gates and a real headless browser", async () => {
   for (const { label, fn } of sections) {
     try {
       await fn();

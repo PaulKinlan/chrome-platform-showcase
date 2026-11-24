@@ -17,7 +17,7 @@
 // is the one that sees a production edit like `width: max-content`, which keeps
 // overflow-x:auto and still overflows the page.
 //
-// Migrated in place to ONE async native Deno.test case (Stage 22 of the dty
+// Migrated in place to ONE async node:test case (Stage 22 of the dty
 // proposal, bead chrome_platform_showcase-dty.29), under the dty.19 policy for
 // this class of suite. The body is unchanged: the imported production renderer,
 // the `await renderCritiquesIndex()` call that used to sit at module scope (now
@@ -27,12 +27,13 @@
 // sentence - including the sentence that defers the real rendered geometry to
 // the browser section of scripts/server-hardening.test.mjs - all survive, and a
 // run still prints NO per-check label on success and still prints every
-// collected failure with its detail on a bad run. The trailing `Deno.exit(1)`
+// collected failure with its detail on a bad run. The trailing `process.exit(1)`
 // became a named throw because exiting inside a case kills the test process
-// before Deno can report it; the count it carried is unchanged.
+// before the test runner can report it; the count it carried is unchanged.
+import { test } from "node:test";
 import { renderCritiquesIndex } from "../routes/critique-renderers.ts";
 
-Deno.test("the critiques index keeps its table inside a keyboard-reachable scroll region", async () => {
+test("the critiques index keeps its table inside a keyboard-reachable scroll region", async () => {
   const html = await renderCritiquesIndex();
   let passed = 0;
   const failures = [];
@@ -115,8 +116,8 @@ Deno.test("the critiques index keeps its table inside a keyboard-reachable scrol
     `header has ${headerCells} columns; body rows carry ${JSON.stringify(rowCellCounts)} cells`,
   );
 
-  // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
-  // live inside a case - it kills the test process before Deno can report the case -
+  // The legacy tail exited the process on a non-zero counter. `process.exit(1)` cannot
+  // live inside a case - it kills the test process before the test runner can report the case -
   // so the collected failures are still printed in full, and the counter is then
   // carried into a named failure instead.
   if (failures.length) {

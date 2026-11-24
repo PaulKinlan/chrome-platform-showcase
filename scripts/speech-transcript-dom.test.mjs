@@ -6,7 +6,7 @@
 // proof - a hostile transcript driven into these real pages in a browser, with
 // a pre-fix control - is recorded on bead chrome_platform_showcase-5c8.
 //
-// Migrated in place to a native Deno.test case (Stage 15 of the dty proposal, bead
+// Migrated in place to a node:test case (Stage 15 of the dty proposal, bead
 // dty.20): same file path, same task id `test-speech-transcript-dom`, the same ordered
 // gate step 23, the same first-failure abort - ONE case covers BOTH demo files,
 // deliberately, so that a failure in the first file still stops the second from
@@ -65,6 +65,9 @@
 // guard actually executed its checks (27 assertions over 2 demos), and the task adds
 // the runner's `PASS — speech transcript DOM contract` line, matching the gate step's
 // own wording.
+
+import { test } from "node:test";
+import { readFileSync } from "node:fs";
 
 const files = {
   "v142/web-speech-api-contextual-biasing/voice-commands/index.html": [
@@ -126,10 +129,10 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-Deno.test("the speech transcript now speaks in text nodes, in both demos", () => {
+test("the speech transcript now speaks in text nodes, in both demos", () => {
   let assertions = 0;
   for (const [file, required] of Object.entries(files)) {
-    const src = Deno.readTextFileSync(file);
+    const src = readFileSync(file, "utf8");
     assert(src.length > 1000, `${file}: file is unexpectedly small - guard would be vacuous`);
     assert(
       src.includes("SpeechRecognition"),

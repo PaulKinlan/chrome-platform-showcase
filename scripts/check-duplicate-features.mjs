@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read
+#!/usr/bin/env node
 // Duplication gate: one demo portfolio per ChromeStatus feature.
 //
 // ChromeStatus lists a feature in the milestone listing for every milestone its
@@ -18,7 +18,7 @@
 //      recorded in feature-lineage.json and their URLs are durable. They may be
 //      improved in place; they may not be joined by new siblings.
 //   3. Every folder in a multi-milestone lineage must carry the lineage note
-//      (`deno task apply-lineage`) so each page states which milestone the
+//      (`npm run apply-lineage`) so each page states which milestone the
 //      feature actually shipped in and links the others.
 //
 // FAIL when:
@@ -27,21 +27,23 @@
 //   B. a recorded lineage gains a folder it did not have, OR
 //   C. a folder in a recorded lineage is missing its lineage note.
 //
-// Usage: deno task check-duplicates
+// Usage: npm run check-duplicates
+
+import { readdir, readFile } from "node:fs/promises";
 
 const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
 
 async function scan() {
   const byId = new Map();
   const notes = new Map();
-  for await (const rel of Deno.readDir(ROOT)) {
-    if (!rel.isDirectory || !/^v\d+$/.test(rel.name)) continue;
-    for await (const feat of Deno.readDir(`${ROOT}/${rel.name}`)) {
-      if (!feat.isDirectory) continue;
+  for (const rel of await readdir(ROOT, { withFileTypes: true })) {
+    if (!rel.isDirectory() || !/^v\d+$/.test(rel.name)) continue;
+    for (const feat of await readdir(`${ROOT}/${rel.name}`, { withFileTypes: true })) {
+      if (!feat.isDirectory()) continue;
       const dir = `${rel.name}/${feat.name}`;
       let html;
       try {
-        html = await Deno.readTextFile(`${ROOT}/${dir}/index.html`);
+        html = await readFile(`${ROOT}/${dir}/index.html`, "utf8");
       } catch {
         continue;
       }
@@ -55,7 +57,7 @@ async function scan() {
   return { byId, notes };
 }
 
-const lineage = JSON.parse(await Deno.readTextFile(`${ROOT}/feature-lineage.json`));
+const lineage = JSON.parse(await readFile(`${ROOT}/feature-lineage.json`, "utf8"));
 const { byId, notes } = await scan();
 
 const failures = [];
@@ -69,7 +71,7 @@ for (const [id, dirs] of byId) {
       failures.push(
         `feature ${id} is recorded in feature-lineage.json with ` +
           `${recorded.folders.length} folders but only ${dirs.length} exists — ` +
-          `regenerate with \`deno task feature-lineage\``,
+          `regenerate with \`npm run feature-lineage\``,
       );
     }
     continue;
@@ -99,7 +101,7 @@ for (const [id, feature] of Object.entries(lineage.features)) {
     if (notes.get(folder.dir) === false) {
       failures.push(
         `${folder.dir} shares feature ${id} with ${feature.folders.length - 1} other ` +
-          `milestone folder(s) but carries no lineage note — run \`deno task apply-lineage\``,
+          `milestone folder(s) but carries no lineage note — run \`npm run apply-lineage\``,
       );
     }
   }
@@ -116,7 +118,7 @@ if (failures.length) {
   console.error(
     `${failures.length} problem(s). See the rule in AGENTS.md, "One demo folder per feature".`,
   );
-  Deno.exit(1);
+  process.exit(1);
 }
 
 console.log(

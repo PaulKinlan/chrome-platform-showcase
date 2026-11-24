@@ -1,19 +1,24 @@
-// Cloudflare Workers host: the seams that let routes/ run outside Deno.
+// Cloudflare Workers host: the seams that let routes/ run on Workers and Node.
 //
 // The Worker (worker/index.ts) serves the same routes as server.ts by swapping
 // in a Workers implementation of lib/platform.ts. Three things can silently
 // break that, and each has a section here:
 //
-//   1. A route, lib module or feature sidecar calls a Deno API directly
-//      (Deno.readFile, Deno.openKv, Deno.env, ...). It works under Deno and
-//      throws on Workers. Guarded by a static scan.
+//   1. A route, lib module or feature sidecar reaches the host directly
+//      (node:fs, node:http, process.env, or a leftover Deno.* call). It works
+//      under Node and throws on Workers. Guarded by a static scan.
 //   2. The Deno KV -> Workers KV adapter mis-orders or mis-matches keys, so
 //      telemetry lists come back in the wrong order or bleed across prefixes.
 //   3. The asset staging step ships something it must not (a `_server.ts`), or
 //      the manifest the Worker lists directories from disagrees with disk.
 //
-// Run: deno task test-worker-platform
+// Run: npm run test-worker-platform
 
+import { test } from "node:test";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { cloudflareKv, decodeKey, encodeKey } from "../worker/kv.ts";
 import { buildIndex, normalize } from "../worker/fs.ts";
 
@@ -29,20 +34,22 @@ function assertEquals(actual, expected, message) {
   if (a !== e) throw new Error(`${message}\n  expected ${e}\n  actual   ${a}`);
 }
 
-// ---- 1. no direct Deno host APIs in code the Worker bundles -------------
+// ---- 1. no direct host APIs in code the Worker bundles -------------------
 
+// Deno.* (gone, but a stale copy-paste would still throw on Workers), Node
+// modules Workers lacks without nodejs_compat, and Node globals.
 const HOST_API =
-  /\bDeno\.(readDir|readTextFile|readTextFileSync|readFile|readFileSync|stat|statSync|realPath|realPathSync|env|openKv|upgradeWebSocket|serve)\b/;
+  /\bDeno\.\w+|["']node:(fs|fs\/promises|http|https|net|child_process|os)["']|\bprocess\.(env|getBuiltinModule|argv|cwd)\b/;
 
 async function* walk(dir) {
-  for await (const entry of Deno.readDir(dir)) {
-    const url = new URL(entry.name + (entry.isDirectory ? "/" : ""), dir);
-    if (entry.isDirectory) yield* walk(url);
-    else if (entry.isFile) yield url;
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const url = new URL(entry.name + (entry.isDirectory() ? "/" : ""), dir);
+    if (entry.isDirectory()) yield* walk(url);
+    else if (entry.isFile()) yield url;
   }
 }
 
-Deno.test("routes, lib and feature sidecars reach the host only through lib/platform.ts", async () => {
+test("routes, lib and feature sidecars reach the host only through lib/platform.ts", async () => {
   const offenders = [];
   const files = [];
   for (const dir of ["routes/", "lib/", "worker/"]) {
@@ -50,8 +57,8 @@ Deno.test("routes, lib and feature sidecars reach the host only through lib/plat
       if (url.pathname.endsWith(".ts")) files.push(url);
     }
   }
-  for await (const entry of Deno.readDir(ROOT)) {
-    if (!entry.isDirectory || !/^v\d+$/.test(entry.name)) continue;
+  for (const entry of await readdir(ROOT, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^v\d+$/.test(entry.name)) continue;
     for await (const url of walk(new URL(`${entry.name}/`, ROOT))) {
       if (url.pathname.endsWith("/_server.ts")) files.push(url);
     }
@@ -59,7 +66,7 @@ Deno.test("routes, lib and feature sidecars reach the host only through lib/plat
   for (const url of files) {
     const rel = url.pathname.slice(ROOT.pathname.length);
     if (rel === "lib/platform.ts") continue;
-    const lines = (await Deno.readTextFile(url)).split("\n");
+    const lines = (await readFile(url, "utf8")).split("\n");
     lines.forEach((line, i) => {
       if (/^\s*(\/\/|\*)/.test(line)) return; // comments may name the APIs
       const m = line.match(HOST_API);
@@ -70,13 +77,13 @@ Deno.test("routes, lib and feature sidecars reach the host only through lib/plat
   assertEquals(
     offenders,
     [],
-    "direct Deno host API calls break the Cloudflare Worker; use platform() from lib/platform.ts",
+    "direct host API calls break the Cloudflare Worker; use platform() from lib/platform.ts",
   );
 });
 
 // ---- 2. Deno KV -> Workers KV adapter ------------------------------------
 
-Deno.test("key encoding keeps Deno KV order under byte-wise string order", () => {
+test("key encoding keeps Deno KV order under byte-wise string order", () => {
   const numbers = [-1e20, -5.5, -1, -0.001, 0, 0.001, 1, 2, 10, 1e3, 1784900000000, 1e20];
   const encoded = numbers.map((n) => encodeKey(["k", n]));
   const sorted = [...encoded].sort();
@@ -87,7 +94,7 @@ Deno.test("key encoding keeps Deno KV order under byte-wise string order", () =>
   assertEquals([...isoEncoded].sort(), isoEncoded, "ISO timestamps must keep their order");
 });
 
-Deno.test("key encoding round-trips and never lets a prefix match a longer part", () => {
+test("key encoding round-trips and never lets a prefix match a longer part", () => {
   const key = ["a\u001fb", "c\u001ed", 42, -3.25, true, false, "", 7n];
   assertEquals(
     decodeKey(encodeKey(key)).map(String),
@@ -142,7 +149,7 @@ async function collect(iter) {
   return out;
 }
 
-Deno.test("adapter: set/get/delete, expireIn becomes a TTL of at least 60s", async () => {
+test("adapter: set/get/delete, expireIn becomes a TTL of at least 60s", async () => {
   const ns = fakeNamespace();
   const kv = cloudflareKv(ns);
   await kv.set(["a", 1], { v: 1 }, { expireIn: 90 * 24 * 60 * 60 * 1000 });
@@ -154,7 +161,7 @@ Deno.test("adapter: set/get/delete, expireIn becomes a TTL of at least 60s", asy
   assertEquals((await kv.get(["a", 1])).value, null, "deleted keys read back null");
 });
 
-Deno.test("adapter: prefix list pages through, honours reverse and limit", async () => {
+test("adapter: prefix list pages through, honours reverse and limit", async () => {
   const kv = cloudflareKv(fakeNamespace());
   for (let i = 1; i <= 7; i++) await kv.set(["t", "day", i], i);
   await kv.set(["t2", "other"], "x");
@@ -173,7 +180,7 @@ Deno.test("adapter: prefix list pages through, honours reverse and limit", async
 
 // ---- 3. asset staging + manifest ----------------------------------------
 
-Deno.test("fs: paths normalise, and climbing out of the asset root is refused", () => {
+test("fs: paths normalise, and climbing out of the asset root is refused", () => {
   assertEquals(normalize("./v151/x/"), "v151/x", "leading ./ and trailing / drop");
   assertEquals(normalize("."), "", "the root is the empty path");
   let threw = false;
@@ -190,26 +197,17 @@ Deno.test("fs: paths normalise, and climbing out of the asset root is refused", 
   assertEquals(idx.dirs.get("v1/a").get("index.html").isFile, true, "file entry");
 });
 
-Deno.test("staging copies every served file, no _server.ts, and a matching manifest", async () => {
-  const out = await Deno.makeTempDir({ prefix: "worker-assets-" });
+test("staging copies every served file, no _server.ts, and a matching manifest", async () => {
+  const out = await mkdtemp(join(tmpdir(), "worker-assets-"));
   try {
-    const run = await new Deno.Command("deno", {
-      args: [
-        "run",
-        "--allow-read",
-        "--allow-write",
-        "scripts/build-worker-assets.mjs",
-        "--out",
-        out,
-      ],
+    const run = spawnSync(process.execPath, ["scripts/build-worker-assets.mjs", "--out", out], {
       cwd: ROOT,
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    const stderr = new TextDecoder().decode(run.stderr);
-    assert(run.success, `build-worker-assets failed:\n${stderr}`);
+      encoding: "utf8",
+    });
+    const stderr = run.stderr;
+    assert(run.status === 0, `build-worker-assets failed:\n${stderr}`);
 
-    const manifest = JSON.parse(await Deno.readTextFile(`${out}/_worker/fs-manifest.json`));
+    const manifest = JSON.parse(await readFile(`${out}/_worker/fs-manifest.json`, "utf8"));
     const files = new Set(manifest.files);
     for (const required of ["demo-index.json", "gendn-links.json", "public/styles.css"]) {
       assert(files.has(required), `manifest is missing ${required}`);
@@ -223,24 +221,26 @@ Deno.test("staging copies every served file, no _server.ts, and a matching manif
       "server source must never be staged",
     );
     // Every v<N>/<feature>/index.html on disk is in the manifest.
-    for await (const release of Deno.readDir(ROOT)) {
-      if (!release.isDirectory || !/^v\d+$/.test(release.name)) continue;
-      for await (const feature of Deno.readDir(new URL(`${release.name}/`, ROOT))) {
-        if (!feature.isDirectory) continue;
+    for (const release of await readdir(ROOT, { withFileTypes: true })) {
+      if (!release.isDirectory() || !/^v\d+$/.test(release.name)) continue;
+      for (
+        const feature of await readdir(new URL(`${release.name}/`, ROOT), { withFileTypes: true })
+      ) {
+        if (!feature.isDirectory()) continue;
         const page = `${release.name}/${feature.name}/index.html`;
         let exists = false;
         try {
-          exists = (await Deno.stat(new URL(page, ROOT))).isFile;
+          exists = (await stat(new URL(page, ROOT))).isFile();
         } catch { /* no index */ }
         if (exists) assert(files.has(page), `manifest is missing ${page}`);
       }
     }
     // And the manifest names only files that were actually staged.
     for (const f of [...files].slice(0, 200)) {
-      assert((await Deno.stat(`${out}/${f}`)).isFile, `${f} listed but not staged`);
+      assert((await stat(`${out}/${f}`)).isFile(), `${f} listed but not staged`);
     }
   } finally {
-    await Deno.remove(out, { recursive: true });
+    await rm(out, { recursive: true, force: true });
   }
 });
 
@@ -252,7 +252,7 @@ import { d1Kv } from "../worker/d1.ts";
 // A D1-shaped wrapper over an in-memory SQLite, running the real migration.
 async function fakeD1() {
   const db = new DatabaseSync(":memory:");
-  db.exec(await Deno.readTextFile(new URL("migrations/0001_kv.sql", ROOT)));
+  db.exec(await readFile(new URL("migrations/0001_kv.sql", ROOT), "utf8"));
   const prepare = (sql, params = []) => ({
     bind: (...values) => prepare(sql, values),
     first: () => Promise.resolve(db.prepare(sql).get(...params) ?? null),
@@ -262,7 +262,7 @@ async function fakeD1() {
   return { db, prepare: (sql) => prepare(sql) };
 }
 
-Deno.test("D1 adapter: set/get/delete/upsert and expiry is hidden on read", async () => {
+test("D1 adapter: set/get/delete/upsert and expiry is hidden on read", async () => {
   const kv = d1Kv(await fakeD1());
   await kv.set(["a", 1], { v: 1 });
   await kv.set(["a", 1], { v: 2 });
@@ -273,7 +273,7 @@ Deno.test("D1 adapter: set/get/delete/upsert and expiry is hidden on read", asyn
   assertEquals((await kv.get(["a", 1])).value, null, "deleted rows read back null");
 });
 
-Deno.test("D1 adapter: prefix ranges, reverse, limit and paging match Deno KV", async () => {
+test("D1 adapter: prefix ranges, reverse, limit and paging match Deno KV", async () => {
   const kv = d1Kv(await fakeD1());
   for (let i = 1; i <= 1203; i++) await kv.set(["t", "day", i], i);
   await kv.set(["t2", "other"], "sibling");
@@ -294,7 +294,7 @@ Deno.test("D1 adapter: prefix ranges, reverse, limit and paging match Deno KV", 
   assertEquals(deep.at(-1).value, 504, "reverse paging continues past the first page");
 });
 
-Deno.test("bundles hold every _questions.json and conformance.json, byte for byte", async () => {
+test("bundles hold every _questions.json and conformance.json, byte for byte", async () => {
   const { bundleFor } = await import("../worker/fs.ts");
   assertEquals(
     bundleFor("v151/x/y/_questions.json"),
@@ -304,32 +304,23 @@ Deno.test("bundles hold every _questions.json and conformance.json, byte for byt
   assertEquals(bundleFor("v151/x/conformance.json"), "_worker/bundle-conformance.json", "suites");
   assertEquals(bundleFor("v151/x/index.html"), null, "everything else is read individually");
 
-  const out = await Deno.makeTempDir({ prefix: "worker-bundles-" });
+  const out = await mkdtemp(join(tmpdir(), "worker-bundles-"));
   try {
-    const run = await new Deno.Command("deno", {
-      args: [
-        "run",
-        "--allow-read",
-        "--allow-write",
-        "scripts/build-worker-assets.mjs",
-        "--out",
-        out,
-      ],
+    const run = spawnSync(process.execPath, ["scripts/build-worker-assets.mjs", "--out", out], {
       cwd: ROOT,
-      stdout: "piped",
-      stderr: "piped",
-    }).output();
-    assert(run.success, new TextDecoder().decode(run.stderr));
-    const manifest = JSON.parse(await Deno.readTextFile(`${out}/_worker/fs-manifest.json`));
+      encoding: "utf8",
+    });
+    assert(run.status === 0, run.stderr);
+    const manifest = JSON.parse(await readFile(`${out}/_worker/fs-manifest.json`, "utf8"));
     for (const name of ["_questions.json", "conformance.json"]) {
-      const bundle = JSON.parse(await Deno.readTextFile(`${out}/_worker/bundle-${name}`));
+      const bundle = JSON.parse(await readFile(`${out}/_worker/bundle-${name}`, "utf8"));
       const expected = manifest.files.filter((f) => f.endsWith(`/${name}`));
       assertEquals(Object.keys(bundle).length, expected.length, `${name}: one entry per file`);
       for (const f of expected.slice(0, 50)) {
-        assertEquals(bundle[f], await Deno.readTextFile(new URL(f, ROOT)), `${f} differs`);
+        assertEquals(bundle[f], await readFile(new URL(f, ROOT), "utf8"), `${f} differs`);
       }
     }
   } finally {
-    await Deno.remove(out, { recursive: true });
+    await rm(out, { recursive: true, force: true });
   }
 });

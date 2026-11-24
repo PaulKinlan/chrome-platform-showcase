@@ -1,3 +1,6 @@
+import { run } from "./lib/run.mjs";
+import { readdir, stat, writeFile } from "node:fs/promises";
+
 const OUTPUT = new URL("../gendn-links.json", import.meta.url);
 const LOCAL_GENDN = new URL("../../gendn/", import.meta.url);
 const ROUTE_RE = /^v\d+\/[^/]+\/index\.html$/;
@@ -5,25 +8,23 @@ const ROUTE_RE = /^v\d+\/[^/]+\/index\.html$/;
 async function localRoutes() {
   try {
     const routes = [];
-    for await (const release of Deno.readDir(LOCAL_GENDN)) {
-      if (!release.isDirectory || !/^v\d+$/.test(release.name)) continue;
-      for await (const feature of Deno.readDir(new URL(`${release.name}/`, LOCAL_GENDN))) {
-        if (!feature.isDirectory) continue;
+    for (const release of await readdir(LOCAL_GENDN, { withFileTypes: true })) {
+      if (!release.isDirectory() || !/^v\d+$/.test(release.name)) continue;
+      for (
+        const feature of await readdir(new URL(`${release.name}/`, LOCAL_GENDN), {
+          withFileTypes: true,
+        })
+      ) {
+        if (!feature.isDirectory()) continue;
         try {
           const page = new URL(`${release.name}/${feature.name}/index.html`, LOCAL_GENDN);
-          if ((await Deno.stat(page)).isFile) routes.push(`/${release.name}/${feature.name}/`);
+          if ((await stat(page)).isFile()) routes.push(`/${release.name}/${feature.name}/`);
         } catch {
           // Not a published feature route.
         }
       }
     }
-    const command = new Deno.Command("git", {
-      cwd: LOCAL_GENDN.pathname,
-      args: ["rev-parse", "HEAD"],
-      stdout: "piped",
-      stderr: "null",
-    });
-    const result = await command.output();
+    const result = await run("git", { cwd: LOCAL_GENDN.pathname, args: ["rev-parse", "HEAD"] });
     const commit = result.success
       ? new TextDecoder().decode(result.stdout).trim()
       : "local-unknown";
@@ -61,7 +62,7 @@ const payload = {
   routeCount: routes.length,
   routes,
 };
-await Deno.writeTextFile(OUTPUT, `${JSON.stringify(payload, null, 2)}\n`);
+await writeFile(OUTPUT, `${JSON.stringify(payload, null, 2)}\n`);
 console.log(
   `sync-gendn-links: ${routes.length} feature routes from ${result.source} @ ${
     result.commit.slice(0, 12)

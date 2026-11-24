@@ -13,18 +13,18 @@
 //   - the cap is asserted independently of expiry;
 //   - the route is driven directly to prove the demo's own output is unchanged.
 //
-// Run: deno task test-speculation-probe-store
+// Run: npm run test-speculation-probe-store
 //
-// Migrated in place to named Deno.test cases (Stage 8 of the dty proposal, bead
+// Migrated in place to named node:test cases (Stage 8 of the dty proposal, bead
 // dty.8): same file path, same task id `test-speculation-probe-store`, the same
 // ordered gate step 15, the same ten subjects and the same assertions - the custom
-// `section()` registry, its trailing loop and the legacy `Deno.exit(1)` branch are
+// `section()` registry, its trailing loop and the legacy `process.exit(1)` branch are
 // gone, so a failure names the case it broke and Deno's runner owns the exit code.
 //
 // ORDER IS LOAD-BEARING: cases 8-10 ("the probe route...", "past the cap...",
 // "the route evicts by creation order...") all drive the SAME module-level store
 // behind the route, and case 10's expectation is only justified after case 9 has
-// filled that store. Deno.test runs the tests of one file serially in declaration
+// filled that store. node:test runs the tests of one file serially in declaration
 // order and scripts/native-test.mjs runs exactly one file per process, so both
 // properties hold; do not add per-test concurrency or run this file with
 // --parallel. Cases 1-7 build their own maps and are order-independent.
@@ -42,6 +42,7 @@
 // would still pass every case here (see the comment on the last case). This
 // migration does not change that.
 
+import { test } from "node:test";
 import {
   evictOldestProbeRecords,
   SPECULATION_RULES_PROBE_MAX_RECORDS,
@@ -85,7 +86,7 @@ function records(entries) {
 
 // ── sweep cost and expiry ───────────────────────────────────────────────────
 
-Deno.test("a sweep visits only the expired prefix, not the whole store", () => {
+test("a sweep visits only the expired prefix, not the whole store", () => {
   const now = 1_000_000;
   const map = records([
     ["expired-a", now - TTL - 5000],
@@ -104,7 +105,7 @@ Deno.test("a sweep visits only the expired prefix, not the whole store", () => {
   );
 });
 
-Deno.test("a large live store costs one visit per access", () => {
+test("a large live store costs one visit per access", () => {
   const now = 2_000_000;
   const map = records(
     Array.from({ length: 50_000 }, (_, i) => [`token-${i}`, now - 1_000 + i]),
@@ -115,7 +116,7 @@ Deno.test("a large live store costs one visit per access", () => {
   assert(map.size === 50_000, "no live record may be dropped");
 });
 
-Deno.test("every expired record goes when age order holds", () => {
+test("every expired record goes when age order holds", () => {
   const now = 3_000_000;
   const map = records([
     ...Array.from({ length: 100 }, (_, i) => [`gone-${i}`, now - TTL - 100 + i]),
@@ -130,7 +131,7 @@ Deno.test("every expired record goes when age order holds", () => {
   );
 });
 
-Deno.test("a sweep stops at the first live record (the helper's contract)", () => {
+test("a sweep stops at the first live record (the helper's contract)", () => {
   // This asserts what the HELPER does on the map it is given, which is why it
   // cannot by itself prove the route maintains the ordering it relies on: the
   // map here is synthetic. The route's half of the contract is covered below by
@@ -154,7 +155,7 @@ Deno.test("a sweep stops at the first live record (the helper's contract)", () =
   );
 });
 
-Deno.test("a live record ages from creation, not from access", () => {
+test("a live record ages from creation, not from access", () => {
   const created = 5_000_000;
   const map = records([["live", created]]);
   for (const offset of [1, 1000, TTL - 1]) {
@@ -171,7 +172,7 @@ Deno.test("a live record ages from creation, not from access", () => {
 
 // ── cap ────────────────────────────────────────────────────────────────────
 
-Deno.test("the cap bounds the store independently of expiry", () => {
+test("the cap bounds the store independently of expiry", () => {
   const now = 6_000_000;
   const map = new Map();
   for (let i = 0; i < 5_000; i++) {
@@ -183,7 +184,7 @@ Deno.test("the cap bounds the store independently of expiry", () => {
   assert(!map.has("token-0"), "the oldest record must be evicted");
 });
 
-Deno.test("eviction is oldest-first and exact", () => {
+test("eviction is oldest-first and exact", () => {
   const now = 7_000_000;
   const map = new Map();
   for (let i = 0; i < CAP + 250; i++) map.set(`token-${i}`, { createdAt: now + i });
@@ -205,7 +206,7 @@ async function probeRoute(route, params = {}) {
   return { res, body: await res.json().catch(() => ({})) };
 }
 
-Deno.test("the probe route still produces its demo output", async () => {
+test("the probe route still produces its demo output", async () => {
   const token = `vu7-demo-${crypto.randomUUID().slice(0, 8)}`;
   const probe = await probeRoute("header-probe", { token });
   assert(probe.res.status === 200, `header-probe should answer 200, got ${probe.res.status}`);
@@ -233,7 +234,7 @@ Deno.test("the probe route still produces its demo output", async () => {
   );
 });
 
-Deno.test("past the cap the oldest client is evicted and the newest kept", async () => {
+test("past the cap the oldest client is evicted and the newest kept", async () => {
   // Named for what actually happens: the OLDEST client (`active`) is the one
   // evicted, while the newest keeps its own record. Getting this backwards would
   // hide a cap that discarded the wrong end.
@@ -261,7 +262,7 @@ Deno.test("past the cap the oldest client is evicted and the newest kept", async
   );
 });
 
-Deno.test("the route evicts by creation order, not by last access", async () => {
+test("the route evicts by creation order, not by last access", async () => {
   // The ordering the sweep depends on, tested through the route rather than on a
   // synthetic map. It covers KEY ORDER specifically: a route that re-inserted a
   // record on access would move the touched client to the tail, so the single

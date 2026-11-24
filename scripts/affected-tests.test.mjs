@@ -9,27 +9,33 @@
 //      selectable by at least one rule, and no rule names a step that does not
 //      exist. A suite nothing can select is the 86v failure mode again;
 //   3. FAST ⊆ FULL — the fast gate can only run steps the full gate runs, and
-//      the runner was never pointed at a task deno.json does not define.
+//      the runner was never pointed at a script package.json does not define.
 //
 // The selection tests are pure: they feed synthetic path lists through the same
 // function the runner uses, so they need no git history and cost milliseconds.
 //
-// Run: deno task test-affected-tests
+// Run: npm run test-affected-tests
 //
-// Migrated in place to ONE ASYNC native Deno.test case (Stage 27 of the dty
+// Migrated in place to ONE ASYNC node:test case (Stage 27 of the dty
 // proposal, bead chrome_platform_showcase-dty.34), under the dty.19 policy for
 // this class of suite. The imports, `REPO`, the `failures` counter, the boolean
 // `check` helper and the `read` helper stay at module scope; everything that used
-// to run after them - the `deno.json` task read, the plan-shape and selection
+// to run after them - the `package.json` script read, the plan-shape and selection
 // checks with their small helpers, the fail-closed git-plumbing fixtures and the
 // temp-repository fixture with its `try/finally` - now runs inside the case in
 // its original order. Every label, detail string, helper and the conditional
 // ordering of the three helper families is unchanged, so a run still reports
-// every failing guard instead of the first. The trailing `Deno.exit(1)` became a
+// every failing guard instead of the first. The trailing `process.exit(1)` became a
 // named throw carrying the same count, because exiting inside a case kills the
-// test process before Deno can report it, and the legacy success line still
+// test process before the test runner can report it, and the legacy success line still
 // prints on a clean run.
 
+import { runSync } from "./lib/run.mjs";
+import { test } from "node:test";
+import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ALL_STEP_IDS, GATE_STEPS, STATIC_STEP_IDS } from "./gate-steps.mjs";
 import {
   changedPaths,
@@ -52,7 +58,7 @@ function check(label, ok, detail = "") {
   }
 }
 
-const read = (path) => Deno.readTextFileSync(`${REPO}${path}`);
+const read = (path) => readFileSync(`${REPO}${path}`, "utf8");
 
 // String-aware comment stripper for the vo6 registry pin: a naive regex would
 // count a COMMENTED-OUT registry entry or import as live wiring (review
@@ -122,8 +128,8 @@ function parseSidecarWiring(source) {
   }
   return { imported, registered, registryFound: registryEnd > registryStart };
 }
-Deno.test("the affected-file map fails closed and never orphans a suite", async () => {
-  const tasks = JSON.parse(read("deno.json")).tasks ?? {};
+test("the affected-file map fails closed and never orphans a suite", async () => {
+  const tasks = JSON.parse(read("package.json")).scripts ?? {};
 
   // ---------------------------------------------------------------- plan shape
   const ids = GATE_STEPS.map((s) => s.id);
@@ -194,7 +200,7 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
     GATE_STEPS.every((s) => (s.tier === "static" || s.tier === "affected") && !!s.task && !!s.what),
   );
   check(
-    "every step names a deno.json task that exists",
+    "every step names a package.json script that exists",
     GATE_STEPS.every((s) => typeof tasks[s.task] === "string"),
     `missing tasks: ${
       GATE_STEPS.filter((s) => typeof tasks[s.task] !== "string").map((s) => s.task)
@@ -205,12 +211,12 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
     STATIC_STEP_IDS.length > 0 && ids.length > STATIC_STEP_IDS.length,
   );
   check(
-    "deno task check runs the timing runner over the full plan",
+    "npm run check runs the timing runner over the full plan",
     (tasks.check ?? "").includes("scripts/run-gate.mjs"),
     `check = ${JSON.stringify(tasks.check)}`,
   );
   check(
-    "deno task check:affected runs the same runner with --affected",
+    "npm run check:affected runs the same runner with --affected",
     (tasks["check:affected"] ?? "").includes("scripts/run-gate.mjs") &&
       (tasks["check:affected"] ?? "").includes("--affected"),
     `check:affected = ${JSON.stringify(tasks["check:affected"])}`,
@@ -277,7 +283,7 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
   full("unknown path", "tools/mystery.bin");
   full("shared design system", "public/styles.css");
   full("shared media asset", "public/media/hero.webp");
-  full("gate definition", "deno.json");
+  full("gate definition", "package.json");
   full("shared test helper", "scripts/lib/manifest.mjs");
   full("a suite file itself", "scripts/brand-new.test.mjs");
 
@@ -471,7 +477,7 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
   // pass on a tree with 8 changed paths. Every required git query now throws
   // ChangeSetError, and the runner turns that into the FULL gate.
   const realGit = (args, cwd) => {
-    const p = new Deno.Command("git", { args, cwd, stdout: "piped", stderr: "piped" }).outputSync();
+    const p = runSync("git", { args, cwd });
     return {
       code: p.code,
       out: new TextDecoder().decode(p.stdout),
@@ -601,17 +607,16 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
 
   // A genuinely unchanged tree is legitimately static: real temp repo, one commit,
   // nothing staged/unstaged/untracked.
-  const fixture = await Deno.makeTempDir({ prefix: "tier-unchanged-" });
+  const fixture = await mkdtemp(join(tmpdir(), "tier-unchanged-"));
   try {
     const gitIn = (args) => {
-      const p = new Deno.Command("git", { args, cwd: fixture, stdout: "piped", stderr: "piped" })
-        .outputSync();
+      const p = runSync("git", { args, cwd: fixture });
       if (p.code !== 0) {
         throw new Error(`git ${args.join(" ")}: ${new TextDecoder().decode(p.stderr)}`);
       }
     };
     gitIn(["init", "-q"]);
-    Deno.writeTextFileSync(`${fixture}/readme.txt`, "unchanged\n");
+    writeFileSync(`${fixture}/readme.txt`, "unchanged\n");
     gitIn(["add", "readme.txt"]);
     gitIn(["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "init"]);
     const unchanged = changedPaths({ base: "HEAD", cwd: fixture });
@@ -621,7 +626,7 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
       `paths=${JSON.stringify(unchanged.paths)}`,
     );
   } finally {
-    await Deno.remove(fixture, { recursive: true });
+    await rm(fixture, { recursive: true, force: true });
   }
 
   // ---------------------------------------------------- registry completeness
@@ -690,15 +695,15 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
       registryFound,
     );
     const onDisk = new Set();
-    for (const release of Deno.readDirSync(REPO)) {
-      if (!release.isDirectory || !/^v\d+$/.test(release.name)) continue;
-      for (const feature of Deno.readDirSync(`${REPO}${release.name}`)) {
-        if (!feature.isDirectory) continue;
+    for (const release of readdirSync(REPO, { withFileTypes: true })) {
+      if (!release.isDirectory() || !/^v\d+$/.test(release.name)) continue;
+      for (const feature of readdirSync(`${REPO}${release.name}`, { withFileTypes: true })) {
+        if (!feature.isDirectory()) continue;
         try {
           if (
-            Deno.statSync(
+            statSync(
               `${REPO}${release.name}/${feature.name}/_server.ts`,
-            ).isFile
+            ).isFile()
           ) {
             onDisk.add(`${release.name}/${feature.name}`);
           }
@@ -740,8 +745,8 @@ Deno.test("the affected-file map fails closed and never orphans a suite", async 
     );
   }
 
-  // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
-  // live inside a case - it kills the test process before Deno can report the case -
+  // The legacy tail exited the process on a non-zero counter. `process.exit(1)` cannot
+  // live inside a case - it kills the test process before the test runner can report the case -
   // so the counter is carried into the named failure instead, and the legacy success
   // line above still prints on a clean run.
   if (failures) {

@@ -23,6 +23,8 @@
 // Nothing here infers a cause it did not see; it reports the port, the exit code
 // and the child's own output.
 
+import { connect } from "node:net";
+
 export const BOOT_TAIL_MAX_CHARS = 2000;
 export const BOOT_MAX_PORT_ATTEMPTS = 5;
 export const BOOT_POLL_MS = 250;
@@ -127,20 +129,17 @@ export function trackBootChild(child, { maxChars = BOOT_TAIL_MAX_CHARS } = {}) {
  * guessed at.
  */
 export async function portIsTaken(port, { hostname = "127.0.0.1", timeoutMs = 400 } = {}) {
-  try {
-    const connection = await Promise.race([
-      Deno.connect({ hostname, port }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), timeoutMs)),
-    ]);
-    try {
-      connection.close();
-    } catch {
-      // already closed
-    }
-    return true;
-  } catch {
-    return false;
-  }
+  return await new Promise((resolve) => {
+    const socket = connect({ host: hostname, port });
+    const done = (taken) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(taken);
+    };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
 }
 
 function collapse(text, max = 600) {

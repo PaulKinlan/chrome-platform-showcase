@@ -1,726 +1,98 @@
-// Local-gate vs CI parity guard (bead chrome_platform_showcase-j3f).
+// Local-gate vs CI parity guard.
 //
-// Regression: br0 (8c67399c) passed the local full gate (`deno task check`,
-// which `fleet-check` runs) but failed GitHub CI, because CI runs
-// `deno fmt --check` and the full gate did not. Unformatted report markdown
-// shipped green locally and only surfaced in CI, where it blocked the deploy
-// job. g0e fixed the data; this guard keeps the gate honest.
+// Regression it exists for: a change passed the local full gate but failed
+// GitHub CI, because CI ran a formatter check the gate did not. The rules:
 //
-// The rule: every formatter gate CI enforces must be part of the repo's full
-// gate, `deno task check` — the task the VM fleet's `fleet-check` wrapper runs.
-// CI is parsed rather than hard-coded, so adding a formatter step to CI
-// without adding it to the gate fails here instead of in CI.
+//   1. Every CI `run:` step in .github/workflows/ci.yml is exactly one
+//      `npm ci` or `npm run <script> [-- args]`, and every script CI runs is a
+//      step of the full gate (scripts/gate-steps.mjs), so the gate is never
+//      weaker than CI.
+//   2. Every gate step names a script that package.json defines.
+//   3. Every scripts/*.test.mjs and tests/unit/*.test.mjs is run by a script
+//      the gate reaches, so a suite that exists cannot be one nothing runs.
 //
-// The second rule: every scripts/*.test.mjs is named by a task reachable from
-// that same gate (bead 86v), so a suite that exists cannot be one nothing ever
-// runs.
+// CI is read with a real YAML parser (the `yaml` package), so the style of the
+// YAML cannot hide a step from rule 1.
 //
-// The gate is no longer an inline `&&` chain string in deno.json: it is the
-// ordered plan in scripts/gate-steps.mjs, executed by scripts/run-gate.mjs and
-// reported with per-step timings (bead 6r8, ADR 15c). This guard reads that
-// plan and expands each step through `deno task`, so the two rules above still
-// hold against the commands the gate is DECLARED to run — and it fails if a plan
-// step names a task deno.json does not define.
-//
-// What this guard proves, and what it does not (finding 140, bead z4u). It proves
-// DECLARATION parity: that the entrypoints, the gate plan and CI declare the same
-// commands, and that every command it credits is a parsed, reachable invocation of
-// a declared program rather than text that merely looks like one. It does NOT
-// prove that scripts/run-gate.mjs executes every GATE_STEPS entry and tier at run
-// time. That dynamic edge is tracked separately in bead
-// chrome_platform_showcase-z4u and is not claimed here.
-//
-// CI inventory and gate grammar (bead chrome_platform_showcase-uzc). CI is read
-// with a pinned real YAML parser, jsr:@std/yaml@1.3.0, because a regex over
-// `run:` saw only the styles it was written for: a flow-style step, a quoted
-// key, a block or folded scalar and a bare `run:` all slipped past it, and any
-// CI command outside the classes it happened to check was unmirrored and
-// invisible. The dependency needs no network after its first fetch — it is
-// pinned in the import specifier and recorded in deno.lock, so a COLD cache
-// costs one fetch on the first run after a checkout and works offline
-// afterwards (`--cached-only` fails loudly rather than skipping the check); CI
-// never runs this guard. Only .github/workflows/ci.yml is in scope;
-// showcase-worklist.yml is a scheduled work-list job, out of scope on purpose.
-// A CI step must be ONE declared invocation — shell operators are refused by
-// name, never interpreted — and gate or task text may chain with a flat `&&`
-// only. Every command CI runs must be mirrored by a gate plan step, matched BY
-// TASK NAME for `deno task …` steps and by expanded text for raw commands.
-//
-// Migrated in place to ONE native Deno.test case (Stage 19 of the dty proposal,
-// bead chrome_platform_showcase-dty.26), under the dty.19 policy for this class
-// of suite: the non-throwing `check(label, ok, detail)` helper, the `failures`
-// counter, the twenty-two bodies in their original order and the failure and
-// success wording all survive, so a run still reports EVERY failing subject
-// rather than the first, and no check became a throwing assert. What moved is
-// when the body runs: the four read phases (`ci.yml` and `deno.json` before the
-// first check, the `scripts/` scan before the four wiring checks, the
-// `tests/unit/` scan before the three pilot-pin checks) now happen inside the
-// case in the same order, so a read failure fails the case loudly instead of
-// aborting the module before any check could report, and the trailing
-// `Deno.exit(1)` became the counter's failure message because exiting inside a
-// case kills the test process before Deno can report it. The guard keeps its own
-// two imports; a caller wanting independent wiring evidence should read the plan
-// (`run-gate.mjs --list`) and the runner's own resolved-target line rather than
-// trusting this file about itself.
-//
-// Run: deno task test-gate-parity
+// Run: npm run test-gate-parity
 
-import { parse } from "jsr:@std/yaml@1.3.0";
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { parse } from "yaml";
 import { GATE_STEPS } from "./gate-steps.mjs";
 
 const REPO = new URL("..", import.meta.url).pathname;
+const read = (path) => readFileSync(`${REPO}${path}`, "utf8");
+const scripts = JSON.parse(read("package.json")).scripts ?? {};
+const gateScripts = new Set(GATE_STEPS.map((s) => s.task));
 
-let failures = 0;
-function check(label, ok, detail = "") {
-  if (ok) console.log(`ok — ${label}`);
-  else {
-    failures++;
-    console.error(`FAIL — ${label}${detail ? `\n      ${detail}` : ""}`);
+// Expand `npm run x` references inside a script, so a script that chains other
+// scripts credits them too.
+function reachable(names) {
+  const seen = new Set();
+  const queue = [...names];
+  while (queue.length) {
+    const name = queue.shift();
+    if (seen.has(name) || typeof scripts[name] !== "string") continue;
+    seen.add(name);
+    for (const m of scripts[name].matchAll(/npm run (?:--silent )?([\w:.-]+)/g)) queue.push(m[1]);
   }
+  return seen;
 }
 
-function read(path) {
-  return Deno.readTextFileSync(`${REPO}${path.replace(/^\/+/, "")}`);
-}
-
-const squash = (s) => s.replace(/\s+/g, " ").trim();
-
-// ── CI inventory: a real YAML parse, not a regex (bead chrome_platform_showcase-uzc)
-//
-// The regex this replaces (`/^\s*-?\s*run:\s*(.+)$/gm`) saw only the styles it
-// was written for. A flow-style step, a quoted key, a block or folded scalar, a
-// bare `run:` and every CI command outside the three classes it happened to
-// check were all invisible — a plain block-style unmirrored `deno task` step
-// included. The inventory below is parsed, so the style of the YAML cannot
-// change what it sees.
-//
-// Scope is ONLY .github/workflows/ci.yml, the pre-merge gate.
-// .github/workflows/showcase-worklist.yml is OUT OF SCOPE by declaration: it is
-// a scheduled work-list job whose last step is a shell redirect into
-// $GITHUB_STEP_SUMMARY, which the CI grammar below deliberately refuses.
-// Widening the scope is a separate decision, not an accident of parsing.
-Deno.test("the local gate and CI declare the same commands, and every suite is named by a task", () => {
-  const CI_WORKFLOW = ".github/workflows/ci.yml";
-  const CI_OUT_OF_SCOPE = ".github/workflows/showcase-worklist.yml";
-  const ci = read(CI_WORKFLOW);
-  const tasks = JSON.parse(read("deno.json")).tasks ?? {};
-
-  const ciRunSteps = [];
-  for (const [jobName, job] of Object.entries(parse(ci)?.jobs ?? {})) {
-    for (const step of (Array.isArray(job?.steps) ? job.steps : [])) {
-      if (step && typeof step === "object" && "run" in step) {
-        ciRunSteps.push({ job: jobName, name: String(step?.name ?? ""), run: step.run });
-      }
+test("every CI step is one npm script that the full gate also runs", () => {
+  const ci = read(".github/workflows/ci.yml");
+  const steps = [];
+  for (const [job, def] of Object.entries(parse(ci)?.jobs ?? {})) {
+    for (const step of def?.steps ?? []) {
+      if (step && typeof step === "object" && "run" in step) steps.push({ job, step });
     }
   }
-  // Totality detector: a permissive counter of `run` keys in ANY style (leading
-  // `-`/`,`/`{`/whitespace, quoted or not) against the parsed inventory. It is
-  // deliberately over-matching: a mismatch can only make this guard louder, never
-  // quieter, so a YAML style the parser somehow normalises away still fails here.
-  const runKeyCount = (ci.match(/(^|[{,\s]-?\s*)("|')?run\2\s*:/gm) ?? []).length;
-  check(
-    "the CI inventory sees every `run` key in the workflow",
-    runKeyCount === ciRunSteps.length,
-    `${CI_WORKFLOW}: ${runKeyCount} \`run\` key(s) counted in the text but ` +
-      `${ciRunSteps.length} parsed as steps — the inventory is incomplete`,
-  );
+  const runKeys = (ci.match(/(^|[{,\s]-?\s*)("|')?run\2\s*:/gm) ?? []).length;
+  assert.equal(runKeys, steps.length, "every `run` key in ci.yml parses as a step");
+  assert.ok(steps.length > 0, "ci.yml has run steps");
 
-  // CI `run` values are NOT a shell language. A CI step must be ONE declared
-  // invocation; anything that needs shell semantics to decide what it does is
-  // refused by name rather than modelled, because the whole class of findings
-  // here (mc6, 049) came from guessing what a shell would do.
-  const CI_SHELL_OPERATORS = ["&&", "||", ";", "|", ">", "<", "&", "`", "$(", "${"];
-  for (const step of ciRunSteps) {
-    const label = `CI step \`${step.name || "(unnamed)"}\` in job \`${step.job}\``;
-    const run = typeof step.run === "string" ? squash(step.run) : "";
-    if (run === "") {
-      check(
-        `${label} declares one command`,
-        false,
-        "the step has no command (empty or bare `run:`)",
-      );
-      continue;
-    }
-    const op = CI_SHELL_OPERATORS.find((o) => run.includes(o));
-    check(
-      `${label} is a single command CI can run`,
-      op === undefined,
-      op === undefined
-        ? ""
-        : `unsupported syntax \`${op}\` in ${JSON.stringify(run)} — model the ` +
-          "step instead of the shell: a CI step is one declared invocation, and shell " +
-          "operators are refused rather than interpreted",
+  for (const { job, step } of steps) {
+    const run = String(step.run).replace(/\s+/g, " ").trim();
+    const label = `CI step "${step.name ?? "(unnamed)"}" in job ${job}`;
+    if (run === "npm ci") continue;
+    const m = run.match(/^npm run ([\w:.-]+)(?: -- [\w ./:=-]+)?$/);
+    assert.ok(m, `${label} must be one \`npm run <script>\`, got: ${run}`);
+    assert.equal(typeof scripts[m[1]], "string", `${label}: package.json has no "${m[1]}" script`);
+    assert.ok(
+      reachable(gateScripts).has(m[1]),
+      `${label}: "${m[1]}" runs in CI but is not a step of the full gate (scripts/gate-steps.mjs)`,
     );
   }
-  const ciRuns = ciRunSteps.map((s) => squash(typeof s.run === "string" ? s.run : ""));
+});
 
-  // Expand `deno task <name>` references inside a repo task so the returned text
-  // is the commands that actually run. `seen` stops any task cycle.
-  // Gate and task text may chain with a flat `&&` ONLY. `||`, `;`, a pipe, a
-  // redirect, a subshell or any interpolation is refused by name: `a || b && c`
-  // does not mean "the gate runs a", it means the text is outside the declared
-  // grammar, so the guard fails instead of deciding which side wins (049). No
-  // claim of arbitrary shell equivalence is made or needed. The check applies to
-  // the task text the gate actually expands — not to every task in deno.json, so
-  // an unrelated task cannot produce a false failure here.
-  const GATE_TEXT_OPERATOR_RE = /(\|\||;|`|\$\(|\$\{|[<>]|\|(?!\|))/;
-  function gateText(label, text) {
-    if (typeof text !== "string" || text.trim() === "") {
-      check(`${label} is a non-empty command`, false, "empty command text");
-      return false;
-    }
-    // A shell comment is not part of the declared grammar. Crediting a command
-    // that appears inside one was a false green (finding 74l): `deno task phantom`
-    // in a trailing comment made the guard report a task as executed, and a
-    // comment's words could even pass as real operands. Nothing in a comment runs,
-    // so nothing in one may be credited.
-    if (text.includes("#")) {
-      check(
-        `${label} contains no shell comment`,
-        false,
-        `\`#\` in ${JSON.stringify(text)} — a comment is unsupported syntax in a gate ` +
-          "command: it cannot execute, and a command written inside it is not a step",
-      );
-      return false;
-    }
-    const bad = text.match(GATE_TEXT_OPERATOR_RE);
-    if (bad) {
-      check(
-        `${label} uses only a flat && chain`,
-        false,
-        `unsupported syntax \`${bad[0]}\` in ${JSON.stringify(text)} — only a flat \`&&\` ` +
-          "chain is a supported gate command, and nothing is inferred about what a " +
-          "shell would do with this text",
-      );
-      return false;
-    }
-    const parts = text.split("&&");
-    if (parts.some((p) => p.trim() === "")) {
-      check(`${label} has no empty && segment`, false, `empty segment in ${JSON.stringify(text)}`);
-      return false;
-    }
-    return true;
-  }
-
-  // The gate exists, it is plan-driven, and the plan is wired to deno.json.
-  check("deno.json defines the `check` full gate", typeof tasks.check === "string");
-  check(
-    "deno.json defines the fast `check:affected` gate",
-    typeof tasks["check:affected"] === "string",
-  );
-  // ── Entrypoint binding (finding 140)
-  //
-  // The gate is reached through two deno.json tasks. Their commands are PARSED and
-  // compared as EXACT argv: a task that merely mentions scripts/run-gate.mjs — an
-  // `echo`, a `deno eval` that prints the path, a substring, a trailing comment, a
-  // dry-run flag, an extra or missing flag, a recursive alias — does not bind the
-  // entrypoint to the plan and fails here. Equality of the parsed argv is the whole
-  // rule; there is no substring test.
-  //
-  // DECLARATION PARITY ONLY: this proves which command the entrypoint declares, not
-  // that the runner executes it (bead chrome_platform_showcase-z4u).
-  const ENTRYPOINT_ARGV = ["deno", "run", "--allow-read", "--allow-run", "scripts/run-gate.mjs"];
-  const ENTRYPOINT_ARGV_AFFECTED = [...ENTRYPOINT_ARGV, "--affected"];
-  const sameArgv = (a, b) => a.length === b.length && a.every((t, i) => t === b[i]);
-  const checkEntrypoint = (label, text, expected) => {
-    const parts = String(text ?? "").trim().split("&&").map((p) => p.trim()).filter((p) =>
-      p !== ""
-    );
-    const argv = parts.length === 1 ? parts[0].split(/\s+/) : [];
-    check(
-      `${label} declares exactly the gate entrypoint`,
-      sameArgv(argv, expected),
-      `${label} = ${JSON.stringify(text)} — expected exactly \`${expected.join(" ")}\`; a task ` +
-        "that only mentions the path (echo, eval, substring, comment, dry-run, extra or " +
-        "missing flag, recursive alias) does not bind the entrypoint to the plan",
-    );
-  };
-  checkEntrypoint("`deno task check`", tasks.check, ENTRYPOINT_ARGV);
-  checkEntrypoint("`deno task check:affected`", tasks["check:affected"], ENTRYPOINT_ARGV_AFFECTED);
-  check(
-    "the gate plan declares steps for both tiers",
-    GATE_STEPS.length > 0 && GATE_STEPS.some((s) => s.tier === "static") &&
-      GATE_STEPS.some((s) => s.tier === "affected"),
-  );
-  for (const step of GATE_STEPS.filter((s) => tasks[s.task] == null)) {
-    check(
-      `plan step \`${step.id}\` names an existing deno.json task`,
-      false,
-      `deno.json has no task \`${step.task}\`; the plan and deno.json have drifted`,
+test("every gate step names a package.json script", () => {
+  for (const step of GATE_STEPS) {
+    assert.equal(
+      typeof scripts[step.task],
+      "string",
+      `gate step ${step.id} names script "${step.task}", which package.json does not define`,
     );
   }
-  check("deno.json defines a formatter task", typeof tasks.fmt === "string");
+});
 
-  // ── The MIRRORED contract (bead uzc / dvf, finding 6uk)
-  //
-  // Every command CI runs must be satisfied by the gate plan, and "satisfied"
-  // means EXECUTED, not merely named. Two false greens lived here: a plan step
-  // whose task was `true` still reported `deno task check-routes` mirrored
-  // because only the task NAME was compared, and `echo deno check server.ts`
-  // satisfied CI's `deno check server.ts` through an unanchored substring of the
-  // expanded text. Both claimed a command ran while the gate skipped it. So the
-  // gate's commands are PARSED, not text-matched: the program must be declared
-  // with the argument shape it is allowed to take, `deno task <name>` resolves
-  // recursively through deno.json to the invocation it really runs, and the
-  // comparison is exact argv identity — never a substring, and never a guess about
-  // what a shell would do.
-  //
-  // A CI command that is not mirrored fails; there is no exemption list, because
-  // the escape hatch is to mirror the step or to take a workflow out of scope on
-  // purpose.
-  const GATE_SUBCOMMANDS = new Set(["check", "fmt", "run", "test", "lint", "task"]);
-  const GATE_PROGRAMS = new Map([
-    // deno subcommands a gate step may use.
-    ["deno", (argv) => GATE_SUBCOMMANDS.has(argv[1])],
-    // the one non-deno invocation on the plan (audit-strict): a repo script by
-    // path, never `-c` and never an arbitrary binary.
-    [
-      "python3",
-      (argv) => /^(\.claude|scripts)\/[A-Za-z0-9._\/-]+\.py$/.test(argv[1] ?? ""),
-    ],
-  ]);
-
-  // Parse text the grammar already accepted into the invocations it runs, or fail
-  // the label: a no-op (`true`), an `echo`, `sh -c` or any undeclared binary must
-  // never read as a step that ran a check.
-  function parseInvocations(label, text) {
-    const argv = [];
-    for (const part of squash(text).split("&&").map((p) => squash(p)).filter((p) => p !== "")) {
-      if (!gateText(`${label} segment`, part)) return null;
-      const tokens = part.split(/\s+/);
-      const declared = GATE_PROGRAMS.get(tokens[0]);
-      if (!declared || !declared(tokens)) {
-        check(
-          `${label} runs a declared gate command`,
-          false,
-          `\`${part}\` is not a declared invocation — a gate step runs ${
-            [...GATE_PROGRAMS.keys()].join("/")
-          } with the argument shapes declared in this guard, so a no-op or an echo ` +
-            "cannot stand in for a check",
-        );
-        return null;
-      }
-      argv.push(tokens);
-    }
-    return argv.length > 0 ? argv : null;
-  }
-  // The same vocabulary applies to CI's own commands: a workflow file is not a
-  // shell script, and the contract only holds if both sides are invocations.
-  const parseCiInvocation = (cmd) => {
-    const argv = squash(cmd).split(/\s+/);
-    const declared = GATE_PROGRAMS.get(argv[0]);
-    return declared && declared(argv) ? argv : null;
-  };
-  const flagsOf = (argv) => argv.filter((a) => a.startsWith("-"));
-  const operandsOf = (argv) => argv.filter((a) => !a.startsWith("-")).slice(2);
-  // Exact argv identity, with the one declared tolerance: the gate may check the
-  // same files PLUS more (`deno check server.ts scripts/…` satisfies CI's
-  // `deno check server.ts`). Identical flags, and every CI operand present.
-  const sameInvocation = (ci, gate) => {
-    const gateOperands = new Set(operandsOf(gate));
-    return ci[0] === gate[0] && ci[1] === gate[1] &&
-      flagsOf(ci).join(" ") === flagsOf(gate).join(" ") &&
-      operandsOf(ci).every((f) => gateOperands.has(f));
-  };
-
-  // Every task the plan reaches, resolved through deno.json (nested `deno task`
-  // references included), parsed into the commands it really runs.
-  // Recursion is driven by the PARSED argv of each task — never by a regex over
-  // its raw text — so a `deno task <id>` written inside a comment, a string or any
-  // other unsupported syntax cannot pull a task into the reachable set (finding
-  // 74l: a phantom task credited through a trailing comment was a false green).
-  // A task the grammar refuses contributes no invocations at all.
-  const planReachable = new Set();
-  const gateCommands = [];
-  const walkPlan = (name) => {
-    if (planReachable.has(name) || typeof tasks[name] !== "string") return;
-    planReachable.add(name);
-    const argv = parseInvocations(`task \`${name}\``, tasks[name]);
-    if (argv === null) return;
-    gateCommands.push({ name, argv });
-    for (const tokens of argv) {
-      if (tokens[0] === "deno" && tokens[1] === "task" && tokens[2]) walkPlan(tokens[2]);
-    }
-  };
-  for (const step of GATE_STEPS) walkPlan(step.task);
-
-  const planTasks = new Map(GATE_STEPS.map((s) => [s.task, s]));
-  const mirrors = (cmd) => {
-    const task = cmd.match(/^deno task ([a-z0-9:-]+)(?:\s+(.*))?$/);
-    if (task) {
-      const step = planTasks.get(task[1]);
-      if (!step) return false;
-      if (squash(task[2] ?? "") !== squash((step.args ?? []).join(" "))) return false;
-      // …and that task must resolve to a declared invocation that runs it.
-      return gateCommands.some((g) => g.name === task[1]);
-    }
-    const ci = parseCiInvocation(cmd);
-    if (!ci) return false;
-    return gateCommands.some((g) => g.argv.some((argv) => sameInvocation(ci, argv)));
-  };
-  for (const cmd of ciRuns.filter((c) => c !== "")) {
-    check(
-      `the gate mirrors CI's \`${cmd}\``,
-      mirrors(cmd),
-      `CI runs \`${cmd}\` but no gate plan step EXECUTES it — add a step to ` +
-        "scripts/gate-steps.mjs that runs this command (and a rule in " +
-        "scripts/affected-tests.mjs) or the command runs in CI and nowhere locally",
+test("every test suite is run by a script the gate reaches", () => {
+  const gate = [...reachable(gateScripts)].map((name) => scripts[name]).join("\n");
+  const suites = [
+    ...readdirSync(`${REPO}scripts`).filter((f) => f.endsWith(".test.mjs")).map((f) =>
+      `scripts/${f}`
+    ),
+    ...readdirSync(`${REPO}tests/unit`).filter((f) => f.endsWith(".test.mjs")).map((f) =>
+      `tests/unit/${f}`
+    ),
+  ];
+  assert.ok(suites.length > 20, `found ${suites.length} suites`);
+  for (const suite of suites) {
+    const dirGlob = `${suite.slice(0, suite.lastIndexOf("/"))}/*.test.mjs`;
+    assert.ok(
+      gate.includes(suite) || gate.includes(dirGlob),
+      `${suite} is not run by any script the gate reaches`,
     );
   }
-
-  // Test-registration parity (bead chrome_platform_showcase-86v).
-  //
-  // scripts/corner-shape-values.test.mjs sat in the tree named by no task and
-  // reachable from no gate, so it could have rotted or started failing and nothing
-  // would ever have reported it. The rule: every scripts/*.test.mjs is named by a
-  // deno.json task AND that task is reachable from the full gate — a task defined
-  // but left off the `check` chain still never runs in the gate the fleet and the
-  // pre-push routine execute.
-  //
-  // What this proves: the suite's path appears in a task command and that task is
-  // on the chain. What it cannot prove: that the command actually executes the file
-  // (a task that merely echoed the path would satisfy it), and it does not scan
-  // subdirectories of scripts/. The f0f section below closes the routing half for
-  // Deno.test-registered suites (the task must invoke scripts/native-test.mjs with
-  // the file as its target); running the gate remains the proof of execution.
-  const scriptTests = [...Deno.readDirSync(`${REPO}scripts`)]
-    .filter((entry) => entry.isFile && entry.name.endsWith(".test.mjs"))
-    .map((entry) => entry.name)
-    .sort();
-  // Tasks reachable from the plan, following nested `deno task <name>` references.
-  const gateTasks = new Set();
-  function walk(name) {
-    if (gateTasks.has(name) || tasks[name] == null) return;
-    gateTasks.add(name);
-    for (const m of tasks[name].matchAll(/deno task ([a-z0-9:-]+)/g)) walk(m[1]);
-  }
-  for (const step of GATE_STEPS) walk(step.task);
-  const tasksRunning = (file) =>
-    // Match the path, not the bare name: `cmd.includes(file)` would let a new
-    // scripts/runner.test.mjs be "covered" by a task running
-    // scripts/conformance-runner.test.mjs, which is the same silent-suite hole
-    // this guard exists to close (review finding on 86v, driven by the reviewer).
-    Object.entries(tasks)
-      .filter(([, cmd]) => cmd.includes(`scripts/${file}`))
-      .map(([name]) => name);
-  const unnamed = scriptTests.filter((file) => tasksRunning(file).length === 0);
-  const unreachable = scriptTests.filter((file) =>
-    tasksRunning(file).length > 0 &&
-    !tasksRunning(file).some((name) => gateTasks.has(name))
-  );
-
-  check(
-    "the repo declares test suites to run",
-    scriptTests.length > 0,
-    "no scripts/*.test.mjs found — if the suites were moved, move this guard with them",
-  );
-  check(
-    "every scripts/*.test.mjs is named by a deno.json task",
-    unnamed.length === 0,
-    `unregistered suites: ${unnamed.join(", ")} — add a test-* task that runs each one, ` +
-      "or delete the file; a suite no task names cannot report a failure",
-  );
-  check(
-    "every test suite is reachable from the full gate (deno task check)",
-    unreachable.length === 0,
-    `suites whose tasks are off the check chain: ${
-      unreachable.map((file) => `${file} (${tasksRunning(file).join(", ")})`).join("; ")
-    }`,
-  );
-
-  // Task-ROUTING parity (bead chrome_platform_showcase-f0f). The 86v section
-  // proves a task NAMES the suite file; it cannot prove the command executes
-  // it. A suite that registers Deno.test cases but whose task is a plain
-  // `deno run <file>` PASSES VACUOUSLY — deno run does not execute registered
-  // cases, so the gate step exits 0 with zero checks run (measured by
-  // rev-dty32: exit 0, zero output, versus 30 ok lines via the runner). So a
-  // registered suite's task must ROUTE the file through the native runner:
-  // one &&-segment of the shape
-  //   deno run <run-flags> scripts/native-test.mjs [runner opts] <file> [-- flags]
-  // where the file is an exact token AFTER the runner path and BEFORE any `--`
-  // child-flags separator. An inert mention — an echo segment, a substring, a
-  // `--summary` text, a comment — fails this, because none of those is a
-  // `deno run` segment whose program is the runner.
-  //
-  // Registration is detected by a TEXTUAL TRACE match on the raw source (bead
-  // chrome_platform_showcase-813 broadened the original line-anchored form: a
-  // suite registering via an alias, a single-line loop or bracket access is
-  // invisible to `^\s*Deno\.test` and could sit on a plain `deno run` task
-  // running zero tests). Any trace — a `Deno.test(` call at ANY position, a
-  // `Deno["test"]` bracket access, a `const { test } = Deno` destructure, an
-  // alias assignment `const t = Deno.test`, or `Deno.test.call/apply/bind` —
-  // makes the file REGISTERED, and C1 then demands runner routing. The false-
-  // positive class is prose: a comment or template literal containing one of
-  // those shapes (measured at introduction: exactly three, all in already-
-  // routed suites, so the tree stays green). If a mention in an UNROUTED file
-  // ever fires, the failure is loud and names the file: reword the mention or
-  // route the task. Deliberately NO homegrown comment/string-stripping parser:
-  // a mini state machine over strings and templates is its own correctness
-  // risk in a guard whose whole purpose is exactness. Honest residual: a
-  // registration with NO textual trace (computed/encoded member access, e.g.
-  // Deno["te"+"st"]) is not statically provable in JS; the backstops are code
-  // review, the runner's at-least-one-test rule once routed, and the C3
-  // allow-list below, which forces every unrouted suite onto a reviewed list.
-  const REGISTERED =
-    /Deno\.test\s*\(|Deno\s*\[\s*["'`]test["'`]\s*\]|\{\s*test(?:\s*:\s*\w+)?\s*\}\s*=\s*Deno\b|(?:const|let|var)\s+\w+\s*=\s*Deno\.test\b|Deno\.test\s*\.\s*(?:call|apply|bind)\b/;
-  const SUITE_FILE = /^(?:scripts|tests)\/[\w./-]*\.test\.mjs$/;
-  // Does one &&-segment of `cmd` actually invoke the runner with `path` as its
-  // target (exact token, after the runner path, before any `--`)?
-  const segmentRoutes = (segment, path) => {
-    const tokens = squash(segment).split(/\s+/);
-    if (tokens[0] !== "deno" || tokens[1] !== "run") return false;
-    const runnerIdx = tokens.indexOf("scripts/native-test.mjs");
-    if (runnerIdx < 2) return false;
-    // Between `run` and the runner path only deno-run flags may appear; a
-    // bare token there means the runner path is an argument of something else.
-    if (tokens.slice(2, runnerIdx).some((t) => !t.startsWith("-"))) return false;
-    const sep = tokens.indexOf("--", runnerIdx);
-    const zone = tokens.slice(runnerIdx + 1, sep === -1 ? undefined : sep);
-    return zone.includes(path);
-  };
-  const taskRoutes = (name, path) =>
-    String(tasks[name]).split("&&").some((seg) => segmentRoutes(seg, path));
-
-  const registeredSuites = scriptTests.filter((file) => REGISTERED.test(read(`scripts/${file}`)));
-  check(
-    "the routing guard sees at least one Deno.test-registered suite",
-    registeredSuites.length > 0,
-    "trace scan found no registrations — the detector is broken, " +
-      "not the tasks; do not let an empty match set vacuously green this section",
-  );
-  const misrouted = registeredSuites.filter((file) => {
-    const naming = tasksRunning(file);
-    return naming.length === 0 ||
-      !naming.every((name) => taskRoutes(name, `scripts/${file}`));
-  });
-  check(
-    "every Deno.test-registered suite's task routes it through scripts/native-test.mjs",
-    misrouted.length === 0,
-    `registered suites not routed through the native runner: ${misrouted.join(", ")} — ` +
-      "a plain `deno run <file>` of a registered suite exits 0 running ZERO tests " +
-      "(measured, bead f0f); route the task through scripts/native-test.mjs with the " +
-      "same file as its target, or remove the registration",
-  );
-  // C3 (bead chrome_platform_showcase-813): fail-closed default for
-  // unregistered suites. A suite named by a task that does NOT route through
-  // the runner must be on this explicit legacy direct-run list, and every list
-  // entry must be a currently unrouted suite — the list must EQUAL the
-  // unrouted set, in both directions. A brand-new suite on a plain `deno run`
-  // task goes RED until a reviewed edit adds it here. The list is EMPTY because
-  // dty.37 moved the last legacy direct-run suite (server-hardening) onto the
-  // runner; it stays as the deliberate, reviewed place for a future one. C1
-  // always wins: a listed suite that gains a registration trace while staying
-  // direct-run is RED under C1 regardless of this list.
-  const LEGACY_DIRECT_RUN = [];
-  const unroutedSuites = scriptTests.filter((file) =>
-    !tasksRunning(file).some((name) => taskRoutes(name, `scripts/${file}`))
-  );
-  const sameNames = (a, b) =>
-    a.length === b.length && [...a].sort().every((x, i) => x === [...b].sort()[i]);
-  check(
-    "the legacy direct-run allow-list is exactly the set of unrouted suites",
-    sameNames(unroutedSuites, LEGACY_DIRECT_RUN),
-    `unrouted suites: [${unroutedSuites.join(", ")}] vs allow-list: [${
-      LEGACY_DIRECT_RUN.join(", ")
-    }] — add a NEW unlisted direct-run suite here deliberately (reviewed edit), ` +
-      "and remove an entry in the same diff that migrates its suite to the runner",
-  );
-
-  // Reverse direction: a task that invokes the runner must point at a file that
-  // actually registers cases. (The runner's own at-least-one-test rule is the
-  // runtime backstop; this catches the drift statically, by name.)
-  const runnerTargets = [];
-  for (const [name, cmd] of Object.entries(tasks)) {
-    if (typeof cmd !== "string") continue;
-    for (const seg of String(cmd).split("&&")) {
-      const tokens = squash(seg).split(/\s+/);
-      const runnerIdx = tokens.indexOf("scripts/native-test.mjs");
-      if (tokens[0] !== "deno" || tokens[1] !== "run" || runnerIdx < 2) continue;
-      const sep = tokens.indexOf("--", runnerIdx);
-      const zone = tokens.slice(runnerIdx + 1, sep === -1 ? undefined : sep);
-      for (const t of zone) if (SUITE_FILE.test(t)) runnerTargets.push([name, t]);
-    }
-  }
-  const staleRunnerTargets = runnerTargets.filter(([, target]) => {
-    try {
-      return !REGISTERED.test(read(target));
-    } catch {
-      return true; // a runner task naming a missing file is stale by definition
-    }
-  });
-  check(
-    "every scripts/native-test.mjs task targets a suite that registers Deno.test",
-    staleRunnerTargets.length === 0,
-    `runner tasks targeting non-registering or missing files: ${
-      staleRunnerTargets.map(([n, t]) => `${n} -> ${t}`).join("; ")
-    }`,
-  );
-
-  // Task-level registration (bead 6r8 union guard). A suite can be registered as a
-  // deno.json task before — or without — a file this scan sees, and two branches
-  // can each add one: the union must not keep the task and lose the chain entry
-  // (which is what replacing the flat `&&` chain with a plan could do). So every
-  // task whose command runs a `*.test.mjs` must be reachable from the plan; a
-  // newly registered suite that no plan step names fails the gate instead of
-  // silently stopping running.
-  const suiteTasks = Object.entries(tasks)
-    .filter(([, cmd]) => /\.test\.mjs\b/.test(cmd))
-    .map(([name]) => name)
-    .sort();
-  const offPlanSuiteTasks = suiteTasks.filter((name) => !gateTasks.has(name));
-  check(
-    "every task that runs a *.test.mjs suite is reachable from the gate plan",
-    offPlanSuiteTasks.length === 0,
-    `off-plan suite tasks: ${
-      offPlanSuiteTasks.join(", ")
-    } — add a step to scripts/gate-steps.mjs ` +
-      "(and a rule in scripts/affected-tests.mjs selects it), or the suite stops running",
-  );
-
-  // Stage 0 opt-in native Deno.test pilot (bead 9th, from dty). The pilot lives in
-  // tests/unit/ and is deliberately NOT on the gate plan: it is opt-in, it runs
-  // with zero permissions, and nothing about it may change the full gate, CI or
-  // the fleet CHECK_CMD. It must not be invisible either, so it is pinned here:
-  // a suite exists, the directory is flat and holds nothing but suites, and the
-  // runner task is exactly the runner invocation below. The runner is what keeps
-  // the pilot off the plan — the task command names scripts/native-test.mjs, not a
-  // *.test.mjs path, so the task-level rule above has nothing to demand of the
-  // plan; it also carries the zero-test rule that `deno test <dir>` cannot express
-  // (Stage 1, bead 0a0).
-  //
-  // The pin has to cover everything the runner can reach (finding 08a):
-  // `deno test <dir>` recurses, so a nested suite is discovered and imported, and
-  // it also discovers `*_test.mjs` (a stray helper is imported as a zero-test
-  // module that exits 0). A symlinked entry could put content outside this
-  // directory in the runner's reach. So every entry must be a REGULAR
-  // *.test.mjs FILE — no subdirectories, no symlinks. That is why the pilot
-  // directory is required to stay flat rather than matched recursively: a flat
-  // directory makes the single-level scan exhaustive, and a nested suite fails
-  // loudly here instead of silently joining the run (the runner refuses it too,
-  // through the same rule in scripts/lib/native-test.mjs).
-  const UNIT_DIR = "tests/unit";
-  const UNIT_RUNNER = "deno run --allow-read --allow-run scripts/native-test.mjs --dir tests/unit";
-  let unitEntries = [];
-  try {
-    unitEntries = [...Deno.readDirSync(`${REPO}${UNIT_DIR}`)].sort((a, b) =>
-      a.name.localeCompare(b.name)
-    );
-  } catch {
-    // Reported by the first check below, which fails with a readable message.
-  }
-  const isRegularSuite = (entry) =>
-    entry.isFile && !entry.isSymlink && entry.name.endsWith(".test.mjs");
-  const unitFiles = unitEntries.filter(isRegularSuite).map((entry) => entry.name);
-  const unreachableByScan = unitEntries
-    .filter((entry) => !isRegularSuite(entry))
-    .map((entry) =>
-      `${entry.name}${entry.isDirectory ? "/" : entry.isSymlink ? " (symlink)" : ""}`
-    );
-  check(
-    "the opt-in pilot declares at least one *.test.mjs suite",
-    unitFiles.length > 0,
-    `${UNIT_DIR} holds no suite — delete this guard only together with the pilot`,
-  );
-  check(
-    "the opt-in pilot directory is flat: only regular *.test.mjs files",
-    unreachableByScan.length === 0,
-    `entries outside a single-level scan: ${
-      unreachableByScan.join(", ")
-    } — deno test recurses into ` +
-      "subdirectories, imports `*_test.mjs`, and can follow a symlink, so a nested suite, a nested " +
-      "helper or a symlink would join the run unnoticed",
-  );
-  check(
-    "the opt-in pilot runner is exactly the fail-closed native-test invocation",
-    tasks["test:unit"] === UNIT_RUNNER,
-    `test:unit = ${JSON.stringify(tasks["test:unit"])} — expected ${JSON.stringify(UNIT_RUNNER)}`,
-  );
-
-  // The OTHER deliberate off-plan suite: the harness regression (bead
-  // chrome_platform_showcase-0a0). tests/integration/native-test-harness.mjs is
-  // the end-to-end regression net for scripts/native-test.mjs itself — it pins
-  // the runner's relay, child-flag and timeout rules (findings i43, 2yh) by
-  // spawning real child processes and writing temp fixtures, which is also why
-  // it is opt-in and OFF the gate plan on purpose: it needs --allow-write and
-  // an unrestricted --allow-run for its children, permissions a gate step does
-  // not hand out. Unlike tests/unit (pinned just above), nothing else fails if
-  // this opt-out drifts: the harness is not a *.test.mjs, so the
-  // every-*.test.mjs reachability rule deliberately ignores it, and until this
-  // pin its opt-out lived only in prose — the file's own header comment and
-  // AGENTS.md. Prose cannot fail a gate: deleting the file, renaming it or
-  // repurposing the task would have been silent, taking the runner's
-  // regression net with it. So the opt-out is enforced, not documented: the
-  // task must exist with exactly the invocation below, the file it names must
-  // exist, and whatever the task actually targets must NOT be a *.test.mjs — a
-  // suite there would fall under the reachability rule above and be forced
-  // onto the gate plan, which is precisely what the opt-out forbids. The
-  // target is taken from the task's own text (its last .mjs operand), so a
-  // repointed task is judged on what it really runs, not on the pinned
-  // constant — the exact-command check below is what fixes the constant.
-  // The fourth check pins the other direction of the opt-out: the task must
-  // stay UNREACHABLE from the gate plan, because a test:harness step (direct
-  // or nested) would hand every gate run the harness's --allow-write and
-  // unrestricted --allow-run — a permission change nobody reviewed.
-  //
-  // Rationale of record: bead chrome_platform_showcase-0a0 and the harness
-  // paragraph in AGENTS.md. This pin names exactly ONE deliberate opt-out and
-  // is not a licence: a future suite left off the plan is drift this guard's
-  // own rules fail on (or, for a non-*.test.mjs, an unpinned hole) — a new
-  // opt-out needs its own reviewed pin and rationale, never an inference
-  // from this one that omission is okay by default.
-  const HARNESS_FILE = "tests/integration/native-test-harness.mjs";
-  const HARNESS_CMD =
-    "deno run --allow-read --allow-write --allow-run tests/integration/native-test-harness.mjs";
-  const harnessTarget = String(tasks["test:harness"] ?? "")
-    .split(/\s+/)
-    .filter((t) => t.endsWith(".mjs"))
-    .pop();
-  let harnessOnDisk = false;
-  try {
-    read(HARNESS_FILE);
-    harnessOnDisk = true;
-  } catch {
-    // Reported by the check below with a readable message.
-  }
-  check(
-    "the off-plan harness regression task is exactly its invocation",
-    tasks["test:harness"] === HARNESS_CMD,
-    `test:harness = ${JSON.stringify(tasks["test:harness"])} — expected ${
-      JSON.stringify(HARNESS_CMD)
-    }`,
-  );
-  check(
-    "the off-plan harness regression file exists",
-    harnessOnDisk,
-    `${HARNESS_FILE} not found — the runner's own regression net (bead 0a0, findings ` +
-      "i43/2yh) was deleted or moved; delete this guard only together with the harness, " +
-      "never before",
-  );
-  check(
-    "the harness regression target is not a *.test.mjs suite",
-    harnessTarget !== undefined && !harnessTarget.endsWith(".test.mjs"),
-    harnessTarget === undefined
-      ? "the test:harness task names no .mjs target at all"
-      : `${harnessTarget} — a *.test.mjs would fall under the every-*.test.mjs reachability ` +
-        "rule and be forced onto the gate plan; the harness is a plain assert-and-exit " +
-        "script on purpose (bead 0a0), so keep it off the suite path instead of wiring it " +
-        "into scripts/gate-steps.mjs",
-  );
-  check(
-    "the off-plan harness regression task is not reachable from the gate plan",
-    !gateTasks.has("test:harness"),
-    "a gate plan step (directly or through a nested `deno task`) reaches " +
-      "test:harness — the harness is opt-in precisely because its children need " +
-      "--allow-write and an unrestricted --allow-run; wiring it into " +
-      "scripts/gate-steps.mjs hands those permissions to every gate run, which the " +
-      "reviewed opt-out (bead 0a0) says not to do",
-  );
-
-  // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
-  // live inside a case - it kills the test process before Deno can report the case -
-  // so the counter is carried into the failure message instead: every failing label
-  // above has already printed, and this makes the case fail loudly with the same
-  // wording the guard used before the migration.
-  if (failures) throw new Error(`${failures} local-gate/CI parity check(s) failed`);
-  console.log("\nlocal-gate/CI parity: all checks passed");
 });

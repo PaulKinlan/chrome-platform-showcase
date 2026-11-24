@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write
+#!/usr/bin/env node
 // Feature id → the demo folder that covers it.
 //
 // The one-folder-per-feature rule means a feature listed against Chrome 155 is
@@ -9,11 +9,13 @@
 //
 // This writes demo-index.json so the server reads one small file instead of
 // scanning every feature folder on each isolate start. Rebuild with
-// `deno task demo-index`; `deno task check-demo-index` fails if it is stale.
+// `npm run demo-index`; `npm run check-demo-index` fails if it is stale.
 
-import { dirname, fromFileUrl, join } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { readdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = join(dirname(fromFileUrl(import.meta.url)), "..");
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT = join(ROOT, "demo-index.json");
 
 const CHROMESTATUS = /chromestatus\.com\/feature\/(\d+)/g;
@@ -23,7 +25,7 @@ export async function buildIndex(root = ROOT) {
   // feature actually shipped in. Prefer that one when a feature has several.
   let canonicalById = new Map();
   try {
-    const lineage = JSON.parse(await Deno.readTextFile(join(root, "feature-lineage.json")));
+    const lineage = JSON.parse(await readFile(join(root, "feature-lineage.json"), "utf8"));
     for (const [id, record] of Object.entries(lineage.features ?? {})) {
       if (record?.canonical) canonicalById.set(Number(id), record.canonical);
     }
@@ -32,13 +34,13 @@ export async function buildIndex(root = ROOT) {
   }
 
   const folders = new Map(); // id → [dir]
-  for await (const release of Deno.readDir(root)) {
-    if (!release.isDirectory || !/^v\d+$/.test(release.name)) continue;
-    for await (const feature of Deno.readDir(join(root, release.name))) {
-      if (!feature.isDirectory) continue;
+  for (const release of await readdir(root, { withFileTypes: true })) {
+    if (!release.isDirectory() || !/^v\d+$/.test(release.name)) continue;
+    for (const feature of await readdir(join(root, release.name), { withFileTypes: true })) {
+      if (!feature.isDirectory()) continue;
       let html;
       try {
-        html = await Deno.readTextFile(join(root, release.name, feature.name, "index.html"));
+        html = await readFile(join(root, release.name, feature.name, "index.html"), "utf8");
       } catch {
         continue;
       }
@@ -66,7 +68,7 @@ export async function buildIndex(root = ROOT) {
     demos[id] = dir;
 
     try {
-      const suite = JSON.parse(await Deno.readTextFile(join(root, dir, "conformance.json")));
+      const suite = JSON.parse(await readFile(join(root, dir, "conformance.json"), "utf8"));
       const assertions = (suite?.assertions ?? []).filter((a) =>
         a && a.kind && a.kind !== "manual" && typeof a.test === "string"
       );
@@ -97,15 +99,15 @@ export async function buildIndex(root = ROOT) {
 }
 
 if (import.meta.main) {
-  const check = Deno.args.includes("--check");
+  const check = process.argv.slice(2).includes("--check");
   const built = await buildIndex();
   if (check) {
     let existing;
     try {
-      existing = JSON.parse(await Deno.readTextFile(OUTPUT));
+      existing = JSON.parse(await readFile(OUTPUT, "utf8"));
     } catch {
-      console.error("FAIL — demo-index.json is missing. Run `deno task demo-index`.");
-      Deno.exit(1);
+      console.error("FAIL — demo-index.json is missing. Run `npm run demo-index`.");
+      process.exit(1);
     }
     const before = JSON.stringify(existing.demos ?? {});
     const after = JSON.stringify(built.demos);
@@ -169,14 +171,14 @@ if (import.meta.main) {
     }
     if (stale.length) {
       console.error(
-        `FAIL — demo-index.json is stale (${stale.join(" + ")}). Run \`deno task demo-index\`.`,
+        `FAIL — demo-index.json is stale (${stale.join(" + ")}). Run \`npm run demo-index\`.`,
       );
-      Deno.exit(1);
+      process.exit(1);
     }
     console.log(`PASS — demo-index.json matches disk (${built.count} features covered)`);
-    Deno.exit(0);
+    process.exit(0);
   }
 
-  await Deno.writeTextFile(OUTPUT, `${JSON.stringify(built, null, 2)}\n`);
+  await writeFile(OUTPUT, `${JSON.stringify(built, null, 2)}\n`);
   console.log(`wrote demo-index.json — ${built.count} features covered`);
 }

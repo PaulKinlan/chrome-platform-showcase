@@ -35,7 +35,7 @@ Rules that must never be broken. Each has bitten the project before:
    text or background. Every text-on-background pair must hit WCAG AA (4.5:1 normal text, 3:1 large
    text). See "Colour and contrast" below.
 4. **No fake simulations when a working path exists**: Do not ship a demo that merely simulates,
-   mocks, pretends, or animates the API if the browser can make a real call, if a Deno route can
+   mocks, pretends, or animates the API if the browser can make a real call, if a server route can
    expose the real header/network behavior, or if a real feature-detection probe can show the
    outcome. A fallback may explain unsupported/flag-required state, but it must be labelled as a
    fallback and must not report "success" as if the platform feature ran.
@@ -105,7 +105,7 @@ Rules that must never be broken. Each has bitten the project before:
     built count as implemented or incomplete as usual and are never built a second time; (d) open
     your PR with "Supersedes #N: this branch builds on it, so merge this one and close #N" as its
     first line. Never rewrite, rebase or force-push the earlier branch; only add commits on your
-    own. If that branch fails `deno task check` in your checkout, start from `main` instead, still
+    own. If that branch fails `npm run check` in your checkout, start from `main` instead, still
     skip every feature id that already has a folder on the open branch, and say in the PR why you
     did not stack.
 
@@ -144,8 +144,8 @@ controls, its use-case intent, and all inbound links.** Routine and agent waves 
   regression gate. Stable does NOT mean frozen — improve existing demos when justified, and add new
   demos/use cases freely; just never replace an old one merely to present a new idea.
 
-**Gate before every push:** run the route regression gate (`deno task check-routes`). It compares
-the previously published manifest against the working tree and fails on any missing published ID,
+**Gate before every push:** run the route regression gate (`npm run check-routes`). It compares the
+previously published manifest against the working tree and fails on any missing published ID,
 deleted route, renamed/repurposed slug, changed published identity, or unexplained concept-count
 reduction — while allowing additive entries, honest `blocked` records, and in-place fixes.
 Exceptional removals/moves must be listed in the migration record with reason + evidence.
@@ -154,9 +154,9 @@ Exceptional removals/moves must be listed in the migration record with reason + 
 tree — every `v<N>/<feature-slug>/index.html` is a published feature demo whose stable identity is
 the ChromeStatus feature id linked from its index (concept demos live in
 `v<N>/<feature-slug>/<concept-slug>/`; a `blocked` feature carries a `_status.json` marker). Emit
-the route manifest with `deno task route-manifest` (or `node scripts/route-manifest.mjs`) and run
-the gate with `deno task check-routes` (or `node scripts/check-routes.mjs`) before every push.
-Record any exceptional removal/rename/move/identity-change in `migrations.json`
+the route manifest with `npm run route-manifest` (or `node scripts/route-manifest.mjs`) and run the
+gate with `npm run check-routes` (or `node scripts/check-routes.mjs`) before every push. Record any
+exceptional removal/rename/move/identity-change in `migrations.json`
 (`{ id, action, from, to, reason, evidence, date }`); a `move`/`alias` there also keeps the old URL
 alive via the 301 redirect in `routes/aliases.ts`, and the committed `.route-manifest.baseline.json`
 is the offline fallback baseline. This matters most for **incomplete** features (Step 3): you are
@@ -199,7 +199,7 @@ targeted compatibility fixes — never a destructive rewrite, never a new slug t
   it claims to support. Apply this to existing demos during audits with targeted compatibility
   fixes, wave by wave — the coverage number is the backlog burn-down, and it never regresses.
 
-**Run the responsive matrix before every push** with `deno task responsive-check` and record each
+**Run the responsive matrix before every push** with `npm run responsive-check` and record each
 touched demo's result in `responsive-support.json` (`ok` / `unsupported`+evidence per class).
 
 ## modern-web-guidance is mandatory for all frontend work
@@ -244,11 +244,11 @@ APIs.
 > existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
 > Per-demo support lives in the git-tracked `responsive-support.json` sidecar (keyed by
 > `v<N>/<feature-slug>`, defaulting existing demos to `untested`), merged into the route manifest.
-> Validate with `deno task responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800;
-> asserts no horizontal overflow + console/network clean and screenshots both classes; a
+> Validate with `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts
+> no horizontal overflow + console/network clean and screenshots both classes; a
 > genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
-> `deno task overflow-scan` (cheap seed → `needs-review`, never `ok`). Report coverage with
-> `deno task responsive-support report`; the gate (`deno task check-routes`) reports the
+> `npm run overflow-scan` (cheap seed → `needs-review`, never `ok`). Report coverage with
+> `npm run responsive-support -- report`; the gate (`npm run check-routes`) reports the
 > mobile/desktop denominators and enforces the rules above before every push. The
 > modern-web-guidance skill source + version + update path is recorded in `MODERN_WEB_GUIDANCE.md`
 > (canonical skill `modern-web-guidance`, scripted fallback `npx -y modern-web-guidance@latest`; no
@@ -261,6 +261,10 @@ The remote cron routine runs with a limited toolset: **Bash, Read, Write, Edit, 
 and a later manual sweep caught the defects. That ends here: do the research and verification with
 the tools you DO have.
 
+- **Tooling is Node + npm.** Run `npm ci` once after checkout (Node 22.18+; the cloud image has it),
+  then every command is `npm run <script>` (pass flags after `--`, e.g.
+  `npm run responsive-check -- <id> --merge`). Deno has been removed: never install it or run
+  `deno`, and never add `Deno.*` calls or `jsr:`/`npm:`/`deno.land` imports.
 - **Research (Step 5c) via `curl`.** The chromestatus detail gives you the reference URLs — `curl`
   each one. For Chromium source, use gitiles raw (curl-able), e.g. the real flag list:
   `curl -s "https://chromium.googlesource.com/chromium/src/+/main/third_party/blink/renderer/platform/runtime_enabled_features.json5?format=TEXT" | base64 -d | grep -i "<Name>"`.
@@ -268,12 +272,12 @@ the tools you DO have.
   curl can't render, fall back to the spec/explainer/MDN text you can fetch. Best-effort is fine —
   the point is to ground the demo in real material, not to hit every source.
 - **Verification via headless Chrome + Read.** You have no `chrome-devtools-mcp`, so drive Chrome
-  from Bash: `deno task start` in the background, then a headless run to capture DOM and a
-  SCREENSHOT, e.g.
+  from Bash: `npm run start` in the background, then a headless run to capture DOM and a SCREENSHOT,
+  e.g.
   `google-chrome --headless=new --screenshot=/tmp/shot.png --window-size=1280,2000 --dump-dom "http://localhost:3000/v<N>/<feature>/<concept>/" > /tmp/dom.html`
   (use `chromium`/`chromium-browser` if that's the binary; Canary when the milestone needs it). Then
   **`Read /tmp/shot.png`** to inspect geometry/contrast visually and grep `/tmp/dom.html` for the
-  expected state. For interaction, script it with a small headless Puppeteer/`deno`+CDP snippet run
+  expected state. For interaction, script it with a small headless Puppeteer/Node+CDP snippet run
   via Bash, or at minimum load the post- interaction state via a URL param / autorun hook and
   screenshot that. Reading the screenshot image IS your visual gate (rule 11) — a clean DOM dump is
   not enough.
@@ -319,7 +323,7 @@ corrupt a half-written folder or ship shallow ones — depth beats throughput.
 Before choosing work, read what real visitors hit:
 
 ```bash
-deno task telemetry-digest --stdout > /tmp/telemetry-digest.md || echo "digest unavailable"
+npm run telemetry-digest -- --stdout > /tmp/telemetry-digest.md || echo "digest unavailable"
 ```
 
 It needs `SHOWCASE_PASSWORD` (or `showcase_password`). If the variable is missing, the request is
@@ -506,13 +510,14 @@ state diagrams second.
   visitor interacts.
 - **DOM / JS features** → a try-it button that actually invokes the API and shows the result.
   Feature-detect and degrade gracefully if the API isn't shipped yet on the visitor's browser.
-- **HTTP / header / MIME / cache / redirect / network features** → use the Deno server. Add a route
-  under the feature folder (e.g. `v<N>/<slug>/echo`) in `server.ts` that responds with the relevant
-  header / redirect / content-type behaviour. The concept page fetches from that route and surfaces
-  the negotiated outcome. ROUTINE NOTE: you are fenced out of top-level files; for server-route
-  demos, generate the feature index + concept page using the path you'd want, and add a one-line
-  TODO in the feature index referencing the route name + behaviour so the human reviewer can wire it
-  in `server.ts`. Do NOT skip the feature and do NOT downgrade to a static card.
+- **HTTP / header / MIME / cache / redirect / network features** → use the server (routes run on
+  Node locally and on Workers in production). Add a route under the feature folder (e.g.
+  `v<N>/<slug>/echo`) in `server.ts` that responds with the relevant header / redirect /
+  content-type behaviour. The concept page fetches from that route and surfaces the negotiated
+  outcome. ROUTINE NOTE: you are fenced out of top-level files; for server-route demos, generate the
+  feature index + concept page using the path you'd want, and add a one-line TODO in the feature
+  index referencing the route name + behaviour so the human reviewer can wire it in `server.ts`. Do
+  NOT skip the feature and do NOT downgrade to a static card.
 - **Origin trial / behind-a-flag features** → ship the interactive demo, and prefer the FLAG path
   over origin-trial framing, because a flag lets anyone (and you) run the demo for real today. In
   the banner, give the EXACT, copyable enable steps you found in Step 5c — in priority order:
@@ -639,7 +644,7 @@ Before committing, start the local server and verify each new concept with `chro
 6. **Fresh evidence** — reload from disk after your FINAL edit and repeat the whole control
    sequence; evidence from before the last edit is invalid (rule 11).
 
-7. **Route regression gate** — run `deno task check-routes` (or `node scripts/check-routes.mjs`). It
+7. **Route regression gate** — run `npm run check-routes` (or `node scripts/check-routes.mjs`). It
    compares the previously published route manifest (origin/main, falling back to
    `.route-manifest.baseline.json`) against the working tree and must PASS (exit 0). It fails if
    this run deleted/renamed a published route, repurposed a slug's identity, or dropped a feature's
@@ -649,14 +654,14 @@ Before committing, start the local server and verify each new concept with `chro
    before pushing.
 
 8. **Mobile + desktop parity gate** — run the responsive matrix for every demo you built or fixed
-   (`deno task responsive-check <id> --merge`): mobile ≈360×740 DPR3 touch AND desktop ≈1280×800. It
-   asserts no horizontal overflow + console/network clean and screenshots both classes; `Read` both
-   screenshots and judge legibility, tap targets, focus, and dialogs. Record each touched demo's
-   result in `responsive-support.json` (`ok`, or `unsupported`+evidence when a class is genuinely
-   unavailable — a genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass, and
-   you must NOT auto-download an absent large model to force a pass). The route gate (item 7) now
-   also FAILS if a touched demo is left untested/broken on a supported class, or if any demo is
-   recorded broken on a class it claims to support, and it reports mobile/desktop coverage
+   (`npm run responsive-check -- <id> --merge`): mobile ≈360×740 DPR3 touch AND desktop ≈1280×800.
+   It asserts no horizontal overflow + console/network clean and screenshots both classes; `Read`
+   both screenshots and judge legibility, tap targets, focus, and dialogs. Record each touched
+   demo's result in `responsive-support.json` (`ok`, or `unsupported`+evidence when a class is
+   genuinely unavailable — a genuinely-unavailable class is `blocked` with evidence, NEVER a fake
+   pass, and you must NOT auto-download an absent large model to force a pass). The route gate
+   (item 7) now also FAILS if a touched demo is left untested/broken on a supported class, or if any
+   demo is recorded broken on a class it claims to support, and it reports mobile/desktop coverage
    denominators.
 
 9. **modern-web-guidance gate** — you consulted `modern-web-guidance` FIRST for the specific UI/API
@@ -696,10 +701,10 @@ Log channels, per-milestone counts, features built (SHA + live URL), stop reason
 - Never edit outside `v<N>/` and `/tmp`. `server.ts`, `lib/`, `public/` are off-limits. The ONLY
   top-level exception is the generated catalogue data the parity workflow records:
   `responsive-support.json` (support record for demos you touched, via
-  `deno task responsive-check <id> --merge`) and `reports/responsive/` (screenshots). These are
+  `npm run responsive-check -- <id> --merge`) and `reports/responsive/` (screenshots). These are
   data, not code — you may write them; you still may not touch `server.ts`, `lib/`, `public/`,
-  `deno.json`, `scripts/`, `CLAUDE.md`, or the conformance suites.
-- Run `deno task check-routes` (read-only) before every push; it must PASS. Never destructively
+  `package.json`, `scripts/`, `CLAUDE.md`, or the conformance suites.
+- Run `npm run check-routes` (read-only) before every push; it must PASS. Never destructively
   replace a published route/slug/identity — add new slugs, patch existing demos in the smallest way.
 - Each run pushes to its own `claude/*` branch and opens one PR; a human merges it. Stack on the
   newest open routine PR (Critical Rule 12) instead of starting again from `main`.

@@ -1,32 +1,34 @@
-#!/usr/bin/env -S deno run --allow-net --allow-env --allow-read --allow-write
+#!/usr/bin/env node
 // Telemetry digest: turns real-visitor telemetry into a short brief the build routine reads
 // before it picks work. Fixes for broken demos come first; recurring error patterns become
 // build rules for new demos.
 //
-//   deno task telemetry-digest                       # live site, needs SHOWCASE_PASSWORD
-//   deno task telemetry-digest --base http://localhost:3000
-//   deno task telemetry-digest --input triage.json   # offline, from a saved triage response
-//   deno task telemetry-digest --stdout              # print the markdown, write nothing
+//   npm run telemetry-digest                       # live site, needs SHOWCASE_PASSWORD
+//   npm run telemetry-digest -- --base http://localhost:3000
+//   npm run telemetry-digest -- --input triage.json   # offline, from a saved triage response
+//   npm run telemetry-digest -- --stdout              # print the markdown, write nothing
 //
 // Writes reports/telemetry/latest.md (for agents and humans) and reports/telemetry/latest.json
 // (the raw triage window it was built from). Both are overwritten on each run.
 
-const DEFAULT_BASE = "https://chrome-platform-showcase.paulkinlan-ea.deno.net";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+
+const DEFAULT_BASE = "https://chrome-platform-showcase.kinlan-test.workers.dev";
 const OUT_DIR = "reports/telemetry";
 
 function arg(name) {
-  const i = Deno.args.indexOf(name);
-  return i === -1 ? null : Deno.args[i + 1] ?? null;
+  const i = process.argv.slice(2).indexOf(name);
+  return i === -1 ? null : process.argv.slice(2)[i + 1] ?? null;
 }
 
 async function loadTriage() {
   const input = arg("--input");
-  if (input) return JSON.parse(await Deno.readTextFile(input));
-  const base = (arg("--base") ?? Deno.env.get("SHOWCASE_BASE_URL") ?? DEFAULT_BASE).replace(
+  if (input) return JSON.parse(await readFile(input, "utf8"));
+  const base = (arg("--base") ?? process.env["SHOWCASE_BASE_URL"] ?? DEFAULT_BASE).replace(
     /\/$/,
     "",
   );
-  const password = Deno.env.get("SHOWCASE_PASSWORD") ?? Deno.env.get("showcase_password");
+  const password = process.env["SHOWCASE_PASSWORD"] ?? process.env["showcase_password"];
   if (!password) {
     throw new Error("Set SHOWCASE_PASSWORD (Basic auth for /telemetry/demo/triage).");
   }
@@ -130,12 +132,12 @@ if (import.meta.main) {
   try {
     const triage = await loadTriage();
     const digest = renderDigest(triage);
-    if (Deno.args.includes("--stdout")) {
+    if (process.argv.slice(2).includes("--stdout")) {
       console.log(digest);
     } else {
-      await Deno.mkdir(OUT_DIR, { recursive: true });
-      await Deno.writeTextFile(`${OUT_DIR}/latest.md`, digest);
-      await Deno.writeTextFile(`${OUT_DIR}/latest.json`, JSON.stringify(triage, null, 2) + "\n");
+      await mkdir(OUT_DIR, { recursive: true });
+      await writeFile(`${OUT_DIR}/latest.md`, digest);
+      await writeFile(`${OUT_DIR}/latest.json`, JSON.stringify(triage, null, 2) + "\n");
       console.log(
         `Wrote ${OUT_DIR}/latest.md (${triage.demos?.length ?? 0} failing demos, ` +
           `${triage.support?.length ?? 0} APIs with support data).`,
@@ -143,6 +145,6 @@ if (import.meta.main) {
     }
   } catch (error) {
     console.error(`telemetry-digest: ${error.message}`);
-    Deno.exit(1);
+    process.exit(1);
   }
 }

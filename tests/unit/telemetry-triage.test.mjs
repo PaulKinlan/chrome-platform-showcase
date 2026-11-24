@@ -1,5 +1,6 @@
 // Telemetry triage + digest: the signals the build routine consumes. Pure data checks, so they
 // run under the pilot's zero permissions.
+import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { buildTriage } from "../../routes/demo-telemetry.ts";
@@ -52,7 +53,7 @@ const stored = [
   ]),
 ];
 
-Deno.test("triage breaks failures down by Chrome major (env first, UA fallback)", () => {
+test("triage breaks failures down by Chrome major (env first, UA fallback)", () => {
   const triage = buildTriage(stored);
   const summarize = triage.demos.find((d) => d.key === "v150/ai-api/summarize");
   assert.ok(summarize, "summarize demo is ranked");
@@ -61,7 +62,7 @@ Deno.test("triage breaks failures down by Chrome major (env first, UA fallback)"
   assert.deepEqual(other.chrome, { "142": 1 }, "falls back to the stored user agent");
 });
 
-Deno.test("triage aggregates api.support outcomes per API and per Chrome version", () => {
+test("triage aggregates api.support outcomes per API and per Chrome version", () => {
   const { support } = buildTriage(stored);
   const s = support.find((x) => x.api === "Summarizer");
   assert.deepEqual(s.states, { unsupported: 1, supported: 1 });
@@ -69,7 +70,7 @@ Deno.test("triage aggregates api.support outcomes per API and per Chrome version
   assert.deepEqual(s.demos, ["v150/ai-api/summarize"]);
 });
 
-Deno.test("triage groups deprecation reports across demos and never counts them as failures", () => {
+test("triage groups deprecation reports across demos and never counts them as failures", () => {
   const triage = buildTriage(stored);
   assert.equal(triage.deprecations.length, 1);
   assert.equal(triage.deprecations[0].count, 2);
@@ -77,7 +78,7 @@ Deno.test("triage groups deprecation reports across demos and never counts them 
   assert.equal(triage.failures, 2, "only the two rejections are failures");
 });
 
-Deno.test("digest lists failing demos, cross-demo patterns, support and deprecations", () => {
+test("digest lists failing demos, cross-demo patterns, support and deprecations", () => {
   const out = renderDigest({ window: 3, ...buildTriage(stored) }, "2026-11-24T08:00:00Z");
   assert.match(out, /\[v150\/ai-api\/summarize\]\(\/v150\/ai-api\/summarize\/\)/);
   assert.match(out, /Permission denied\*\*: 2x on 2 demos/);
@@ -88,7 +89,7 @@ Deno.test("digest lists failing demos, cross-demo patterns, support and deprecat
   assert.match(out, /deprecation \*\*UnloadHandler\*\* 2x on 2 demos/);
 });
 
-Deno.test("digest renders an empty window without crashing", () => {
+test("digest renders an empty window without crashing", () => {
   const out = renderDigest({ window: 0, scanned: 0, failures: 0, demos: [], signatures: [] });
   assert.match(out, /No failures in this window/);
 });

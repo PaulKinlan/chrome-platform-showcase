@@ -1,5 +1,5 @@
 // Corner-shape vocabulary and rendered gallery — migrated in place to native
-// Deno.test (Stage 2 of the dty proposal, bead dty.1).
+// node:test (Stage 2 of the dty proposal, bead dty.1).
 //
 // Same file path, same task id (`test-corner-shape-values`), same ordered gate
 // step, same subject and the same 37 assertions — the module-level `assert(...)`
@@ -23,6 +23,7 @@
 //      the DOM it built and the strings it wrote. Browser parsing/rendering of
 //      `corner-shape` itself is what the chrome-devtools-mcp run in the kz8
 //      evidence covers; this suite is deterministic and offline (two file reads).
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
@@ -130,7 +131,7 @@ function parseSupportCounts(text) {
 const allSupported = () => runGallery({ supported: () => true });
 const renderedCount = 7;
 
-Deno.test("ok — builder exposes the CSS Borders 4 keyword vocabulary", () => {
+test("ok — builder exposes the CSS Borders 4 keyword vocabulary", () => {
   const builderList = builderHtml().match(/const SHAPES = \[([^\]]+)\];/);
   assert.ok(builderList, "Builder must expose its shape vocabulary");
   const builderValues = [...builderList[1].matchAll(/'([^']+)'/g)].map((match) => match[1]);
@@ -141,7 +142,7 @@ Deno.test("ok — builder exposes the CSS Borders 4 keyword vocabulary", () => {
   );
 });
 
-Deno.test("ok — gallery renders the keyword list plus the functional form", () => {
+test("ok — gallery renders the keyword list plus the functional form", () => {
   const renderedShapes = allSupported().swatches.map((swatch) => swatch.shape);
   assert.deepEqual(
     renderedShapes,
@@ -152,7 +153,7 @@ Deno.test("ok — gallery renders the keyword list plus the functional form", ()
   );
 });
 
-Deno.test("ok — gallery feature-detects corner-shape for every rendered example", () => {
+test("ok — gallery feature-detects corner-shape for every rendered example", () => {
   const gallery = allSupported();
   const renderedShapes = gallery.swatches.map((swatch) => swatch.shape);
   // Every value the page feature-detects must be corner-shape. This replaces the old
@@ -172,7 +173,7 @@ Deno.test("ok — gallery feature-detects corner-shape for every rendered exampl
   );
 });
 
-Deno.test("ok — supported branch labels, classes and applied properties agree with the DOM", () => {
+test("ok — supported branch labels, classes and applied properties agree with the DOM", () => {
   const gallery = allSupported();
   const renderedShapes = gallery.swatches.map((swatch) => swatch.shape);
   // Supported branch: the label, the class and the applied custom property all agree.
@@ -198,7 +199,7 @@ Deno.test("ok — supported branch labels, classes and applied properties agree 
   );
 });
 
-Deno.test("ok — supported branch summary, detail and telemetry agree with the render", () => {
+test("ok — supported branch summary, detail and telemetry agree with the render", () => {
   const gallery = allSupported();
   // The count and support state in the page's summary must agree with what it
   // rendered. Parsed counts ([supported, total]) are compared against the rendered
@@ -251,7 +252,7 @@ Deno.test("ok — supported branch summary, detail and telemetry agree with the 
   );
 });
 
-Deno.test("ok — fallback branch renders the same examples without applying corner-shape", () => {
+test("ok — fallback branch renders the same examples without applying corner-shape", () => {
   const gallery = runGallery({ supported: () => false });
   assert.equal(
     gallery.swatches.length,
@@ -280,7 +281,7 @@ Deno.test("ok — fallback branch renders the same examples without applying cor
   );
 });
 
-Deno.test("ok — fallback branch summary, detail and telemetry agree with the render", () => {
+test("ok — fallback branch summary, detail and telemetry agree with the render", () => {
   const gallery = runGallery({ supported: () => false });
   // Fallback branch summary: class must indicate negative support, parsed counts
   // must be 0 of renderedCount, and it must describe corner-shape and border-radius.
@@ -331,7 +332,7 @@ Deno.test("ok — fallback branch summary, detail and telemetry agree with the r
   );
 });
 
-Deno.test("ok — radius-zero branch describes square corners and follows the control", () => {
+test("ok — radius-zero branch describes square corners and follows the control", () => {
   const gallery = runGallery({ supported: () => true, radius: "0" });
   // The radius-zero branch: must describe square corners at zero radius across
   // rendered examples without pinning the exact sentence.

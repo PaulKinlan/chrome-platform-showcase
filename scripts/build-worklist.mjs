@@ -1,10 +1,14 @@
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { getChannels, getMilestoneFeatures, slugify } from "../lib/chromestatus.ts";
 
 const args = new Map();
-for (let index = 0; index < Deno.args.length; index++) {
-  const value = Deno.args[index];
+for (let index = 0; index < process.argv.slice(2).length; index++) {
+  const value = process.argv.slice(2)[index];
   if (value.startsWith("--")) {
-    args.set(value.slice(2), Deno.args[index + 1]?.startsWith("--") ? true : Deno.args[++index]);
+    args.set(
+      value.slice(2),
+      process.argv.slice(2)[index + 1]?.startsWith("--") ? true : process.argv.slice(2)[++index],
+    );
   }
 }
 
@@ -25,7 +29,7 @@ const PORTFOLIO = {
 
 async function exists(url) {
   try {
-    return (await Deno.stat(url)).isFile;
+    return (await stat(url)).isFile();
   } catch {
     return false;
   }
@@ -33,15 +37,15 @@ async function exists(url) {
 
 async function releaseNumbers() {
   const values = [];
-  for await (const entry of Deno.readDir(ROOT)) {
-    if (entry.isDirectory && /^v\d+$/.test(entry.name)) values.push(Number(entry.name.slice(1)));
+  for (const entry of await readdir(ROOT, { withFileTypes: true })) {
+    if (entry.isDirectory() && /^v\d+$/.test(entry.name)) values.push(Number(entry.name.slice(1)));
   }
   return values.sort((a, b) => a - b);
 }
 
 async function readJson(url, fallback) {
   try {
-    return JSON.parse(await Deno.readTextFile(url));
+    return JSON.parse(await readFile(url, "utf8"));
   } catch {
     return fallback;
   }
@@ -55,8 +59,8 @@ async function critiqueCounts(featureUrl) {
     files.push(new URL("_questions.json", featureUrl));
   }
   try {
-    for await (const entry of Deno.readDir(featureUrl)) {
-      if (!entry.isDirectory) continue;
+    for (const entry of await readdir(featureUrl, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
       const path = new URL(`${entry.name}/_questions.json`, featureUrl);
       if (await exists(path)) files.push(path);
     }
@@ -77,12 +81,12 @@ async function localInventory() {
   const records = [];
   for (const milestone of await releaseNumbers()) {
     const release = `v${milestone}`;
-    for await (const feature of Deno.readDir(new URL(`${release}/`, ROOT))) {
-      if (!feature.isDirectory) continue;
+    for (const feature of await readdir(new URL(`${release}/`, ROOT), { withFileTypes: true })) {
+      if (!feature.isDirectory()) continue;
       const featureUrl = new URL(`${release}/${feature.name}/`, ROOT);
       const indexUrl = new URL("index.html", featureUrl);
       if (!(await exists(indexUrl))) continue;
-      const html = await Deno.readTextFile(indexUrl);
+      const html = await readFile(indexUrl, "utf8");
       // Identity comes from the EXPLICIT "ChromeStatus entry" reference links
       // (the skeleton's convention), not from any ID that happens to appear in
       // prose — pages legitimately mention related features' IDs in context
@@ -103,9 +107,9 @@ async function localInventory() {
       ].slice(0, 1);
       const identity = identities[0] ?? 0;
       const concepts = [];
-      for await (const concept of Deno.readDir(featureUrl)) {
+      for (const concept of await readdir(featureUrl, { withFileTypes: true })) {
         if (
-          concept.isDirectory && await exists(new URL(`${concept.name}/index.html`, featureUrl))
+          concept.isDirectory() && await exists(new URL(`${concept.name}/index.html`, featureUrl))
         ) concepts.push(concept.name);
       }
       const portfolio = Object.fromEntries(
@@ -300,9 +304,9 @@ const report = {
   work: actionable,
 };
 
-await Deno.mkdir(new URL("./", JSON_OUTPUT), { recursive: true });
-await Deno.mkdir(new URL("./", MARKDOWN_OUTPUT), { recursive: true });
-await Deno.writeTextFile(JSON_OUTPUT, `${JSON.stringify(report, null, 2)}\n`);
+await mkdir(new URL("./", JSON_OUTPUT), { recursive: true });
+await mkdir(new URL("./", MARKDOWN_OUTPUT), { recursive: true });
+await writeFile(JSON_OUTPUT, `${JSON.stringify(report, null, 2)}\n`);
 
 const lines = [
   "# Chrome Platform Showcase work-list",
@@ -340,7 +344,7 @@ const lines = [
   "",
   "Portfolio gaps above are heuristic leads, not factual failures; close them only after primary-source research.",
 ];
-await Deno.writeTextFile(MARKDOWN_OUTPUT, `${lines.join("\n")}\n`);
+await writeFile(MARKDOWN_OUTPUT, `${lines.join("\n")}\n`);
 console.log(
   `worklist: ${built}/${work.length} built · ${coveredElsewhere} re-listed · ${missing} missing · ${thin} thin · ${actionable.length} actionable`,
 );

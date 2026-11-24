@@ -1,6 +1,6 @@
 // Speech transcript regression tests: the shipped reducer plus the repo-wide demo inventory.
 //
-// Migrated in place to a native Deno.test case (Stage 17 of the dty proposal, bead dty.22):
+// Migrated in place to a node:test case (Stage 17 of the dty proposal, bead dty.22):
 // same file path, same task id `test-speech-transcripts`, the same ordered gate step 22, the
 // same four `assertEquals` call sites, the same two per-page `throw` guards, the same 21
 // snapshot-gated pages, the same 14 reasoned exemptions and the same order of work - the
@@ -23,6 +23,8 @@
 // walk reads the whole tree with `Deno.readDir(".")` and then reads every matching page.
 // No env, network, port, child process or GC flag, so no `--serial` and no `--dir`.
 
+import { test } from "node:test";
+import { readdir, readFile } from "node:fs/promises";
 import "../public/speech-transcript.js";
 
 const { snapshotSpeechRecognitionResults } = globalThis;
@@ -37,7 +39,7 @@ function assertEquals(actual, expected, label) {
   if (a !== e) throw new Error(`${label}: expected ${e}, got ${a}`);
 }
 
-Deno.test("the shipped reducer and the whole speech demo inventory stay in step", async () => {
+test("the shipped reducer and the whole speech demo inventory stay in step", async () => {
   // A recognizer repeatedly replaces one interim result with a longer hypothesis.
   // Rendering each event as a snapshot must not produce "hellohello this…".
   const cumulativeEvents = [
@@ -104,7 +106,7 @@ Deno.test("the shipped reducer and the whole speech demo inventory stay in step"
   ];
 
   for (const page of migratedPages) {
-    const source = await Deno.readTextFile(page);
+    const source = await readFile(page, "utf8");
     if (!source.includes('src="/public/speech-transcript.js"')) {
       throw new Error(`${page}: tested speech transcript module is not loaded`);
     }
@@ -145,17 +147,17 @@ Deno.test("the shipped reducer and the whole speech demo inventory stay in step"
   };
 
   async function* htmlFiles(directory) {
-    for await (const entry of Deno.readDir(directory)) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
       const path = `${directory}/${entry.name}`;
-      if (entry.isDirectory) yield* htmlFiles(path);
-      else if (entry.isFile && entry.name.endsWith(".html")) yield path;
+      if (entry.isDirectory()) yield* htmlFiles(path);
+      else if (entry.isFile() && entry.name.endsWith(".html")) yield path;
     }
   }
 
   const runtimePages = [];
   for await (const page of htmlFiles(".")) {
     if (!/^\.\/v\d+\//.test(page)) continue;
-    const source = await Deno.readTextFile(page);
+    const source = await readFile(page, "utf8");
     if (
       /new\s+(?:SpeechRecognition|SR|SpeechRec|SpeechAPI|Rec)\s*\(/.test(source) &&
       /\.onresult\s*=|addEventListener\(["']result["']/.test(source)

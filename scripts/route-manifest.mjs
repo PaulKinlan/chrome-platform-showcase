@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-run --allow-env
+#!/usr/bin/env node
 // Route manifest emitter for the durable demo compatibility contract.
 //
 // Emits the normalized published-demo manifest for the CURRENT working tree:
@@ -9,9 +9,9 @@
 // `pending` placeholder in this repo (a feature is only in the tree once built).
 //
 // Usage:
-//   deno run --allow-read --allow-run --allow-env scripts/route-manifest.mjs        # print to stdout
-//   deno run --allow-read --allow-run --allow-env scripts/route-manifest.mjs --ref origin/main
-//   deno run --allow-read --allow-run --allow-env scripts/route-manifest.mjs --write # refresh baseline
+//   node scripts/route-manifest.mjs        # print to stdout
+//   node scripts/route-manifest.mjs --ref origin/main
+//   node scripts/route-manifest.mjs --write # refresh baseline
 //
 // (also runnable with `node scripts/route-manifest.mjs`)
 

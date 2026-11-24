@@ -52,7 +52,7 @@ future demo-building and review work ask, record, and enforce accessibility ques
   iterates rubric entries generically.
 - `.claude/audit-demos.py` — static audit. Add objective accessibility checks that catch obvious
   regressions without pretending to replace browser/a11y-tree review.
-- `deno.json` — only if needed to wire a new audit command into existing checks.
+- `package.json` — only if needed to wire a new audit command into existing checks.
 - Specific `v<N>/.../index.html` demo files — only after the validation process is in place and the
   metric reveals concrete, low-risk accessibility issues to fix.
 
@@ -69,7 +69,7 @@ future demo-building and review work ask, record, and enforce accessibility ques
 
 ## Constraints
 
-- `deno fmt --check`, `deno check server.ts`, and `deno task check` should pass for kept changes.
+- `npm run fmt-check`, `npm run typecheck`, and `npm run check` should pass for kept changes.
 - Accessibility validation must combine static checks with explicit DevTools/browser review
   guidance. Static checks are a safety net, not the full definition of accessible.
 - Preserve the existing project rule that browser verification uses `chrome-devtools-mcp` only.
@@ -85,4 +85,4 @@ future demo-building and review work ask, record, and enforce accessibility ques
 - Static accessibility issue reduction: added programmatic labels to generated controls, keyboard
   semantics/Enter+Space activation for inline clickable non-controls, accessible names for icon
   buttons, alt text for images, and scanner fixes for wrapping labels plus script/code examples.
-  Result: `static_a11y_issues` 1801 → 0 and `deno task check` has no accessibility warnings.
+  Result: `static_a11y_issues` 1801 → 0 and `npm run check` has no accessibility warnings.

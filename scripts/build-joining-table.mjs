@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-net
+#!/usr/bin/env node
 // Regenerate the ContextJ data tables embedded in the IDNA domain-validator demo.
 //
 // RFC 5892 Appendix A.1/A.2 needs two pieces of DERIVED Unicode data:
@@ -15,8 +15,8 @@
 // rewrites the marked block in the page.
 //
 // Usage:
-//   deno run --allow-read --allow-write --allow-net scripts/build-joining-table.mjs
-//   UCD_DIR=/path/to/ucd deno run --allow-read --allow-write scripts/build-joining-table.mjs
+//   node scripts/build-joining-table.mjs
+//   UCD_DIR=/path/to/ucd node scripts/build-joining-table.mjs
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -30,7 +30,7 @@ const BEGIN = "// BEGIN GENERATED CONTEXT-DATA";
 const END = "// END GENERATED CONTEXT-DATA";
 const JOINING_KEEP = new Set(["L", "D", "R", "C", "T"]); // U is the default and is omitted
 
-const BASE = (Deno.env.get("UCD_DIR") ??
+const BASE = (process.env["UCD_DIR"] ??
   "https://www.unicode.org/Public/UCD/latest/ucd/extracted").replace(/\/$/, "");
 
 async function load(name) {
@@ -174,7 +174,7 @@ const formatViramas = (() => {
 })();
 
 const block = [
-  `${BEGIN} (Unicode ${version}) — regenerate with: deno task joining-table`,
+  `${BEGIN} (Unicode ${version}) — regenerate with: npm run joining-table`,
   `  // Joining_Type ranges for every code point whose type is not U (non-joining);`,
   `  // Join_Causing (C) is kept because it is NOT in the RFC 5892 joining sets and the`,
   `  // demo must not treat it as joining. Viramas are every code point with`,

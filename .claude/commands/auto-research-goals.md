@@ -37,8 +37,8 @@ Goal-setting loop:
    Fix the demo so they pass; never change a test to match the demo. You may only _create_ a suite
    for a feature that has none; if an existing assertion is genuinely wrong, flag it for a human
    with its id instead of editing it.
-9. Run relevant checks: at minimum `deno fmt --check`, `deno check server.ts`, and a local smoke
-   test when routes or shared rendering changed.
+9. Run relevant checks: at minimum `npm run fmt-check`, `npm run typecheck`, and a local smoke test
+   when routes or shared rendering changed.
 10. Commit and push the fix and updated critique separately when practical.
 
 Do not start a broad rewrite. Ship one coherent answer to the critique, then report the fixed

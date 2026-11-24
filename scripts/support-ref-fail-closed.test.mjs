@@ -16,7 +16,7 @@
 // The fixture is a throwaway repo: A pre-support -> B introduces the map ->
 // C malformed -> D deleted -> E empty object.
 //
-// Migrated in place to ONE asynchronous native Deno.test case (Stage 25 of the
+// Migrated in place to ONE asynchronous node:test case (Stage 25 of the
 // dty proposal, bead chrome_platform_showcase-dty.32), under the dty.19 policy
 // for this class of suite: the non-throwing `check(label, fn)` helper, the
 // `failures` counter, all thirty bodies in their original order and the legacy
@@ -26,8 +26,8 @@
 // run at module top level now runs inside the case — still awaited, still
 // before the first check in the same order — so a fixture failure fails the
 // case loudly instead of aborting the module before any check could report.
-// The trailing `Deno.exit(1)` became the counter's failure message because
-// exiting inside a case kills the test process before Deno can report it.
+// The trailing `process.exit(1)` became the counter's failure message because
+// exiting inside a case kills the test process before the test runner can report it.
 // Fixture cleanup lives in the case's finally and covers normal throws only;
 // the dty.23 scratch-clone isolation of the check-routes negative (it never
 // writes the real tracked responsive-support.json) is preserved unchanged.
@@ -35,8 +35,13 @@
 // lock the 1b3 cleanup ordering: removal is attempted even when the byte guard
 // throws, so a future reorder of that finally fails loudly here.
 //
-// Run: deno task test-support-ref-fail-closed
+// Run: npm run test-support-ref-fail-closed
 
+import { runSync } from "./lib/run.mjs";
+import { test } from "node:test";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   loadSidecarFromRef,
@@ -87,14 +92,14 @@ function assertThrows(fn, match) {
 // cleanup would leak the ~185MB clone on a normal-path failure (bead 1b3). If
 // BOTH fail, the original detector error wins the throw and the cleanup
 // failure is still reported with the path to remove. Dependencies default to
-// the real Deno calls and console.error; the in-memory pins inject fakes and
+// the real node:fs calls and console.error; the in-memory pins inject fakes and
 // never touch the filesystem.
 function runScratchNegativeCleanup({
   realSidecar,
   realBefore,
   scratch,
-  readBytes = Deno.readFileSync,
-  remove = Deno.removeSync,
+  readBytes = readFileSync,
+  remove = rmSync,
   reportCleanupError = (message) => console.error(message),
 }) {
   let detectorError = null;
@@ -131,17 +136,15 @@ function runScratchNegativeCleanup({
   }
 }
 
-Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
+test("support-ref fail-closed snapshot and gate contract", async () => {
   // ── fixture repo ────────────────────────────────────────────────────────────
-  const root = await Deno.makeTempDir({ prefix: "6tg-support-ref-" });
+  const root = await mkdtemp(join(tmpdir(), "6tg-support-ref-"));
   try {
     function git(args) {
-      const out = new Deno.Command("git", {
+      const out = runSync("git", {
         args,
         cwd: root,
-        stdout: "piped",
-        stderr: "piped",
-      }).outputSync();
+      });
       return {
         code: out.code,
         stdout: new TextDecoder().decode(out.stdout),
@@ -172,29 +175,29 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
     const record = { "v1/demo": { desktop: "ok", mobile: "ok" } };
 
     git(["init", "-q"]);
-    Deno.writeTextFileSync(join(root, "README.md"), "fixture\n");
+    writeFileSync(join(root, "README.md"), "fixture\n");
     const A = commit("pre-support");
-    Deno.writeTextFileSync(join(root, MAP), `${JSON.stringify(record, null, 2)}\n`);
+    writeFileSync(join(root, MAP), `${JSON.stringify(record, null, 2)}\n`);
     const B = commit("introduces the map");
-    Deno.writeTextFileSync(join(root, MAP), "{ this is not json\n");
+    writeFileSync(join(root, MAP), "{ this is not json\n");
     const C = commit("malformed map");
-    Deno.removeSync(join(root, MAP));
+    rmSync(join(root, MAP), { recursive: true, force: true });
     const D = commit("map deleted after introduction");
-    Deno.writeTextFileSync(join(root, MAP), "{}\n");
+    writeFileSync(join(root, MAP), "{}\n");
     const E = commit("empty but existing map");
-    Deno.writeTextFileSync(join(root, MAP), "null\n");
+    writeFileSync(join(root, MAP), "null\n");
     const F = commit("JSON null");
-    Deno.writeTextFileSync(join(root, MAP), '["v1/demo"]\n');
+    writeFileSync(join(root, MAP), '["v1/demo"]\n');
     const G = commit("JSON array");
-    Deno.writeTextFileSync(join(root, MAP), '"a string"\n');
+    writeFileSync(join(root, MAP), '"a string"\n');
     const H = commit("JSON string");
-    Deno.writeTextFileSync(join(root, MAP), "42\n");
+    writeFileSync(join(root, MAP), "42\n");
     const I = commit("JSON number");
     // An unrelated history: orphan branch, no map, no common ancestor with B.
     git(["checkout", "--orphan", "unrelated"]);
     git(["rm", "-rf", "--cached", "."]);
-    Deno.removeSync(join(root, MAP));
-    Deno.writeTextFileSync(join(root, "README.md"), "unrelated\n");
+    rmSync(join(root, MAP), { recursive: true, force: true });
+    writeFileSync(join(root, "README.md"), "unrelated\n");
     git(["add", "-A"]);
     const UNRELATED = commit("unrelated orphan");
     git(["checkout", "-q", "master"]);
@@ -297,12 +300,10 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
           }));
         }
       `;
-      const out = new Deno.Command("node", {
+      const out = runSync("node", {
         args: ["--input-type=module", "-e", code],
         cwd: REPO_ROOT,
-        stdout: "piped",
-        stderr: "piped",
-      }).outputSync();
+      });
       assert(out.code === 0, `node invocation failed: ${new TextDecoder().decode(out.stderr)}`);
       return JSON.parse(new TextDecoder().decode(out.stdout).trim());
     }
@@ -399,14 +400,12 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
       assert(/shares no ancestry/.test(res.message), `unexpected message ${res.message}`);
     });
 
-    // ── check-routes gate integration (Node and Deno) ───────────────────────────
+    // ── check-routes gate integration ───────────────────────────
     check("node scripts/check-routes.mjs passes on valid baseline", () => {
-      const out = new Deno.Command("node", {
+      const out = runSync("node", {
         args: ["scripts/check-routes.mjs"],
         cwd: REPO_ROOT,
-        stdout: "piped",
-        stderr: "piped",
-      }).outputSync();
+      });
       const stdout = new TextDecoder().decode(out.stdout);
       const stderr = new TextDecoder().decode(out.stderr);
       assert(out.code === 0, `expected exit code 0, got ${out.code}: ${stderr || stdout}`);
@@ -416,23 +415,7 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
       );
     });
 
-    check("deno task check-routes passes on valid baseline", () => {
-      const out = new Deno.Command("deno", {
-        args: ["run", "--allow-read", "--allow-run", "--allow-env", "scripts/check-routes.mjs"],
-        cwd: REPO_ROOT,
-        stdout: "piped",
-        stderr: "piped",
-      }).outputSync();
-      const stdout = new TextDecoder().decode(out.stdout);
-      const stderr = new TextDecoder().decode(out.stderr);
-      assert(out.code === 0, `expected exit code 0, got ${out.code}: ${stderr || stdout}`);
-      assert(
-        stdout.includes("PASS: no published demo route or identity was destructively changed."),
-        `unexpected output: ${stdout}`,
-      );
-    });
-
-    check("check-routes gate fails on support downgrade under both Node and Deno", () => {
+    check("check-routes gate fails on support downgrade", () => {
       // Isolation (bead chrome_platform_showcase-dty.23, ADR dty.23.1 + errata):
       // the downgrade is applied ONLY inside a throwaway `git clone --local` of
       // the executing checkout. A finally-restore of the real tracked sidecar is
@@ -443,15 +426,13 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
       // support-ref-scratch-* under the OS temp dir; do NOT assume the OS cleans
       // it promptly — operators may remove support-ref-scratch-* by hand.
       const realSidecar = join(REPO_ROOT, "responsive-support.json");
-      const realBefore = Deno.readFileSync(realSidecar);
-      const scratch = Deno.makeTempDirSync({ prefix: "support-ref-scratch-" });
+      const realBefore = readFileSync(realSidecar);
+      const scratch = mkdtempSync(join(tmpdir(), "support-ref-scratch-"));
       const gitIn = (cwd, args) => {
-        const out = new Deno.Command("git", {
+        const out = runSync("git", {
           args,
           cwd,
-          stdout: "piped",
-          stderr: "piped",
-        }).outputSync();
+        });
         return {
           code: out.code,
           stdout: new TextDecoder().decode(out.stdout).trim(),
@@ -462,8 +443,8 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
         // Structural guard BEFORE any write: the scratch root must resolve
         // strictly OUTSIDE the real REPO_ROOT, and the scratch sidecar must not
         // be the real tracked file.
-        const realRoot = Deno.realPathSync(REPO_ROOT);
-        const scratchRoot = Deno.realPathSync(scratch);
+        const realRoot = realpathSync(REPO_ROOT);
+        const scratchRoot = realpathSync(scratch);
         assert(
           scratchRoot !== realRoot && !scratchRoot.startsWith(realRoot + "/"),
           `scratch ${scratchRoot} is not outside REPO_ROOT ${realRoot}`,
@@ -506,23 +487,21 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
 
         const scratchSidecar = join(scratchRoot, "responsive-support.json");
         assert(
-          Deno.realPathSync(scratchSidecar) !== Deno.realPathSync(realSidecar),
+          realpathSync(scratchSidecar) !== realpathSync(realSidecar),
           "scratch sidecar resolves to the real tracked file",
         );
 
-        const data = JSON.parse(Deno.readTextFileSync(scratchSidecar));
+        const data = JSON.parse(readFileSync(scratchSidecar, "utf8"));
         const targetKey = Object.keys(data).find((k) => data[k]?.mobile === "ok");
         assert(targetKey, "could not find key with mobile=ok");
         data[targetKey].mobile = "needs-review";
-        Deno.writeTextFileSync(scratchSidecar, JSON.stringify(data, null, 2) + "\n");
+        writeFileSync(scratchSidecar, JSON.stringify(data, null, 2) + "\n");
 
         // Node gate run (cwd: scratch)
-        const nodeOut = new Deno.Command("node", {
+        const nodeOut = runSync("node", {
           args: ["scripts/check-routes.mjs"],
           cwd: scratchRoot,
-          stdout: "piped",
-          stderr: "piped",
-        }).outputSync();
+        });
         assert(nodeOut.code === 1, `Node expected exit code 1, got ${nodeOut.code}`);
         const nodeText = new TextDecoder().decode(nodeOut.stdout) +
           new TextDecoder().decode(nodeOut.stderr);
@@ -533,25 +512,6 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
         assert(
           nodeText.includes(`${targetKey}: mobile support regressed ok -> needs-review`),
           `Node output missing regression notice: ${nodeText}`,
-        );
-
-        // Deno gate run (cwd: scratch)
-        const denoOut = new Deno.Command("deno", {
-          args: ["run", "--allow-read", "--allow-run", "--allow-env", "scripts/check-routes.mjs"],
-          cwd: scratchRoot,
-          stdout: "piped",
-          stderr: "piped",
-        }).outputSync();
-        assert(denoOut.code === 1, `Deno expected exit code 1, got ${denoOut.code}`);
-        const denoText = new TextDecoder().decode(denoOut.stdout) +
-          new TextDecoder().decode(denoOut.stderr);
-        assert(
-          denoText.includes("FAIL: 1 contract violation(s):"),
-          "Deno output missing violation header",
-        );
-        assert(
-          denoText.includes(`${targetKey}: mobile support regressed ok -> needs-review`),
-          `Deno output missing regression notice: ${denoText}`,
         );
       } finally {
         // Normal-path detectors, NOT kill safety (SIGKILL skips this block):
@@ -565,12 +525,10 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
 
     // ── the recorded evidence must still be true in the real repo ───────────────
     check("SUPPORT_MAP_INTRODUCED_IN matches the commit that added the map", () => {
-      const out = new Deno.Command("git", {
+      const out = runSync("git", {
         args: ["log", "--diff-filter=A", "--format=%H", "-1", "--", MAP],
         cwd: REPO_ROOT,
-        stdout: "piped",
-        stderr: "piped",
-      }).outputSync();
+      });
       const actual = new TextDecoder().decode(out.stdout).trim();
       assert(
         actual === SUPPORT_MAP_INTRODUCED_IN,
@@ -686,11 +644,11 @@ Deno.test("support-ref fail-closed snapshot and gate contract", async () => {
     // throws - the counter handles those). SIGKILL runs none of this and can
     // only orphan a bounded prefix-named temp dir under the OS temp dir; do
     // NOT assume the OS cleans it promptly - remove 6tg-support-ref-* by hand.
-    Deno.removeSync(root, { recursive: true });
+    rmSync(root, { recursive: true, force: true });
   }
 
-  // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
-  // live inside a case - it kills the test process before Deno can report the case -
+  // The legacy tail exited the process on a non-zero counter. `process.exit(1)` cannot
+  // live inside a case - it kills the test process before the test runner can report the case -
   // so the counter is carried into the failure message instead: every failing label
   // above has already printed, and this makes the case fail loudly with the same
   // wording the guard used before the migration.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Stage the files the Cloudflare Worker serves into dist/worker-assets/.
 //
-// The Deno server reads demo files straight from the repository. A Worker has
+// The Node server reads demo files straight from the repository. A Worker has
 // no filesystem, so wrangler uploads this staged copy as static assets and the
 // Worker reads it back through the ASSETS binding (see worker/index.ts and
 // lib/platform.ts). Directory listings are answered from
@@ -15,9 +15,9 @@
 // Never staged: `_server.ts` handlers (bundled into the Worker as code instead).
 //
 // Every request goes to the Worker first (run_worker_first in wrangler.jsonc),
-// so nothing here is reachable except through the same routes as on Deno.
+// so nothing here is reachable except through the same routes as on the Node server.
 //
-// Runs under Node (Cloudflare's build image, `wrangler` build hook) and Deno.
+// Runs under Node (Cloudflare's build image, `wrangler` build hook, `npm run worker-assets`).
 // Usage: node scripts/build-worker-assets.mjs [--out dist/worker-assets]
 
 import {

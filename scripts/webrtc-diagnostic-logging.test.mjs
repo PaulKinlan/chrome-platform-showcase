@@ -18,11 +18,11 @@
 // run instead of passing forever. The remaining HTML/JSON string checks are
 // labelled STATIC; the demo pages themselves are executed by
 // scripts/conformance-sweep.mjs in a real browser (task `conformance-sweep`,
-// not part of `deno task check`).
+// not part of `npm run check`).
 //
-// Run: deno task test-webrtc-diagnostic-logging
+// Run: npm run test-webrtc-diagnostic-logging
 //
-// Migrated in place to ONE ASYNC native Deno.test case (Stage 26 of the dty
+// Migrated in place to ONE ASYNC node:test case (Stage 26 of the dty
 // proposal, bead chrome_platform_showcase-dty.33), under the dty.19 policy for
 // this class of suite. Nothing in the body changed: the helper definitions, the
 // FEATURE/ROUTES/CANONICAL_SPEC/STATIC_METHODS setup, the boolean `check` helper
@@ -36,17 +36,19 @@
 // `public/conformance-runner.js` still evaluates the tracked payload strings
 // with `new Function`, and `withGlobal` still saves the original property
 // descriptor and restores or deletes it in its own per-call `finally` - neither
-// is wrapped, intercepted or reimplemented. The trailing `Deno.exit(1)` became
+// is wrapped, intercepted or reimplemented. The trailing `process.exit(1)` became
 // a named throw carrying the same count, because exiting inside a case kills the
-// test process before Deno can report it, and the legacy success line below
+// test process before the test runner can report it, and the legacy success line below
 // still prints on a clean run.
 
+import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import { runConformanceAssertion } from "../public/conformance-runner.js";
 
 const REPO = new URL("..", import.meta.url).pathname;
 
 function read(path) {
-  return Deno.readTextFileSync(`${REPO}${path}`);
+  return readFileSync(`${REPO}${path}`, "utf8");
 }
 
 let failures = 0;
@@ -91,7 +93,7 @@ const STATIC_METHODS = [
   "cancelDiagnosticLogging",
 ];
 
-Deno.test("the WebRTC diagnostic logging contract holds and its payloads discriminate the surfaces", async () => {
+test("the WebRTC diagnostic logging contract holds and its payloads discriminate the surfaces", async () => {
   const conformanceRaw = read(`${FEATURE}/conformance.json`);
   const conformance = JSON.parse(conformanceRaw);
 
@@ -370,8 +372,8 @@ Deno.test("the WebRTC diagnostic logging contract holds and its payloads discrim
     index.includes("https://chromestatus.com/feature/5091582546149376"),
   );
 
-  // The legacy tail exited the process on a non-zero counter. `Deno.exit(1)` cannot
-  // live inside a case - it kills the test process before Deno can report the case -
+  // The legacy tail exited the process on a non-zero counter. `process.exit(1)` cannot
+  // live inside a case - it kills the test process before the test runner can report the case -
   // so the counter is carried into the named failure instead, and the legacy success
   // line below still prints on a clean run.
   if (failures > 0) {

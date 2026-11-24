@@ -380,7 +380,7 @@ export function renderConformanceRunAllPage(all: ConformanceSuite[]): string {
   <header class="lede-block">
     <p class="eyebrow">conformance · run all</p>
     <h1>conformance dashboard</h1>
-    <p class="lede">Run all spec-vs-implementation probes in this Deno instance simultaneously. Running directly in your browser context, this verifies which contracts actually pass or fail in Chrome, Firefox, Safari, or Edge instantly.</p>
+    <p class="lede">Run all spec-vs-implementation probes on this server simultaneously. Running directly in your browser context, this verifies which contracts actually pass or fail in Chrome, Firefox, Safari, or Edge instantly.</p>
     <div class="meta">
       <span>browser: <strong id="ua">…</strong></span>
     </div>

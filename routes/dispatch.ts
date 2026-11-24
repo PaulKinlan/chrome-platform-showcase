@@ -1,4 +1,4 @@
-// Host-independent request dispatcher. server.ts (Deno) and worker/index.ts
+// Host-independent request dispatcher. server.ts (Node) and worker/index.ts
 // (Cloudflare Workers) both hand every request to `dispatch`, so the route
 // table lives in exactly one place. Route implementations live alongside this
 // file so each URL group can evolve independently.
@@ -19,7 +19,7 @@ import { handleReleaseRoute } from "./release.ts";
 
 // The connection context a route may use for per-source decisions. `remoteAddr`
 // is the client address as the host saw it, which a client cannot forge: the
-// socket peer on Deno, Cloudflare's CF-Connecting-IP on Workers (see
+// socket peer under Node, Cloudflare's CF-Connecting-IP on Workers (see
 // lib/auth-throttle.ts).
 export type RouteContext = { remoteAddr?: string | null };
 type RouteHandler = (

@@ -30,10 +30,11 @@
 // gate that the merger still runs once on the merged union.
 //
 // CLI:
-//   deno run --allow-read --allow-run scripts/affected-tests.mjs [--base <ref>] [--json]
-//   deno run --allow-read --allow-run scripts/affected-tests.mjs --paths a,b,c
-//   deno run --allow-read --allow-run scripts/affected-tests.mjs --list
+//   node scripts/affected-tests.mjs [--base <ref>] [--json]
+//   node scripts/affected-tests.mjs --paths a,b,c
+//   node scripts/affected-tests.mjs --list
 
+import { spawnSync } from "node:child_process";
 import { AFFECTED_STEP_IDS, ALL_STEP_IDS, GATE_STEPS, STATIC_STEP_IDS } from "./gate-steps.mjs";
 
 const REPO = new URL("..", import.meta.url).pathname;
@@ -95,8 +96,8 @@ const RELEASE_ENDPOINT_STEPS = [
 ];
 
 // The server/behaviour family. Matched by server.ts, routes/** and lib/**.
-// test-worker-platform scans routes/, lib/ and every sidecar for direct Deno host
-// API calls, which would break the Cloudflare Worker.
+// test-worker-platform scans routes/, lib/ and every sidecar for direct host API
+// calls (Deno.*, node:fs, node:http), which would break the Cloudflare Worker.
 const SERVER_STEPS = ["test-hardening", "test-server-boot", "check-routes", "test-worker-platform"];
 
 /**
@@ -130,8 +131,10 @@ export const RULES = [
   { pattern: ".beads/**", staticOnly: true, note: "task metadata" },
 
   // ---- shared gate infrastructure: fail closed to the full gate --------
-  { pattern: "deno.json", all: true, note: "gate definition" },
-  { pattern: "deno.lock", all: true, note: "dependency lock" },
+  { pattern: "package.json", all: true, note: "gate definition" },
+  { pattern: "package-lock.json", all: true, note: "dependency lock" },
+  { pattern: "tsconfig.json", all: true, note: "type-check config" },
+  { pattern: "dprint.json", all: true, note: "formatter config" },
   { pattern: ".github/**", all: true, note: "CI definition" },
   { pattern: "scripts/lib/**", all: true, note: "shared test/server helper" },
   { pattern: "scripts/gate-steps.mjs", all: true, note: "gate plan" },
@@ -409,17 +412,9 @@ export function unknownRuleSteps(steps = GATE_STEPS, rules = RULES) {
 
 function git(args, cwd = REPO) {
   try {
-    const { code, stdout, stderr } = new Deno.Command("git", {
-      args,
-      cwd,
-      stdout: "piped",
-      stderr: "piped",
-    }).outputSync();
-    return {
-      code,
-      out: new TextDecoder().decode(stdout),
-      err: new TextDecoder().decode(stderr).trim(),
-    };
+    const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (r.error) throw r.error;
+    return { code: r.status ?? -1, out: r.stdout, err: r.stderr.trim() };
   } catch (err) {
     return { code: -1, out: "", err: String(err?.message ?? err) };
   }
@@ -497,7 +492,7 @@ export function changedPaths({ base = null, cwd = REPO, run = git } = {}) {
 }
 
 function main() {
-  const argv = Deno.args;
+  const argv = process.argv.slice(2);
   const flag = (name) => {
     const i = argv.indexOf(name);
     return i === -1 ? null : argv[i + 1];
@@ -523,7 +518,7 @@ function main() {
       // small one (reviewer finding ysp on 1701cee9).
       console.error(`affected: ${err.message}`);
       console.error("affected: FAIL-CLOSED — no tier can be chosen from an unknown change set");
-      Deno.exit(2);
+      process.exit(2);
     }
     paths = changes.paths;
     source = `${paths.length} changed file(s) vs ${changes.base} (merge-base ${
@@ -547,7 +542,7 @@ function main() {
           : `, ${selection.steps.length - selection.staticIds.length} selected`
       })`,
   );
-  console.log(`affected: run with deno task check:affected`);
+  console.log(`affected: run with npm run check:affected`);
   if (selection.tier !== "full" && selection.skipped.length) {
     console.log(`affected: skipped — ${selection.skipped.join(", ")}`);
   }

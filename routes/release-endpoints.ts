@@ -480,8 +480,7 @@ async function renderCompressionDictionaryMeasureRoute(
   const dictionaryMatches = hasAdvertisedDictionary && advertisedHash === actualHash;
 
   try {
-    const { brotliCompressSync, constants, gzipSync } = await import("node:zlib");
-    const { deflateRaw } = await import("npm:pako@2.1.0");
+    const { brotliCompressSync, constants, deflateRawSync, gzipSync } = await import("node:zlib");
     const brotliOptions = {
       params: {
         [constants.BROTLI_PARAM_MODE]: constants.BROTLI_MODE_TEXT,
@@ -491,8 +490,8 @@ async function renderCompressionDictionaryMeasureRoute(
     const rawBytes = responseBytes.byteLength;
     const gzipBytes = gzipSync(responseBytes).byteLength;
     const brotliBytes = brotliCompressSync(responseBytes, brotliOptions).byteLength;
-    const deflateBytes = deflateRaw(responseBytes).byteLength;
-    const dictionaryDeflateBytes = deflateRaw(responseBytes, {
+    const deflateBytes = deflateRawSync(responseBytes).byteLength;
+    const dictionaryDeflateBytes = deflateRawSync(responseBytes, {
       dictionary: dictionaryBytes,
     }).byteLength;
     const dcbHeaderBytes = 36;

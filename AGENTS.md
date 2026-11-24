@@ -6,14 +6,18 @@ safely with the project.
 
 ## Project Shape
 
-`chrome-platform-showcase` is a Deno site of interactive demos for Chrome web platform features. The
-site is hosted from `main` on Deno Deploy. Most generated content lives under `v<N>/`, with one
-folder per Chrome milestone and one folder per feature.
+`chrome-platform-showcase` is a site of interactive demos for Chrome web platform features. It is
+hosted on Cloudflare Workers, deployed from `main` by Workers Builds (`docs/cloudflare.md`). All
+tooling is Node 22.18+ with npm scripts; Deno has been removed, so never add `deno` commands,
+`Deno.*` calls, `jsr:`/`npm:`/`deno.land` imports or a `deno.json`. Most generated content lives
+under `v<N>/`, with one folder per Chrome milestone and one folder per feature.
 
 Important files:
 
-- `server.ts`: Deno HTTP entry point and routes.
-- `deno.json`: tasks and formatter config.
+- `server.ts`: local Node HTTP entry point (`npm start`); `worker/index.ts` is the production entry,
+  and both serve `routes/dispatch.ts`.
+- `package.json`: scripts and pinned dev dependencies (`npm ci` installs them).
+- `dprint.json` / `tsconfig.json`: formatter and type-check config.
 - `public/styles.css`: shared design system and CSS variables.
 - `lib/chromestatus.ts`: ChromeStatus API wrapper.
 - `.claude/routine-prompt.md`: source prompt for the remote Claude Code routine.
@@ -21,111 +25,64 @@ Important files:
 
 ## Commands
 
-Run from the repo root:
+Run from the repo root, after `npm ci`:
 
 ```bash
-deno fmt --check
-deno check server.ts
-deno task check            # full gate: every step in scripts/gate-steps.mjs, with per-step timings
-deno task check:affected   # fast gate: static steps + the suites the changed files select
-deno task audit
-deno task check-routes    # Route regression gate — run before EVERY push (see contract below)
-deno task check-duplicates # One-folder-per-feature gate — run before EVERY push (see contract below)
-deno task check-demo-coverage # No-demo-pending gate — run before EVERY push (see contract below)
-deno task demo-index      # Rebuild demo-index.json after adding or moving a feature folder
-deno task route-manifest  # Emit the published-demo route manifest
-deno task start
-deno task auto-research   # Starts the local server and displays the quality/conformance status
+npm run fmt-check
+npm run typecheck
+npm run check            # full gate: every step in scripts/gate-steps.mjs, with per-step timings
+npm run check:affected   # fast gate: static steps + the suites the changed files select
+npm run audit
+npm run check-routes    # Route regression gate — run before EVERY push (see contract below)
+npm run check-duplicates # One-folder-per-feature gate — run before EVERY push (see contract below)
+npm run check-demo-coverage # No-demo-pending gate — run before EVERY push (see contract below)
+npm run demo-index      # Rebuild demo-index.json after adding or moving a feature folder
+npm run route-manifest  # Emit the published-demo route manifest
+npm run start
+npm run auto-research   # Starts the local server and displays the quality/conformance status
 ```
 
-`deno fmt` intentionally excludes HTML, CSS, and generated demo JSON/JS. Do not mass-format demo
+`npm run fmt` intentionally excludes HTML, CSS, and generated demo JSON/JS. Do not mass-format demo
 HTML or CSS unless the task specifically requires it.
 
-`deno task check` is the local full gate (and the task the VM fleet's `fleet-check` runs). It runs
-every step in `scripts/gate-steps.mjs` — `deno check server.ts`, `deno fmt --check`, the
-durable-demo route gate (`deno task check-routes`), the responsive-coverage report
-(`deno task responsive-support report`), the python demo audit and every behavioural, integration
+`npm run check` is the local full gate (and the task the VM fleet's `fleet-check` runs). It runs
+every step in `scripts/gate-steps.mjs` — `npm run typecheck`, `npm run fmt-check`, the durable-demo
+route gate (`npm run check-routes`), the responsive-coverage report
+(`npm run responsive-support -- report`), the python demo audit and every behavioural, integration
 and GC-exposed suite — in order, failing fast on the first non-zero exit. `scripts/run-gate.mjs`
 executes that plan and prints each step's **measured** duration plus a slowest-steps summary, so a
 step that starts costing more is visible in the gate log instead of being guessed at.
 
-`deno task check:affected` is the fast tier for iterative work: the static steps of the same plan
-plus only the suites the change selects (`scripts/affected-tests.mjs`). The map is fail-closed — a
-path no rule matches, `deno.json`, `deno.lock`, `lib/**`, `scripts/lib/**`, a suite file itself,
-`.github/**` and the shared `public/styles.css` / `public/media/**` assets all select the **full**
-gate. Generated artefacts (`responsive-support.json`, `demo-index.json`, `feature-lineage.json`) and
-prose select the static tier only, so an automated fix pass does not pay the integration gate.
-`lib/**` is deliberately **not** narrowed: without proven per-file coverage a shared-backend edit
-selects the full gate. `scripts/affected-tests.test.mjs` is a static step, so an unselectable suite
-or a dead rule fails the gate rather than silently missing tests; `scripts/gate-parity.test.mjs`
-fails if a task that runs a `*.test.mjs` is not reachable from the plan, so a suite landing from
-another branch cannot be dropped by a merge. The full gate is still the merger's once-per-landing
-run; `check:affected` is a feedback loop, not a replacement for it.
+`npm run check:affected` is the fast tier for iterative work: the static steps of the same plan plus
+only the suites the change selects (`scripts/affected-tests.mjs`). The map is fail-closed — a path
+no rule matches, `package.json`, `package-lock.json`, `lib/**`, `scripts/lib/**`, a suite file
+itself, `.github/**` and the shared `public/styles.css` / `public/media/**` assets all select the
+**full** gate. Generated artefacts (`responsive-support.json`, `demo-index.json`,
+`feature-lineage.json`) and prose select the static tier only, so an automated fix pass does not pay
+the integration gate. `lib/**` is deliberately **not** narrowed: without proven per-file coverage a
+shared-backend edit selects the full gate. `scripts/affected-tests.test.mjs` is a static step, so an
+unselectable suite or a dead rule fails the gate rather than silently missing tests;
+`scripts/gate-parity.test.mjs` fails if a task that runs a `*.test.mjs` is not reachable from the
+plan, so a suite landing from another branch cannot be dropped by a merge. The full gate is still
+the merger's once-per-landing run; `check:affected` is a feedback loop, not a replacement for it.
 
 `scripts/gate-parity.test.mjs` reads the same plan (`scripts/gate-steps.mjs`), expands every step,
 reads `.github/workflows/ci.yml`, and fails if CI enforces a formatter or type-check step that the
-full gate omits, or if a plan step names a task `deno.json` does not define.
+full gate omits, or if a plan step names a script `package.json` does not define.
 
-### Opt-in native Deno.test pilot (`deno task test:unit`) — Stage 0, NOT part of the gate
+### Test suites
 
-`tests/unit/` holds an **opt-in** pilot proving a native `Deno.test` suite can live beside the
-current suites (bead 9th, Stage 0 of the dty proposal; Stage 1 is bead 0a0). Run it with
-`deno task test:unit`, which is `scripts/native-test.mjs --dir tests/unit`: it runs **one file per
-`deno test` process** and requires each process to exit 0 **and** report at least one executed test,
-so a file that registers nothing fails instead of passing quietly (`deno test` exits 0 with
-`0 passed | 0 failed` for such a file, and so did the old direct directory run — measured). It never
-passes `--permit-no-files`, and it refuses a subdirectory, a symlink or a non-suite file in the
-directory, the same rule the guard pins below.
-
-The pilot is **deliberately not on the gate plan**: it is not a step of `deno task check`, not wired
-into CI, and does not change the fleet `CHECK_CMD` — do not describe the suites as migrated, and do
-not treat a green pilot as migration progress. The runner grants the **test processes zero
-permissions** (a case that touches the filesystem fails `NotCapable` rather than quietly widening
-the runner) and its own `--allow-read --allow-run` never reach them; use the built-in
-`node:assert/strict` so the pilot adds no dependency. Three assertions in
-`scripts/gate-parity.test.mjs` pin it where the existing guards do not look: at least one
-`*.test.mjs` exists, the directory is **flat** — only regular `*.test.mjs` files, no subdirectories
-and no symlinks (Deno also discovers `*_test.mjs`, imports a zero-test module that exits 0, recurses
-into subdirectories and can follow a symlink, so nested content has to be refused rather than
-matched) — and the task string is exactly the runner invocation. A change under `tests/**` is
-unmatched by `scripts/affected-tests.mjs`, so it selects the **full** gate.
-
-The runner enforces three more things that a bare `deno test` call could not: every child's report
-is **relayed exactly once** (a passing run shows its per-test names, not just its summary),
-forwarded child flags are **validated against an allowlist** (permission flags, `--v8-flags`,
-`--no-check`) and positioned **before exactly one file path**, so a forwarded flag or an extra path
-can never change which tests run — a `--` separator or a directory handed to `deno test` used to
-discover the whole repository instead of the target — and each child has a **per-file bound**
-(`--timeout-ms`, default 300000; a file that exceeds it is killed and the run exits 124).
-
-The end-to-end regression for all of that is `deno task test:harness`
-(`tests/integration/native-test-harness.mjs`): it is a plain assert-and-exit script, not a
-`*.test.mjs` module, precisely because it must spawn processes and write fixtures — the same shape
-as `test-font-loading`. Like the pilot it is opt-in and **off the gate plan**; the merger's full
-gate and the CI do not run it.
-
-#### Migrating a suite in place (Stage 1)
-
-`scripts/conformance-runner.test.mjs` is the first suite migrated in place (bead 0a0): same file
-path, same task id `test-conformance-runner`, same ordered gate step, same subject. Its assertions
-became `Deno.test` cases, its task runs through the same runner, and the runner keeps the legacy
-final line (`PASS — shared conformance assertion runner`, via `--summary`) so drills that grep suite
-output keep working; a failing case now names itself and the task prints `FAIL — <label>`. Run it
-with `deno task test-conformance-runner`. A migrated suite keeps its own permission flags (the child
-gets exactly the flags after `--`, never a union); this suite's child needs none, which was proven
-by running it with no flags before the flag was dropped.
-
-`scripts/corner-shape-values.test.mjs` is the second (bead dty.1), and it is the case where the
-child's permission is **kept**: it reads two demo files, so its task still passes exactly
-`--allow-read` to the child, and running it without that flag fails `NotCapable` — the proof that
-the flag is required and confined. Its 37 assertions are now eight named cases, and its legacy final
-`PASS — corner-shape vocabulary and rendered gallery (…)` line is byte-identical to the one the old
-task printed.
+Every suite is a plain `node:test` file (`scripts/*.test.mjs`, `tests/unit/*.test.mjs`), run with
+`node --test <file>` through its `test-*` script (`npm run test:unit` runs `tests/unit/`). Use
+`node:assert/strict`. Suites that measure retained heap run with `node --expose-gc` (see their
+scripts). Adding a suite means: the file, a `test-<name>` script, a step in `scripts/gate-steps.mjs`
+and a rule in `scripts/affected-tests.mjs`; `scripts/gate-parity.test.mjs` and
+`scripts/affected-tests.test.mjs` fail if any of those is missing.
 
 That guard covers that one direction only, so this is **not** a general CI-parity guarantee: a
-future CI step is not automatically mirrored in `deno task check`, and nothing fails if it is
-missing. Wire it into the gate (and, if it can run locally, into the guard's expectation) in the
-change that adds it.
+future CI step is not automatically mirrored in `npm run check`, and nothing fails if it is missing.
+Wire it into the gate (and, if it can run locally, into the guard's expectation) in the change that
+adds it.
 
 ### Slashcommands (Trigger via chat)
 
@@ -135,7 +92,7 @@ change that adds it.
   all failures, repair the relevant demos/concepts in-place, and push clean, working commits for all
   features.
 
-For a quick server smoke test after `deno task start`:
+For a quick server smoke test after `npm run start`:
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/
@@ -228,14 +185,14 @@ already built, each page opening "Chrome N introduces…" for a feature that shi
 
 - `feature-lineage.json` — feature id → every milestone folder hosting it, the canonical folder (the
   milestone it shipped in per `browsers.chrome.desktop`), and the basis for that choice. Regenerate
-  with `deno task feature-lineage` (hits ChromeStatus).
-- `deno task apply-lineage` — writes/refreshes the lineage note on every affected page. Idempotent.
-- `deno task check-duplicates` — the gate. FAILS on a new duplicate folder, on a lineage record that
-  no longer matches disk, and on any affected page missing its note. Wired into `deno task check`.
+  with `npm run feature-lineage` (hits ChromeStatus).
+- `npm run apply-lineage` — writes/refreshes the lineage note on every affected page. Idempotent.
+- `npm run check-duplicates` — the gate. FAILS on a new duplicate folder, on a lineage record that
+  no longer matches disk, and on any affected page missing its note. Wired into `npm run check`.
 
 **When a new milestone re-lists a feature you have already built:** do nothing to the catalogue.
 Regenerate the lineage so the note picks up the new listing, and spend the time on an uncovered
-feature instead. The work-list (`deno task worklist`) is the place to find those.
+feature instead. The work-list (`npm run worklist`) is the place to find those.
 
 ## Every listed feature has a demo — no "demo pending" anywhere
 
@@ -248,9 +205,9 @@ only in the milestone folder they are rendering. `demo-index.json` is that map, 
 feature id to demo folder, built by scanning every `v*/*/index.html` for its ChromeStatus link and
 preferring `feature-lineage.json`'s canonical folder when a feature has several.
 
-- After adding, moving, or renaming a feature folder, run `deno task demo-index`. `deno task check`
+- After adding, moving, or renaming a feature folder, run `npm run demo-index`. `npm run check`
   fails if the committed index no longer matches what is on disk.
-- Run `deno task check-demo-coverage` before every push. It reads the live milestone listings and
+- Run `npm run check-demo-coverage` before every push. It reads the live milestone listings and
   fails if any listed feature resolves to no demo anywhere — the exact condition that renders a
   "demo pending" badge. A milestone listing it cannot fetch is a failure, not a skip.
 - The fix for a coverage failure is a demo, not a suppression. Feature removals get one too: pair
@@ -288,8 +245,8 @@ controls, its use-case intent, and all inbound links.** Routine and agent waves 
   regression gate. Stable does NOT mean frozen — improve existing demos when justified, and add new
   demos/use cases freely; just never replace an old one merely to present a new idea.
 
-**Gate before every push:** run the route regression gate (`deno task check-routes`). It compares
-the previously published manifest against the working tree and fails on any missing published ID,
+**Gate before every push:** run the route regression gate (`npm run check-routes`). It compares the
+previously published manifest against the working tree and fails on any missing published ID,
 deleted route, renamed/repurposed slug, changed published identity, or unexplained concept-count
 reduction — while allowing additive entries, honest `blocked` records, and in-place fixes.
 Exceptional removals/moves must be listed in the migration record with reason + evidence.
@@ -298,9 +255,9 @@ Exceptional removals/moves must be listed in the migration record with reason + 
 tree — every `v<N>/<feature-slug>/index.html` is a published feature demo whose stable identity is
 the ChromeStatus feature id linked from its index (concept demos live in
 `v<N>/<feature-slug>/<concept-slug>/`; a `blocked` feature carries a `_status.json` marker). Emit
-the route manifest with `deno task route-manifest` (or `node scripts/route-manifest.mjs`) and run
-the gate with `deno task check-routes` (or `node scripts/check-routes.mjs`) before every push.
-Record any exceptional removal/rename/move/identity-change in `migrations.json`
+the route manifest with `npm run route-manifest` (or `node scripts/route-manifest.mjs`) and run the
+gate with `npm run check-routes` (or `node scripts/check-routes.mjs`) before every push. Record any
+exceptional removal/rename/move/identity-change in `migrations.json`
 (`{ id, action, from, to, reason, evidence, date }`); a `move`/`alias` there also keeps the old URL
 alive via the 301 redirect in `routes/aliases.ts`, and the committed `.route-manifest.baseline.json`
 is the offline fallback baseline.
@@ -340,7 +297,7 @@ targeted compatibility fixes — never a destructive rewrite, never a new slug t
   it claims to support. Apply this to existing demos during audits with targeted compatibility
   fixes, wave by wave — the coverage number is the backlog burn-down, and it never regresses.
 
-**Run the responsive matrix before every push** with `deno task responsive-check` and record each
+**Run the responsive matrix before every push** with `npm run responsive-check` and record each
 touched demo's result in `responsive-support.json` (`ok` / `unsupported`+evidence per class).
 
 ## modern-web-guidance is mandatory for all frontend work
@@ -385,11 +342,11 @@ APIs.
 > existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
 > Per-demo support lives in the git-tracked `responsive-support.json` sidecar (keyed by
 > `v<N>/<feature-slug>`, defaulting existing demos to `untested`), merged into the route manifest.
-> Validate with `deno task responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800;
-> asserts no horizontal overflow + console/network clean and screenshots both classes; a
+> Validate with `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts
+> no horizontal overflow + console/network clean and screenshots both classes; a
 > genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
-> `deno task overflow-scan` (cheap seed → `needs-review`, never `ok`). Report coverage with
-> `deno task responsive-support report`; the gate (`deno task check-routes`) reports the
+> `npm run overflow-scan` (cheap seed → `needs-review`, never `ok`). Report coverage with
+> `npm run responsive-support -- report`; the gate (`npm run check-routes`) reports the
 > mobile/desktop denominators and enforces the rules above before every push. The
 > modern-web-guidance skill source + version + update path is recorded in `MODERN_WEB_GUIDANCE.md`
 > (canonical skill `modern-web-guidance`, scripted fallback `npx -y modern-web-guidance@latest`; no
@@ -462,7 +419,7 @@ Site routes discover these files automatically:
   conformance page.
 
 For a critique pass, walk concept pages under the target milestone, skip any concept that already
-has a sibling `_questions.json`. Start the local server (`deno task start`) and test the actual
+has a sibling `_questions.json`. Start the local server (`npm run start`) and test the actual
 changes/interactivity with `chrome-devtools-mcp`: navigate to the page, click or type through every
 visible control, verify the live DOM/readout changes, inspect console and network failures, and
 check the page's `/conformance/` route. Record this evidence in the critique rationale or summary.
@@ -480,8 +437,8 @@ same concept. You may update the touched `_questions.json` (critiques are workin
 edit the feature's `conformance.json` to match your fix — the assertions are the spec contract; fix
 the page so they pass, and if an assertion itself looks wrong, flag it for a human instead of
 changing it (see "Conformance assertions are an IMMUTABLE spec contract"). In the handoff, list the
-browser/channel, URL, controls exercised, console/network status, Deno checks, and JSON files
-touched.
+browser/channel, URL, controls exercised, console/network status, `npm run check` results, and JSON
+files touched.
 
 For a conformance pass, **skip features that already have `conformance.json` — never overwrite an
 existing suite**. Only create suites for features that lack one. Write 3-10 assertions covering
@@ -494,8 +451,8 @@ If using multiple background agents, avoid shared-worktree races: commit one gen
 a time, stage only that file, and do not use `git add -A` for per-file critique/conformance commits.
 If a push races, pull/rebase and retry the push for the already-created commit.
 
-After an auto-research/conformance batch, run `deno fmt` to normalize the generated JSON, then run
-`deno check server.ts`. If formatting changed files, commit only the relevant formatting changes.
+After an auto-research/conformance batch, run `npm run fmt` to normalize the generated JSON, then
+run `npm run typecheck`. If formatting changed files, commit only the relevant formatting changes.
 
 Goal-setting closes the loop:
 
@@ -516,12 +473,12 @@ repository prompt changed but the live routine was not updated.
 
 Before handing off meaningful changes:
 
-- Run the narrowest relevant checks, preferably `deno fmt --check`, `deno check server.ts`, and
-  `deno task audit` or `deno task check` when generated demos changed.
-- **Run `deno task check-duplicates` before every push.** A second folder for a feature that is
+- Run the narrowest relevant checks, preferably `npm run fmt-check`, `npm run typecheck`, and
+  `npm run audit` or `npm run check` when generated demos changed.
+- **Run `npm run check-duplicates` before every push.** A second folder for a feature that is
   already built is wasted work and a false claim about which Chrome introduced it.
-- **Run `deno task check-routes` before every push.** Read the existing demo, its git history, and
-  the route manifest before editing any published demo; default to the smallest patch and never
+- **Run `npm run check-routes` before every push.** Read the existing demo, its git history, and the
+  route manifest before editing any published demo; default to the smallest patch and never
   regenerate a working demo from scratch. Record any intentional removal/rename/move/identity-change
   in `migrations.json` — the gate fails on unexplained destructive changes.
 - Start the server and smoke test key routes when routing, rendering, or shared styles changed.

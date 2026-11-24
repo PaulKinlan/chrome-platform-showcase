@@ -17,18 +17,18 @@
 // dedupe scan constant again. The bounds are display-only strings, so this suite
 // checks both halves: the arrays stay bounded, and what the demo shows is intact.
 //
-// Run: deno task test-speculation-probe-docs
+// Run: npm run test-speculation-probe-docs
 //
-// Migrated in place to named Deno.test cases (Stage 11 of the dty proposal, bead
+// Migrated in place to named node:test cases (Stage 11 of the dty proposal, bead
 // dty.12): same file path, same task id `test-speculation-probe-docs`, the same
 // ordered gate step 17, the same eight subjects and the same assertions — the
-// custom `section()` registry, its trailing loop and the legacy `Deno.exit(1)`
+// custom `section()` registry, its trailing loop and the legacy `process.exit(1)`
 // branch are gone, so a failure names the case it broke and Deno's runner owns the
 // exit code.
 //
 // ORDER IS LOAD-BEARING: the last case measures retained heap and belongs last so
 // nothing it allocates is charged to another case, and the route cases before it
-// flood one record each with their own token. Deno.test runs the tests of one file
+// flood one record each with their own token. node:test runs the tests of one file
 // serially in declaration order and this task runs exactly one file per process, so
 // the ordering holds; do not add per-test concurrency or run this file with
 // --parallel.
@@ -58,6 +58,7 @@
 // both directions, and one of them drives the route so a route that passed the
 // helper an explicit limit would fail too.
 
+import { test } from "node:test";
 import {
   recordProbeDoc,
   SPECULATION_RULES_PROBE_MAX_DOC_CHARS,
@@ -82,14 +83,14 @@ function assert(condition, message) {
 
 // ── the helper's contract ───────────────────────────────────────────────────
 
-Deno.test("a short doc is recorded once and duplicates are ignored", () => {
+test("a short doc is recorded once and duplicates are ignored", () => {
   const docs = [];
   assert(recordProbeDoc(docs, "/rules.json") === true, "a fresh doc should be recorded");
   assert(recordProbeDoc(docs, "/rules.json") === false, "a duplicate should not be recorded");
   assert(docs.length === 1, `expected one entry, got ${docs.length}`);
 });
 
-Deno.test("an over-long doc is ignored, not truncated, and later docs still record", () => {
+test("an over-long doc is ignored, not truncated, and later docs still record", () => {
   const docs = [];
   const tooLong = "/" + "y".repeat(MAX_CHARS);
   assert(recordProbeDoc(docs, tooLong) === false, "an over-long doc must be ignored");
@@ -104,7 +105,7 @@ Deno.test("an over-long doc is ignored, not truncated, and later docs still reco
   );
 });
 
-Deno.test("the boundary is exact", () => {
+test("the boundary is exact", () => {
   const atLimit = "/" + "z".repeat(MAX_CHARS - 1);
   const oneOver = "/" + "z".repeat(MAX_CHARS);
   assert(atLimit.length === MAX_CHARS, "the boundary fixture must sit exactly at the limit");
@@ -116,7 +117,7 @@ Deno.test("the boundary is exact", () => {
   assert(dropped.length === 0, `a doc of ${MAX_CHARS + 1} chars must be dropped`);
 });
 
-Deno.test("the per-record count is capped and the cap is exact", () => {
+test("the per-record count is capped and the cap is exact", () => {
   const docs = [];
   for (let i = 0; i < MAX_DOCS; i++) {
     assert(recordProbeDoc(docs, `/doc-${i}.json`) === true, `doc ${i} should fit in the cap`);
@@ -138,7 +139,7 @@ Deno.test("the per-record count is capped and the cap is exact", () => {
   );
 });
 
-Deno.test("a full array refuses new docs without scanning or mutating it", () => {
+test("a full array refuses new docs without scanning or mutating it", () => {
   // `recordProbeDoc` checks the count BEFORE its `includes` scan, which is what
   // makes the per-append cost constant again. That ordering is asserted here
   // rather than described: the array is wrapped so a call to `includes` is
@@ -197,7 +198,7 @@ async function probeRoute(route, params = {}) {
   return { res, body: await res.json().catch(() => ({})) };
 }
 
-Deno.test("a demo-shaped run records every doc it asks for", async () => {
+test("a demo-shaped run records every doc it asks for", async () => {
   const token = `rh7-demo-${crypto.randomUUID().slice(0, 8)}`;
   for (const doc of DEMO_DOCS) await probeRoute("rules.json", { token, doc });
   for (const doc of DEMO_DOCS) await probeRoute("prefetch-target", { token, doc });
@@ -219,7 +220,7 @@ Deno.test("a demo-shaped run records every doc it asks for", async () => {
   );
 });
 
-Deno.test("the route refuses over-long docs and caps a flooded record", async () => {
+test("the route refuses over-long docs and caps a flooded record", async () => {
   const token = `rh7-flood-${crypto.randomUUID().slice(0, 8)}`;
   const huge = "/" + "q".repeat(8 * 1024);
   await probeRoute("rules.json", { token, doc: huge });
@@ -249,7 +250,7 @@ Deno.test("the route refuses over-long docs and caps a flooded record", async ()
 // the fixtures are asserted against their literal lengths as well, so a fixture
 // that drifted cannot make a case pass.
 
-Deno.test("the per-record document size cap is exactly 256 characters", () => {
+test("the per-record document size cap is exactly 256 characters", () => {
   const atLimit = "/" + "z".repeat(255);
   const oneOver = "/" + "z".repeat(256);
   assert(
@@ -270,7 +271,7 @@ Deno.test("the per-record document size cap is exactly 256 characters", () => {
   assert(dropped.length === 0, "a dropped doc must leave no trace");
 });
 
-Deno.test("the per-record document count cap is exactly 64", () => {
+test("the per-record document count cap is exactly 64", () => {
   const docs = [];
   for (let i = 0; i < 64; i++) {
     assert(recordProbeDoc(docs, `/limit-${i}.json`) === true, `doc ${i} must fit the 64-doc cap`);
@@ -288,7 +289,7 @@ Deno.test("the per-record document count cap is exactly 64", () => {
   assert(docs.length === 64, `the array must stay at exactly 64, got ${docs.length}`);
 });
 
-Deno.test("the route applies the project's document bounds to a probe record", async () => {
+test("the route applies the project's document bounds to a probe record", async () => {
   // Its own token, so this shares no state with the other route cases.
   const token = `dty13-route-${crypto.randomUUID().slice(0, 8)}`;
   const atLimit = "/" + "s".repeat(255);
@@ -331,10 +332,10 @@ Deno.test("the route applies the project's document bounds to a probe record", a
   );
 });
 
-Deno.test("one record cannot retain unbounded doc memory", async () => {
+test("one record cannot retain unbounded doc memory", async () => {
   assert(
     typeof globalThis.gc === "function",
-    "this case measures retained heap and needs a real GC: run deno task test-speculation-probe-docs",
+    "this case measures retained heap and needs a real GC: run npm run test-speculation-probe-docs",
   );
   const docs = 500;
   const docChars = 8 * 1024;
@@ -345,12 +346,12 @@ Deno.test("one record cannot retain unbounded doc memory", async () => {
     await probeRoute("rules.json", { token: "rh7-warm", doc: `/w-${i}` });
   }
   globalThis.gc();
-  const before = Deno.memoryUsage().heapUsed;
+  const before = process.memoryUsage().heapUsed;
   for (let i = 0; i < docs; i++) {
     await probeRoute("rules.json", { token, doc: `/${"m".repeat(docChars - 8)}${i}` });
   }
   globalThis.gc();
-  const retainedMiB = (Deno.memoryUsage().heapUsed - before) / (1024 * 1024);
+  const retainedMiB = (process.memoryUsage().heapUsed - before) / (1024 * 1024);
   const offeredMiB = (docs * docChars) / (1024 * 1024);
 
   // At the base commit this retained essentially the whole offer (500 x 8 KiB);

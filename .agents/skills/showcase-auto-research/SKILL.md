@@ -54,8 +54,8 @@ controls, its use-case intent, and all inbound links.** Routine and agent waves 
   regression gate. Stable does NOT mean frozen — improve existing demos when justified, and add new
   demos/use cases freely; just never replace an old one merely to present a new idea.
 
-**Gate before every push:** run the route regression gate (`deno task check-routes`). It compares
-the previously published manifest against the working tree and fails on any missing published ID,
+**Gate before every push:** run the route regression gate (`npm run check-routes`). It compares the
+previously published manifest against the working tree and fails on any missing published ID,
 deleted route, renamed/repurposed slug, changed published identity, or unexplained concept-count
 reduction — while allowing additive entries, honest `blocked` records, and in-place fixes.
 Exceptional removals/moves must be listed in the migration record with reason + evidence.
@@ -64,9 +64,9 @@ Exceptional removals/moves must be listed in the migration record with reason + 
 tree — every `v<N>/<feature-slug>/index.html` is a published feature demo whose stable identity is
 the ChromeStatus feature id linked from its index (concept demos live in
 `v<N>/<feature-slug>/<concept-slug>/`; a `blocked` feature carries a `_status.json` marker). Emit
-the route manifest with `deno task route-manifest` (or `node scripts/route-manifest.mjs`) and run
-the gate with `deno task check-routes` (or `node scripts/check-routes.mjs`) before every push.
-Record any exceptional removal/rename/move/identity-change in `migrations.json`
+the route manifest with `npm run route-manifest` (or `node scripts/route-manifest.mjs`) and run the
+gate with `npm run check-routes` (or `node scripts/check-routes.mjs`) before every push. Record any
+exceptional removal/rename/move/identity-change in `migrations.json`
 (`{ id, action, from, to, reason, evidence, date }`); a `move`/`alias` there also keeps the old URL
 alive via the 301 redirect in `routes/aliases.ts`, and the committed `.route-manifest.baseline.json`
 is the offline fallback baseline. Before editing any existing demo in the critique/goal-setting/
@@ -108,7 +108,7 @@ targeted compatibility fixes — never a destructive rewrite, never a new slug t
   it claims to support. Apply this to existing demos during audits with targeted compatibility
   fixes, wave by wave — the coverage number is the backlog burn-down, and it never regresses.
 
-**Run the responsive matrix before every push** with `deno task responsive-check` and record each
+**Run the responsive matrix before every push** with `npm run responsive-check` and record each
 touched demo's result in `responsive-support.json` (`ok` / `unsupported`+evidence per class).
 
 ## modern-web-guidance is mandatory for all frontend work
@@ -153,11 +153,11 @@ APIs.
 > existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
 > Per-demo support lives in the git-tracked `responsive-support.json` sidecar (keyed by
 > `v<N>/<feature-slug>`, defaulting existing demos to `untested`), merged into the route manifest.
-> Validate with `deno task responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800;
-> asserts no horizontal overflow + console/network clean and screenshots both classes; a
+> Validate with `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts
+> no horizontal overflow + console/network clean and screenshots both classes; a
 > genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
-> `deno task overflow-scan` (cheap seed → `needs-review`, never `ok`). Report coverage with
-> `deno task responsive-support report`; the gate (`deno task check-routes`) reports the
+> `npm run overflow-scan` (cheap seed → `needs-review`, never `ok`). Report coverage with
+> `npm run responsive-support -- report`; the gate (`npm run check-routes`) reports the
 > mobile/desktop denominators and enforces the rules above before every push. The
 > modern-web-guidance skill source + version + update path is recorded in `MODERN_WEB_GUIDANCE.md`
 > (canonical skill `modern-web-guidance`, scripted fallback `npx -y modern-web-guidance@latest`; no
@@ -471,13 +471,13 @@ Default to one coherent fix per invocation unless the user explicitly asks for a
 
 ## Telemetry Triage Pass
 
-Real-visitor errors are captured to Deno KV but are only useful if something reads them. This pass
-turns them into fixes (it is the telemetry half of the weekly hardening routine):
+Real-visitor errors are captured to D1 (Cloudflare) but are only useful if something reads them.
+This pass turns them into fixes (it is the telemetry half of the weekly hardening routine):
 
 1. Pull the ranked triage: `GET /telemetry/demo/triage?scan=2000` with HTTP Basic auth using
-   `showcase_password` (locally: start `deno task start`, ensure `showcase_password` is set, and
-   curl `-u :$showcase_password`). It flattens batched events, ranks demos worst-first by failure
-   count, and clusters errors by normalised signature across visitors.
+   `showcase_password` (locally: start `npm run start`, ensure `showcase_password` is set, and curl
+   `-u :$showcase_password`). It flattens batched events, ranks demos worst-first by failure count,
+   and clusters errors by normalised signature across visitors.
 2. Take the top offending demos. For each, open the exact route with `chrome-devtools-mcp`,
    reproduce the error signature, and fix the demo (never the immutable conformance assertions).
    Distinguish a real runtime error from an expected unsupported/flag/permission fallback — the
@@ -518,28 +518,28 @@ page itself before making that claim.
 Run:
 
 ```bash
-deno fmt
-deno check server.ts
-deno task responsive-check <touched-id> --merge   # mobile+desktop matrix for each demo you touched
-deno task check-routes                             # route + parity gate + coverage report
-deno task responsive-support report                # mobile/desktop coverage denominators
+npm run fmt
+npm run typecheck
+npm run responsive-check -- <touched-id> --merge   # mobile+desktop matrix for each demo you touched
+npm run check-routes                             # route + parity gate + coverage report
+npm run responsive-support -- report                # mobile/desktop coverage denominators
 git status --short
 ```
 
 For every demo you built or fixed, run the mobile+desktop matrix
-(`deno task responsive-check <id>
+(`npm run responsive-check -- <id>
 --merge`), `Read` both screenshots, and record the result in
 `responsive-support.json` (`ok`, or `unsupported`+evidence when a class is genuinely unavailable —
 `blocked` with evidence is NEVER a fake pass, and you must not auto-download an absent large model
-to force a pass). A cheap `deno task overflow-scan --sample <n>` seeds `needs-review` flags across
+to force a pass). A cheap `npm run overflow-scan -- --sample <n>` seeds `needs-review` flags across
 the backlog (never `ok`). Consult `modern-web-guidance` FIRST for any HTML/CSS/JS work and record it
-in the critique's `guidanceConsulted`. `deno task check-routes` is the route + parity regression
-gate — run it before every push. It must PASS (exit 0); a failure means a published demo
+in the critique's `guidanceConsulted`. `npm run check-routes` is the route + parity regression gate
+— run it before every push. It must PASS (exit 0); a failure means a published demo
 route/slug/identity was destructively changed. Fix the change to be additive, or record an
 intentional removal/rename/move in `migrations.json`. When new demos land, refresh the baseline
-snapshot with `deno task route-manifest --write`.
+snapshot with `npm run route-manifest -- --write`.
 
-If `deno fmt` changed generated JSON, commit and push only those relevant formatting changes.
+If `npm run fmt` changed generated JSON, commit and push only those relevant formatting changes.
 Report:
 
 - coverage before and after (`implemented/unique tracked`, incomplete, uber status);
