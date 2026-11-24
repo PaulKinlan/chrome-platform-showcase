@@ -16,9 +16,16 @@ Important files:
 
 - `server.ts`: local Node HTTP entry point (`npm start`); `worker/index.ts` is the production entry,
   and both serve `routes/dispatch.ts`.
+- `routes/pages/`, `routes/telemetry/`, `routes/conformance/`: modular route handlers for site
+  pages, telemetry ingestion/triage/admin, and conformance runners.
+- `routes/release.ts` & `routes/_feature-servers.generated.ts`: serves `v<N>/*` demos and resolves
+  co-located `v<N>/<feature-slug>/_server.ts` handlers (rebuilt via `npm run gen:feature-servers`
+  and checked by `npm run check-feature-servers`).
+- `lib/feature-servers/`: shared server helpers for co-located `_server.ts` handlers.
 - `package.json`: scripts and pinned dev dependencies (`npm ci` installs them).
 - `dprint.json` / `tsconfig.json`: formatter and type-check config.
-- `public/styles.css`: shared design system and CSS variables.
+- `public/styles.css` & `public/show-code.js`: shared design system, CSS variables, and live-source
+  `<details class="show-code">` hydration.
 - `lib/chromestatus.ts`: ChromeStatus API wrapper.
 - `.claude/routine-prompt.md`: source prompt for the remote Claude Code routine.
 - `.claude/auto-research.md`: manual workflow for critique and conformance passes.
@@ -36,6 +43,9 @@ npm run audit
 npm run check-routes    # Route regression gate — run before EVERY push (see contract below)
 npm run check-duplicates # One-folder-per-feature gate — run before EVERY push (see contract below)
 npm run check-demo-coverage # No-demo-pending gate — run before EVERY push (see contract below)
+npm run gen:feature-servers # Rebuild routes/_feature-servers.generated.ts from v<N>/*/_server.ts
+npm run check-feature-servers # Verify routes/_feature-servers.generated.ts matches disk
+npm run check:writing   # Check demo prose for AI-slop filler
 npm run demo-index      # Rebuild demo-index.json after adding or moving a feature folder
 npm run route-manifest  # Emit the published-demo route manifest
 npm run start
@@ -57,7 +67,7 @@ step that starts costing more is visible in the gate log instead of being guesse
 only the suites the change selects (`scripts/affected-tests.mjs`). The map is fail-closed — a path
 no rule matches, `package.json`, `package-lock.json`, `lib/**`, `scripts/lib/**`, a suite file
 itself, `.github/**` and the shared `public/styles.css` / `public/media/**` assets all select the
-**full** gate. Generated artefacts (`responsive-support.json`, `demo-index.json`,
+**full** gate. Generated artefacts (`v<N>/<feature-slug>/_support.json`, `demo-index.json`,
 `feature-lineage.json`) and prose select the static tier only, so an automated fix pass does not pay
 the integration gate. `lib/**` is deliberately **not** narrowed: without proven per-file coverage a
 shared-backend edit selects the full gate. `scripts/affected-tests.test.mjs` is a static step, so an
@@ -137,10 +147,32 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/v149/
   milestone needs it. If `chrome-devtools-mcp` is unavailable, report the blocker and do not claim a
   browser-tested result.
 - Build every distinct use case identified for an API. Two or three concepts is a floor, not a cap.
-- Require a deliberate use-case portfolio rather than counting near-duplicate pages: evaluate
-  basic/canonical usage, configuration or inspection tooling, a practical product use case,
-  edge/failure/migration behavior, and a novel or advanced composition. Build every applicable angle
-  additively, document why any angle is inapplicable, and preserve every existing route and angle.
+- Follow the **Two-Track + Boundary & Composition Matrix** model rather than counting near-duplicate
+  pages (always additively — never delete or rename published routes/concepts):
+  - **Track A — Canonical Starter (`start/` or basic concept):** cleanest 40–60 line "hello world"
+    of the exact shipped surface, enable flags/OT steps, common errors & fixes, zero bloat.
+  - **Track B — Hypothesis-Driven Experiments (no ceiling; every distinct angle):** every experiment
+    asks a concrete, falsifiable question; push the limits of the API (build stress/boundary tests
+    even when expected to fail, let them fail visibly, record empirical findings with Chrome version
+    + date, try alternatives one after another, state `"not verified"` if not run); include at least
+    one surprising **Cross-API Composition** combining the feature with another modern platform
+    primitive (Shadow DOM, `OffscreenCanvas`/Worker, WebGPU/WebGL, View Transitions, Popover/Anchor
+    Positioning, Streams, Compression, Web Audio, CSS `shape()`/`@scope`) transforming real page
+    content rather than an isolated synthetic box.
+- Add optional/additive per-concept `page.json` metadata on new or upgraded concepts (`title`,
+  `blurb`, `kind`: `starter` | `experiment` | `stress` | `composition` | `migration`, `question`,
+  `result`, `testedIn`, `api`, `composesWith`, and `friction`: `summary`, `kind`, `repro`,
+  `browser`, `issueUrl`, `workaround`). It powers the automatic **"About this experiment"** box
+  under `<p class="lede">`, the site-wide **`/friction/`** browser-bug/API-limit ledger, and the
+  **`/experiments/`** cross-API explorer.
+- Prefer live-source `<details class="show-code">` hydrated by `/public/show-code.js` (wrapping key
+  demo code in `// --- demo ---` / `// --- /demo ---` markers) over hand-copied `<pre><code>` blocks
+  that drift. Follow the standard experiment section order: Banner + Lede + About box → **Live
+  interactive demo first** → `<details class="show-code">` → **How it works** → **Live checks**
+  (`<details class="live-checks">`, out-of-flow fixtures for zero CLS) → **Findings** (empirical,
+  dated, Chrome-versioned).
+- Write direct engineering prose: no AI-slop filler ("delve", "unlock the power", "seamless",
+  "game-changer"); checked by `npm run check:writing`.
 - **Research before building.** Follow every chromestatus reference (spec, explainer, docs, samples)
   and their onward links, enumerate the distinct use cases (that count sets the concepts), search
   MDN/web.dev/WPT for more, and read the real implementation in Chromium source
@@ -298,7 +330,8 @@ targeted compatibility fixes — never a destructive rewrite, never a new slug t
   fixes, wave by wave — the coverage number is the backlog burn-down, and it never regresses.
 
 **Run the responsive matrix before every push** with `npm run responsive-check` and record each
-touched demo's result in `responsive-support.json` (`ok` / `unsupported`+evidence per class).
+touched demo's result in its per-feature `v<N>/<feature-slug>/_support.json` sidecar (`ok` /
+`unsupported`+evidence per class, updated via `npm run responsive-check -- <id> --merge`).
 
 ## modern-web-guidance is mandatory for all frontend work
 
@@ -340,8 +373,9 @@ APIs.
 > one. The two invariants ship as NEW immutable cross-project conformance suites under
 > `conformance/cross-project/` (`mobile-desktop-parity.json`, `modern-web-guidance.json`) — no
 > existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
-> Per-demo support lives in the git-tracked `responsive-support.json` sidecar (keyed by
-> `v<N>/<feature-slug>`, defaulting existing demos to `untested`), merged into the route manifest.
+> Per-demo support lives in git-tracked per-feature `v<N>/<feature-slug>/_support.json` sidecars
+> (defaulting existing demos to `untested`), managed via `npm run responsive-support` and
+> `npm run responsive-check -- <id> --merge`, and merged into the route manifest.
 > Validate with `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts
 > no horizontal overflow + console/network clean and screenshots both classes; a
 > genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
@@ -359,12 +393,15 @@ case. For removals and deprecations, pair detection with a working replacement p
 trial, flag-gated, OS-specific, or device-specific features, show capability detection and a useful
 fallback rather than skipping the interaction.
 
-For HTTP, header, MIME, cache, redirect, or negotiation features, wire the relevant route in
-`server.ts` and have the concept page fetch it and surface status, headers, and body in-page. For
-CSS features, pair syntax detection with an observable effect when possible, such as
-`getComputedStyle()`, layout measurements, active selector state, or a visible before/after. For API
-features, feature-detect the exact constructor/member and make a real, safe call; unsupported or
-permission-gated results must be surfaced as unsupported/fallback, not hidden behind a generic pass.
+For HTTP, header, MIME, cache, redirect, or negotiation features, co-locate a feature server handler
+at `v<N>/<feature-slug>/_server.ts` (using `lib/feature-servers/` helpers), regenerate
+`routes/_feature-servers.generated.ts` with `npm run gen:feature-servers` (checked by
+`npm run check-feature-servers`), and have the concept page fetch it and surface status, headers,
+and body in-page. For CSS features, pair syntax detection with an observable effect when possible,
+such as `getComputedStyle()`, layout measurements, active selector state, or a visible before/after.
+For API features, feature-detect the exact constructor/member and make a real, safe call;
+unsupported or permission-gated results must be surfaced as unsupported/fallback, not hidden behind
+a generic pass.
 
 ## Auto-Research, Conformance, And Goal-Setting
 

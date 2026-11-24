@@ -7,8 +7,10 @@ import { handleAliasRoute } from "./aliases.ts";
 import { handleCategoriesRoute } from "./categories.ts";
 import { handleConformanceRoute } from "./conformance.ts";
 import { handleCritiquesRoute } from "./critiques.ts";
+import { handleExperimentsRoute } from "./experiments.ts";
 import { handleFeaturesRoute } from "./features.ts";
 import { handleFaviconRoute } from "./favicon.ts";
+import { handleFrictionRoute } from "./friction.ts";
 import { handleDemoTelemetryRoute } from "./demo-telemetry.ts";
 import { handleFedCmWellKnownRoute } from "./fedcm-well-known.ts";
 import { handleIndexRoute } from "./index.ts";
@@ -33,6 +35,8 @@ const routes: RouteHandler[] = [
   handleFeaturesRoute,
   handleConformanceRoute,
   handleCritiquesRoute,
+  handleExperimentsRoute,
+  handleFrictionRoute,
   handleCategoriesRoute,
   handleFaviconRoute,
   handleEchoSocketRoute,

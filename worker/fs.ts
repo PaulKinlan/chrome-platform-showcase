@@ -56,7 +56,7 @@ export function buildIndex(manifest: FsManifest): FsIndex {
 }
 
 /** File names whose contents are also bundled per kind (see build-worker-assets.mjs). */
-export const BUNDLED_NAMES = ["_questions.json", "conformance.json"] as const;
+export const BUNDLED_NAMES = ["_questions.json", "conformance.json", "page.json"] as const;
 
 /** The bundle a path's contents live in, or null when it is read individually. */
 export function bundleFor(path: string): string | null {

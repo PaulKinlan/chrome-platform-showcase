@@ -1,6 +1,8 @@
 import { platform } from "../lib/platform.ts";
 import { renderBreadcrumbs } from "../lib/breadcrumbs.ts";
 import { getChannels } from "../lib/chromestatus.ts";
+import { readConceptPageMeta } from "../lib/experiment.ts";
+import { injectExperimentShell } from "../lib/experiment-shell.ts";
 import type {
   AssetReader,
   FeatureServerContext,
@@ -275,8 +277,8 @@ async function readReleaseAssetFromDisk(
   if (key.endsWith("/")) key += "index.html";
   else if (!/\.[a-z0-9]+$/i.test(key)) key += "/index.html";
 
-  // Never serve internal `_server.ts` modules as raw static files.
-  if (key.endsWith("_server.ts")) return null;
+  // Never serve internal `_server.ts` or `_support.json` files as raw static assets.
+  if (key.endsWith("_server.ts") || key.endsWith("_support.json")) return null;
 
   try {
     const file = await platform().readFile(`./${release}/${key}`);
@@ -284,7 +286,14 @@ async function readReleaseAssetFromDisk(
     if (ext === "html") {
       const html = new TextDecoder().decode(file);
       const withBreadcrumbs = await injectReleaseBreadcrumbs(html, release, key, origin);
-      const withGendn = await injectGendnReference(withBreadcrumbs, release, key);
+      const segments = key.endsWith("index.html")
+        ? key.replace(/\/index\.html$/, "").split("/").filter(Boolean)
+        : [];
+      const pageMeta = segments.length === 2
+        ? await readConceptPageMeta(release, segments[0], segments[1])
+        : null;
+      const withExperiment = injectExperimentShell(withBreadcrumbs, pageMeta);
+      const withGendn = await injectGendnReference(withExperiment, release, key);
       const withConformance = await injectConformancePanel(withGendn, release, key);
       return new Response(injectDemoTelemetry(withConformance), {
         headers: demoTelemetryHeaders({ "content-type": MIME[ext] }),

@@ -11,8 +11,9 @@ This is not the remote Claude routine.
 ## First Steps
 
 1. Read `CLAUDE.md`, `AGENTS.md`, `.claude/routine-prompt.md`, and `.claude/auto-research.md`.
-2. Read `lib/chromestatus.ts` and the milestone renderer in `server.ts` so coverage uses the same
-   ChromeStatus listing and slug rules as the site.
+2. Read `lib/chromestatus.ts` (including `slugify`) and the milestone renderer in
+   `routes/pages/release.ts` so coverage uses the same ChromeStatus listing and slug rules as the
+   site.
 3. Read `lib/critique.ts` for critique shape when writing `_questions.json`.
 4. Read `lib/conformance.ts` for conformance shape when writing `conformance.json`.
 5. Start from a current checkout:
@@ -109,7 +110,8 @@ targeted compatibility fixes — never a destructive rewrite, never a new slug t
   fixes, wave by wave — the coverage number is the backlog burn-down, and it never regresses.
 
 **Run the responsive matrix before every push** with `npm run responsive-check` and record each
-touched demo's result in `responsive-support.json` (`ok` / `unsupported`+evidence per class).
+touched demo's result in its per-feature `v<N>/<feature-slug>/_support.json` sidecar (`ok` /
+`unsupported`+evidence per class, updated via `npm run responsive-check -- <id> --merge`).
 
 ## modern-web-guidance is mandatory for all frontend work
 
@@ -151,8 +153,9 @@ APIs.
 > one. The two invariants ship as NEW immutable cross-project conformance suites under
 > `conformance/cross-project/` (`mobile-desktop-parity.json`, `modern-web-guidance.json`) — no
 > existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
-> Per-demo support lives in the git-tracked `responsive-support.json` sidecar (keyed by
-> `v<N>/<feature-slug>`, defaulting existing demos to `untested`), merged into the route manifest.
+> Per-demo support lives in git-tracked per-feature `v<N>/<feature-slug>/_support.json` sidecars
+> (defaulting existing demos to `untested`), managed via `npm run responsive-support` and
+> `npm run responsive-check -- <id> --merge`, and merged into the route manifest.
 > Validate with `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts
 > no horizontal overflow + console/network clean and screenshots both classes; a
 > genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
@@ -167,8 +170,8 @@ APIs.
 
 Infer the mode from the user prompt:
 
-- `coverage`, `pending`, or `build`: inventory the milestone and build missing feature and uber
-  demos.
+- `coverage`, `pending`, or `build`: inventory the milestone and build missing feature demos.
+  (Per-release Uber demos were removed on 2026-08-27 — see `migrations.json`.)
 - `critique`: write missing `_questions.json` files for demos that exist.
 - `conformance`: write missing `conformance.json` files for features that exist.
 - `all` or `auto-research`: **coverage/build first**, then critique and conformance. Never treat
@@ -201,17 +204,15 @@ For each target milestone:
    for the milestone; never infer the milestone from a feature detail response.
 2. Deduplicate cards by ChromeStatus feature ID. A feature can appear in more than one status
    section, but one implementation satisfies that feature ID.
-3. Derive each slug from the milestone listing name with the same slug function as `server.ts`. Do
-   not use the feature-detail name.
+3. Derive each slug from the milestone listing name with the same `slugify` function as
+   `lib/chromestatus.ts`. Do not use the feature-detail name.
 4. Compare the complete unique feature-ID set with disk and with the rendered milestone page:
    - implemented feature: `v<N>/<slug>/index.html` exists and the milestone card links to
-     `/v<N>/<slug>/`;
+     `/v<N>/<slug>/` (or to its canonical folder in another milestone via `demo-index.json`);
    - pending feature: the card links only to ChromeStatus, says `demo pending`, or the canonical
      feature folder/index is absent;
    - incomplete feature: the feature index exists but has no interactive concept pages, lacks the
-     mandatory ChromeStatus link, or only contains static code/reference cards;
-   - pending uber demo: `/v<N>/uber-demo/index.html` is absent or the milestone page says it has not
-     been built.
+     mandatory ChromeStatus link, or only contains static code/reference cards.
 5. Print and preserve an exact inventory before building:
 
 ```text
@@ -219,7 +220,6 @@ v<N> unique tracked features: <total>
 implemented: <implemented>
 pending: <pending>
 incomplete: <incomplete>
-uber demo: implemented | pending
 ```
 
 The denominator is the unique ChromeStatus feature-ID set, not the number of folders already on
@@ -231,13 +231,21 @@ For each pending or incomplete feature:
 
 1. Read `.claude/routine-prompt.md`, the milestone listing entry, ChromeStatus detail, linked spec,
    and existing neighboring demos.
-2. Build `v<N>/<canonical-slug>/index.html` plus interactive concept pages for **every distinct use
-   case**. Two or three concepts are a floor, not a cap.
+2. Build `v<N>/<canonical-slug>/index.html` plus interactive concept pages using the **Two-Track +
+   Boundary & Composition Matrix** model (**Track A** canonical starter + **Track B**
+   hypothesis-driven experiments, stress/boundary tests, and at least one cross-API composition).
+   Two or three concepts are a floor, not a cap. Add optional `page.json` metadata on new or
+   upgraded concepts, prefer `<details class="show-code">` hydrated by `/public/show-code.js`
+   (`// --- demo ---` / `// --- /demo ---` markers), and keep `<details class="live-checks">`
+   out-of-flow for zero CLS.
 3. Follow all project invariants: real interaction, exact feature probes, graceful
-   unsupported/flag/device fallbacks, CSS variables, WCAG AA, keyboard/accessibility semantics, and
-   a `chromestatus.com/feature/<id>` link on every page.
-4. For HTTP/header/cache/redirect behavior, add the required server route as a manual top-level
-   change; do not fake the contract in client-side text.
+   unsupported/flag/device fallbacks, CSS variables, WCAG AA, keyboard/accessibility semantics,
+   direct engineering writing (`npm run check:writing`), and a `chromestatus.com/feature/<id>` link
+   on every page.
+4. For HTTP/header/cache/redirect behavior, co-locate a feature handler in
+   `v<N>/<canonical-slug>/_server.ts` (using helpers from `lib/feature-servers/`) and run
+   `npm run gen:feature-servers` to regenerate `routes/_feature-servers.generated.ts` (verified by
+   `npm run check-feature-servers`); do not fake the contract in client-side text.
 5. Use `chrome-devtools-mcp` on every new concept. Exercise every visible control, inspect the
    accessibility tree where needed, inspect console/network/telemetry, and verify the fallback path
    when the current browser lacks the feature. For every API demo, also invoke the exact advertised
@@ -257,14 +265,14 @@ For each pending or incomplete feature:
    unsupported state.
 9. Reload from disk after the final edit and repeat the complete control sequence. Evidence captured
    before the last source change is invalid.
-10. Commit and push one feature at a time, staging only that feature and any route code it requires:
+10. Commit and push one feature at a time, staging only that feature and any generated registry
+    update it requires:
 
 ```bash
-git add v<N>/<feature>/ server.ts && git commit -m "add v<N> <feature> demos" && git push
+git add v<N>/<feature>/ routes/_feature-servers.generated.ts && git commit -m "add v<N> <feature> demos" && git push
 ```
 
-Omit `server.ts` when it was not changed. Build the uber demo after the per-feature batch and commit
-it separately.
+Omit `routes/_feature-servers.generated.ts` when no `_server.ts` was added or changed.
 
 ### Prove the coverage gap closed
 
@@ -274,7 +282,6 @@ page. A target milestone is complete only when:
 - every unique tracked feature ID maps to its canonical local demo link;
 - no card says `demo pending` or links only to ChromeStatus because its demo is absent;
 - each feature has interactive concept coverage and the mandatory ChromeStatus reference;
-- the requested uber demo exists;
 - local routes return 200 and were exercised through `chrome-devtools-mcp`;
 - desktop/mobile screenshots show correct geometry, anchoring, clipping, fallback rendering, and
   readable contrast;
@@ -285,40 +292,48 @@ page. A target milestone is complete only when:
 If time or quota stops the batch, report `implemented/total` and list every remaining feature ID +
 canonical slug. Do not say “complete,” “clean,” or “all” when pending items remain.
 
-## Uber Demo Design And Integrity
+## Two-Track Demo Generation And Experiment Quality
 
-An uber demo is a believable product experience, not a feature checklist arranged in a grid.
+Per-release Uber demos were removed on 2026-08-27 (`migrations.json`) so every milestone invests in
+deep per-feature portfolios. Every feature follows the **Two-Track + Boundary & Composition Matrix**
+model (preserving the durable-demo contract — always add new concept slugs, never delete or rename
+published routes):
 
-1. Start with one user goal and select milestone features only when each one materially improves
-   that goal. It is acceptable—and usually necessary—to use stable features from earlier Chrome
-   releases as connective tissue. Never distort the information architecture just to place every new
-   feature on the same screen.
-2. Give behavior APIs real work. A scroll-promise demo needs a genuinely scrollable journey with a
-   visible start and destination; cancellation needs an operation that can still be in flight; gap
-   decoration needs a real gap; shape clipping must improve a deliberate visual rather than
-   mutilating a card border. If removing the API would not change the experience, choose a better
-   use case.
-3. Keep decorative and structural responsibilities separate. Do not clip the element whose border or
-   reading surface must remain intact. Apply experimental shape/paint effects to an inner
-   illustration, pseudo-element, or dedicated layer, then inspect the resulting geometry at desktop
-   and mobile sizes.
-4. Treat feature APIs as versioned inputs at the integration boundary. Normalize documented return
-   shapes (string, iterable, array, promise, or void) before array methods, iteration, optional
-   chaining, or promise chaining. Report the observed shape and degraded behavior; never turn a
-   compatibility difference into a generic parse error or a false success.
-5. Derive all counts and summaries from the rendered implementation. If an index links four demos,
-   its heading and prose must say four. Verify card/link counts, named feature counts, code
-   snippets, and “features at work” tables against the DOM after the final edit.
-6. Syntax-check every inline script, including sample HTML/JavaScript strings containing quotes,
-   `</script>`, keyboard key names, event-handler attributes, and template literals. Then load the
-   real URL—the extracted script passing a parser is necessary but not sufficient.
-7. Validate the feature demos used by the uber demo as well as the uber route itself. Initial-load
-   console warnings and errors are failures, including browser diagnostics for invalid experimental
-   attribute tokens. Exercise every control and inspect console/network again after each
-   state-changing sequence.
-8. Prefer two focused experiences over one incoherent “everything” page when a release spans
-   unrelated surfaces. If a release has multiple uber concepts, label the exact count and explain
-   each concept's distinct job; do not leave stale “one/two demos” copy after adding more routes.
+1. **Track A — Canonical Starter (`start/` or basic concept):** The cleanest 40–60 line "hello
+   world" of the exact shipped surface, copyable enable flags or origin-trial steps, common errors
+   and fixes, zero bloat.
+2. **Track B — Hypothesis-Driven Experiments (no ceiling; every distinct angle):**
+   - Every experiment asks a **concrete, falsifiable question** about the API's limits,
+     interactions, or edge cases.
+   - **Push the limits of the API:** Build the stress or boundary test even when you expect it to
+     fail. Let it fail visibly, record the empirical finding (Chrome version + date), then try
+     alternatives one after another. Never invent results — state `"not verified"` if not run.
+   - **Cross-API Composition:** Include at least one genuinely surprising experiment composing the
+     feature with another modern platform primitive (e.g., Shadow DOM, `OffscreenCanvas`/Worker,
+     WebGPU/WebGL, View Transitions, Popover/Anchor Positioning, Streams, Compression, Web Audio,
+     CSS `shape()`/`@scope`) — transforming real content on the page rather than an isolated
+     synthetic box. Give composed APIs real work; if removing the API would not change the
+     experience, choose a better composition.
+3. **Per-concept `page.json` metadata (optional / additive):** Document `title`, `blurb`, `kind`
+   (`starter` | `experiment` | `stress` | `composition` | `migration`), `question`, `result`,
+   `testedIn`, `api`, `composesWith`, and `friction` (`summary`, `kind`, `repro`, `browser`,
+   `issueUrl`, `workaround`). It automatically powers the **"About this experiment"** box under
+   `<p class="lede">`, the site-wide **`/friction/`** browser-bug/API-limit ledger, and the
+   **`/experiments/`** cross-API explorer.
+4. **Live-source `<details class="show-code">` and out-of-flow Live Checks:** Prefer
+   `<details class="show-code">` hydrated by `/public/show-code.js` (wrapping key demo code in
+   `// --- demo ---` / `// --- /demo ---` markers) over hand-copied `<pre><code>` blocks that
+   drift. Follow the standard experiment section order: Banner + Lede + About box → **Live
+   interactive demo first** → `<details class="show-code">` → **How it works** → **Live checks**
+   (`<details class="live-checks">`, out-of-flow fixtures so the page holds still with zero CLS) →
+   **Findings** (empirical, dated, browser-versioned).
+5. **Direct engineering writing:** No AI-slop filler ("delve", "unlock the power", "seamless",
+   "game-changer"). Verify prose with `npm run check:writing`.
+6. **Structural & integration hygiene:** Keep decorative and structural layers separate (never clip
+   a reading surface's border); normalize versioned API return shapes before chaining `.then()` or
+   iterating; derive all displayed counts and summaries from the rendered DOM; and syntax-check
+   every inline script (including sample strings containing quotes or `</script>`) before loading
+   the real URL.
 
 ## Critique Pass
 
@@ -503,15 +518,15 @@ Do not use critique counts or conformance counts as evidence that a release's de
 These are separate axes:
 
 ```text
-coverage: <implemented>/<unique tracked> feature demos; uber: implemented | pending
+coverage: <implemented>/<unique tracked> feature demos
 critique: <reports>/<implemented concepts>
 conformance: <suites>/<implemented features>
 validation: <exercised>/<implemented concepts>
 ```
 
 For `all`, report all four axes. A no-op is valid only when coverage has zero pending/incomplete
-features, the uber demo exists, and critique/conformance have no gaps. Check the rendered `/v<N>/`
-page itself before making that claim.
+features and critique/conformance have no gaps. Check the rendered `/v<N>/` page itself before
+making that claim.
 
 ## After Each Batch
 
@@ -520,29 +535,31 @@ Run:
 ```bash
 npm run fmt
 npm run typecheck
+npm run check-feature-servers                      # verify routes/_feature-servers.generated.ts
+npm run check:writing                              # check demo prose for AI-slop filler
 npm run responsive-check -- <touched-id> --merge   # mobile+desktop matrix for each demo you touched
-npm run check-routes                             # route + parity gate + coverage report
-npm run responsive-support -- report                # mobile/desktop coverage denominators
+npm run check-routes                               # route + parity gate + coverage report
+npm run responsive-support -- report               # mobile/desktop coverage denominators
 git status --short
 ```
 
 For every demo you built or fixed, run the mobile+desktop matrix
-(`npm run responsive-check -- <id>
---merge`), `Read` both screenshots, and record the result in
-`responsive-support.json` (`ok`, or `unsupported`+evidence when a class is genuinely unavailable —
-`blocked` with evidence is NEVER a fake pass, and you must not auto-download an absent large model
-to force a pass). A cheap `npm run overflow-scan -- --sample <n>` seeds `needs-review` flags across
-the backlog (never `ok`). Consult `modern-web-guidance` FIRST for any HTML/CSS/JS work and record it
-in the critique's `guidanceConsulted`. `npm run check-routes` is the route + parity regression gate
-— run it before every push. It must PASS (exit 0); a failure means a published demo
-route/slug/identity was destructively changed. Fix the change to be additive, or record an
-intentional removal/rename/move in `migrations.json`. When new demos land, refresh the baseline
-snapshot with `npm run route-manifest -- --write`.
+(`npm run responsive-check -- <id> --merge`), `Read` both screenshots, and record the result in its
+per-feature `v<N>/<feature-slug>/_support.json` sidecar (`ok`, or `unsupported`+evidence when a
+class is genuinely unavailable — `blocked` with evidence is NEVER a fake pass, and you must not
+auto-download an absent large model to force a pass). A cheap
+`npm run overflow-scan -- --sample <n>` seeds `needs-review` flags across the backlog (never `ok`).
+Consult `modern-web-guidance` FIRST for any HTML/CSS/JS work and record it in the critique's
+`guidanceConsulted`. `npm run check-routes` is the route + parity regression gate — run it before
+every push. It must PASS (exit 0); a failure means a published demo route/slug/identity was
+destructively changed. Fix the change to be additive, or record an intentional removal/rename/move
+in `migrations.json`. When new demos land, refresh the baseline snapshot with
+`npm run route-manifest -- --write`.
 
 If `npm run fmt` changed generated JSON, commit and push only those relevant formatting changes.
 Report:
 
-- coverage before and after (`implemented/unique tracked`, incomplete, uber status);
+- coverage before and after (`implemented/unique tracked`, incomplete);
 - every built feature and commit;
 - critique, conformance, and validation counts with their own denominators;
 - pushed refs and routes to inspect (`/v<N>/`, `/critiques`, `/conformance`);

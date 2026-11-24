@@ -290,7 +290,7 @@ test(
           expectedStaged.add(f);
         }
       }
-      for (const name of BUNDLED_NAMES) {
+      for (const name of ["_questions.json", "conformance.json"]) {
         assert(
           (bundledCounts.get(name) ?? 0) > 0,
           `expected manifest to include ${name} entries`,
@@ -308,16 +308,21 @@ test(
 );
 
 test(
-  "staging fixture actively skips _server.ts and _support.json and bundles _questions.json/conformance.json without duplicating them",
+  "staging fixture actively skips _server.ts and _support.json and bundles _questions.json/conformance.json/page.json without duplicating them",
   async () => {
     const tmp = await mkdtemp(join(tmpdir(), "worker-assets-fixture-"));
     const fixtureRoot = join(tmp, "repo");
     const out = join(tmp, "out");
     try {
       await mkdir(join(fixtureRoot, "public"), { recursive: true });
-      await mkdir(join(fixtureRoot, "v151", "sample-demo"), { recursive: true });
+      await mkdir(join(fixtureRoot, "v151", "sample-demo", "basic"), { recursive: true });
       const questionsBody = JSON.stringify({ feature: "sample-demo", questions: [] });
       const conformanceBody = JSON.stringify({ feature: "sample-demo", tests: [] });
+      const pageBody = JSON.stringify({
+        title: "Basic sample",
+        blurb: "Exercises the sample feature.",
+        kind: "starter",
+      });
       await writeFile(join(fixtureRoot, "demo-index.json"), "{}");
       await writeFile(join(fixtureRoot, "gendn-links.json"), "{}");
       await writeFile(join(fixtureRoot, "public", "styles.css"), "body {}");
@@ -335,6 +340,10 @@ test(
       await writeFile(
         join(fixtureRoot, "v151", "sample-demo", "conformance.json"),
         conformanceBody,
+      );
+      await writeFile(
+        join(fixtureRoot, "v151", "sample-demo", "basic", "page.json"),
+        pageBody,
       );
 
       const run = spawnSync(
@@ -354,6 +363,7 @@ test(
           "gendn-links.json",
           "public/styles.css",
           "v151/sample-demo/_questions.json",
+          "v151/sample-demo/basic/page.json",
           "v151/sample-demo/conformance.json",
           "v151/sample-demo/index.html",
         ],
@@ -364,6 +374,7 @@ test(
         [
           "_worker/bundle-_questions.json",
           "_worker/bundle-conformance.json",
+          "_worker/bundle-page.json",
           "_worker/fs-manifest.json",
           "demo-index.json",
           "gendn-links.json",
@@ -375,6 +386,7 @@ test(
 
       const qBundle = JSON.parse(await readFile(`${out}/_worker/bundle-_questions.json`, "utf8"));
       const cBundle = JSON.parse(await readFile(`${out}/_worker/bundle-conformance.json`, "utf8"));
+      const pBundle = JSON.parse(await readFile(`${out}/_worker/bundle-page.json`, "utf8"));
       assertEquals(
         qBundle["v151/sample-demo/_questions.json"],
         questionsBody,
@@ -384,6 +396,11 @@ test(
         cBundle["v151/sample-demo/conformance.json"],
         conformanceBody,
         "conformance.json must be byte-for-byte in its bundle",
+      );
+      assertEquals(
+        pBundle["v151/sample-demo/basic/page.json"],
+        pageBody,
+        "page.json must be byte-for-byte in its bundle",
       );
     } finally {
       await rm(tmp, { recursive: true, force: true });
@@ -441,13 +458,18 @@ test("D1 adapter: prefix ranges, reverse, limit and paging match Deno KV", async
   assertEquals(deep.at(-1).value, 504, "reverse paging continues past the first page");
 });
 
-test("bundles hold every _questions.json and conformance.json, byte for byte, without individual copies", async () => {
+test("bundles hold every _questions.json, conformance.json, and page.json, byte for byte, without individual copies", async () => {
   assertEquals(
     bundleFor("v151/x/y/_questions.json"),
     "_worker/bundle-_questions.json",
     "concept critiques map to the critique bundle",
   );
   assertEquals(bundleFor("v151/x/conformance.json"), "_worker/bundle-conformance.json", "suites");
+  assertEquals(
+    bundleFor("v151/x/y/page.json"),
+    "_worker/bundle-page.json",
+    "experiment metadata maps to the page bundle",
+  );
   assertEquals(bundleFor("v151/x/index.html"), null, "everything else is read individually");
 
   const out = await mkdtemp(join(tmpdir(), "worker-bundles-"));

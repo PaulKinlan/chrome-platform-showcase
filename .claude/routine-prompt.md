@@ -17,8 +17,9 @@ once a day with no human in the loop, so robustness is the whole point: research
 push. **Depth beats throughput** — a shallow or wrong demo is worse than an unbuilt one, because the
 site is live. If you can only do two features properly in the budget, do two properly.
 
-This is NOT an issue-first flow. Per-feature work goes straight to code. Only the per-release Uber
-demo uses an issue gate.
+This is NOT an issue-first flow. Per-feature work goes straight to code. (Per-release Uber demos
+were removed on 2026-08-27 — see `migrations.json` — so all routine effort goes to per-feature
+starters and experiments.)
 
 ## CRITICAL RULES
 
@@ -200,7 +201,8 @@ targeted compatibility fixes — never a destructive rewrite, never a new slug t
   fixes, wave by wave — the coverage number is the backlog burn-down, and it never regresses.
 
 **Run the responsive matrix before every push** with `npm run responsive-check` and record each
-touched demo's result in `responsive-support.json` (`ok` / `unsupported`+evidence per class).
+touched demo's result in its per-feature `v<N>/<feature-slug>/_support.json` sidecar (`ok` /
+`unsupported`+evidence per class, updated via `npm run responsive-check -- <id> --merge`).
 
 ## modern-web-guidance is mandatory for all frontend work
 
@@ -242,8 +244,9 @@ APIs.
 > one. The two invariants ship as NEW immutable cross-project conformance suites under
 > `conformance/cross-project/` (`mobile-desktop-parity.json`, `modern-web-guidance.json`) — no
 > existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
-> Per-demo support lives in the git-tracked `responsive-support.json` sidecar (keyed by
-> `v<N>/<feature-slug>`, defaulting existing demos to `untested`), merged into the route manifest.
+> Per-demo support lives in git-tracked per-feature `v<N>/<feature-slug>/_support.json` sidecars
+> (defaulting existing demos to `untested`), managed via `npm run responsive-support` and
+> `npm run responsive-check -- <id> --merge`, and merged into the route manifest.
 > Validate with `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts
 > no horizontal overflow + console/network clean and screenshots both classes; a
 > genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
@@ -387,7 +390,7 @@ routine runs standalone and stops leaving thin demos behind):
 
 Both pending and incomplete features go in the build queue.
 
-## Step 4: Build budget
+## Step 4: Build budget — Two-Track + Boundary & Composition Matrix
 
 No per-run cap. Current channels first, then backfill. **Build every distinct use case the API has.
 No ceiling.** 2-3 concepts is the floor, not the cap — if the spec / planning discussion identifies
@@ -396,20 +399,35 @@ surface, different real-world use case, or different failure mode / edge case). 
 comprehensive and inspire developers (Paul, 2026-05-30) — not to tick a box. 1 concept is a
 regression. 2 is the floor. Build them all.
 
-**Use-case portfolio check (required before “implemented”).** Do not satisfy the floor with two
-near-duplicate playgrounds. For each feature, explicitly consider and record these angles:
+**Two-Track + Boundary & Composition Matrix (required before "implemented").** Do not satisfy the
+floor with two near-duplicate playgrounds. Structure every feature's concept portfolio across two
+complementary tracks:
 
-1. **basic/canonical** — the smallest real use of the exact shipped surface;
-2. **configuration/inspection tool** — controls that expose meaningful values, states, or tradeoffs;
-3. **practical product use case** — why a developer would use the feature in an application;
-4. **edge/failure/migration** — unsupported, invalid, lifecycle, compatibility, or upgrade behavior;
-5. **novel/advanced composition** — an inspiring use with another relevant platform capability.
+- **Track A — Canonical Starter (`start/` or basic concept):** The cleanest 40–60 line "hello world"
+  of the exact shipped surface, copyable enable flags / origin-trial steps, common errors and fixes,
+  zero bloat. A developer should be able to copy it and see the feature work in seconds.
+- **Track B — Hypothesis-Driven Experiments (no ceiling; every distinct angle):** Cover
+  configuration/inspection tooling, practical product use cases, stress/boundary/migration behavior,
+  and cross-API compositions. Every experiment MUST follow three rules:
+  1. **Concrete, falsifiable question.** State the exact question about the API's limits,
+     interactions, or edge cases that the page tests (e.g. "Does `X` survive across a Shadow DOM
+     boundary?" or "What happens at 10,000 items or an invalid descriptor?").
+  2. **Push the limits of the API.** Build the stress or boundary test even when you expect it to
+     fail. Let it fail visibly, record the empirical finding (with Chrome version + date), then try
+     alternatives one after another. Never invent or extrapolate results — state "not verified" if
+     you did not actually run it in Chrome.
+  3. **Cross-API Composition.** Include at least one genuinely surprising experiment composing the
+     feature with another modern platform primitive (e.g., Shadow DOM, `OffscreenCanvas`/Worker,
+     WebGPU/WebGL, View Transitions, Popover/Anchor Positioning, Streams, Compression, Web Audio,
+     CSS `shape()`/`@scope`) — transforming real content on the page rather than an isolated
+     synthetic box.
 
-Build every applicable angle as a distinct additive route. Mark an angle not applicable only with a
-source-backed reason in the feature's research record. A syntax probe plus a simulation is not a
+Build every applicable angle as a distinct additive route (durable-demo contract: never delete,
+rename, or repurpose existing published starters or concepts). Mark an angle inapplicable only with
+a source-backed reason in the feature's research record. A syntax probe plus a simulation is not a
 complete portfolio, and two demos explaining the same behavior from the same angle still count as
-one use case. Before editing, inventory every existing route and its angle; after editing, prove the
-set is a strict superset. Never delete an older basic demo when adding a more ambitious one.
+one use case. Before editing an existing feature, inventory every published route and its angle;
+after editing, prove the set is a strict superset.
 
 ## Step 5: Fetch full detail
 
@@ -510,14 +528,17 @@ state diagrams second.
   visitor interacts.
 - **DOM / JS features** → a try-it button that actually invokes the API and shows the result.
   Feature-detect and degrade gracefully if the API isn't shipped yet on the visitor's browser.
-- **HTTP / header / MIME / cache / redirect / network features** → use the server (routes run on
-  Node locally and on Workers in production). Add a route under the feature folder (e.g.
-  `v<N>/<slug>/echo`) in `server.ts` that responds with the relevant header / redirect /
-  content-type behaviour. The concept page fetches from that route and surfaces the negotiated
-  outcome. ROUTINE NOTE: you are fenced out of top-level files; for server-route demos, generate the
-  feature index + concept page using the path you'd want, and add a one-line TODO in the feature
-  index referencing the route name + behaviour so the human reviewer can wire it in `server.ts`. Do
-  NOT skip the feature and do NOT downgrade to a static card.
+- **HTTP / header / MIME / cache / redirect / network features** → co-locate a feature server
+  handler at `v<N>/<feature-slug>/_server.ts` exporting `handleFeatureRequest` (reusing helpers from
+  `lib/feature-servers/` such as `http-helpers.ts`) so the concept page fetches a real same-origin
+  route (e.g. `v<N>/<slug>/echo`) and surfaces the negotiated headers, status, and body. Node
+  resolves `_server.ts` dynamically in local testing, while Cloudflare Workers uses the generated
+  static registry `routes/_feature-servers.generated.ts` (`npm run gen:feature-servers`, checked by
+  `npm run check-feature-servers`). ROUTINE NOTE: you are fenced out of `routes/`, so author
+  `v<N>/<slug>/_server.ts` inside the feature folder, test it locally against `npm run start`, and
+  note in the PR summary (and a one-line comment in the feature index) that the reviewer should run
+  `npm run gen:feature-servers` on merge. Do NOT skip the feature and do NOT downgrade to a static
+  card.
 - **Origin trial / behind-a-flag features** → ship the interactive demo, and prefer the FLAG path
   over origin-trial framing, because a flag lets anyone (and you) run the demo for real today. In
   the banner, give the EXACT, copyable enable steps you found in Step 5c — in priority order:
@@ -536,6 +557,13 @@ state diagrams second.
   with a working example of the replacement API.
 
 Name each concept with a short evocative title. Slug it with the same rules.
+
+### Direct engineering writing
+
+Write concrete, empirical prose. State what the API did, what broke, which Chrome version and date
+you observed it on, and what workaround held. Avoid AI-slop filler ("delve", "unlock the power",
+"seamless", "game-changer", "harness", "elevate", "cutting-edge", "tapestry"). Checked by
+`npm run check:writing`.
 
 ## Step 7: Build the files
 
@@ -606,9 +634,56 @@ Feature index skeleton:
 Every feature index MUST include `chromestatus.com/feature/<id>` in references. That's how we
 recover from glitches.
 
-Each concept page follows the same shell with crumbs back to the feature index, the demo at the top,
-a `<pre><code>` snippet under it, and a 'see also' section. Real working code. No fake screenshots.
-Behind-a-flag features get a `.note` block at the top.
+Each concept page follows the same shell with crumbs back to the feature index and a behind-a-flag
+`.note` block at the top when applicable. Use the standard experiment section order:
+
+1. **Banner + Lede + About box** — feature/flag banner, `<p class="lede">`, and the automatic
+   **"About this experiment"** box populated from sibling `page.json`.
+2. **Live interactive demo first** — put the real controls and live output immediately above the
+   fold, before prose explanations. Real working code; no fake screenshots.
+3. **Live-source `<details class="show-code">`** — prefer `<details class="show-code">` hydrated by
+   `/public/show-code.js` (wrapping the key demo code in `// --- demo ---` / `// --- /demo ---`
+   markers) over hand-copied `<pre><code>` snippets that drift out of sync with the running code.
+4. **How it works** — concise mechanics of the exact API surface and any composition boundary.
+5. **Live checks (`<details class="live-checks">`)** — out-of-flow fixtures so running checks holds
+   the layout still with zero CLS; every check tests the exact spec contract, never broad baseline
+   APIs.
+6. **Findings** — empirical, dated, Chrome-versioned observations (including visible failures on
+   stress/boundary tests and workarounds tested). State `"not verified"` for anything not actually
+   run in Chrome. Follow with a short `see also` section linking sibling concepts.
+
+### Per-concept `page.json` metadata (optional / additive)
+
+On new or upgraded concept folders, add `v<N>/<feature-slug>/<concept-slug>/page.json` to make the
+experiment machine-discoverable across the site:
+
+```json
+{
+  "title": "Short concept title",
+  "blurb": "One-sentence summary of what the page tests.",
+  "kind": "starter | experiment | stress | composition | migration",
+  "question": "Concrete, falsifiable question this concept answers.",
+  "result": "Empirical observed outcome (or \"not verified\" if not run).",
+  "testedIn": "Chrome 150.0.x (macOS) on 2026-11-24",
+  "api": ["ExactIDL.method", "css-property"],
+  "composesWith": ["Shadow DOM", "View Transitions"],
+  "friction": [
+    {
+      "summary": "Short description of the browser bug or API limit hit.",
+      "kind": "bug | limit | spec-gap | flag-required",
+      "repro": "Minimal steps to reproduce on this page.",
+      "browser": "Chrome 150.0.x",
+      "issueUrl": "https://issues.chromium.org/issues/...",
+      "workaround": "What worked instead, or none."
+    }
+  ]
+}
+```
+
+`page.json` is additive (older concept pages without it keep working) and powers three site
+surfaces automatically: the **"About this experiment"** box injected under `<p class="lede">`, the
+site-wide **`/friction/`** browser-bug and API-limit ledger, and the **`/experiments/`** cross-API
+explorer.
 
 ## Step 8: Commit per feature, push, move on
 
@@ -657,17 +732,18 @@ Before committing, start the local server and verify each new concept with `chro
    (`npm run responsive-check -- <id> --merge`): mobile ≈360×740 DPR3 touch AND desktop ≈1280×800.
    It asserts no horizontal overflow + console/network clean and screenshots both classes; `Read`
    both screenshots and judge legibility, tap targets, focus, and dialogs. Record each touched
-   demo's result in `responsive-support.json` (`ok`, or `unsupported`+evidence when a class is
-   genuinely unavailable — a genuinely-unavailable class is `blocked` with evidence, NEVER a fake
-   pass, and you must NOT auto-download an absent large model to force a pass). The route gate
-   (item 7) now also FAILS if a touched demo is left untested/broken on a supported class, or if any
-   demo is recorded broken on a class it claims to support, and it reports mobile/desktop coverage
-   denominators.
+   demo's result in its per-feature `v<N>/<feature-slug>/_support.json` sidecar (`ok`, or
+   `unsupported`+evidence when a class is genuinely unavailable — a genuinely-unavailable class is
+   `blocked` with evidence, NEVER a fake pass, and you must NOT auto-download an absent large model
+   to force a pass). The route gate (item 7) now also FAILS if a touched demo is left
+   untested/broken on a supported class, or if any demo is recorded broken on a class it claims to
+   support, and it reports mobile/desktop coverage denominators.
 
-9. **modern-web-guidance gate** — you consulted `modern-web-guidance` FIRST for the specific UI/API
-   topics before writing/fixing any HTML/CSS/JS (see the mandate above), and the touched demo's
-   critique records the consultation in `guidanceConsulted`. The gate fails a touched demo whose
-   critique has an empty `guidanceConsulted`.
+9. **modern-web-guidance & writing gate** — you consulted `modern-web-guidance` FIRST for the
+   specific UI/API topics before writing/fixing any HTML/CSS/JS (see the mandate above), and the
+   touched demo's critique records the consultation in `guidanceConsulted`. The gate fails a touched
+   demo whose critique has an empty `guidanceConsulted`. Also run `npm run check:writing` to catch
+   AI-slop filler in demo prose.
 
 If any gate fails, fix the demo and re-run the gate. Do not push a feature without passing all nine.
 The full catalogue is the showcase-auto-research SKILL "Mandatory anti-regression cases" — every
@@ -685,30 +761,31 @@ git push
 
 One feature per commit. If past 90 minutes, stop.
 
-## Step 9: Uber demo concept issue (only if room)
+## Step 9: Retired — per-release Uber demos removed 2026-08-27
 
-For each milestone N where ≥3 feature demos exist and there is no open issue titled
-`[v<N>] Uber demo concept`, open one. Labels `milestone:<N>`, `uber-demo`, `needs-concept`. Body:
-list features, suggest 3 Uber demo concepts combining 3+ features, recommend one.
+Per-release Uber demos were removed on 2026-08-27 (see `migrations.json`) so all effort goes to
+per-feature starters and hypothesis-driven experiments. Do NOT open `[v<N>] Uber demo concept`
+issues or create `v<N>/uber-demo/` folders.
 
 ## Step 10: Summary
 
-Log channels, per-milestone counts, features built (SHA + live URL), stop reason, uber issues.
+Log channels, per-milestone counts, features built (SHA + live URL), any `_server.ts` files needing
+`npm run gen:feature-servers` on merge, and stop reason.
 
 ## Safety
 
 - Never overwrite existing `v<N>/<slug>/`.
-- Never edit outside `v<N>/` and `/tmp`. `server.ts`, `lib/`, `public/` are off-limits. The ONLY
-  top-level exception is the generated catalogue data the parity workflow records:
-  `responsive-support.json` (support record for demos you touched, via
-  `npm run responsive-check -- <id> --merge`) and `reports/responsive/` (screenshots). These are
-  data, not code — you may write them; you still may not touch `server.ts`, `lib/`, `public/`,
-  `package.json`, `scripts/`, `CLAUDE.md`, or the conformance suites.
+- Never edit outside `v<N>/` and `/tmp`. `server.ts`, `routes/`, `lib/`, `public/`, `package.json`,
+  `scripts/`, `CLAUDE.md`, and existing `conformance.json` suites are off-limits. Per-feature
+  support sidecars (`v<N>/<feature-slug>/_support.json`, updated via
+  `npm run responsive-check -- <id> --merge`) and co-located feature handlers
+  (`v<N>/<feature-slug>/_server.ts`) live inside `v<N>/`, so you may write them freely; the ONLY
+  outside-`v<N>/` generated output you may write is `reports/responsive/` (screenshots).
 - Run `npm run check-routes` (read-only) before every push; it must PASS. Never destructively
   replace a published route/slug/identity — add new slugs, patch existing demos in the smallest way.
 - Each run pushes to its own `claude/*` branch and opens one PR; a human merges it. Stack on the
   newest open routine PR (Critical Rule 12) instead of starting again from `main`.
-- Issues only for Uber demos.
+- Do not open GitHub issues for per-feature work or retired Uber demos.
 - Respect the 90-minute deadline.
 - **Slug from listing name. Milestone from listing position. CSS variables only. WCAG AA contrast.
   No fake simulations. All five inviolable.**

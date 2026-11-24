@@ -266,6 +266,11 @@ export const RULES = [
     note: "conformance runner",
   },
   { pattern: "public/chrome-compat.js", steps: ["test-ua-badges"], note: "UA-CH helper" },
+  {
+    pattern: "public/show-code.js",
+    steps: ["test-a11y-focus", "test-hardening"],
+    note: "live show-code disclosure helper",
+  },
   { pattern: "public/fonts/**", steps: ["test-font-loading"], note: "design-system font" },
   // public/styles.css and public/media/** are DELIBERATELY unmatched: they are
   // shared by every demo, so they fall through to the full gate on purpose.
@@ -300,6 +305,11 @@ export const RULES = [
     pattern: "scripts/build-feature-servers.mjs",
     staticOnly: true,
     note: "feature-server registry generator; static check-feature-servers guards it",
+  },
+  {
+    pattern: "scripts/check-writing.mjs",
+    staticOnly: true,
+    note: "writing lint script; unit suite in tests/unit guards it",
   },
   { pattern: "routes/**", steps: SERVER_STEPS, note: "route surface" },
   // ALL of lib/** fails closed to the full gate (coord, 2026-10-09): the shared

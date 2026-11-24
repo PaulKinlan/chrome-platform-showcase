@@ -34,16 +34,27 @@ dprint.json           Formatter config (dprint, the engine deno fmt used, pinned
                       HTML and CSS are excluded so the routine can format inline CSS without it being
                       reformatted.
 tsconfig.json         Type check only (`npm run typecheck`); nothing is emitted.
+routes/
+  dispatch.ts         Top-level request router shared by Node and Cloudflare Workers.
+  pages/              Page renderers: home.ts, release.ts, features.ts, categories.ts, demo-index.ts, layout.ts.
+  telemetry/          Demo telemetry ingestion, storage, triage, and admin UI (handler.ts, store.ts, triage.ts, admin-ui.ts, types.ts).
+  conformance/        Conformance suite index, loader, page renderer, and run-all runner (index.ts, loader.ts, page.ts, run-all.ts).
+  release.ts          Serves v<N>/* demos and resolves co-located feature servers.
+  _feature-servers.generated.ts  Auto-generated static import map of all v<N>/*/_server.ts (`npm run gen:feature-servers`).
 lib/
   chromestatus.ts     Thin wrapper around chromestatus.com/api/v0. Strips the )]}' XSSI prefix. In-memory cache.
-public/styles.css     Shared design system. Editorial / print-inspired. Uses CSS variables — see below.
-v<N>/                 One folder per Chrome milestone. Each contains <feature-slug>/index.html + concept subfolders.
+  critique.ts         Data model for self-critique reports (_questions.json). See .claude/auto-research.md.
+  conformance.ts      Data model for spec-conformance suites (conformance.json). See .claude/auto-research.md.
+  feature-servers/    Shared server helpers for co-located feature handlers (http-helpers.ts, capability-echo.ts, html-stream.ts, responsive-iframe.ts, dbsc.ts, spc-bbk.ts).
+public/
+  styles.css          Shared design system. Editorial / print-inspired. Uses CSS variables — see below.
+  show-code.js        Hydrates `<details class="show-code">` from live `// --- demo ---` markers.
+v<N>/                 One folder per Chrome milestone. Each contains <feature-slug>/index.html, concept subfolders
+                      (index.html, optional page.json, _questions.json), per-feature _support.json, optional _server.ts,
+                      and conformance.json.
 .claude/
   routine-prompt.md   Source of truth for the routine. The live routines just bootstrap-read this file; edit here.
   auto-research.md    How the self-critique loop, conformance probes, and goal-setting work + how to re-run them.
-lib/
-  critique.ts         Data model for self-critique reports (_questions.json). See .claude/auto-research.md.
-  conformance.ts      Data model for spec-conformance suites (conformance.json). See .claude/auto-research.md.
 ```
 
 ## Auto-research, conformance & goal-setting
@@ -150,7 +161,7 @@ telemetry. Its job is the depth work the daily build routine is too busy to do:
 - `GET /telemetry/demo/events?limit=N` — raw newest-first events.
 - `GET /telemetry/demo/triage?scan=N` — **flattens batched events**, ranks failing demos
   worst-first, and clusters errors by normalised signature across visitors. This is the query the
-  weekly routine consumes. (`routes/demo-telemetry.ts`.)
+  weekly routine consumes (`routes/telemetry/triage.ts`, served via `routes/telemetry/handler.ts`).
 - `GET /telemetry/demo/admin` — HTML dashboard, now including the top-failing-demos triage panel.
 - `npm run telemetry-digest` (needs `SHOWCASE_PASSWORD`; `--base`, `--input`, `--stdout`) turns the
   triage window into `reports/telemetry/latest.md`: top failing demos with their Chrome-version
@@ -270,7 +281,8 @@ targeted compatibility fixes — never a destructive rewrite, never a new slug t
   fixes, wave by wave — the coverage number is the backlog burn-down, and it never regresses.
 
 **Run the responsive matrix before every push** with `npm run responsive-check` and record each
-touched demo's result in `responsive-support.json` (`ok` / `unsupported`+evidence per class).
+touched demo's result in its per-feature `v<N>/<feature-slug>/_support.json` sidecar (`ok` /
+`unsupported`+evidence per class, updated via `npm run responsive-check -- <id> --merge`).
 
 ## modern-web-guidance is mandatory for all frontend work
 
@@ -312,8 +324,9 @@ APIs.
 > one. The two invariants ship as NEW immutable cross-project conformance suites under
 > `conformance/cross-project/` (`mobile-desktop-parity.json`, `modern-web-guidance.json`) — no
 > existing `v<N>/**/conformance.json` is edited, weakened, or deleted; only new suites are ADDED.
-> Per-demo support lives in the git-tracked `responsive-support.json` sidecar (keyed by
-> `v<N>/<feature-slug>`, defaulting existing demos to `untested`), merged into the route manifest.
+> Per-demo support lives in git-tracked per-feature `v<N>/<feature-slug>/_support.json` sidecars
+> (defaulting existing demos to `untested`), managed via `npm run responsive-support` and
+> `npm run responsive-check -- <id> --merge`, and merged into the route manifest.
 > Validate with `npm run responsive-check` (mobile ≈360×740 DPR3 touch + desktop ≈1280×800; asserts
 > no horizontal overflow + console/network clean and screenshots both classes; a
 > genuinely-unavailable class is `blocked` with evidence, NEVER a fake pass) and
@@ -427,12 +440,15 @@ A "concept" is supposed to be hands-on. The shape depends on what the feature ac
   flip between values, is the minimum.
 - **DOM / JS features** → a "try it" button that actually invokes the API in-page and shows the
   return value or side effect. Feature-detect and fall back gracefully if the API is missing.
-- **HTTP / header / MIME / cache / redirect features** → server-side. Add a route under the feature
-  folder (e.g. `v<N>/<slug>/echo`) that the server responds to with the relevant header, redirect,
-  or content-type behaviour. The concept page then fetches from that route and surfaces the
-  negotiated outcome (headers, status, response body) in the page. `server.ts` is the place to wire
-  this in — the routine is normally fenced out of top-level files, so if a routine run ends up
-  needing a server route, queue it as a manual task.
+- **HTTP / header / MIME / cache / redirect features** → co-locate a feature server handler at
+  `v<N>/<feature-slug>/_server.ts` exporting `handleFeatureRequest` (reusing shared helpers in
+  `lib/feature-servers/`). The concept page fetches from that same-origin route (e.g.
+  `v<N>/<slug>/echo`) and surfaces the negotiated headers, status, and response body in-page. Run
+  `npm run gen:feature-servers` after adding or removing any `_server.ts` so
+  `routes/_feature-servers.generated.ts` stays in sync for Cloudflare Workers bundling (checked by
+  `npm run check-feature-servers`; locally Node also resolves `_server.ts` dynamically). Because
+  the routine is fenced out of `routes/`, a routine run may author `v<N>/<slug>/_server.ts` and
+  flag the PR for a `npm run gen:feature-servers` run on merge.
 - **Origin trial / behind-a-flag features** → ship the interactive demo anyway, with a clearly
   visible "to actually run this, enable chrome://flags/#X or join the origin trial" banner up top.
   Visitors will read it. Don't skip the demo because the API might not resolve — the demo should
@@ -490,14 +506,47 @@ hits a distinct angle (different API surface, different real-world use case, or 
 mode / edge case). Bug history: 2026-05-30, the rebuilt v130-v144 backfill came out with exactly 1
 concept per feature; when I followed up I capped at 2-3. Paul flagged both. Don't cap. Don't skip.
 
-**A complete feature needs a deliberate use-case portfolio, not merely a concept count.** For every
-feature, explicitly evaluate: (1) basic/canonical usage, (2) configuration or inspection tooling,
-(3) a practical product use case, (4) edge/failure/migration behavior, and (5) a novel or advanced
-composition. Build every applicable angle on its own additive stable route; record a source-backed
-reason for any non-applicable angle. Two near-duplicate playgrounds do not satisfy two angles. A
-syntax probe plus a simulation is not a complete portfolio. Inventory all existing routes and their
-angles before editing, and require the result to be a strict superset — older basic demos remain
-when more ambitious demos arrive.
+**A complete feature follows the Two-Track + Boundary & Composition Matrix model, not merely a
+concept count.** Preserving the durable-demo contract (additive evolution — never delete, rename, or
+repurpose published routes or concepts), structure every feature across two tracks:
+
+- **Track A — Canonical Starter (`start/` or basic concept):** The cleanest 40–60 line "hello world"
+  of the exact shipped surface, copyable enable flags / origin-trial steps, common errors & fixes,
+  zero bloat.
+- **Track B — Hypothesis-Driven Experiments (no ceiling; every distinct angle):** Cover
+  configuration/inspection tooling, practical product use cases, stress/boundary/migration behavior,
+  and cross-API compositions. Every experiment asks a **concrete, falsifiable question** about the
+  API's limits, interactions, or edge cases. **Push the limits of the API:** build stress/boundary
+  tests even when expected to fail, let them fail visibly, record empirical findings (Chrome version
+  + date), and try alternatives one after another — never invent results (state `"not verified"` if
+  not run). Include at least one genuinely surprising **Cross-API Composition** combining the
+  feature with another modern platform primitive (e.g., Shadow DOM, `OffscreenCanvas`/Worker,
+  WebGPU/WebGL, View Transitions, Popover/Anchor Positioning, Streams, Compression, Web Audio, CSS
+  `shape()`/`@scope`) — transforming real page content rather than an isolated synthetic box.
+
+Build every applicable angle on its own additive stable route; record a source-backed reason for any
+non-applicable angle. Two near-duplicate playgrounds do not satisfy two angles, and a syntax probe
+plus a simulation is not a complete portfolio. Inventory all existing routes and their angles before
+editing, and require the result to be a strict superset — older basic demos remain when more
+ambitious experiments arrive.
+
+**Experiment page structure, `page.json`, live-source code, and writing discipline:**
+
+- **Optional/additive `page.json` metadata:** New or upgraded concepts may include a sibling
+  `page.json` (`title`, `blurb`, `kind`: `starter` | `experiment` | `stress` | `composition` |
+  `migration`, `question`, `result`, `testedIn`, `api`, `composesWith`, and `friction`: `summary`,
+  `kind`, `repro`, `browser`, `issueUrl`, `workaround`). It powers the automatic **"About this
+  experiment"** box under `<p class="lede">`, the site-wide **`/friction/`** browser-bug/API-limit
+  ledger, and the **`/experiments/`** cross-API explorer.
+- **Live-source `<details class="show-code">` and out-of-flow Live Checks:** Prefer
+  `<details class="show-code">` hydrated by `/public/show-code.js` (wrapping the key demo code in
+  `// --- demo ---` / `// --- /demo ---` markers) over hand-copied `<pre><code>` blocks that drift.
+  Follow the standard experiment section order: Banner + Lede + About box → **Live interactive demo
+  first** → `<details class="show-code">` → **How it works** → **Live checks**
+  (`<details class="live-checks">`, out-of-flow fixtures so the page holds still with zero CLS) →
+  **Findings** (empirical, dated, browser-versioned).
+- **Direct engineering writing:** No AI-slop filler ("delve", "unlock the power", "seamless",
+  "game-changer"); checked by `npm run check:writing`.
 
 ### 7c. Conformance checks are visible learning material
 
@@ -510,9 +559,13 @@ full `/conformance/` route and unit-test its assertion kinds.
 
 ### 8. Routine never edits top-level files
 
-The routine prompt is constrained to writing inside `v<N>/`. `server.ts`, `lib/`, `public/`,
-`package.json`, `CLAUDE.md` are all off-limits to the routine. If you ever see commits touching
-those from the routine, something has slipped.
+The routine prompt is constrained to writing inside `v<N>/`. `server.ts`, `routes/`, `lib/`,
+`public/`, `package.json`, `scripts/`, and `CLAUDE.md` are all off-limits to the routine.
+Per-feature support sidecars (`v<N>/<feature-slug>/_support.json`) and co-located feature handlers
+(`v<N>/<feature-slug>/_server.ts`) live inside `v<N>/`, so the routine can write them directly; when
+a routine adds `_server.ts`, a human or merge pass runs `npm run gen:feature-servers` to update
+`routes/_feature-servers.generated.ts`. If you ever see routine commits touching top-level code
+files, something has slipped.
 
 ### 9. Research the feature before building — depth is the whole point
 
@@ -569,6 +622,9 @@ npm run check:affected              # fast tier for iterative work: the static s
                                       # suites the changed files select (fail-closed path map)
 npm run check-routes                # route + parity regression gate — run before EVERY push
                                       # (already inside `npm run check`)
+npm run check-feature-servers       # verify routes/_feature-servers.generated.ts matches disk
+                                      # (`npm run gen:feature-servers` to regenerate)
+npm run check:writing               # check demo prose for AI-slop filler
 npm run check-demo-coverage         # no listed feature without a demo — run before EVERY push
 npm run responsive-support -- report   # mobile/desktop parity coverage denominators
                                       # (already inside `npm run check`)
@@ -653,7 +709,7 @@ chromestatus API docs.
 
 - `v148` shows as "Stable (live)" even though chromestatus says stable is 149. That's because
   chromestatus's `stable.mstone` is the _next_ cut. Most users are on stable-1 until the cut
-  actually lands. See `server.ts` `renderIndex()`.
+  actually lands. See `routes/pages/home.ts` `renderIndex()`.
 - The /features page only lists features where a demo has been built. Pending ones still appear on
   the per-release page. This is intentional — /features is "what's shipped to the showcase", not
   "what could be shipped".

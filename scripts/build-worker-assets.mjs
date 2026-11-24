@@ -8,9 +8,10 @@
 // dist/worker-assets/_worker/fs-manifest.json, written here.
 //
 // What is staged mirrors what the routes read from disk:
-//   v<N>/**            demo pages, concept folders (conformance.json and
-//                      _questions.json are bundled under _worker/ instead of
-//                      staged individually, while remaining in fs-manifest.json)
+//   v<N>/**            demo pages, concept folders (conformance.json,
+//                      _questions.json, and page.json are bundled under
+//                      _worker/ instead of staged individually, while
+//                      remaining in fs-manifest.json)
 //   public/**          shared design system + client scripts
 //   demo-index.json    feature id -> demo folder
 //   gendn-links.json   reference-doc cross links
@@ -48,7 +49,7 @@ const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const ROOT_FILES = ["demo-index.json", "gendn-links.json"];
 const SKIP_NAMES = new Set(["_server.ts", "_support.json", ".DS_Store"]);
 // Must match BUNDLED_NAMES in worker/fs.ts.
-const BUNDLED_NAMES = ["_questions.json", "conformance.json"];
+const BUNDLED_NAMES = ["_questions.json", "conformance.json", "page.json"];
 const BUNDLED_SET = new Set(BUNDLED_NAMES);
 
 function walk(dir, out) {
@@ -82,11 +83,12 @@ for (const file of files) {
   else individualFiles.push(file);
 }
 
-// The /critiques and /conformance listings read every _questions.json and
-// conformance.json (about 3,400 files). One ASSETS fetch per file would blow
-// through the Worker's subrequest limit, and staging them individually wastes
-// static-assets file slots, so each kind is bundled into a single JSON object
-// { path: text } that the Worker loads once per isolate.
+// The /critiques, /conformance, /experiments, and /friction listings read
+// every _questions.json, conformance.json, and page.json (thousands of files).
+// One ASSETS fetch per file would blow through the Worker's subrequest limit,
+// and staging them individually wastes static-assets file slots, so each kind
+// is bundled into a single JSON object { path: text } that the Worker loads
+// once per isolate.
 const bundles = new Map();
 for (const name of BUNDLED_NAMES) {
   const bundle = {};

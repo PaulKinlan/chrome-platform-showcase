@@ -93,7 +93,7 @@ export async function renderIndex(channels: Channels): Promise<string> {
     <section>
       <h2>releases</h2>
       <ol class="release-list">${cards}</ol>
-      <p class="note">Or jump straight to <a href="/features">the full feature catalogue</a>, <a href="/categories/">browse by category</a> (identity, on-device AI, CSS layout, WebGPU, privacy…), the <a href="/critiques/">self-critique</a> (a reviewer agent's open-questions list per concept), or run the <a href="/conformance/">conformance probes</a> in your browser (live pass/fail against the spec). Release cards show stable rollout ranges from ChromeStatus and Chromium Dash schedules when available.</p>
+      <p class="note">Or jump straight to <a href="/features">the full feature catalogue</a>, <a href="/categories/">browse by category</a> (identity, on-device AI, CSS layout, WebGPU, privacy…), <a href="/experiments/">explore experiments</a> (starters, stress tests, and cross-API compositions), the <a href="/friction/">friction ledger</a> (measured browser bugs &amp; API limits), the <a href="/critiques/">self-critique</a>, or run the <a href="/conformance/">conformance probes</a> in your browser. Release cards show stable rollout ranges from ChromeStatus and Chromium Dash schedules when available.</p>
     </section>
 
     <section class="how">
