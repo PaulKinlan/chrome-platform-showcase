@@ -314,6 +314,33 @@ Note Unix time at start. Soft 90-minute budget. The cron fires once a day; the n
 where this one stops. Better to leave features behind (deeply-researched, correct demos) than to
 corrupt a half-written folder or ship shallow ones — depth beats throughput.
 
+## Step 1b: Read the telemetry digest (real-visitor failures come first)
+
+Before choosing work, read what real visitors hit:
+
+```bash
+deno task telemetry-digest --stdout > /tmp/telemetry-digest.md || echo "digest unavailable"
+```
+
+It needs `SHOWCASE_PASSWORD` (or `showcase_password`). If the variable is missing, the request is
+refused or throttled (a 429 means wait, never retry in a loop), or the site is unreachable, note
+"telemetry digest unavailable: <reason>" in the Step 10 summary and continue. Never block the run on
+it. Use `--stdout` so nothing is written into the repo; do not commit `reports/telemetry/`.
+
+How to use it:
+
+1. **Top failing demos** go to the front of the build queue as **incomplete** (Step 3), ahead of new
+   features. Reproduce each error in headless Chrome before editing, fix it with the smallest
+   in-place patch (Critical Rule on durable demos), and re-verify. Skip an entry only when its
+   errors are all on Chrome versions older than the feature ships in, and say so in the summary.
+2. **Recurring patterns** (one signature on more than one demo) are build rules for this run: design
+   every new or touched demo so it cannot produce that error, and mention the rule you applied in
+   the commit message.
+3. **API support by Chrome version** tells you whether "unsupported" is browser age, a flag, or a
+   real bug. Use it to word banners and fallbacks accurately (Critical Rules on flags and probes).
+4. **Deprecation and intervention reports** name APIs demos should stop using. Replace them when you
+   touch the demo.
+
 ## Step 2: Get current channels
 
 ```bash
@@ -416,6 +443,10 @@ When adding or changing a demo:
   or `assert.fail` events as blockers;
 - if the demo needs permission/hardware/user activation, assert the real success path separately
   from the unsupported or denied fallback path;
+- report the capability check for the exact API the demo shows with
+  `window.showcaseTelemetry?.support("<exact API>", state, details)`, where `state` is one of
+  `supported`, `flag`, `unsupported`, `denied` or `error`. Call it once, from the real probe, so the
+  telemetry digest can separate "missing in this Chrome" from a broken demo;
 - keep telemetry payloads privacy-safe: no typed field values, tokens, exact user content, or large
   blobs.
 
