@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fallback-timer race — Distinct TypeError for cancelled race-network-and-fetch-handler fetch() — Chrome 159</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Distinct TypeError message for cancelled race-network-and-fetch-handler fetch()</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · service worker · basic usage</p>
+    <h1>Fallback-timer race</h1>
+    <p class="lede">The exact scenario from the ChromeStatus entry. A static route sends the request down <code>"race-network-and-fetch-handler"</code>; the fetch handler calls <code>fetch(event.request)</code> and races it against an offline-fallback timer inside <code>event.respondWith()</code>. When the timer wins before the server has sent headers, Chrome cancels the raced request &mdash; and the worker&rsquo;s <code>fetch()</code> rejects. Which <code>TypeError</code> message it rejects with is what Chrome 159 changed.</p>
+  </header>
+
+  <div class="note" id="status" role="status">Registering this feature&rsquo;s service worker&hellip;</div>
+
+  <div class="stage">
+    <h2>Run one raced request</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="delay">Server holds back its headers for</label>
+        <input type="range" id="delay" min="0" max="1200" step="50" value="800" aria-describedby="delay-hint">
+        <output for="delay" id="delay-out">800 ms</output>
+        <span class="hint" id="delay-hint">The real route waits this long before sending any response headers.</span>
+      </div>
+      <div class="field">
+        <label for="fb">Offline-fallback timer fires after</label>
+        <input type="range" id="fb" min="25" max="1500" step="25" value="150" aria-describedby="fb-hint">
+        <output for="fb" id="fb-out">150 ms</output>
+        <span class="hint" id="fb-hint">Timer &lt; header delay → the fallback answers first and the raced request is cancelled.</span>
+      </div>
+    </div>
+    <div class="actions">
+      <button type="button" id="run">Run the race</button>
+      <button type="button" id="preset-cancel" class="secondary">Preset: timer wins (800 / 150)</button>
+      <button type="button" id="preset-network" class="secondary">Preset: network wins (0 / 600)</button>
+    </div>
+
+    <div class="timeline" aria-hidden="true" id="timeline">
+      <div class="lane"><span>server headers</span><span class="track"><span class="bar" id="bar-delay" style="inline-size:0"></span></span></div>
+      <div class="lane"><span>fallback timer</span><span class="track"><span class="bar black" id="bar-fb" style="inline-size:0"></span></span></div>
+      <div class="lane"><span>worker fetch() settled</span><span class="track"><span class="bar rose" id="bar-settle" style="inline-size:0"></span></span></div>
+    </div>
+
+    <div class="readout" id="readout" role="status" aria-live="polite" aria-atomic="true">Press &ldquo;Run the race&rdquo; to make a real request.</div>
+  </div>
+
+  <section>
+    <h2>what the worker runs</h2>
+    <pre tabindex="0"><code>// ../sw.js, install: route the slow URL down the race source
+await event.addRoutes({
+  condition: { urlPattern: { pathname: "/v151/cpu-performance-api/capability-echo" } },
+  source: "race-network-and-fetch-handler",
+});
+
+// fetch: race the deduplicated network fetch against a fallback timer
+const network = fetch(event.request);
+event.respondWith(Promise.race([network, timer(fb).then(offlineFallback)]));
+network.catch((error) =&gt; report(error.name, error.message));   // verbatim, to this page</code></pre>
+    <p>The page also reads Resource Timing for the same URL: <code>workerMatchedRouterSource</code> proves the request really matched the race rule, and <code>workerFinalRouterSource</code> says whether the network (<code>"network"</code>) or your handler (<code>"fetch-event"</code>) supplied the response.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../fetch-shape-inspector/">Fetch-shape inspector</a></li>
+      <li><a href="../telemetry-noise-filter/">Telemetry noise filter</a></li>
+      <li><a href="../app-shell-revalidation/">App-shell revalidation</a></li>
+      <li><a href="../error-taxonomy/">Error taxonomy</a></li>
+      <li><a href="https://chromestatus.com/feature/5124748525830144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://w3c.github.io/ServiceWorker/#dom-routersourceenum-race-network-and-fetch-handler" target="_blank" rel="noopener">Spec &mdash; race-network-and-fetch-handler</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script type="module">
+  import { run, RACE_CANCELLED_MESSAGE } from "../harness.js";
+  import { showStatus, engineReading } from "../ui.js";
+
+  const $ = (id) => document.getElementById(id);
+  const delay = $("delay"), fb = $("fb"), readout = $("readout"), runBtn = $("run");
+
+  function sync() {
+    $("delay-out").textContent = `${delay.value} ms`;
+    $("fb-out").textContent = `${fb.value} ms`;
+    delay.setAttribute("aria-valuetext", `${delay.value} milliseconds`);
+    fb.setAttribute("aria-valuetext", `${fb.value} milliseconds`);
+  }
+  delay.addEventListener("input", sync);
+  fb.addEventListener("input", sync);
+  sync();
+
+  function setBar(id, ms, scale) {
+    $(id).style.inlineSize = `${Math.min(100, (ms / scale) * 100)}%`;
+  }
+
+  const status = await showStatus($("status"));
+  const usable = Boolean(status?.ok);
+
+  async function go() {
+    runBtn.disabled = true;
+    readout.textContent = "Request in flight…";
+    try {
+      const r = await run("fallback", { delay: Number(delay.value), fb: Number(fb.value) });
+      const f = r.worker.fetches?.[0];
+      const scale = Math.max(r.delay, r.fb, f?.ms ?? 0, 100);
+      setBar("bar-delay", r.delay, scale);
+      setBar("bar-fb", r.fb, scale);
+      setBar("bar-settle", f?.ms ?? 0, scale);
+
+      const lines = [];
+      lines.push(`request   ${r.url}`);
+      lines.push(`router    matched=${r.timing?.matched ?? "(not exposed)"}  final=${r.timing?.final ?? "(not exposed)"}`);
+      lines.push(`responder ${r.worker.responder ?? "?"}  → page got ${r.page.ok ? `HTTP ${r.page.status} from ${r.page.servedBy}` : `${r.page.name}: ${r.page.message}`} after ${r.page.ms} ms`);
+      if (!f) {
+        lines.push(`worker    no report (${r.worker.error ?? "timed out"})`);
+      } else if (f.settled === "fulfilled") {
+        lines.push(`worker    fetch(event.request) FULFILLED · HTTP ${f.status} after ${f.ms} ms`);
+        lines.push("");
+        lines.push(r.fb < r.delay
+          ? "The timer was shorter than the header delay, yet the fetch fulfilled — the raced request was not cancelled before headers."
+          : "The network sent headers before the timer fired, so nothing was cancelled. Shorten the timer below the header delay to see the cancellation.");
+      } else {
+        lines.push(`worker    fetch(event.request) REJECTED after ${f.ms} ms`);
+        lines.push(`          error.name    = ${f.name}`);
+        lines.push(`          error.message = ${JSON.stringify(f.message)}`);
+        lines.push(`          classified as ${f.classification}`);
+        lines.push("");
+        lines.push(engineReading(f));
+      }
+      if (!usable) lines.push("", "Static routing was not available, so this request was NOT raced; any outcome above is the plain fetch-handler path.");
+      readout.textContent = lines.join("\n");
+
+      const cancelled = f?.settled === "rejected";
+      window.showcaseTelemetry?.assert(
+        "race-fallback-run-reported",
+        Boolean(f),
+        { settled: f?.settled, message: f?.message, matched: r.timing?.matched, delay: r.delay, fb: r.fb },
+      );
+      if (cancelled && usable) {
+        window.showcaseTelemetry?.assert(
+          "race-cancellation-message-observed",
+          f.name === "TypeError",
+          { distinct: f.message === RACE_CANCELLED_MESSAGE, message: f.message },
+        );
+      }
+    } catch (error) {
+      readout.textContent = `The run could not complete: ${error.message}`;
+      window.showcaseTelemetry?.assert("race-fallback-run-reported", false, { error: error.message });
+    } finally {
+      runBtn.disabled = false;
+    }
+  }
+
+  runBtn.addEventListener("click", go);
+  $("preset-cancel").addEventListener("click", () => { delay.value = 800; fb.value = 150; sync(); go(); });
+  $("preset-network").addEventListener("click", () => { delay.value = 0; fb.value = 600; sync(); go(); });
+</script>
+</body>
+</html>

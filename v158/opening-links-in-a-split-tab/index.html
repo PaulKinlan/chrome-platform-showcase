@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Opening links in a split tab — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone); border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3); font-size: 0.9rem; margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .flag-banner {
+      border: 2px solid var(--border-black); background: var(--bg-paper);
+      padding: var(--space-4); margin: var(--space-4) 0; box-shadow: var(--thin-shadow);
+    }
+    .flag-banner ol { margin: var(--space-2) 0 0; padding-inline-start: 1.25rem; }
+    .flag-banner code { overflow-wrap: anywhere; }
+    table.surface { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+    table.surface th, table.surface td { border: 1px solid var(--border-black); padding: var(--space-2); text-align: start; vertical-align: top; }
+    .table-wrap { overflow-x: auto; }
+    .v-yes { color: var(--accent-emerald-dark); font-weight: 700; }
+    .v-no { color: var(--accent-rose); font-weight: 700; }
+    button:disabled { background: var(--bg-stone); color: var(--text-charcoal); border-style: dashed; box-shadow: none; cursor: not-allowed; transform: none; }
+  </style>
+</head>
+<body>
+<!--
+RESEARCH RECORD (weekly-hardening-builder, 2026-11-22)
+Feature id: 5136319775899648 · listing name "Opening links in a split tab" (v158; also re-listed in
+  v160 — built ONLY here, one folder per feature).
+Owner: masonf@chromium.org. Tracking bug: https://crbug.com/570412924. Status on chromestatus:
+  "Proposed", rollout plan "Will ship enabled for all users", finch_name WindowOpenSplitTab.
+Explainer: https://github.com/mfreed7/split-tabs (re-works MSEdgeExplainers SplitTab
+  "Allow target navigation at split tab", which proposed target="_split" — rejected alternative).
+WHATWG issue: https://github.com/whatwg/html/issues/13153 · spec PR: https://github.com/whatwg/html/pull/13245
+TAG review: https://github.com/w3ctag/design-reviews/issues/1309 (pending).
+Positions: Mozilla #1481 / WebKit #741 — no signal.
+
+EXACT WEB SURFACE (explainer + Blink IDL, read via gitiles 2026-11-22):
+  1. window.open(url, target, features) — three NEW window features:
+     split (boolean) · splitposition = left|right|top|bottom · splitsize = integer percentage of the
+     NEW content. split is mutually exclusive with popup; when both are given split wins, and if the
+     split cannot be made the fallback is the popup. Otherwise the fallback is an ordinary new TAB.
+     splitposition / splitsize alone do NOT request a split. Chromium clamps splitsize to 10–90.
+  2. windowfeatures content attribute on <a>, <area>, <form>, reflected as IDL windowFeatures
+     (html_hyperlink_element_utils.idl and html_form_element.idl:
+       [RuntimeEnabled=WindowOpenSplitTab, CEReactions, Reflect] attribute DOMString windowFeatures;)
+     Allowed in the attribute: split, splitposition, splitsize, popup, width/height, left/top.
+     NOT allowed: noopener/noreferrer (use rel), legacy toolbar/menubar/... (ignored). With
+     popup or split and no target, target="_blank" is implied (beats <base target>). An existing
+     named target still wins (features ignored). rel still governs the opener (target=_blank
+     anchors imply noopener; rel="opener" restores it).
+  3. Behaviour: user-activation gated like any window.open(); opener PRESERVED (not forced
+     noopener) — handle returned, postMessage works, handle.close() collapses the split;
+     already-split window → falls back to a new tab; named targets reuse the existing window.
+  4. Deliberately NOT exposed: whether a split was created, its size, or navigator.splitTabSupported
+     (dropped for fingerprinting). Feature detection = 'windowFeatures' in HTMLAnchorElement.prototype.
+LEGACY TRAP: in engines without the feature, "split" is an unknown feature in a NON-EMPTY string, so
+  "checking if a popup window is requested" returns TRUE → a POPUP window. "popup=0,split" opts out.
+OBSERVABLE DISCRIMINATOR (from WPT open-features-split.tentative.html + declarative-windowfeatures
+  .tentative.html): the opened document's BarProp (window.locationbar.visible etc.) is false for a
+  popup and true for a tab/split. So window.open(url,'_blank','split') → BarProp true on an
+  implementing engine, false on a legacy one. Ground truth in this container (Chrome for Testing
+  153.0.8010.12 headless, 2026-11-22): 'split' → false (popup), 'popup=0,split' → true,
+  'split,popup' → false, 'split,noopener' → null handle, 'width=400' → false. windowFeatures is
+  absent from HTMLAnchorElement/HTMLAreaElement/HTMLFormElement even with
+  --enable-experimental-web-platform-features (153 predates the feature).
+FLAG: runtime_enabled_features.json5 → name "WindowOpenSplitTab", status "experimental",
+  origin_trial_feature_name "WindowOpenSplitTab" (third-party allowed), base_feature_status
+  "enabled" (browser-side kill switch), copied_from_base_feature_if "overridden".
+  No dedicated chrome://flags entry → chrome://flags/#enable-experimental-web-platform-features,
+  or --enable-blink-features=WindowOpenSplitTab, or --enable-features=WindowOpenSplitTab.
+Use-case portfolio (explainer "Use Cases" + Behavior sections):
+  1. basic/canonical → feature-string-builder (compose split/splitposition/splitsize, call
+     window.open for real, read back what the opened pane can observe)
+  2. inspection/migration → barprop-fallback-matrix (the WPT matrix of feature strings vs the
+     BarProp each opens with — exposes the legacy "split ⇒ popup" trap and the popup=0 guard)
+  3. declarative → declarative-windowfeatures (windowfeatures on a/area/form: reflection,
+     implied _blank, rel governs opener, named target wins)
+  4. practical product → serp-side-by-side (search results as real anchors with windowfeatures,
+     progressive enhancement, opened article reports back to the results list)
+  5. advanced composition/edge → live-preview-handle (editor + preview pane in a split: handle
+     kept, postMessage source updates, named-target reuse, noopener → null, handle.close())
+  Not built as separate pages: agent/assistant pane (same opener+postMessage mechanics as 5 —
+  cross-origin inspection is explicitly out of scope), video/news/OA/docs sites (same anchor
+  mechanics as 4), Window Management placement (non-goal per explainer).
+-->
+<main>
+  <p class="crumbs"><a href="/v158/">&larr; Chrome 158</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v158 · dom · navigation</p>
+    <h1>Opening links in a split tab</h1>
+    <p class="lede">Browsers can tile two tabs side-by-side in one window, but a page had no way to <em>ask</em> for that: <code>_blank</code> gives a new full-size tab and the <code>popup</code> feature gives a detached window. This feature adds a third request &mdash; <code>window.open(url, "_blank", "split,splitposition=right,splitsize=40")</code> &mdash; plus a declarative <code>windowfeatures</code> attribute on <code>&lt;a&gt;</code>, <code>&lt;area&gt;</code> and <code>&lt;form&gt;</code>. It is only a <strong>request</strong>: the browser may ignore it (narrow window, mobile, already split) and fall back to a normal tab, and the page is never told which happened.</p>
+  </header>
+
+  <div class="flag-banner" role="note" aria-labelledby="flag-h">
+    <h2 id="flag-h" style="margin-top:0">To actually get a split tab</h2>
+    <p>Chromium ships this behind the Blink runtime feature <code>WindowOpenSplitTab</code> (status <em>experimental</em>, also an origin trial named <code>WindowOpenSplitTab</code>). There is no dedicated flag page entry. Enable it with, in order of preference:</p>
+    <ol>
+      <li><code>chrome://flags/#enable-experimental-web-platform-features</code> &rarr; Enabled, relaunch.</li>
+      <li>Launch with <code>--enable-blink-features=WindowOpenSplitTab</code>.</li>
+      <li>Or <code>--enable-features=WindowOpenSplitTab</code> (overriding the base feature drives both renderer and browser side).</li>
+      <li>Or <code>--enable-experimental-web-platform-features</code>.</li>
+    </ol>
+    <p>You also need a desktop browser window wide enough to split, a click (user activation &mdash; popup blockers apply), and a tab that is not already in a split. On Android there is no split surface: the request is still parsed and falls back to a new tab.</p>
+    <p id="support-line" role="status">Checking this browser&hellip;</p>
+  </div>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./feature-string-builder/">Feature string builder</a></h3>
+      <p>The canonical call. Compose <code>split</code>, <code>splitposition</code>, <code>splitsize</code>, the <code>popup=0</code> guard and <code>noopener</code>, watch the exact string, then press the button to make the real <code>window.open()</code> call and read back what the opened pane can observe.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./barprop-fallback-matrix/">BarProp fallback matrix</a></h3>
+      <p>The inspection tool. Each row opens one feature string and records the opened page&rsquo;s <code>locationbar.visible</code> &mdash; the only signal that separates &ldquo;popup&rdquo; from &ldquo;tab or split&rdquo;. It exposes the legacy trap (<code>"split"</code> opens a <em>popup</em> in engines that do not know it) and why <code>"popup=0,split"</code> is the safe migration string.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./declarative-windowfeatures/">Declarative windowfeatures</a></h3>
+      <p>No JavaScript: <code>&lt;a windowfeatures="split"&gt;</code>, <code>&lt;area&gt;</code> and <code>&lt;form&gt;</code>. Live attribute/IDL reflection, the implied <code>target="_blank"</code>, <code>rel</code> still deciding the opener, and an existing named frame winning over the features.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./serp-side-by-side/">Search results side-by-side</a></h3>
+      <p>The explainer&rsquo;s headline use case: a results page whose links are real anchors with <code>windowfeatures="split,splitsize=50"</code> &mdash; middle-click and the context menu still work &mdash; and the opened article tells the results list which one you are reading.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./live-preview-handle/">Live preview through the handle</a></h3>
+      <p>Advanced composition: an editor opens a named preview pane with <code>"popup=0,split,splitposition=right,splitsize=40"</code>, keeps the returned handle, streams edits with <code>postMessage</code>, re-uses the pane by name, contrasts <code>split,noopener</code> (handle is <code>null</code>) and closes the split with <code>handle.close()</code>.</p>
+    </li>
+  </ol></section>
+
+  <section>
+    <h2>why it exists</h2>
+    <p>Split tabs ship in Chrome, Edge, Firefox, Arc, Whale and Vivaldi, and the common reason to use one is &ldquo;open this link next to what I am reading&rdquo;: a search result next to the results page, a product next to the listing, a reference next to a tutorial, a live preview next to an editor, an assistant next to the page it is driving. The original Microsoft proposal used a new <code>target="_split"</code>; the reworked explainer moves the request into the extensible <code>windowFeatures</code> string so it can carry position and size hints, keeps the opener relationship intact (so previews and assistants can coordinate), and avoids colliding with frames already named <code>_split</code>.</p>
+    <p>Two privacy decisions shape every demo here: there is no <code>navigator.splitTabSupported</code>, and no event saying whether the split happened. Pages can detect <em>API</em> support (<code>'windowFeatures' in HTMLAnchorElement.prototype</code>) but never the <em>outcome</em>.</p>
+  </section>
+
+  <section>
+    <h2>the API</h2>
+    <div class="table-wrap">
+      <table class="surface">
+        <caption>New window features and the declarative attribute</caption>
+        <thead><tr><th scope="col">surface</th><th scope="col">values</th><th scope="col">meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>split</code></td><td>boolean</td><td>Request a split tab beside the opener. Wins over <code>popup</code>; falls back to a tab (or to the popup if both were given).</td></tr>
+          <tr><td><code>splitposition</code></td><td><code>left</code> <code>right</code> <code>top</code> <code>bottom</code></td><td>Side for the new content. Ignored without <code>split</code>.</td></tr>
+          <tr><td><code>splitsize</code></td><td>integer %</td><td>Share for the new content; invalid values ignored, Chromium clamps to 10&ndash;90.</td></tr>
+          <tr><td><code>windowfeatures</code> / <code>windowFeatures</code></td><td>feature string</td><td>Content attribute + reflected IDL on <code>a</code>, <code>area</code>, <code>form</code>.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <pre tabindex="0"><code>// Split where supported, ordinary tab everywhere else:
+const pane = window.open("/article", "_blank", "popup=0,split,splitsize=40");
+pane?.postMessage({ hello: true }, location.origin);  // opener is preserved
+
+// Declarative (rel decides the opener; target="_blank" is implied):
+&lt;a href="/article" windowfeatures="split,splitposition=right"&gt;Read beside&lt;/a&gt;
+
+// API detection only — the outcome is never exposed:
+const hasApi = "windowFeatures" in HTMLAnchorElement.prototype;</code></pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5136319775899648" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/mfreed7/split-tabs" target="_blank" rel="noopener">Explainer: Opening links in a split tab</a> (<a href="https://mfreed7.github.io/split-tabs/test/demo.html" target="_blank" rel="noopener">author&rsquo;s demo</a>)</li>
+      <li><a href="https://github.com/whatwg/html/issues/13153" target="_blank" rel="noopener">WHATWG HTML issue #13153</a> &middot; <a href="https://github.com/whatwg/html/pull/13245" target="_blank" rel="noopener">spec PR #13245</a></li>
+      <li><a href="https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/SplitTab/NavigationInSplitTab/explainer.md" target="_blank" rel="noopener">Original Microsoft explainer (target="_split")</a></li>
+      <li><a href="https://wpt.fyi/results/html/browsers/the-window-object/open-close?label=master&amp;label=experimental&amp;aligned&amp;q=open-features-split" target="_blank" rel="noopener">WPT: open-features-split.tentative.html</a> &middot; <a href="https://wpt.fyi/results/html/browsers/the-window-object/open-close?label=master&amp;label=experimental&amp;aligned&amp;q=declarative-windowfeatures" target="_blank" rel="noopener">declarative-windowfeatures.tentative.html</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/nav-history-apis.html#popup-window-is-requested" target="_blank" rel="noopener">HTML: checking if a popup window is requested</a></li>
+      <li><a href="https://github.com/w3ctag/design-reviews/issues/1309" target="_blank" rel="noopener">TAG design review #1309</a></li>
+      <li><a href="https://crbug.com/570412924" target="_blank" rel="noopener">crbug.com/570412924 &mdash; implementation tracking</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+  (function () {
+    var line = document.getElementById("support-line");
+    var a = "windowFeatures" in HTMLAnchorElement.prototype;
+    var f = "windowFeatures" in HTMLFormElement.prototype;
+    if (a && f) {
+      line.innerHTML = '<span class="v-yes">API present:</span> <code>windowFeatures</code> is on <code>HTMLAnchorElement</code> and <code>HTMLFormElement</code> &mdash; this engine understands the split request. Whether a split actually appears is still the browser&rsquo;s call.';
+    } else {
+      line.innerHTML = '<span class="v-no">API absent:</span> <code>windowFeatures</code> is not on <code>HTMLAnchorElement.prototype</code>, so this engine treats <code>"split"</code> as an unknown feature (and a bare <code>"split"</code> string as a <em>popup</em> request). Use the flag steps above; every demo still runs and labels the fallback it gets.';
+    }
+    window.showcaseTelemetry?.assert("split-tab-api-detected", typeof a === "boolean", { anchor: a, form: f });
+  })();
+</script>
+</body>
+</html>

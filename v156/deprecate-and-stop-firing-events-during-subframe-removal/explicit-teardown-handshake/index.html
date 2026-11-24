@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Explicit teardown handshake — Deprecate and stop firing events during subframe removal — Chrome 156</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .field { display: grid; gap: 0.3rem; margin-bottom: var(--space-3); }
+    .field label { font-size: 0.85rem; font-weight: 700; }
+    .field input { min-height: 44px; border: 2px solid var(--border-black); background: var(--bg-paper); color: var(--text-black); padding: 0 0.5rem; font: inherit; inline-size: 100%; box-sizing: border-box; }
+    .field input:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    .actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-3) 0; }
+    .actions button { min-height: 44px; }
+    .actions button.secondary { background: var(--bg-ivory); color: var(--text-black); border: 2px solid var(--border-black); }
+    .host { min-block-size: 7rem; border: 2px dashed var(--border-black); background: var(--bg-ivory); padding: var(--space-2); }
+    .host iframe { inline-size: 100%; block-size: 7rem; border: 1px solid var(--border-black); background: var(--bg-paper); }
+    .host-empty { font-size: 0.8rem; color: var(--text-muted); margin: 0; }
+    .tablewrap { overflow-x: auto; max-inline-size: 100%; border: 2px solid var(--border-black); margin-top: var(--space-3); }
+    .tablewrap:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: 2px; }
+    table { border-collapse: collapse; inline-size: 100%; font-size: 0.8rem; background: var(--bg-paper); }
+    caption { caption-side: top; text-align: left; font-size: 0.8rem; font-weight: 700; padding: 0.4rem 0.5rem; background: var(--bg-paper); color: var(--text-black); }
+    th, td { border: 1px solid var(--border-black); padding: 0.4rem 0.5rem; text-align: left; vertical-align: top; overflow-wrap: break-word; }
+    thead th { background: var(--bg-stone); color: var(--text-black); }
+    .v-yes { color: var(--accent-emerald-dark); font-weight: 700; }
+    .v-no { color: var(--accent-rose); font-weight: 700; }
+    .verdict { font-weight: 700; }
+    pre { overflow-x: auto; max-inline-size: 100%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v156/deprecate-and-stop-firing-events-during-subframe-removal/">&larr; Deprecate and stop firing events during subframe removal</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v156 · dom · feature removal · migration</p>
+    <h1>Explicit teardown handshake</h1>
+    <p class="lede">An embedded same-origin draft editor saved its unsent text in <code>pagehide</code>, because that used to fire when the host page closed the panel with <code>iframe.remove()</code>. With the events omitted, that save never runs. Here is the real widget and three ways to close it &mdash; the old reliance, and two replacements that work in every browser, flag or no flag.</p>
+  </header>
+
+  <div class="note" role="note">
+    <strong>Flag:</strong> to watch strategy A lose the draft, run Chrome 156+ with
+    <code>--enable-blink-features=OmitSubframeDetachmentEventsOnRemoval</code>. Strategies B and C do not depend on the flag at all &mdash; that&rsquo;s the point.
+  </div>
+
+  <div class="stage">
+    <h2>Close the widget three ways</h2>
+    <div class="field">
+      <label for="seed">Draft text put into a freshly opened widget</label>
+      <input id="seed" type="text" value="Notes: ship the v156 demo" autocomplete="off">
+    </div>
+    <div class="actions">
+      <button type="button" class="secondary" id="open">Open widget</button>
+    </div>
+    <div class="host" id="host" aria-label="widget host">
+      <p class="host-empty" id="host-empty">No widget open. Opening one is automatic when you pick a strategy; open it first if you want to type in it.</p>
+    </div>
+    <div class="actions" role="group" aria-label="close strategies">
+      <button type="button" id="s-remove">A · just remove() (relies on pagehide)</button>
+      <button type="button" id="s-handshake">B · teardown message, await ack, remove()</button>
+      <button type="button" id="s-observer">C · mirror state + parent MutationObserver</button>
+    </div>
+    <p class="verdict" id="verdict" role="status" aria-live="polite">Pick a strategy.</p>
+
+    <div class="tablewrap" tabindex="0" role="region" aria-label="saved drafts, scrolls horizontally on narrow screens">
+      <table>
+        <caption>Drafts that reached the host&rsquo;s store</caption>
+        <thead><tr><th scope="col">strategy</th><th scope="col">draft saved?</th><th scope="col">saved by</th><th scope="col">characters</th></tr></thead>
+        <tbody id="results"><tr><td colspan="4">Nothing closed yet.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <section>
+    <h2>the replacement patterns</h2>
+    <pre tabindex="0"><code>// B · explicit teardown: ask, wait (bounded), then remove
+async function closeWidget(frame, port) {
+  const ack = new Promise(r =&gt; port.addEventListener("message",
+    e =&gt; e.data.type === "saved" &amp;&amp; r(e.data), { once: true }));
+  port.start();
+  port.postMessage("teardown");
+  const saved = await Promise.race([ack, timeout(500)]);  // never block the UI forever
+  if (saved) store(saved.draft);
+  frame.remove();
+}
+
+// C · the parent owns the state: mirror it continuously, persist on removal
+port.onmessage = e =&gt; { if (e.data.type === "state") latest.set(frame, e.data.draft); };
+new MutationObserver(records =&gt; {
+  for (const r of records) for (const n of r.removedNodes)
+    if (latest.has(n)) store(latest.get(n));       // runs after removal, as a microtask
+}).observe(host, { childList: true });
+
+// Inside the widget: flush is idempotent, so the legacy pagehide path can stay as a fallback
+let flushed = false;
+function flush(via) { if (flushed) return; flushed = true; /* … */ }
+addEventListener("pagehide", () =&gt; flush("pagehide"));   // still right for navigations</code></pre>
+    <p>For analytics or telemetry rather than user data, the guidance for whole-session beacons is <code>fetchLater()</code>, scheduled as data arrives, rather than sending from an unload-time handler &mdash; it is delivered when the document is destroyed, whatever caused that.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Deprecate and stop firing events during subframe removal</a> &mdash; feature index</li>
+      <li><a href="../removal-event-recorder/">Removal event recorder</a></li>
+      <li><a href="../agent-boundary-matrix/">Agent boundary matrix</a></li>
+      <li><a href="../navigation-move-and-focus/">Navigation, moves &amp; focus</a></li>
+      <li><a href="../reentrancy-hazard/">Re-entrancy hazard</a></li>
+      <li><a href="https://chromestatus.com/feature/5754395122860032" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.mozilla.org/docs/Web/API/MessageChannel" target="_blank" rel="noopener">MDN: MessageChannel</a></li>
+      <li><a href="https://developer.mozilla.org/docs/Web/API/MutationObserver" target="_blank" rel="noopener">MDN: MutationObserver</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(() => {
+  const host = document.getElementById("host");
+  const hostEmpty = document.getElementById("host-empty");
+  const seed = document.getElementById("seed");
+  const verdictEl = document.getElementById("verdict");
+  const resultsEl = document.getElementById("results");
+  const buttons = [...document.querySelectorAll(".stage button")];
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // The embedded widget. Same origin, so its legacy pagehide path can call into the host directly.
+  const WIDGET = `<!doctype html><style>body{font:14px system-ui;margin:6px}textarea{width:100%;box-sizing:border-box;min-height:3.2rem;font:inherit}</style>
+<label for=d>Draft (inside the widget)</label><textarea id=d></textarea>
+<script>
+var port = null, flushed = false, d = document.getElementById('d');
+function flush(via) {
+  if (flushed) return; flushed = true;
+  if (via === 'pagehide') { try { parent.__draftStore.save('pagehide handler (inside widget)', d.value); } catch (e) {} }
+  else if (port) port.postMessage({ type: 'saved', draft: d.value, via: via });
+}
+addEventListener('message', function (e) {
+  if (e.source !== parent || e.data !== 'init' || !e.ports[0]) return;
+  port = e.ports[0];
+  port.onmessage = function (m) { if (m.data === 'teardown') flush('teardown message'); };
+  d.addEventListener('input', function () { port.postMessage({ type: 'state', draft: d.value }); });
+  port.postMessage({ type: 'ready', draft: d.value });
+});
+addEventListener('pagehide', function () { flush('pagehide'); });
+<\/script>`;
+
+  let current = null; // { frame, port, latest }
+  let run = null;     // saves recorded during the current close
+  let observerArmed = false;
+
+  window.__draftStore = {
+    save(via, draft) { if (run) run.saves.push({ via, draft }); },
+  };
+
+  const mo = new MutationObserver((records) => {
+    if (!observerArmed) return;
+    for (const r of records) {
+      for (const n of r.removedNodes) {
+        if (current && n === current.frame && current.latest !== null) {
+          window.__draftStore.save("parent MutationObserver (mirrored state)", current.latest);
+        }
+      }
+    }
+  });
+  mo.observe(host, { childList: true });
+
+  async function openWidget() {
+    if (current) return current;
+    const frame = document.createElement("iframe");
+    frame.title = "draft editor widget";
+    frame.srcdoc = WIDGET;
+    hostEmpty.hidden = true;
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("widget load timed out")), 6000);
+      frame.addEventListener("load", () => { clearTimeout(t); resolve(); }, { once: true });
+      host.append(frame);
+    });
+    frame.contentDocument.getElementById("d").value = seed.value;
+    const { port1, port2 } = new MessageChannel();
+    const w = { frame, port: port1, latest: null };
+    port1.onmessage = (e) => {
+      if (e.data.type === "state" || e.data.type === "ready") w.latest = e.data.draft;
+      if (e.data.type === "saved" && run) run.saves.push({ via: e.data.via, draft: e.data.draft });
+    };
+    const ready = new Promise((resolve) => {
+      const prev = port1.onmessage;
+      port1.onmessage = (e) => { prev(e); if (e.data.type === "ready") resolve(); };
+    });
+    frame.contentWindow.postMessage("init", "*", [port2]);
+    await Promise.race([ready, wait(3000)]);
+    current = w;
+    return w;
+  }
+
+  const LABEL = { remove: "A · just remove()", handshake: "B · teardown handshake", observer: "C · mirror + MutationObserver" };
+  const resultRows = [];
+
+  async function close(strategy) {
+    for (const b of buttons) b.disabled = true;
+    verdictEl.textContent = "Closing the widget…";
+    try {
+      const w = await openWidget();
+      const expected = w.frame.contentDocument.getElementById("d").value;
+      w.latest = expected; // the input handler mirrors typing; make the seed count as mirrored state too
+      run = { saves: [] };
+      if (strategy === "remove") {
+        w.frame.remove();
+      } else if (strategy === "handshake") {
+        const before = run.saves.length;
+        w.port.postMessage("teardown");
+        const deadline = performance.now() + 500;
+        while (run.saves.length === before && performance.now() < deadline) await wait(10);
+        w.frame.remove();
+      } else {
+        observerArmed = true;
+        w.frame.remove();
+      }
+      await wait(80); // let MutationObserver microtasks / late messages land
+      observerArmed = false;
+      current = null;
+      hostEmpty.hidden = false;
+      const saves = run.saves;
+      run = null;
+      const ok = saves.some((s) => s.draft === expected);
+      const via = saves.length ? [...new Set(saves.map((s) => s.via))].join(" + ") : "nothing — the draft was lost";
+      resultRows.unshift({ strategy, ok, via, chars: expected.length });
+      renderResults();
+      verdictEl.textContent = LABEL[strategy] + ": " + (ok ? "draft saved by " + via + "." : "draft LOST. No pagehide ran during removal" + (strategy === "remove" ? " — this is the 156 behaviour; move to B or C." : "."));
+      if (strategy === "remove") {
+        window.showcaseTelemetry?.assert("legacy-pagehide-save-observed", true, { ok, saves: saves.length });
+      } else {
+        window.showcaseTelemetry?.assert("teardown-replacement-saved-" + strategy, ok, { saves: saves.length });
+      }
+    } catch (err) {
+      verdictEl.textContent = "Could not run: " + err.message;
+      window.showcaseTelemetry?.assert("teardown-strategy-ran", false, { strategy, error: String(err.message) });
+    } finally {
+      for (const b of buttons) b.disabled = false;
+    }
+  }
+
+  function renderResults() {
+    resultsEl.replaceChildren(...resultRows.slice(0, 9).map((r) => {
+      const tr = document.createElement("tr");
+      const th = document.createElement("th");
+      th.scope = "row";
+      th.textContent = LABEL[r.strategy];
+      const ok = document.createElement("td");
+      ok.textContent = r.ok ? "saved" : "lost";
+      ok.className = r.ok ? "v-yes" : "v-no";
+      const via = document.createElement("td");
+      via.textContent = r.via;
+      const chars = document.createElement("td");
+      chars.textContent = String(r.chars);
+      tr.append(th, ok, via, chars);
+      return tr;
+    }));
+  }
+
+  document.getElementById("open").addEventListener("click", async () => {
+    try {
+      await openWidget();
+      verdictEl.textContent = "Widget open. Type in it, then pick a strategy.";
+    } catch (err) {
+      verdictEl.textContent = "Could not open the widget: " + err.message;
+    }
+  });
+  document.getElementById("s-remove").addEventListener("click", () => close("remove"));
+  document.getElementById("s-handshake").addEventListener("click", () => close("handshake"));
+  document.getElementById("s-observer").addEventListener("click", () => close("observer"));
+})();
+</script>
+</body>
+</html>

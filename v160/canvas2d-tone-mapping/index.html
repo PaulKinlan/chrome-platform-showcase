@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canvas2D tone mapping — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note { background: var(--bg-stone); border-left: 3px solid var(--accent-blue); padding: var(--space-3); font-size: 0.85rem; margin: var(--space-4) 0; overflow-wrap: anywhere; }
+    pre { max-inline-size: 100%; overflow-x: auto; }
+  </style>
+</head>
+<body>
+<!--
+RESEARCH RECORD (weekly-hardening-builder, 2026-11-22)
+Feature id: 5077164932333568 · listing name "Canvas2D tone mapping" · milestone 160 listing · category Graphics
+Owner ccameron@chromium.org · bug https://issues.chromium.org/issues/448552449 · finch CanvasToneMapping
+Spec: WHATWG HTML PR #11734 (https://github.com/whatwg/html/pull/11734); explainer
+  https://github.com/w3c/ColorWeb-CG/blob/main/canvas-tone-map.md (+ hdr-big-picture.md); TAG review
+  w3ctag/design-reviews#1194 (issues addressed). Safari: positive; Firefox: no signal.
+Exact IDL (chromium main, core/html/canvas/canvas_tone_mapping.idl):
+  enum CanvasToneMappingMode { "standard", "extended" };
+  dictionary CanvasToneMapping { CanvasToneMappingMode mode = "standard"; };
+  CanvasRenderingContext2DSettings { …; CanvasToneMapping toneMapping = {}; }   (reflected by getContextAttributes())
+  CanvasContextCreationAttributesModule: [RuntimeEnabled=CanvasToneMapping] CanvasToneMapping toneMapping = {};
+  canvas_context_creation_attributes_helpers.cc parses/reflects only when RuntimeEnabledFeatures::CanvasToneMappingEnabled().
+  Same dictionary in WebGPU (GPUCanvasConfiguration.toneMapping) and WebGL
+  ([RuntimeEnabled=WebGLToneMapping] CanvasToneMapping drawingBufferToneMapping(optional CanvasToneMapping)).
+Flag (runtime_enabled_features.json5 via gitiles, 2026-11-22): name "CanvasToneMapping", status "experimental"
+  → --enable-blink-features=CanvasToneMapping or --enable-experimental-web-platform-features
+  (chrome://flags/#enable-experimental-web-platform-features). No dedicated chrome://flags entry.
+Spec semantics (PR + explainer + chromestatus test-coverage audit):
+  - default/omitted/{} → "standard"; "standard" → bitmap HDR headroom 0; "extended" → headroom not limited.
+  - tone mapping never alters stored pixel values; display tone-maps to device headroom limited by the
+    element's dynamic-range-limit, before conversion to the output colour space; presented headroom =
+    min(bitmap headroom, tone-mapped-to headroom). "extended" + dynamic-range-limit:standard == "standard".
+  - ImageBitmap (createImageBitmap / transferToImageBitmap) preserves the tone-mapping behaviour.
+  - Encoding (toDataURL/toBlob/convertToBlob): "standard" maximises SDR precision; "extended" uses HLG (8-bit)
+    or PQ (deeper). WPT encode-hdr.html: srgb-linear 16 → ≈1 standard, ≈16 extended.
+Local ground truth (Chrome for Testing 153.0.8010.12, headless, this container):
+  - flag off: getContextAttributes() already includes toneMapping {mode:"standard"} (constant); a getter on
+    settings.toneMapping is never read; {mode:"bogus"} does not throw → reflection-key detection is a false positive.
+  - flag on: member is read; "bogus" throws TypeError (CanvasToneMappingMode); but "extended" still reflects
+    "standard"; PNG round-trip of a 4.0 value returns 1.0 for both modes; ImageBitmap keeps 4.0 for both;
+    getImageData(…, {pixelFormat:"rgba-float16"}) returns 4.0 in both modes (pixels unaltered).
+    gl.drawingBufferToneMapping absent in 153 even with the experimental flag.
+Use-case portfolio:
+  1. basic/canonical → mode-reflection (every setting × host × colorType, plus the WPT table)
+  2. configuration/inspection tooling → feature-detection-kit (four detectors; why only reflection of
+     "extended" is a valid branch condition; app picks HDR vs SDR path)
+  3. practical product → hdr-highlight-viewer (photo/game scene with >1.0 highlights side by side,
+     peak slider, pixel sampling proving values are unaltered)
+  4. edge/failure/migration → encode-and-bitmap-roundtrip (WPT encode-hdr matrix for every export path,
+     ImageBitmap rows informational pending whatwg/html#13235)
+  5. advanced composition → dynamic-range-limit-interplay (CSS dynamic-range-limit × mode matrix) and
+     one-dictionary-three-contexts (same CanvasToneMapping across 2D, WebGL, WebGPU)
+  Not applicable: VideoFrame metadata (explainer "should include metadata"; no Chromium surface exposes
+  tone-mapping metadata on VideoFrame to script yet — no observable contract to demo).
+-->
+<main>
+  <p class="crumbs"><a href="/v160/">&larr; Chrome 160</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · graphics · canvas</p>
+    <h1>Canvas2D tone mapping</h1>
+    <p class="lede">A float16 2D canvas can already store colours brighter than white &mdash; but until now every browser squashed them to SDR on screen and in exported files. A new creation setting, <code>getContext("2d", { toneMapping: { mode: "extended" } })</code>, tells the browser the bitmap is HDR and should be shown with the display&rsquo;s extra headroom. The default, <code>"standard"</code>, keeps today&rsquo;s behaviour. It is the same <code>CanvasToneMapping</code> dictionary WebGPU already uses, now shared with 2D canvas and WebGL.</p>
+  </header>
+
+  <div class="note">
+    <p><strong>Flag:</strong> Blink runtime feature <code>CanvasToneMapping</code> (experimental). Enable <code>chrome://flags/#enable-experimental-web-platform-features</code> or launch with <code>--enable-blink-features=CanvasToneMapping</code>; Chrome 160 is planned to ship it on by default. Visible HDR also needs an HDR display. Every concept page probes the exact surface and labels a partial or missing implementation honestly &mdash; on Chrome 153 with the flag, for example, the setting is parsed and validated but <code>"extended"</code> is not yet reflected.</p>
+  </div>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./mode-reflection/">Mode reflection</a></h3>
+      <p>The canonical call. Create contexts with every <code>toneMapping</code> value (omitted, <code>{}</code>, standard, extended, invalid) on <code>HTMLCanvasElement</code> and <code>OffscreenCanvas</code>, read <code>getContextAttributes()</code> back, and run the WPT table.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./feature-detection-kit/">Feature-detection kit</a></h3>
+      <p>Dictionary members are invisible to <code>in</code> checks. Four independent detectors &mdash; member read, enum validation, default reflection, extended reflection &mdash; show which one is a false positive and which one an app should branch on.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./hdr-highlight-viewer/">HDR highlight viewer</a></h3>
+      <p>A scene with a sun up to 8&times; SDR white drawn into a <code>"standard"</code> and an <code>"extended"</code> canvas side by side. Sample the pixels to prove tone mapping changes the display, never the stored values.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./encode-and-bitmap-roundtrip/">Encode &amp; ImageBitmap round-trip</a></h3>
+      <p>Paint 16&times; white, export through <code>toDataURL</code>, <code>toBlob</code>, <code>convertToBlob</code>, <code>createImageBitmap</code> and <code>transferToImageBitmap</code>, decode, and measure &mdash; the WPT <code>encode-hdr</code> matrix, live, for PNG, JPEG and WebP.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./dynamic-range-limit-interplay/">dynamic-range-limit interplay</a></h3>
+      <p>The script knob meets the style knob: apply CSS <code>dynamic-range-limit</code> values to standard and extended canvases and see why <code>"extended"</code> under <code>dynamic-range-limit: standard</code> equals <code>"standard"</code>.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./one-dictionary-three-contexts/">One dictionary, three contexts</a></h3>
+      <p>Push the same <code>{mode}</code> through 2D <code>getContext</code>, WebGL <code>drawingBufferToneMapping()</code> and WebGPU <code>configure()</code> and see which contexts honour the unified <code>CanvasToneMapping</code> in this browser.</p>
+    </li>
+  </ol></section>
+
+  <section>
+    <h2>why it shipped</h2>
+    <p>Floating-point 2D canvases (<code>colorType: "float16"</code>) can represent values above 1.0, but the spec had no way to say whether those values were higher-precision SDR or genuine HDR, so browsers always limited canvas output to standard dynamic range. WebGPU solved this with <code>GPUCanvasToneMapping</code>; the W3C Color on the Web CG proposed renaming it to <code>CanvasToneMapping</code>, moving it into HTML (WHATWG PR #11734), and adding it to 2D canvas so HDR image editors, viewers and games can show highlights properly and export them to HDR files. The default stays <code>"standard"</code>, so no existing page changes. Security review notes it exposes no display headroom to script.</p>
+  </section>
+
+  <section>
+    <h2>the API</h2>
+    <pre tabindex="0"><code>enum CanvasToneMappingMode { "standard", "extended" };
+dictionary CanvasToneMapping { CanvasToneMappingMode mode = "standard"; };
+
+partial dictionary CanvasRenderingContext2DSettings {
+  CanvasToneMapping toneMapping = {};
+};
+
+const ctx = canvas.getContext("2d", {
+  colorSpace: "srgb-linear", colorType: "float16",
+  toneMapping: { mode: "extended" },
+});
+ctx.getContextAttributes().toneMapping;   // { mode: "extended" }</code></pre>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5077164932333568" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/whatwg/html/pull/11734" target="_blank" rel="noopener">Spec: WHATWG HTML PR #11734</a></li>
+      <li><a href="https://github.com/w3c/ColorWeb-CG/blob/main/canvas-tone-map.md" target="_blank" rel="noopener">Explainer: Tone mapping for 2D Canvas</a></li>
+      <li><a href="https://github.com/w3c/ColorWeb-CG/blob/main/hdr-big-picture.md" target="_blank" rel="noopener">Explainer: HDR on the web, the big picture</a></li>
+      <li><a href="https://github.com/w3ctag/design-reviews/issues/1194" target="_blank" rel="noopener">TAG design review #1194</a></li>
+      <li><a href="https://issues.chromium.org/issues/448552449" target="_blank" rel="noopener">Chromium tracking bug 448552449</a></li>
+      <li><a href="https://wpt.fyi/results/html/canvas/element/manual/context-attributes/getContextAttributes.html?label=experimental&amp;label=master&amp;aligned" target="_blank" rel="noopener">WPT: getContextAttributes.html</a></li>
+      <li><a href="https://wpt.fyi/results/html/canvas/element/manual/wide-gamut-canvas/encode-hdr.html?label=experimental&amp;label=master&amp;aligned" target="_blank" rel="noopener">WPT: encode-hdr.html</a></li>
+      <li><a href="https://www.w3.org/TR/webgpu/#dictdef-gpucanvastonemapping" target="_blank" rel="noopener">WebGPU: GPUCanvasToneMapping</a></li>
+      <li><a href="https://github.com/mozilla/standards-positions/issues/1359" target="_blank" rel="noopener">Mozilla standards position #1359</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+</body>
+</html>

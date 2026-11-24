@@ -1,7 +1,7 @@
 # Source of truth for the chrome-platform-showcase routine
 
 > This is the prompt the remote Claude Code routine receives. The live copy lives on the routine
-> trigger (trig_01GtXjwvzEM5mhsktARhGeSx). When you change this file, ALSO push the change to the
+> trigger (trig_01328Ji5KGCnwibMmoehXCVr). When you change this file, ALSO push the change to the
 > live routine via `RemoteTrigger.update`. Otherwise this drifts out of date.
 
 ---
@@ -93,6 +93,21 @@ Rules that must never be broken. Each has bitten the project before:
     clean console cannot see wrong geometry or low contrast. Reload from disk after your FINAL edit
     and repeat the whole control sequence — evidence captured before the last source change is
     invalid.
+
+12. **Build on unmerged routine work: never start from a stale `main` while a routine PR is open.**
+    Each run lands as a pull request from its own `claude/*` branch, and a human merges it later,
+    sometimes weeks later. Starting every run from `main` rebuilt the same features again: six
+    weekly PRs (2026-10-11 to 2026-11-22) built 19 features two to four times each, conflicted on
+    every generated file, and had to be combined by hand. So in Step 1, before classifying coverage:
+    (a) find the newest unmerged routine branch that is based on the current `main` (snippet in Step
+    1); (b) if there is one, start your work branch from its head, so your PR contains its commits
+    and merging yours lands both; (c) classify coverage against that tree, so features it already
+    built count as implemented or incomplete as usual and are never built a second time; (d) open
+    your PR with "Supersedes #N: this branch builds on it, so merge this one and close #N" as its
+    first line. Never rewrite, rebase or force-push the earlier branch; only add commits on your
+    own. If that branch fails `deno task check` in your checkout, start from `main` instead, still
+    skip every feature id that already has a folder on the open branch, and say in the PR why you
+    did not stack.
 
 Every time you decide to write a folder, the path MUST be `v<N>/<slug(listing_name)>` where N is the
 milestone whose listing returned the feature.
@@ -275,6 +290,25 @@ Fresh checkout of PaulKinlan/chrome-platform-showcase. Configure git author:
 git config user.email 'paul.kinlan@gmail.com'
 git config user.name 'Paul Kinlan'
 ```
+
+Then apply Critical Rule 12: find the newest unmerged routine branch built on the current `main`
+and, if there is one, start your work branch from it.
+
+```bash
+git fetch origin main '+refs/heads/claude/*:refs/remotes/origin/claude/*'
+MAIN=$(git rev-parse origin/main); BASE=""
+for r in $(git for-each-ref --sort=-committerdate --format='%(refname:short)' refs/remotes/origin/claude/); do
+  if [ "$(git rev-parse "$r")" != "$MAIN" ] && [ "$(git merge-base origin/main "$r")" = "$MAIN" ]; then
+    BASE=$r; break
+  fi
+done
+echo "stacking on: ${BASE:-main}"
+# If BASE is set: git checkout -B "$(git branch --show-current)" "$BASE"
+```
+
+When the GitHub API is reachable, confirm `BASE` still has an open PR
+(`/repos/PaulKinlan/chrome-platform-showcase/pulls?state=open&head=PaulKinlan:<branch>`); a branch
+whose PR was closed without merging was rejected, so skip it and take the next one.
 
 Note Unix time at start. Soft 90-minute budget. The cron fires once a day; the next run continues
 where this one stops. Better to leave features behind (deeply-researched, correct demos) than to
@@ -636,7 +670,8 @@ Log channels, per-milestone counts, features built (SHA + live URL), stop reason
   `deno.json`, `scripts/`, `CLAUDE.md`, or the conformance suites.
 - Run `deno task check-routes` (read-only) before every push; it must PASS. Never destructively
   replace a published route/slug/identity — add new slugs, patch existing demos in the smallest way.
-- Pushes go to main. No branches.
+- Each run pushes to its own `claude/*` branch and opens one PR; a human merges it. Stack on the
+  newest open routine PR (Critical Rule 12) instead of starting again from `main`.
 - Issues only for Uber demos.
 - Respect the 90-minute deadline.
 - **Slug from listing name. Milestone from listing position. CSS variables only. WCAG AA contrast.

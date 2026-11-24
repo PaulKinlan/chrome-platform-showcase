@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RTP Header Extension Encryption — Chrome 160 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="./cryptex-lab.css">
+</head>
+<body>
+<!--
+RESEARCH RECORD (weekly-hardening-builder, 2026-11-22)
+Feature id: 5177732519559168 · listing name "RTP Header Extension Encryption" (milestone 160).
+Spec: https://w3c.github.io/webrtc-extensions/#rtp-header-extension-encryption
+  enum RTCRtpHeaderEncryptionPolicy { "disable", "negotiate", "require" };
+  partial dictionary RTCConfiguration { RTCRtpHeaderEncryptionPolicy rtpHeaderEncryptionPolicy = "negotiate"; };
+  - signalled by "a=cryptex" (RFC 9335), TRANSPORT category: on every RTP m= section of a BUNDLE
+    group or none; never on the SCTP/data-channel section.
+  - "require": setRemoteDescription rejects with InvalidAccessError if the remote description does
+    not indicate cryptex; received RTP packets not encrypted with cryptex are not processed further.
+  - policy can only be set at construction; setConfiguration with a different value must fail
+    (InvalidModificationError, as for bundlePolicy/rtcpMuxPolicy).
+  - "disable" was added by https://github.com/w3c/webrtc-extensions/pull/256 (which also removed the
+    per-transceiver readonly signal the explainer discusses), so the surface is now just this member.
+Explainer: https://github.com/fippo/webrtc-explainers/blob/gh-pages/rtp-header-extension-encryption/index.md
+Bug: https://issues.chromium.org/issues/455813732 · Finch: RtcRtpHeaderEncryptionPolicy · UMA WebRTC.PeerConnection.CryptexUsage
+Blink: rtc_configuration.idl has [RuntimeEnabled=RtcRtpHeaderEncryptionPolicy] on the member;
+  rtc_peer_connection.cc maps it to webrtc::CryptoOptions::Srtp::cryptex_policy
+  (kDisabled/kNegotiate/kRequire) and back in getConfiguration().
+  runtime_enabled_features.json5 (main, fetched 2026-11-22): RtcRtpHeaderEncryptionPolicy status "experimental".
+  No chrome://flags entry. Enable with --enable-blink-features=RtcRtpHeaderEncryptionPolicy,
+  --enable-features=RtcRtpHeaderEncryptionPolicy, or chrome://flags/#enable-experimental-web-platform-features.
+Ground truth in this container (Chrome for Testing 153.0.8010.12, headless):
+  - default: getConfiguration() has NO rtpHeaderEncryptionPolicy member; offers carry no a=cryptex.
+  - with the flag: default "negotiate"; enum is only "negotiate" | "require" ("disable" → TypeError,
+    i.e. pre-PR-#256); a=cryptex appears once at SESSION level; require + answer without a=cryptex →
+    InvalidAccessError "cryptex required but not negotiated"; negotiate accepts the stripped answer;
+    setConfiguration({rtpHeaderEncryptionPolicy: other}) does NOT throw on 153 (spec says it must).
+WPT: webrtc-extensions/RTCConfiguration-rtpHeaderEncryptionPolicy.html (the conformance suite mirrors it).
+Use-case portfolio:
+  1. basic/canonical → policy-probe (construct with each value, getConfiguration reflection, vocabulary
+     table, immutability via setConfiguration)
+  2. configuration/inspection → sdp-cryptex-inspector (real createOffer per policy × bundlePolicy ×
+     m-section mix, a=cryptex placement, data channel excluded, per-section header extension list)
+  3. practical product → negotiation-matrix (every offerer×answerer policy pair through real
+     offer/answer, plus a signalling path that strips a=cryptex — what a deployment actually sees)
+  4. edge/failure/migration → require-downgrade-guard (live media + getStats: require rejects a
+     stripped answer, a require receiver drops clear packets, negotiate silently falls back)
+  5. novel/advanced composition → voice-activity-leak (two concurrent calls, one with cryptex, one
+     without; receiver getSynchronizationSources().audioLevel shows the RFC 6464 metadata the
+     feature takes off the wire; CSRC list noted)
+Not web-observable: the actual packet bytes (0xBEDE vs 0xC0DE profile). Pages say so and never claim
+a capture; they rely on SDP + getStats + receiver APIs.
+-->
+<main>
+  <p class="crumbs"><a href="/v160/">&larr; Chrome 160</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · peer connection</p>
+    <h1>RTP Header Extension Encryption</h1>
+    <p class="lede">WebRTC media has always been encrypted with SRTP &mdash; but only the payload. Every packet's RTP header extensions (audio level, send time, stream ids, video orientation&hellip;) and its list of contributing sources (CSRCs) crossed the network in the clear. RFC&nbsp;9335, &ldquo;cryptex&rdquo;, reuses the SRTP keys to encrypt them too, negotiated by a single <code>a=cryptex</code> SDP line. Chrome 160 implements it with one new <code>RTCConfiguration</code> member: <code>rtpHeaderEncryptionPolicy</code>, <code>"disable"</code> | <code>"negotiate"</code> (default) | <code>"require"</code>.</p>
+  </header>
+
+  <div class="note" id="flag-note" role="status">Checking this browser&hellip;</div>
+
+  <section><h2>concepts</h2><ol class="demo-list">
+    <li class="demo-card">
+      <h3><a href="./policy-probe/">Policy probe</a></h3>
+      <p>The whole API in one page: construct peer connections with every enum value, read them back through <code>getConfiguration()</code>, discover which vocabulary this build accepts, and try to change the policy after construction &mdash; which the spec forbids.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./sdp-cryptex-inspector/">SDP cryptex inspector</a></h3>
+      <p>Build a real offer with your choice of policy, bundle policy and audio/video/data-channel sections. See where <code>a=cryptex</code> lands, that it covers every RTP section and never the data channel, and exactly which header extensions it takes out of the clear.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./negotiation-matrix/">Negotiation matrix</a></h3>
+      <p>Every offerer &times; answerer policy pairing, each a real offer/answer between two in-page peers &mdash; with switches that strip <code>a=cryptex</code> in transit the way an old signalling server or SBC might. Encrypted, clear, rejected or one-sided, per cell, with logs.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./require-downgrade-guard/">Require: downgrade guard</a></h3>
+      <p>Live synthetic audio and video between two peers. Watch <code>getStats()</code> show <code>"require"</code> rejecting a stripped answer with <code>InvalidAccessError</code>, a <code>"require"</code> receiver dropping every clear-header packet, and <code>"negotiate"</code> silently falling back.</p>
+    </li>
+    <li class="demo-card">
+      <h3><a href="./voice-activity-leak/">Voice-activity leak</a></h3>
+      <p>Why it matters: two concurrent calls, one with cryptex and one without. Both receivers report identical <code>audioLevel</code> via <code>getSynchronizationSources()</code> &mdash; the RFC&nbsp;6464 header extension that, without cryptex, tells any on-path observer exactly when you speak.</p>
+    </li>
+  </ol></section>
+
+  <section>
+    <h2>why it shipped</h2>
+    <p>RFC&nbsp;6904, the old per-extension header encryption, was cumbersome and saw little use. Cryptex (January 2023) covers the whole extension block and the CSRCs with the existing SRTP context and one SDP attribute, and libSRTP &mdash; which browsers depend on &mdash; recently gained support. The W3C API had been marked at risk for lack of implementations; implementation feedback then shrank it (<a href="https://github.com/w3c/webrtc-extensions/pull/256" target="_blank" rel="noopener">PR&nbsp;#256</a>: added <code>"disable"</code>, dropped the per-transceiver read-only signal). The ChromeStatus activation-risk note says the owners weighed a <code>"disable"</code> default for the initial roll-out (&ldquo;we should switch the default from disable to negotiate but for the initial roll-out disable seems less risky&rdquo;); the IDL default &mdash; and what a flagged Chrome 153 reports &mdash; is <code>"negotiate"</code>, so check <code>getConfiguration()</code> rather than assuming. The policy is never a downgrade attack vector because cryptex is optional unless you choose <code>"require"</code>.</p>
+  </section>
+
+  <section>
+    <h2>the API</h2>
+    <pre tabindex="0"><code>// Default: offer cryptex, fall back to clear headers if the peer can't.
+const pc = new RTCPeerConnection();                 // rtpHeaderEncryptionPolicy: "negotiate"
+
+// Refuse calls that would expose header extensions / CSRCs:
+const strict = new RTCPeerConnection({ rtpHeaderEncryptionPolicy: "require" });
+await strict.setRemoteDescription(answerWithoutCryptex);
+// → rejects: InvalidAccessError
+
+// Opt out (e.g. a middlebox that must read header extensions):
+new RTCPeerConnection({ rtpHeaderEncryptionPolicy: "disable" });
+
+// Feature detection — the member only appears when implemented:
+"rtpHeaderEncryptionPolicy" in new RTCPeerConnection().getConfiguration();
+
+// SDP: one session-level line under BUNDLE
+//   a=cryptex</code></pre>
+  </section>
+
+  <section>
+    <h2>flag &amp; availability</h2>
+    <p>Blink runtime feature <code>RtcRtpHeaderEncryptionPolicy</code> (status <em>experimental</em> in <code>runtime_enabled_features.json5</code>; Finch name the same). No dedicated <code>chrome://flags</code> entry. To try it before it ships: <code>chrome://flags/#enable-experimental-web-platform-features</code>, or launch with <code>--enable-blink-features=RtcRtpHeaderEncryptionPolicy</code> or <code>--enable-features=RtcRtpHeaderEncryptionPolicy</code>. Builds from before webrtc-extensions PR&nbsp;#256 (for example Chrome 153 with the flag) know only <code>"negotiate"</code> and <code>"require"</code>; every page here detects the vocabulary rather than assuming it.</p>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5177732519559168" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://w3c.github.io/webrtc-extensions/#rtp-header-extension-encryption" target="_blank" rel="noopener">WebRTC Extensions &sect; RTP Header Encryption</a></li>
+      <li><a href="https://github.com/fippo/webrtc-explainers/blob/gh-pages/rtp-header-extension-encryption/index.md" target="_blank" rel="noopener">Explainer (Philipp Hancke)</a></li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9335" target="_blank" rel="noopener">RFC 9335 &mdash; Completely Encrypting RTP Header Extensions and Contributing Sources</a></li>
+      <li><a href="https://github.com/w3c/webrtc-extensions/pull/256" target="_blank" rel="noopener">webrtc-extensions PR #256 &mdash; smaller API, adds "disable"</a></li>
+      <li><a href="https://issues.chromium.org/issues/455813732" target="_blank" rel="noopener">issues.chromium.org/455813732 &mdash; implementation tracking</a></li>
+      <li><a href="https://wpt.fyi/results/webrtc-extensions/RTCConfiguration-rtpHeaderEncryptionPolicy.html" target="_blank" rel="noopener">WPT: RTCConfiguration-rtpHeaderEncryptionPolicy.html</a></li>
+      <li><a href="https://github.com/pion/webrtc/pull/3357" target="_blank" rel="noopener">Pion cryptex implementation (interop)</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="./cryptex-lab.js"></script>
+<script>
+(function () {
+  var L = window.CryptexLab;
+  var note = document.getElementById("flag-note");
+  var sup = L.probeSupport();
+  if (sup.supported) {
+    var acc = L.acceptedPolicies();
+    note.className = "note ok";
+    note.innerHTML = '<span class="v-yes">Implemented in this browser</span> &mdash; default <code>"' + sup.defaultPolicy + '"</code>, accepted values ' + acc.map(function (p) { return "<code>" + p + "</code>"; }).join(", ") + ".";
+  } else {
+    note.className = "note warn";
+    note.innerHTML = '<span class="v-no">Not implemented in this browser</span> (<code>getConfiguration()</code> has no <code>rtpHeaderEncryptionPolicy</code>). Every demo still runs real peer connections and shows the honest pre-feature result. ' + L.flagHelpHTML();
+  }
+})();
+</script>
+</body>
+</html>

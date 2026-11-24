@@ -23,6 +23,8 @@
     .unpositioned { color: var(--accent-rose); font-weight: 700; }
     .sample-tag { display: inline-block; background: var(--text-black); color: var(--bg-ivory); font-family: var(--font-mono); font-size: 0.8rem; padding: 2px 6px; margin-bottom: var(--space-2); }
     pre { overflow-x: auto; }
+    /* 44px tap targets on every control (WCAG 2.5.5; modern-web-guidance form-factor-adaptation). */
+    main button, main input[type="range"] { min-block-size: 44px; }
   </style>
 </head>
 <body>
@@ -31,11 +33,11 @@
   <header class="lede-block">
     <p class="eyebrow">v153 · speechrecognitionresult timestamps</p>
     <h1>Caption timeline mapper</h1>
-    <p class="lede">A captioning or transcript-scrubbing tool needs to know <em>where</em> each phrase sits in the audio. With <code>audioStartTime</code> and <code>audioEndTime</code> you can position every recognised segment on a timeline &mdash; the foundation for click-to-seek transcripts, karaoke-style highlighting, and aligning captions to a media element.</p>
+    <p class="lede">A captioning or transcript-scrubbing tool needs to know <em>where</em> each phrase sits in the audio. With <code>speechStartTime</code> and <code>speechEndTime</code> &mdash; seconds from the first audio frame the recognizer consumed &mdash; you can position every recognised segment on a timeline &mdash; the foundation for click-to-seek transcripts, karaoke-style highlighting, and aligning captions to a media element.</p>
   </header>
 
-  <div class="note">
-    <strong>To read real timestamps:</strong> you need a build that implements the proposal (PR #192, unmerged; the v153 listing records a developer trial at 153, but the attributes are not yet in Chromium main's IDL as of 2026-07-24 and no dedicated runtime flag exists yet) plus a timing-capable recognition backend. When a result's <code>audioStartTime</code> / <code>audioEndTime</code> are <code>null</code>, its caption is still shown but flagged as <em>unpositioned</em> &mdash; never dropped onto the timeline at a made-up spot. The sample walkthrough renders a fully-timed transcript.
+  <div class="note" role="note" aria-label="How to enable the timestamps">
+    <strong>Enable it:</strong> the attributes sit behind the Blink runtime flag <code>WebSpeechTimestamps</code>. In Chrome 153&ndash;159 it is <em>experimental</em>: turn on <code>chrome://flags/#enable-experimental-web-platform-features</code>, or launch Chrome with <code>--enable-blink-features=WebSpeechTimestamps</code>. Chromium main (after the M159 branch) enables it by default on Windows, macOS and Linux; Android and ChromeOS still need the flag. The spec names are <code>speechStartTime</code> / <code>speechEndTime</code> (Chrome 156+), already in seconds on the session audio timeline &mdash; exactly what a <code>VTTCue</code> or <code>media.currentTime</code> wants. Chrome 153&ndash;155 expose an earlier draft, <code>audioStartTime</code> / <code>audioEndTime</code> (nullable ms on the time origin); this page uses them only when the spec names are absent, re-bases them on <code>audiostart</code>, and labels them as draft. A caption with no timing is still listed but flagged <em>unpositioned</em> &mdash; never dropped onto the timeline at a made-up spot. The sample walkthrough renders a fully-timed transcript.
   </div>
 
   <section class="stage" aria-labelledby="demo-title">
@@ -57,9 +59,10 @@
     <pre tabindex="0"><code>recognition.onresult = (event) =&gt; {
   const result = event.results[event.resultIndex];
   if (!result.isFinal) return;
-  const start = result.audioStartTime, end = result.audioEndTime;   // ms | null
-  if (start == null || end == null) { listUnpositioned(result[0].transcript); return; }
+  const start = result.speechStartTime, end = result.speechEndTime;   // seconds from audiostart
+  if (!Number.isFinite(start) || !Number.isFinite(end)) { listUnpositioned(result[0].transcript); return; }
   addSegment(result[0].transcript, start, end);   // left = start / total, width = (end - start) / total
+  textTrack.addCue(new VTTCue(start, end, result[0].transcript));   // same units as a media timeline
 };</code></pre>
   </section>
 
@@ -89,6 +92,7 @@
   let listening = false;
   let segments = []; // {text, start, end}
   let placeholderCleared = false;
+  let audioOriginMs = null; // audiostart event.timeStamp: t = 0 of the session audio timeline
 
   function ensureCaptionsCleared() {
     if (!placeholderCleared) { captions.textContent = ''; placeholderCleared = true; }
@@ -124,13 +128,13 @@
     li.appendChild(c);
     captions.appendChild(li);
   }
-  function listUnpositioned(text) {
+  function listUnpositioned(text, why) {
     ensureCaptionsCleared();
     const li = document.createElement('li');
     li.append(document.createTextNode(text + ' '));
     const span = document.createElement('span');
     span.className = 'unpositioned';
-    span.textContent = '[unpositioned — audioStartTime/audioEndTime were null]';
+    span.textContent = '[unpositioned — ' + why + ']';
     li.appendChild(span);
     captions.appendChild(li);
   }
@@ -158,15 +162,37 @@
     recognition = new SR();
     recognition.continuous = true;
     recognition.interimResults = false;
+    audioOriginMs = null;
+    recognition.onaudiostart = (event) => { audioOriginMs = event.timeStamp; };
     recognition.onresult = (event) => {
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
         if (!result.isFinal) continue;
-        const text = result[0] ? result[0].transcript.trim() : '';
-        const start = ('audioStartTime' in result) ? result.audioStartTime : null;
-        const end = ('audioEndTime' in result) ? result.audioEndTime : null;
+        let text = result[0] ? result[0].transcript.trim() : '';
+        // Spec (Chrome 156+): seconds on the session audio timeline. Draft
+        // (Chrome 153–155 only): nullable ms on the time origin, re-based here
+        // on audiostart so both land on the same 0-based timeline in ms.
+        let start = null;
+        let end = null;
+        let why = 'no speechStartTime/speechEndTime (or draft audioStartTime/audioEndTime) on this result';
+        if ('speechStartTime' in result && 'speechEndTime' in result) {
+          if (Number.isFinite(result.speechStartTime) && Number.isFinite(result.speechEndTime)) {
+            start = result.speechStartTime * 1000;
+            end = result.speechEndTime * 1000;
+          } else {
+            why = 'speechStartTime/speechEndTime were not finite numbers';
+          }
+        } else if ('audioStartTime' in result && 'audioEndTime' in result) {
+          if (result.audioStartTime != null && result.audioEndTime != null && audioOriginMs !== null) {
+            start = result.audioStartTime - audioOriginMs;
+            end = result.audioEndTime - audioOriginMs;
+            text = text + ' (draft audioStartTime/audioEndTime)';
+          } else {
+            why = audioOriginMs === null ? 'draft audioStartTime/audioEndTime with no audiostart anchor' : 'draft audioStartTime/audioEndTime were null';
+          }
+        }
         if (start == null || end == null) {
-          listUnpositioned(text);
+          listUnpositioned(text, why);
           window.showcaseTelemetry?.assert('speechts-timeline-null', true, {});
         } else {
           addSegment(text, start, end);

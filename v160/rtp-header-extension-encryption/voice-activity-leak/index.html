@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice-activity leak — RTP Header Extension Encryption — Chrome 160</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../cryptex-lab.css">
+  <style>
+    .calls { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: var(--space-3); margin-top: var(--space-3); }
+    .call { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-3); min-inline-size: 0; }
+    .call h3 { margin-top: 0; font-size: 1rem; }
+    meter { inline-size: 100%; block-size: 1.5rem; }
+    .wire { font-family: var(--font-mono); font-size: 0.78rem; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v160/rtp-header-extension-encryption/">&larr; RTP Header Extension Encryption</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · webrtc · privacy</p>
+    <h1>Voice-activity leak</h1>
+    <p class="lede">SRTP has always encrypted your voice. It never encrypted the RTP header extension that says <em>how loud</em> each packet is: <code>urn:ietf:params:rtp-hdrext:ssrc-audio-level</code> (RFC&nbsp;6464), which is what powers <code>RTCRtpReceiver.getSynchronizationSources()[i].audioLevel</code> and every &ldquo;who is speaking&rdquo; indicator. Two real calls run side by side here, one negotiated with cryptex and one without. Your app sees identical levels in both &mdash; the difference is whether anyone on the network path can read them too.</p>
+  </header>
+
+  <div class="note" id="support-note" role="status">Probing this browser&hellip;</div>
+
+  <div class="stage">
+    <h2>Two calls, one voice</h2>
+    <div class="actions">
+      <button type="button" class="lab-btn primary" id="start-btn">Start both calls</button>
+      <button type="button" class="lab-btn" id="talk-btn" aria-pressed="false" disabled>Talk (raise tone level)</button>
+      <button type="button" class="lab-btn" id="stop-btn" disabled>Stop</button>
+    </div>
+    <div class="readout" id="status" role="status" aria-live="polite">Press Start. Synthetic oscillator audio only &mdash; no microphone is used.</div>
+    <div class="calls">
+      <section class="call" aria-labelledby="clear-h">
+        <h3 id="clear-h">Call A &mdash; headers in the clear</h3>
+        <p class="wire" id="clear-wire">not started</p>
+        <label for="clear-meter">receiver audioLevel</label>
+        <meter id="clear-meter" min="0" max="1" value="0"></meter>
+        <p class="wire" id="clear-val">—</p>
+      </section>
+      <section class="call" aria-labelledby="enc-h">
+        <h3 id="enc-h">Call B &mdash; cryptex negotiated</h3>
+        <p class="wire" id="enc-wire">not started</p>
+        <label for="enc-meter">receiver audioLevel</label>
+        <meter id="enc-meter" min="0" max="1" value="0"></meter>
+        <p class="wire" id="enc-val">—</p>
+      </section>
+    </div>
+  </div>
+
+  <section>
+    <h2>what this proves, and what it cannot</h2>
+    <p>The page can prove, from the real descriptions, which call negotiated <code>a=cryptex</code> and which extension id carries <code>ssrc-audio-level</code>; and from the real receivers, that the level reaches the app either way. A web page cannot see the packets on the wire, so the &ldquo;readable by an on-path observer&rdquo; line is a consequence of RFC&nbsp;6464 + RFC&nbsp;9335, not a capture. To see it yourself, record <code>chrome://webrtc-internals</code> RTP dumps or a packet capture of a real call: without cryptex, one-byte extension id <em>N</em> with the level is visible after the <code>0xBEDE</code> profile; with cryptex the profile becomes <code>0xC0DE</code> and the block is ciphertext.</p>
+    <p>The same encryption covers the <strong>CSRC list</strong>: when an SFU or mixer forwards audio, CSRCs identify the contributing speakers (<code>getContributingSources()</code>). In this direct two-peer call that list is empty: <span id="csrc-note">—</span>.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">RTP Header Extension Encryption</a> &mdash; feature index</li>
+      <li><a href="../sdp-cryptex-inspector/">SDP cryptex inspector</a></li>
+      <li><a href="../require-downgrade-guard/">Require: downgrade guard</a></li>
+      <li><a href="https://chromestatus.com/feature/5177732519559168" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc6464" target="_blank" rel="noopener">RFC 6464 &mdash; client-to-mixer audio level</a></li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9335" target="_blank" rel="noopener">RFC 9335 &mdash; cryptex</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script src="../cryptex-lab.js"></script>
+<script>
+(function () {
+  var L = window.CryptexLab;
+  var supportNote = document.getElementById("support-note");
+  var statusEl = document.getElementById("status");
+  var startBtn = document.getElementById("start-btn");
+  var talkBtn = document.getElementById("talk-btn");
+  var stopBtn = document.getElementById("stop-btn");
+
+  var sup = L.probeSupport();
+  var accepted = sup.supported ? L.acceptedPolicies() : [];
+  // Call A (clear): "disable" if the build has it, otherwise "negotiate" with the answer's
+  // a=cryptex stripped (both sides then legitimately run in the clear).
+  var clearPlan = accepted.indexOf("disable") !== -1 ? { policy: "disable", strip: false } : { policy: sup.supported ? "negotiate" : null, strip: true };
+  if (sup.supported) {
+    supportNote.className = "note ok";
+    supportNote.innerHTML = '<span class="v-yes">Policy implemented.</span> Call A uses ' + (clearPlan.policy === "disable" ? '<code>"disable"</code>' : '<code>"negotiate"</code> with <code>a=cryptex</code> removed from the answer (this build predates <code>"disable"</code>)') + '; call B uses <code>"negotiate"</code> on both ends.';
+  } else {
+    supportNote.className = "note warn";
+    supportNote.innerHTML = '<span class="v-no">rtpHeaderEncryptionPolicy is not implemented here</span>: neither call can negotiate cryptex, so <em>both</em> will report clear headers. That is this browser&rsquo;s real behaviour. ' + L.flagHelpHTML();
+  }
+
+  var calls = [];
+  var talking = false;
+  var timer = 0;
+
+  async function startCall(id, policy, strip) {
+    var pc1 = L.makePc(policy), pc2 = L.makePc(policy);
+    var media = L.makeMediaStream({ video: false, gain: 0.02 });
+    media.audioCtx.resume();
+    media.stream.getTracks().forEach(function (t) { pc1.addTrack(t, media.stream); });
+    L.exchangeIce(pc1, pc2);
+    var log = await L.negotiate(pc1, pc2, { tamperAnswer: strip ? L.stripCryptex : null });
+    var offer = L.analyse(log[0].sdp), answer = L.analyse(log[2].sdp);
+    var enc = offer.hasCryptexLine && answer.hasCryptexLine;
+    var ext = (answer.media[0] && answer.media[0].extmaps || []).find(function (e) { return /ssrc-audio-level/.test(e.uri); });
+    document.getElementById(id + "-wire").textContent =
+      "policy " + (policy || "(none)") + (strip ? " · answer stripped" : "") + " · a=cryptex both sides: " + enc +
+      " · ssrc-audio-level = extmap id " + (ext ? ext.id : "not negotiated") +
+      " → " + (enc ? "level byte ENCRYPTED on the wire" : "level byte readable by any on-path observer");
+    await L.waitConnected(pc1, 10000);
+    var receiver = pc2.getReceivers()[0];
+    // Chrome only decodes (and so only reports audioLevel for) remote audio that is being
+    // played out by a sink. A muted <audio> element is enough; nothing is audible.
+    var sink = document.createElement("audio");
+    sink.muted = true;
+    sink.srcObject = new MediaStream([receiver.track]);
+    sink.play().catch(function () {});
+    return { id: id, pc1: pc1, pc2: pc2, media: media, enc: enc, ext: ext, receiver: receiver, sink: sink, samples: [] };
+  }
+
+  function stopAll() {
+    clearInterval(timer);
+    calls.forEach(function (c) { c.sink.srcObject = null; c.media.stop(); c.pc1.close(); c.pc2.close(); });
+    calls = [];
+    talkBtn.disabled = true; stopBtn.disabled = true; startBtn.disabled = false;
+    talking = false; talkBtn.setAttribute("aria-pressed", "false");
+  }
+
+  startBtn.addEventListener("click", async function () {
+    startBtn.disabled = true;
+    statusEl.textContent = "Negotiating two calls…";
+    try {
+      calls = [
+        await startCall("clear", clearPlan.policy, clearPlan.strip),
+        await startCall("enc", sup.supported ? "negotiate" : null, false),
+      ];
+    } catch (e) {
+      statusEl.textContent = "Call setup failed: " + e.name + ": " + e.message;
+      stopAll();
+      return;
+    }
+    talkBtn.disabled = false; stopBtn.disabled = false;
+    statusEl.textContent = "Both calls connected. Press Talk to raise the tone level and watch both receivers' audioLevel follow it.";
+    var lastAssert = 0;
+    timer = setInterval(function () {
+      calls.forEach(function (c) {
+        var src = c.receiver.getSynchronizationSources();
+        var lvl = src.length && typeof src[0].audioLevel === "number" ? src[0].audioLevel : null;
+        document.getElementById(c.id + "-meter").value = lvl || 0;
+        document.getElementById(c.id + "-val").textContent = lvl === null ? "no level yet" : "audioLevel " + lvl.toFixed(3) + (c.enc ? " (decrypted at the endpoint; ciphertext on the wire)" : " (same value sits in a clear RTP header)");
+        if (lvl !== null) c.samples.push({ t: talking, lvl: lvl });
+        if (c.id === "enc") {
+          var csrc = c.receiver.getContributingSources();
+          document.getElementById("csrc-note").textContent = "getContributingSources() returned " + csrc.length + " entr" + (csrc.length === 1 ? "y" : "ies");
+        }
+      });
+      if (talking && Date.now() - lastAssert > 3000 && calls.length === 2) {
+        lastAssert = Date.now();
+        var hi = calls.map(function (c) { return c.samples.filter(function (s) { return s.t; }).reduce(function (m, s) { return Math.max(m, s.lvl); }, 0); });
+        var lo = calls.map(function (c) { return c.samples.filter(function (s) { return !s.t; }).reduce(function (m, s) { return Math.max(m, s.lvl); }, 0); });
+        var tracked = hi.every(function (h, i) { return h > lo[i]; });
+        var distinct = sup.supported ? (calls[1].enc && !calls[0].enc) : (!calls[0].enc && !calls[1].enc);
+        statusEl.textContent = "Talking. Peak level — call A: " + hi[0].toFixed(3) + ", call B: " + hi[1].toFixed(3) + " (quiet baseline " + lo[0].toFixed(3) + " / " + lo[1].toFixed(3) + ").\n" +
+          (tracked ? "Both receivers tracked the change: the app gets voice activity either way." : "Levels have not risen yet — keep Talk on a moment.") + "\n" +
+          (sup.supported ? (distinct ? "Only call A exposed it in clear RTP headers." : "UNEXPECTED: cryptex state did not differ between the calls.") : "Neither call could encrypt it (feature not implemented).");
+        window.showcaseTelemetry?.assert(sup.supported ? "cryptex-audio-level-composition" : "cryptex-audio-level-unsupported-fallback", tracked && distinct,
+          { supported: sup.supported, clearPlan: clearPlan, enc: calls.map(function (c) { return c.enc; }), hi: hi, lo: lo, labelled: sup.supported ? "native" : "honest-unsupported" });
+      }
+    }, 250);
+  });
+
+  talkBtn.addEventListener("click", function () {
+    talking = !talking;
+    talkBtn.setAttribute("aria-pressed", String(talking));
+    calls.forEach(function (c) { c.media.gain.gain.setTargetAtTime(talking ? 0.9 : 0.02, c.media.audioCtx.currentTime, 0.05); });
+  });
+  stopBtn.addEventListener("click", function () { stopAll(); statusEl.textContent = "Stopped."; });
+})();
+</script>
+</body>
+</html>

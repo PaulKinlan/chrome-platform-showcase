@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bootstrap-processor migration — Shared MessagePort for AudioWorklet — Chrome 160</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .note.warn { border-left-color: var(--accent-rose); }
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin: var(--space-3) 0; }
+    .controls button { min-height: 44px; }
+    .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: var(--space-3); }
+    .col { border: 2px solid var(--border-black); background: var(--bg-ivory); padding: var(--space-3); min-inline-size: 0; }
+    .col h3 { margin-top: 0; font-size: 1rem; }
+    .col pre { overflow-x: auto; font-size: 0.72rem; max-inline-size: 100%; }
+    dl.metrics { display: grid; grid-template-columns: auto 1fr; gap: 0.2rem 0.6rem; font-size: 0.8rem; margin: var(--space-2) 0 0; }
+    dl.metrics dt { font-weight: 700; }
+    dl.metrics dd { margin: 0; font-family: var(--font-mono); overflow-wrap: anywhere; }
+    @media (max-width: 30rem) { dl.metrics { grid-template-columns: 1fr; } dl.metrics dd { margin-block-end: 0.4rem; } }
+    .tablewrap { overflow-x: auto; }
+    table { border-collapse: collapse; inline-size: 100%; font-size: 0.78rem; }
+    caption { text-align: left; font-size: 0.85rem; padding-block: 0.3rem; color: var(--text-charcoal); }
+    th, td { border: 1px solid var(--border-black); padding: 0.4rem 0.5rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); color: var(--text-black); }
+    .ok { color: var(--accent-emerald-dark); font-weight: 700; }
+    .bad { color: var(--accent-rose); font-weight: 700; }
+    .na { color: var(--text-muted); font-weight: 700; }
+    #status { font-weight: 700; margin-top: var(--space-3); overflow-wrap: anywhere; }
+    pre { overflow-x: auto; max-inline-size: 100%; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v160/shared-messageport-for-audioworklet/">&larr; Shared MessagePort for AudioWorklet</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · multimedia · web audio</p>
+    <h1>Bootstrap-processor migration</h1>
+    <p class="lede">Before the shared port, the only way into <code>AudioWorkletGlobalScope</code> was to construct an <code>AudioWorkletNode</code> whose processor did nothing but relay messages &mdash; Emscripten output and MOD players ship exactly that. This page runs the legacy workaround and the spec path side by side on the same module, then probes the edges you hit while migrating.</p>
+  </header>
+
+  <div class="note" id="support-note" role="status">Probing this browser&hellip;</div>
+
+  <div class="stage">
+    <h2>Side by side: deliver a config object to global scope</h2>
+    <div class="controls"><button type="button" id="compare-btn">Run both paths</button></div>
+    <div class="cols">
+      <div class="col">
+        <h3>Legacy: bootstrap processor</h3>
+<pre tabindex="0"><code>await ctx.audioWorklet.addModule(url);
+const boot = new AudioWorkletNode(ctx, "bootstrap");
+boot.port.postMessage({ type: "config", … });</code></pre>
+        <dl class="metrics" id="legacy-metrics"><dt>result</dt><dd>not run</dd></dl>
+      </div>
+      <div class="col">
+        <h3>Spec: shared port</h3>
+<pre tabindex="0"><code>await ctx.audioWorklet.addModule(url);
+ctx.audioWorklet.port.postMessage({ type: "config", … });
+</code></pre>
+        <dl class="metrics" id="shared-metrics"><dt>result</dt><dd>not run</dd></dl>
+      </div>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+  </div>
+
+  <div class="stage">
+    <h2>Edge probes</h2>
+    <div class="controls"><button type="button" id="edges-btn">Run edge probes</button></div>
+    <div class="tablewrap" tabindex="0" role="region" aria-label="Edge probe results (scrolls horizontally on narrow screens)">
+      <table>
+        <caption>Observed behaviour in this browser</caption>
+        <thead><tr><th scope="col">probe</th><th scope="col">observed</th><th scope="col">verdict</th></tr></thead>
+        <tbody id="edge-rows"><tr><td colspan="3">Press “Run edge probes”.</td></tr></tbody>
+      </table>
+    </div>
+    <p id="edge-status" role="status" aria-live="polite"></p>
+  </div>
+
+  <section>
+    <h2>migration pattern</h2>
+    <pre tabindex="0"><code>async function globalScopePort(ctx) {
+  if ("port" in AudioWorklet.prototype) return ctx.audioWorklet.port;  // Chrome 160+, Firefox 138+
+  return new AudioWorkletNode(ctx, "bootstrap").port;                   // legacy fallback
+}
+// In the module, wire ONE handler to whichever end arrives:
+if (typeof port === "object" &amp;&amp; port) port.onmessage = (e) =&gt; handle(e.data, port);
+registerProcessor("bootstrap", class extends AudioWorkletProcessor {
+  constructor() { super(); this.port.onmessage = (e) =&gt; handle(e.data, this.port); }
+  process() { return false; }       // never renders: it only existed to borrow a port
+});</code></pre>
+    <p>Rows labelled <em>observed</em> describe what this engine did; the spec text defines the port pair and the <code>close()</code> note, but not every ordering detail. The <code>WebAssembly.Module</code> row matters for Emscripten-style loaders: a compiled module can only be shared within an agent cluster, so this page shows the portable alternative &mdash; transfer the bytes and compile inside the worklet.</p>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5079784523694080" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://github.com/emscripten-core/emscripten/pull/25354" target="_blank" rel="noopener">Emscripten PR #25354</a></li>
+      <li><a href="https://github.com/WebAudio/web-audio-api/issues/2456" target="_blank" rel="noopener">WebAudio issue #2456</a></li>
+      <li><a href="https://webaudio.github.io/web-audio-api/#dom-audioworklet-port" target="_blank" rel="noopener">Web Audio API &mdash; AudioWorklet.port (note on close())</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/web-messaging.html#message-ports" target="_blank" rel="noopener">HTML &mdash; MessagePort (queues, start(), close())</a></li>
+    </ul>
+  </section>
+</main>
+<script>
+  (function () {
+    "use strict";
+    var MODULE = [
+      "const shared = { config: null, early: [], wasm: null };",
+      "function handle(d, reply) {",
+      "  try {",
+      "    if (!d) return;",
+      "    if (d.type === 'config') { shared.config = d.config; reply({ type: 'config-ack', keys: Object.keys(d.config).length }); }",
+      "    else if (d.type === 'early') { shared.early.push(d.tag); }",
+      "    else if (d.type === 'whoami') reply({ type: 'whoami', sampleRate, early: shared.early.slice(), config: shared.config });",
+      "    else if (d.type === 'wasm-bytes') {",
+      "      const inst = new WebAssembly.Instance(new WebAssembly.Module(d.bytes), {});",
+      "      reply({ type: 'wasm-result', value: inst.exports.mul(3, 7) });",
+      "    }",
+      "    else if (d.type === 'wasm-module') {",
+      "      const inst = new WebAssembly.Instance(d.module, {});",
+      "      reply({ type: 'wasm-result', value: inst.exports.mul(3, 7) });",
+      "    }",
+      "  } catch (err) { reply({ type: 'error', message: String(err) }); }",
+      "}",
+      "if (typeof port === 'object' && port) {",
+      "  port.onmessage = (e) => handle(e.data, (m) => port.postMessage(m));",
+      "  port.onmessageerror = () => port.postMessage({ type: 'messageerror' });",
+      "}",
+      "registerProcessor('bootstrap', class extends AudioWorkletProcessor {",
+      "  constructor() {",
+      "    super();",
+      "    this.port.onmessage = (e) => handle(e.data, (m) => this.port.postMessage(m));",
+      "    this.port.onmessageerror = () => this.port.postMessage({ type: 'messageerror' });",
+      "  }",
+      "  process() { return false; }",
+      "});"
+    ].join("\n");
+    var MODULE_URL = URL.createObjectURL(new Blob([MODULE], { type: "text/javascript" }));
+    // (module (func (export "mul") (param f32 f32) (result f32) local.get 0 local.get 1 f32.mul))
+    var WASM = [0, 97, 115, 109, 1, 0, 0, 0, 1, 7, 1, 96, 2, 125, 125, 1, 125, 3, 2, 1, 0, 7, 7, 1, 3, 109, 117, 108, 0, 0, 10, 9, 1, 7, 0, 32, 0, 32, 1, 148, 11];
+
+    var note = document.getElementById("support-note");
+    var hasAW = typeof AudioWorklet !== "undefined";
+    var hasPort = hasAW && "port" in AudioWorklet.prototype;
+    var compareBtn = document.getElementById("compare-btn");
+    var edgesBtn = document.getElementById("edges-btn");
+    if (!hasAW) {
+      note.className = "note warn";
+      note.textContent = "AudioWorklet is not exposed here (secure context required).";
+      compareBtn.disabled = edgesBtn.disabled = true;
+    } else if (!hasPort) {
+      note.className = "note warn";
+      note.textContent = "No AudioWorklet.prototype.port here, so only the LEGACY column can run — which is exactly the situation that forced the workaround. Chrome 160 ships the shared port by default; on an earlier build with the implementation, enable chrome://flags/#enable-experimental-web-platform-features or launch with --enable-blink-features=AudioWorkletSharedPort.";
+    } else {
+      note.textContent = "AudioWorklet.prototype.port is present — both columns run, and the shared column needs no extra node.";
+    }
+
+    function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return "&#" + c.charCodeAt(0) + ";"; }); }
+    function request(port, msg, types, ms, transfer) {
+      if (typeof types === "string") types = [types];
+      return new Promise(function (resolve) {
+        var t = setTimeout(function () { port.removeEventListener("message", on); resolve(null); }, ms || 1500);
+        function on(e) { if (e.data && types.indexOf(e.data.type) >= 0) { clearTimeout(t); port.removeEventListener("message", on); resolve(e.data); } }
+        port.addEventListener("message", on);
+        port.start();
+        if (msg) port.postMessage(msg, transfer || []);
+      });
+    }
+    function metrics(el, pairs) {
+      el.innerHTML = pairs.map(function (p) { return "<dt>" + esc(p[0]) + "</dt><dd" + (p[2] ? " class=\"" + p[2] + "\"" : "") + ">" + esc(p[1]) + "</dd>"; }).join("");
+    }
+    var CONFIG = { tempo: 128, swing: 0.12, scale: "dorian", voices: 8 };
+
+    compareBtn.addEventListener("click", async function () {
+      compareBtn.disabled = true;
+      // Legacy
+      var c1 = new OfflineAudioContext(1, 128, 48000);
+      await c1.audioWorklet.addModule(MODULE_URL);
+      var t0 = performance.now();
+      var boot = new AudioWorkletNode(c1, "bootstrap");
+      var legacyAck = await request(boot.port, { type: "config", config: CONFIG }, "config-ack");
+      var legacyMs = performance.now() - t0;
+      metrics(document.getElementById("legacy-metrics"), [
+        ["delivered", legacyAck ? "yes — " + legacyAck.keys + " keys acknowledged" : "no ack", legacyAck ? "ok" : "bad"],
+        ["extra AudioWorkletNode", "1 (constructed only to borrow its port)"],
+        ["extra processor instance", "1 on the render thread"],
+        ["time to ack", legacyAck ? legacyMs.toFixed(2) + " ms (includes node + processor construction)" : "—"]
+      ]);
+      // Spec
+      var c2 = new OfflineAudioContext(1, 128, 48000);
+      var sharedAck = null, sharedMs = 0;
+      if (c2.audioWorklet.port instanceof MessagePort) {
+        await c2.audioWorklet.addModule(MODULE_URL);
+        var t1 = performance.now();
+        sharedAck = await request(c2.audioWorklet.port, { type: "config", config: CONFIG }, "config-ack");
+        sharedMs = performance.now() - t1;
+        c2.audioWorklet.port.close();
+        metrics(document.getElementById("shared-metrics"), [
+          ["delivered", sharedAck ? "yes — " + sharedAck.keys + " keys acknowledged" : "no ack", sharedAck ? "ok" : "bad"],
+          ["extra AudioWorkletNode", "0"],
+          ["extra processor instance", "0"],
+          ["time to ack", sharedAck ? sharedMs.toFixed(2) + " ms" : "—"]
+        ]);
+      } else {
+        metrics(document.getElementById("shared-metrics"), [
+          ["delivered", "unavailable — ctx.audioWorklet.port is undefined", "bad"],
+          ["what to do", "keep the legacy path behind the feature check above"]
+        ]);
+      }
+      document.getElementById("status").textContent = "Legacy: " + (legacyAck ? "delivered via a dummy node" : "failed") +
+        ". Shared port: " + (sharedAck ? "delivered with zero extra nodes." : hasPort ? "no ack." : "not available in this engine (unsupported, shown honestly).");
+      window.showcaseTelemetry?.assert("migration-paths", !!legacyAck && (hasPort ? !!sharedAck : !sharedAck),
+        { legacy: !!legacyAck, shared: !!sharedAck, branch: hasPort ? "spec" : "unsupported-fallback" });
+      compareBtn.disabled = false;
+    });
+
+    edgesBtn.addEventListener("click", async function () {
+      edgesBtn.disabled = true;
+      var rows = [];
+      function row(probe, observed, verdict, cls) { rows.push("<tr><th scope=\"row\">" + probe + "</th><td>" + esc(observed) + "</td><td class=\"" + cls + "\">" + esc(verdict) + "</td></tr>"); }
+
+      if (hasPort) {
+        // 1. Post before addModule
+        var c = new OfflineAudioContext(1, 128, 48000);
+        c.audioWorklet.port.postMessage({ type: "early", tag: "sent-before-addModule" });
+        await c.audioWorklet.addModule(MODULE_URL);
+        var who = await request(c.audioWorklet.port, { type: "whoami" }, "whoami");
+        var early = who && who.early.indexOf("sent-before-addModule") >= 0;
+        row("postMessage() before addModule()", who ? "global scope saw: [" + who.early.join(", ") + "]" : "no reply", early ? "observed: queued & delivered" : "observed: not delivered", early ? "ok" : "na");
+
+        // 2. Per-context isolation
+        var other = new OfflineAudioContext(1, 128, 44100);
+        await other.audioWorklet.addModule(MODULE_URL);
+        await request(c.audioWorklet.port, { type: "config", config: { owner: "context-A" } }, "config-ack");
+        var otherWho = await request(other.audioWorklet.port, { type: "whoami" }, "whoami");
+        var isolated = otherWho && otherWho.config === null && otherWho.sampleRate === 44100;
+        row("config sent to context A, read from context B", otherWho ? "B (" + otherWho.sampleRate + " Hz) config = " + JSON.stringify(otherWho.config) : "no reply", isolated ? "isolated: one global scope per context" : "leaked or no reply", isolated ? "ok" : "bad");
+
+        // 3. Wasm bytes vs module
+        var bytes = new Uint8Array(WASM).buffer;
+        var wb = await request(c.audioWorklet.port, { type: "wasm-bytes", bytes: bytes }, ["wasm-result", "error", "messageerror"], 1500, [bytes]);
+        row("transfer WebAssembly bytes, compile in worklet", wb ? JSON.stringify(wb) + " · sender buffer byteLength now " + bytes.byteLength : "no reply", wb && wb.value === 21 ? "works (21 = 3×7)" : "failed", wb && wb.value === 21 ? "ok" : "bad");
+        var mod = await WebAssembly.compile(new Uint8Array(WASM));
+        var wm = await request(c.audioWorklet.port, { type: "wasm-module", module: mod }, ["wasm-result", "error", "messageerror"], 1500);
+        row("post a compiled WebAssembly.Module", wm ? JSON.stringify(wm) : "no reply", wm && wm.value === 21 ? "observed: shared" : "observed: not shareable here (crossOriginIsolated = " + self.crossOriginIsolated + ")", wm && wm.value === 21 ? "ok" : "na");
+
+        // 4. close()
+        c.audioWorklet.port.close();
+        var afterClose = await request(c.audioWorklet.port, { type: "whoami" }, "whoami", 600);
+        row("close() then postMessage()", afterClose ? "still replied" : "no reply within 600 ms", afterClose ? "unexpected" : "closed: channel is dead", afterClose ? "bad" : "ok");
+        other.audioWorklet.port.close();
+      } else {
+        var c3 = new OfflineAudioContext(1, 128, 48000);
+        row("ctx.audioWorklet.port", String(c3.audioWorklet.port), "unsupported — the shared-port probes cannot run", "bad");
+        await c3.audioWorklet.addModule(MODULE_URL);
+        var bootNode = new AudioWorkletNode(c3, "bootstrap");
+        var bytes2 = new Uint8Array(WASM).buffer;
+        var wb2 = await request(bootNode.port, { type: "wasm-bytes", bytes: bytes2 }, ["wasm-result", "error", "messageerror"], 1500, [bytes2]);
+        row("FALLBACK (bootstrap port): transfer WebAssembly bytes", wb2 ? JSON.stringify(wb2) : "no reply", wb2 && wb2.value === 21 ? "works via the workaround (21 = 3×7)" : "failed", wb2 && wb2.value === 21 ? "ok" : "bad");
+        var mod2 = await WebAssembly.compile(new Uint8Array(WASM));
+        var wm2 = await request(bootNode.port, { type: "wasm-module", module: mod2 }, ["wasm-result", "error", "messageerror"], 1500);
+        row("FALLBACK (bootstrap port): post a compiled WebAssembly.Module", wm2 ? JSON.stringify(wm2) : "no reply", wm2 && wm2.value === 21 ? "observed: shared" : "observed: not shareable here (crossOriginIsolated = " + self.crossOriginIsolated + ")", wm2 && wm2.value === 21 ? "ok" : "na");
+        bootNode.port.close();
+      }
+      document.getElementById("edge-rows").innerHTML = rows.join("");
+      document.getElementById("edge-status").textContent = rows.length + " edge probes ran " + (hasPort ? "against the shared port." : "— shared-port probes unavailable; fallback probes ran through the bootstrap workaround.");
+      window.showcaseTelemetry?.assert("migration-edges-ran", rows.length >= 3, { rows: rows.length, branch: hasPort ? "spec" : "unsupported-fallback" });
+      edgesBtn.disabled = false;
+    });
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telemetry noise filter — Distinct TypeError for cancelled race-network-and-fetch-handler fetch() — Chrome 159</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Distinct TypeError message for cancelled race-network-and-fetch-handler fetch()</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · service worker · practical use</p>
+    <h1>Telemetry noise filter</h1>
+    <p class="lede">The motivating product problem. An offline-capable app reports every rejected <code>fetch()</code> in its service worker to an error dashboard, except the ones it caused itself by answering first. With Navigation Preload it filtered those by message; after moving to <code>"race-network-and-fetch-handler"</code> they all said <q>Failed to fetch</q> and the dashboard lit up. Replay a session of <strong>real</strong> requests &mdash; cancelled races, clean successes and genuine network failures &mdash; through both classifiers and count the alerts.</p>
+  </header>
+
+  <div class="note" id="status" role="status">Registering this feature&rsquo;s service worker&hellip;</div>
+
+  <div class="stage">
+    <h2>Replay a session</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="n-cancel">Slow responses the fallback timer beats</label>
+        <input type="number" id="n-cancel" min="0" max="8" value="4" inputmode="numeric" aria-describedby="h-cancel">
+        <span class="hint" id="h-cancel">Server headers at 700 ms, timer at 100 ms → a race cancellation each.</span>
+      </div>
+      <div class="field">
+        <label for="n-ok">Fast responses</label>
+        <input type="number" id="n-ok" min="0" max="8" value="3" inputmode="numeric" aria-describedby="h-ok">
+        <span class="hint" id="h-ok">Headers immediately, timer at 1500 ms → fulfilled.</span>
+      </div>
+      <div class="field">
+        <label for="n-fail">Genuine network failures</label>
+        <input type="number" id="n-fail" min="0" max="8" value="2" inputmode="numeric" aria-describedby="h-fail">
+        <span class="hint" id="h-fail">A raced request to a 301 with <code>redirect: "error"</code> → a real failure.</span>
+      </div>
+    </div>
+    <div class="actions">
+      <button type="button" id="replay">Replay the session</button>
+    </div>
+    <progress id="progress" max="1" value="0" aria-label="session progress" hidden></progress>
+
+    <div class="counters" id="counters">
+      <div class="counter">
+        <h3>Genuine failures (ground truth)</h3>
+        <div class="big" id="c-truth">—</div>
+      </div>
+      <div class="counter">
+        <h3>Legacy classifier alerts</h3>
+        <div class="big" id="c-legacy">—</div>
+        <p id="c-legacy-note">any <code>TypeError</code> is an outage</p>
+      </div>
+      <div class="counter">
+        <h3>Message-aware classifier alerts</h3>
+        <div class="big" id="c-aware">—</div>
+        <p id="c-aware-note">skips the two &ldquo;cancelled before &hellip; settled&rdquo; messages</p>
+      </div>
+    </div>
+    <div class="readout" id="verdict" role="status" aria-live="polite" aria-atomic="true">Replay a session to compare the classifiers.</div>
+
+    <div tabindex="0" role="region" aria-labelledby="log-caption" class="table-wrapper">
+      <table>
+        <caption id="log-caption">Every request in the session, as the worker reported it</caption>
+        <thead><tr><th scope="col">#</th><th scope="col">Kind</th><th scope="col">Worker fetch() result</th><th scope="col">Legacy</th><th scope="col">Message-aware</th></tr></thead>
+        <tbody id="log"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <section>
+    <h2>the classifier</h2>
+    <pre tabindex="0"><code>const EXPECTED_CANCELLATIONS = new Set([
+  // Navigation Preload (already in Chrome):
+  "The service worker navigation preload request was cancelled before 'preloadResponse' settled.",
+  // Static routing race (Chrome 159+):
+  "The service worker race-network-and-fetch-handler request was cancelled before 'fetch()' settled.",
+]);
+
+function shouldAlert(error) {
+  if (error?.name === "AbortError") return false;           // our own AbortController
+  if (error instanceof TypeError &amp;&amp; EXPECTED_CANCELLATIONS.has(error.message)) return false;
+  return true;                                              // genuine — page someone
+}</code></pre>
+    <p>Matching an exact, implementation-defined string is deliberate here: it is what the Navigation Preload code already did, and it fails safe &mdash; on a browser without the change the cancellation still says <q>Failed to fetch</q> and is reported, so you get noise, never a missed outage.</p>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../fallback-timer-race/">Fallback-timer race</a></li>
+      <li><a href="../fetch-shape-inspector/">Fetch-shape inspector</a></li>
+      <li><a href="../app-shell-revalidation/">App-shell revalidation</a></li>
+      <li><a href="../error-taxonomy/">Error taxonomy</a></li>
+      <li><a href="https://chromestatus.com/feature/5124748525830144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://developer.mozilla.org/docs/Web/API/FetchEvent/preloadResponse" target="_blank" rel="noopener">MDN: FetchEvent.preloadResponse</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script type="module">
+  import { run, RACE_CANCELLED_MESSAGE, NAV_PRELOAD_CANCELLED_MESSAGE } from "../harness.js";
+  import { showStatus, esc } from "../ui.js";
+
+  const EXPECTED = new Set([NAV_PRELOAD_CANCELLED_MESSAGE, RACE_CANCELLED_MESSAGE]);
+  const legacyAlert = (f) => f.settled === "rejected" && f.name === "TypeError";
+  const awareAlert = (f) => f.settled === "rejected" && f.name !== "AbortError" && !(f.name === "TypeError" && EXPECTED.has(f.message));
+
+  const $ = (id) => document.getElementById(id);
+  await showStatus($("status"));
+
+  const count = (id) => Math.min(8, Math.max(0, Math.round(Number($(id).value) || 0)));
+
+  $("replay").addEventListener("click", async () => {
+    const button = $("replay");
+    button.disabled = true;
+    const plan = [];
+    const nCancel = count("n-cancel"), nOk = count("n-ok"), nFail = count("n-fail");
+    // Interleave deterministically so the log reads like a real session.
+    for (let i = 0; i < Math.max(nCancel, nOk, nFail); i++) {
+      if (i < nCancel) plan.push({ kind: "slow → timer wins", mode: "fallback", opts: { delay: 700, fb: 100 }, genuine: false });
+      if (i < nOk) plan.push({ kind: "fast response", mode: "fallback", opts: { delay: 0, fb: 1500 }, genuine: false });
+      if (i < nFail) plan.push({ kind: "genuine failure", mode: "genuine", opts: {}, genuine: true });
+    }
+    const log = $("log");
+    log.textContent = "";
+    const progress = $("progress");
+    progress.hidden = false;
+    progress.max = Math.max(1, plan.length);
+    progress.value = 0;
+    let truth = 0, legacy = 0, aware = 0, missed = 0, cancellations = 0, distinct = 0;
+    try {
+      for (const [index, step] of plan.entries()) {
+        const r = await run(step.mode, step.opts);
+        const f = r.worker.fetches?.[0] ?? { settled: "rejected", name: "Error", message: r.worker.error ?? "no report" };
+        const isLegacy = legacyAlert(f), isAware = awareAlert(f);
+        if (step.genuine && f.settled === "rejected") truth++;
+        if (isLegacy) legacy++;
+        if (isAware) aware++;
+        if (step.genuine && f.settled === "rejected" && !isAware) missed++;
+        if (!step.genuine && f.settled === "rejected") cancellations++;
+        if (f.message === RACE_CANCELLED_MESSAGE) distinct++;
+        const tr = document.createElement("tr");
+        const result = f.settled === "fulfilled" ? `fulfilled · HTTP ${f.status}` : `${f.name}: ${f.message}`;
+        tr.innerHTML = `<th scope="row">${index + 1}</th><td data-label="Kind">${esc(step.kind)}</td>` +
+          `<td data-label="Worker fetch()"><code>${esc(result)}</code></td>` +
+          `<td data-label="Legacy">${isLegacy ? '<span class="v-no">alert</span>' : "quiet"}</td>` +
+          `<td data-label="Message-aware">${isAware ? '<span class="v-no">alert</span>' : "quiet"}</td>`;
+        log.append(tr);
+        progress.value = index + 1;
+      }
+      $("c-truth").textContent = String(truth);
+      $("c-legacy").textContent = String(legacy);
+      $("c-aware").textContent = String(aware);
+      const lines = [
+        `${plan.length} real requests: ${cancellations} race cancellation(s), ${truth} genuine failure(s).`,
+        `Legacy classifier: ${legacy} alert(s) — ${Math.max(0, legacy - truth)} false positive(s).`,
+        `Message-aware classifier: ${aware} alert(s) — ${Math.max(0, aware - truth)} false positive(s), ${missed} missed outage(s).`,
+      ];
+      if (cancellations && distinct === cancellations) {
+        lines.push("Every cancellation carried the distinct Chrome 159+ message, so the message-aware classifier stayed quiet for exactly those.");
+      } else if (cancellations) {
+        lines.push("The cancellations here said \"Failed to fetch\" (Chrome before 159, or 159 with ServiceWorkerRaceNetworkRequestAbortedErrorMessage off), so both classifiers alert on them — the noise this change removes.");
+      }
+      $("verdict").textContent = lines.join("\n");
+      window.showcaseTelemetry?.assert("noise-filter-never-misses-genuine", missed === 0, { truth, legacy, aware, cancellations, distinct });
+    } catch (error) {
+      $("verdict").textContent = `Replay stopped: ${error.message}`;
+      window.showcaseTelemetry?.assert("noise-filter-never-misses-genuine", false, { error: error.message });
+    } finally {
+      button.disabled = false;
+      progress.hidden = true;
+    }
+  });
+</script>
+</body>
+</html>

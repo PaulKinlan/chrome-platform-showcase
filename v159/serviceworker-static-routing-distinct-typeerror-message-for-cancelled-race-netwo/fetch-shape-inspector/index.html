@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fetch-shape inspector — Distinct TypeError for cancelled race-network-and-fetch-handler fetch() — Chrome 159</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <link rel="stylesheet" href="../demo.css">
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; Distinct TypeError message for cancelled race-network-and-fetch-handler fetch()</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v159 · service worker · inspection tool</p>
+    <h1>Fetch-shape inspector</h1>
+    <p class="lede">Chrome only deduplicates a handler&rsquo;s request onto the raced network request when it carries that request&rsquo;s race token, and only reports the distinct message while the token&rsquo;s loader is still the race loader. This table runs each common way of &ldquo;fetching the request&rdquo; inside a fetch handler, under the same cancellation (server headers after <span id="delay-label">800</span>&nbsp;ms, fallback timer at <span id="fb-label">120</span>&nbsp;ms), and prints exactly what every <code>fetch()</code> promise did.</p>
+  </header>
+
+  <div class="note" id="status" role="status">Registering this feature&rsquo;s service worker&hellip;</div>
+
+  <div class="stage">
+    <h2>Inspect the call shapes</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="delay">Server header delay (ms)</label>
+        <input type="number" id="delay" min="0" max="1200" step="50" value="800" inputmode="numeric">
+      </div>
+      <div class="field">
+        <label for="fb">Fallback timer (ms)</label>
+        <input type="number" id="fb" min="0" max="1500" step="10" value="120" inputmode="numeric">
+      </div>
+    </div>
+    <div class="actions">
+      <button type="button" id="run-all">Run every shape</button>
+    </div>
+
+    <div tabindex="0" role="region" aria-labelledby="shape-caption" class="table-wrapper">
+      <table>
+        <caption id="shape-caption">fetch() call shapes inside a race-routed fetch handler</caption>
+        <thead>
+          <tr><th scope="col">Shape</th><th scope="col">Run</th><th scope="col">What the worker&rsquo;s fetch() promise(s) did</th><th scope="col">Page got</th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="readout" id="summary" role="status" aria-live="polite">No shape run yet.</div>
+  </div>
+
+  <section>
+    <h2>reading the table</h2>
+    <ul>
+      <li><strong><code>fetch(event.request)</code></strong> &mdash; deduplicated onto the raced request. Cancelled with it, and carries the distinct message on Chrome 159+.</li>
+      <li><strong><code>fetch(new Request(event.request))</code></strong> &mdash; the copy keeps the race token (observed in Chrome 159/160), so it is deduplicated and cancelled the same way.</li>
+      <li><strong><code>fetch(event.request.url)</code></strong> &mdash; a brand-new request with no token: it is <em>not</em> cancelled with the race and fulfils on its own, at the cost of a second network request.</li>
+      <li><strong>Two <code>fetch(event.request)</code> calls</strong> &mdash; only the first gets the race loader; the second falls back to a normal loader and fulfils. Chromium looks the loader state up per token when the first one fails, finds &ldquo;already consumed&rdquo;, and reports the first cancellation as the generic <code>"Failed to fetch"</code> even on Chrome 160 (<code>GetCustomFetchErrorMessage</code> requires state <code>kRaceLoaderUsed</code>).</li>
+      <li><strong>Control</strong> &mdash; <code>respondWith(fetch(event.request))</code> with no timer: nothing cancels the race, so it fulfils.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>see also</h2>
+    <ul>
+      <li><a href="../">Feature index</a></li>
+      <li><a href="../fallback-timer-race/">Fallback-timer race</a></li>
+      <li><a href="../telemetry-noise-filter/">Telemetry noise filter</a></li>
+      <li><a href="../app-shell-revalidation/">App-shell revalidation</a></li>
+      <li><a href="../error-taxonomy/">Error taxonomy</a></li>
+      <li><a href="https://chromestatus.com/feature/5124748525830144" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/modules/service_worker/service_worker_global_scope.cc" target="_blank" rel="noopener">Chromium: GetCustomFetchErrorMessage</a></li>
+    </ul>
+  </section>
+
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script type="module">
+  import { run } from "../harness.js";
+  import { showStatus, esc, verdictFor } from "../ui.js";
+
+  const SHAPES = [
+    { mode: "fallback", label: "fetch(event.request)" },
+    { mode: "copy", label: "fetch(new Request(event.request))" },
+    { mode: "url", label: "fetch(event.request.url)" },
+    { mode: "double", label: "fetch(event.request) called twice" },
+    { mode: "await", label: "control: respondWith(fetch(event.request)), no timer" },
+  ];
+  const $ = (id) => document.getElementById(id);
+  const rows = $("rows");
+  const results = new Map();
+
+  for (const shape of SHAPES) {
+    const tr = document.createElement("tr");
+    tr.id = `row-${shape.mode}`;
+    tr.innerHTML = `<th scope="row"><code>${esc(shape.label)}</code></th>
+      <td data-label="Run"><button type="button" class="secondary run-row" data-mode="${shape.mode}" aria-label="Run ${esc(shape.label)}">Run</button></td>
+      <td data-label="Worker fetch()" class="out">not run</td>
+      <td data-label="Page got" class="page">—</td>`;
+    rows.append(tr);
+  }
+
+  function sync() {
+    $("delay-label").textContent = $("delay").value;
+    $("fb-label").textContent = $("fb").value;
+  }
+  $("delay").addEventListener("input", sync);
+  $("fb").addEventListener("input", sync);
+
+  await showStatus($("status"));
+
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, Number(v) || 0));
+
+  async function runShape(mode) {
+    const tr = $(`row-${mode}`);
+    tr.querySelector(".out").textContent = "running…";
+    const r = await run(mode, { delay: clamp($("delay").value, 0, 1200), fb: clamp($("fb").value, 0, 1500) });
+    results.set(mode, r);
+    const parts = (r.worker.fetches ?? []).map((f) => {
+      const v = verdictFor(f);
+      const detail = f.settled === "rejected" ? `<br><code>${esc(f.name)}: ${esc(f.message)}</code>` : "";
+      return `<div><code>${esc(f.label)}</code> <span class="verdict ${v.cls}">${esc(v.text)}</span> <span>(${f.ms} ms)</span>${detail}</div>`;
+    });
+    tr.querySelector(".out").innerHTML = parts.join("") || esc(r.worker.error ?? "no report");
+    tr.querySelector(".page").textContent = r.page.ok ? `HTTP ${r.page.status} · ${r.page.servedBy} · ${r.page.ms} ms` : `${r.page.name}: ${r.page.message}`;
+    return r;
+  }
+
+  function summarise() {
+    const lines = [];
+    for (const shape of SHAPES) {
+      const r = results.get(shape.mode);
+      if (!r) continue;
+      const desc = (r.worker.fetches ?? []).map((f) => `${f.label} → ${f.settled === "fulfilled" ? "fulfilled " + f.status : f.classification}`).join("; ");
+      lines.push(`${shape.label}: ${desc}`);
+    }
+    $("summary").textContent = lines.join("\n") || "No shape run yet.";
+  }
+
+  rows.addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-mode]");
+    if (!button) return;
+    button.disabled = true;
+    try { await runShape(button.dataset.mode); } catch (error) { $(`row-${button.dataset.mode}`).querySelector(".out").textContent = error.message; }
+    button.disabled = false;
+    summarise();
+  });
+
+  $("run-all").addEventListener("click", async () => {
+    const all = $("run-all");
+    all.disabled = true;
+    try {
+      for (const shape of SHAPES) await runShape(shape.mode);
+      const direct = results.get("fallback")?.worker.fetches?.[0];
+      const copy = results.get("copy")?.worker.fetches?.[0];
+      const url = results.get("url")?.worker.fetches?.[0];
+      window.showcaseTelemetry?.assert("shape-matrix-complete", SHAPES.every((s) => results.get(s.mode)?.worker.fetches?.length), {
+        direct: direct?.classification ?? direct?.settled,
+        copy: copy?.classification ?? copy?.settled,
+        url: url?.settled,
+      });
+    } catch (error) {
+      $("summary").textContent = `Run failed: ${error.message}`;
+      window.showcaseTelemetry?.assert("shape-matrix-complete", false, { error: error.message });
+    } finally {
+      all.disabled = false;
+      summarise();
+    }
+  });
+</script>
+</body>
+</html>

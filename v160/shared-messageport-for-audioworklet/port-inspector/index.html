@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Port inspector — Shared MessagePort for AudioWorklet — Chrome 160</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .note {
+      background: var(--bg-stone);
+      border-left: 3px solid var(--accent-blue);
+      padding: var(--space-3);
+      font-size: 0.85rem;
+      margin: var(--space-4) 0;
+      overflow-wrap: anywhere;
+    }
+    .note.warn { border-left-color: var(--accent-rose); }
+    .stage {
+      border: 2px solid var(--border-black);
+      box-shadow: var(--thin-shadow);
+      background: var(--bg-paper);
+      padding: var(--space-4);
+      margin: var(--space-4) 0;
+    }
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin: var(--space-3) 0; }
+    .controls button { min-height: 44px; }
+    .tablewrap { overflow-x: auto; }
+    table { border-collapse: collapse; inline-size: 100%; min-inline-size: 34rem; font-size: 0.75rem; }
+    caption { text-align: left; font-size: 0.85rem; padding-block: 0.3rem; color: var(--text-charcoal); }
+    th, td { border: 1px solid var(--border-black); padding: 0.4rem 0.5rem; text-align: left; vertical-align: top; }
+    td code, td { overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); color: var(--text-black); }
+    td.ok { color: var(--accent-emerald-dark); font-weight: 700; }
+    td.bad { color: var(--accent-rose); font-weight: 700; }
+    td.na { color: var(--text-muted); font-weight: 700; }
+    #status { font-weight: 700; margin-top: var(--space-3); overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="/v160/shared-messageport-for-audioworklet/">&larr; Shared MessagePort for AudioWorklet</a></p>
+
+  <header class="lede-block">
+    <p class="eyebrow">v160 · multimedia · web audio</p>
+    <h1>Port inspector</h1>
+    <p class="lede">Two IDL attributes, one channel. This tool interrogates both ends: how <code>AudioWorklet.prototype.port</code> is defined, whether it is the same object on every read, whether each <code>BaseAudioContext</code> gets its own, whether it is really readonly &mdash; and then asks the module running inside <code>AudioWorkletGlobalScope</code> to describe <em>its</em> <code>port</code>.</p>
+  </header>
+
+  <div class="note" id="support-note" role="status">Probing this browser&hellip;</div>
+
+  <div class="stage">
+    <div class="controls">
+      <button type="button" id="run-btn">Inspect both ends</button>
+    </div>
+    <div class="tablewrap" tabindex="0" role="region" aria-label="Inspection results (scrolls horizontally on narrow screens)">
+      <table>
+        <caption>Each row is a live check; “expected” is the Web Audio spec / WPT contract</caption>
+        <thead><tr><th scope="col">side</th><th scope="col">check</th><th scope="col">observed</th><th scope="col">verdict</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="4">Press “Inspect both ends”.</td></tr></tbody>
+      </table>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+  </div>
+
+  <section>
+    <h2>what the rows mean</h2>
+    <ul>
+      <li><strong>Main thread</strong> rows read the Window-side IDL: the attribute is a getter on the prototype (no setter, because it is <code>readonly</code>), returns a <code>MessagePort</code>, and &ldquo;each BaseAudioContext possesses exactly one AudioWorklet&rdquo;, so two contexts must yield two different ports.</li>
+      <li><strong>Global scope</strong> rows are answered by the worklet module over the shared channel itself &mdash; so if the channel does not exist, they cannot be answered, and the table says so rather than guessing.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>references</h2>
+    <ul>
+      <li><a href="https://chromestatus.com/feature/5079784523694080" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://webaudio.github.io/web-audio-api/#AudioWorklet" target="_blank" rel="noopener">Web Audio API &mdash; the AudioWorklet interface</a></li>
+      <li><a href="https://webaudio.github.io/web-audio-api/#AudioWorkletGlobalScope" target="_blank" rel="noopener">Web Audio API &mdash; AudioWorkletGlobalScope</a></li>
+      <li><a href="https://webidl.spec.whatwg.org/#es-attributes" target="_blank" rel="noopener">Web IDL &mdash; how readonly attributes become accessor properties</a></li>
+    </ul>
+  </section>
+</main>
+<script>
+  (function () {
+    "use strict";
+    var MODULE = [
+      "if (typeof port === 'object' && port) {",
+      "  port.onmessage = (e) => {",
+      "    if (!e.data || e.data.type !== 'inspect') return;",
+      "    const d = Object.getOwnPropertyDescriptor(AudioWorkletGlobalScope.prototype, 'port');",
+      "    port.postMessage({ type: 'report',",
+      "      typeofPort: typeof port,",
+      "      isMessagePort: port instanceof MessagePort,",
+      "      sameAsGlobalThis: globalThis.port === port,",
+      "      stableIdentity: globalThis.port === globalThis.port,",
+      "      descriptorGetter: !!(d && typeof d.get === 'function'),",
+      "      descriptorSetter: !!(d && d.set),",
+      "      scopeName: Object.prototype.toString.call(globalThis),",
+      "      sampleRate, renderQuantumSize: typeof renderQuantumSize === 'number' ? renderQuantumSize : null,",
+      "      currentFrame: Number(currentFrame) });",
+      "  };",
+      "}",
+      "registerProcessor('inspector-noop', class extends AudioWorkletProcessor { process() { return false; } });"
+    ].join("\n");
+
+    var note = document.getElementById("support-note");
+    var rows = document.getElementById("rows");
+    var statusEl = document.getElementById("status");
+    var runBtn = document.getElementById("run-btn");
+    var hasAW = typeof AudioWorklet !== "undefined";
+    var hasPort = hasAW && "port" in AudioWorklet.prototype;
+    if (!hasAW) {
+      note.className = "note warn";
+      note.textContent = "AudioWorklet is not exposed here (secure context required).";
+      runBtn.disabled = true;
+    } else if (!hasPort) {
+      note.className = "note warn";
+      note.textContent = "Unsupported here: no AudioWorklet.prototype.port. Chrome 160 ships it by default; on an earlier build with the implementation, enable chrome://flags/#enable-experimental-web-platform-features or launch with --enable-blink-features=AudioWorkletSharedPort. The inspector still runs and shows each failing check.";
+    } else {
+      note.textContent = "AudioWorklet.prototype.port is present — every check below runs against the real implementation.";
+    }
+
+    function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return "&#" + c.charCodeAt(0) + ";"; }); }
+
+    function waitFor(p, type, ms) {
+      return new Promise(function (resolve) {
+        var t = setTimeout(function () { p.removeEventListener("message", on); resolve(null); }, ms);
+        function on(e) { if (e.data && e.data.type === type) { clearTimeout(t); p.removeEventListener("message", on); resolve(e.data); } }
+        p.addEventListener("message", on);
+        p.start();
+      });
+    }
+
+    runBtn.addEventListener("click", async function () {
+      runBtn.disabled = true;
+      var out = [];
+      function row(side, check, observed, pass) {
+        out.push({ side: side, check: check, observed: observed, pass: pass });
+      }
+      var a = new OfflineAudioContext(1, 128, 48000);
+      var b = new OfflineAudioContext(1, 128, 44100);
+      var desc = Object.getOwnPropertyDescriptor(AudioWorklet.prototype, "port");
+      row("main", "'port' in AudioWorklet.prototype", String("port" in AudioWorklet.prototype), "port" in AudioWorklet.prototype);
+      row("main", "descriptor is an accessor with a getter", desc ? "get: " + typeof desc.get : "no descriptor", !!(desc && typeof desc.get === "function"));
+      row("main", "descriptor has no setter (readonly)", desc ? "set: " + typeof desc.set : "no descriptor", !!(desc && desc.set === undefined));
+      row("main", "descriptor enumerable &amp; configurable (Web IDL)", desc ? "enumerable " + desc.enumerable + ", configurable " + desc.configurable : "no descriptor", !!(desc && desc.enumerable && desc.configurable));
+      var p1 = a.audioWorklet.port;
+      row("main", "ctx.audioWorklet.port instanceof MessagePort (before addModule)", p1 === undefined ? "undefined" : Object.prototype.toString.call(p1), p1 instanceof MessagePort);
+      row("main", "same object on repeated reads", String(p1 !== undefined && a.audioWorklet.port === p1), p1 !== undefined && a.audioWorklet.port === p1);
+      var pb = b.audioWorklet.port;
+      row("main", "a second context has a different port", p1 === undefined ? "both undefined" : String(pb !== p1), p1 instanceof MessagePort && pb instanceof MessagePort && pb !== p1);
+      var threw = "no throw";
+      try { (function () { "use strict"; a.audioWorklet.port = null; })(); } catch (e) { threw = e.name; }
+      row("main", "strict-mode assignment throws TypeError", threw, threw === "TypeError" && a.audioWorklet.port === p1 && p1 !== undefined);
+
+      var report = null;
+      if (p1 instanceof MessagePort) {
+        var url = URL.createObjectURL(new Blob([MODULE], { type: "text/javascript" }));
+        await a.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+        var wait = waitFor(p1, "report", 2000);
+        p1.postMessage({ type: "inspect" });
+        report = await wait;
+        p1.close();
+      }
+      var unreachable = "not reachable — no shared channel to ask";
+      function g(check, val, pass) {
+        if (!report) { out.push({ side: "global scope", check: check, observed: unreachable, pass: null }); return; }
+        row("global scope", check, val, pass);
+      }
+      g("typeof port", report && report.typeofPort, report && report.typeofPort === "object");
+      g("port instanceof MessagePort", report && String(report.isMessagePort), report && report.isMessagePort);
+      g("globalThis.port === port", report && String(report.sameAsGlobalThis), report && report.sameAsGlobalThis);
+      g("accessor getter on AudioWorkletGlobalScope.prototype", report && ("getter " + report.descriptorGetter + ", setter " + report.descriptorSetter), report && report.descriptorGetter && !report.descriptorSetter);
+      g("scope it lives in", report && report.scopeName + " @ " + report.sampleRate + " Hz, quantum " + report.renderQuantumSize, report && /AudioWorkletGlobalScope/.test(report.scopeName) && report.sampleRate === 48000);
+
+      rows.innerHTML = out.map(function (r) {
+        var cls = r.pass === null ? "na" : r.pass ? "ok" : "bad";
+        var word = r.pass === null ? "n/a" : r.pass ? "pass" : "fail";
+        return "<tr><th scope=\"row\">" + esc(r.side) + "</th><td>" + r.check + "</td><td><code>" + esc(r.observed) + "</code></td><td class=\"" + cls + "\">" + word + "</td></tr>";
+      }).join("");
+      var passed = out.filter(function (r) { return r.pass === true; }).length;
+      var failed = out.filter(function (r) { return r.pass === false; }).length;
+      var na = out.length - passed - failed;
+      statusEl.textContent = passed + " pass · " + failed + " fail · " + na + " not reachable. " +
+        (report ? "Both ends of the shared channel answered." : "The global-scope end could not be asked because this engine exposes no shared port.");
+      window.showcaseTelemetry?.assert("inspector-consistent", hasPort ? (failed === 0 && !!report) : (!report && passed === 0),
+        { hasPort: hasPort, passed: passed, failed: failed, unreachable: na, branch: hasPort ? "spec" : "unsupported-fallback" });
+      runBtn.disabled = false;
+    });
+  })();
+</script>
+</body>
+</html>

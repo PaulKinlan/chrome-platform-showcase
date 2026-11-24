@@ -17,7 +17,7 @@ humans. Hosted on Deno Deploy via Deno's native GitHub integration, moving to **
 
 - Live site: https://chrome-platform-showcase.paulkinlan-ea.deno.net/
 - Repo: https://github.com/PaulKinlan/chrome-platform-showcase
-- Routine: https://claude.ai/code/routines/trig_01GtXjwvzEM5mhsktARhGeSx
+- Routine: https://claude.ai/code/routines/trig_01328Ji5KGCnwibMmoehXCVr
 
 Sister project: [gendn](https://github.com/PaulKinlan/gendn) (reference docs, same shape).
 
@@ -76,11 +76,12 @@ working commits for all features. You can also inspect the current quality snaps
 
 ## The routine
 
-Cron `17 6 * * *` (once a day, 06:17 UTC), trigger `trig_01GtXjwvzEM5mhsktARhGeSx`. Runs in
-Anthropic's cloud as a Claude Code session against a fresh checkout of `main`. Soft 90-minute budget
-per run. Picks up where the last run left off. **Toolset is Bash/Read/Write/Edit/Glob/Grep (+
-WebFetch/WebSearch) — no `chrome-devtools-mcp`.** It verifies with headless Chrome via Bash and
-`Read`-the-screenshot (see `.claude/routine-prompt.md` → "Toolset & verification environment").
+Cron `17 6 * * 1-6` (06:17 UTC Monday to Saturday; Sunday belongs to the weekly hardening run),
+trigger `trig_01328Ji5KGCnwibMmoehXCVr`. Runs in Anthropic's cloud as a Claude Code session against
+a fresh checkout of `main`. Soft 90-minute budget per run. Picks up where the last run left off.
+**Toolset is Bash/Read/Write/Edit/Glob/Grep (+ WebFetch/WebSearch) — no `chrome-devtools-mcp`.** It
+verifies with headless Chrome via Bash and `Read`-the-screenshot (see `.claude/routine-prompt.md` →
+"Toolset & verification environment").
 
 Cadence history: hourly → every-2-hours (2026-05-30, routines-per-day cap) → **once a day
 (2026-07-18)**, when the routine was re-enabled after a period disabled and its prompt was hardened
@@ -145,6 +146,17 @@ telemetry. Its job is the depth work the daily build routine is too busy to do:
   worst-first, and clusters errors by normalised signature across visitors. This is the query the
   weekly routine consumes. (`routes/demo-telemetry.ts`.)
 - `GET /telemetry/demo/admin` — HTML dashboard, now including the top-failing-demos triage panel.
+- `deno task telemetry-digest` (needs `SHOWCASE_PASSWORD`; `--base`, `--input`, `--stdout`) turns
+  the triage window into `reports/telemetry/latest.md`: top failing demos with their Chrome-version
+  spread, error patterns seen on more than one demo, per-API support outcomes by Chrome version, and
+  deprecation/intervention reports. Read it before choosing build work: fix broken demos first, and
+  treat each recurring pattern as a build rule for new demos.
+- The client collector (`public/demo-telemetry.js`) attaches a coarse `env` snapshot to each batch
+  (Chrome major, platform, mobile, viewport class, DPR, memory, connection; nothing identifying),
+  records `ReportingObserver` deprecation/intervention reports, DOMException names on errors, and
+  the heaviest script behind each long animation frame. Demos should call
+  `window.showcaseTelemetry?.support("<exact API>", "supported"|"flag"|"unsupported"|"denied"|"error", details)`
+  from their capability check so triage can tell "missing in old Chrome" from a real bug.
 - KV events self-expire after 90 days (`TELEMETRY_TTL_MS`) so the store no longer grows unbounded.
 - **Failed authentication is throttled per source** (`lib/auth-throttle.ts`): 10 failures, then one
   further attempt per 10 seconds (while that address's entry stays resident - churn from other
@@ -615,7 +627,7 @@ If you changed the design system (`public/styles.css`):
    kept drifting out of date.)
 2. Only use `RemoteTrigger` (action `update`) when you need to change cadence, enable/disable, the
    allowed tools, the model, or the bootstrap message itself. Trigger IDs: build
-   `trig_01GtXjwvzEM5mhsktARhGeSx`, weekly hardening `trig_01ShfGDEQYwDRsoisCRXhZBT`.
+   `trig_01328Ji5KGCnwibMmoehXCVr`, weekly hardening `trig_01ShfGDEQYwDRsoisCRXhZBT`.
 3. To smoke-test a prompt change, run the routine once via `RemoteTrigger` (action `run`) before
    relying on the next cron tick.
 
@@ -654,7 +666,7 @@ chromestatus API docs.
 
 - Live: https://chrome-platform-showcase.paulkinlan-ea.deno.net/
 - Catalogue: https://chrome-platform-showcase.paulkinlan-ea.deno.net/features
-- Routine UI: https://claude.ai/code/routines/trig_01GtXjwvzEM5mhsktARhGeSx
+- Routine UI: https://claude.ai/code/routines/trig_01328Ji5KGCnwibMmoehXCVr
 - chromestatus API: https://chromestatus.com/api/v0/channels
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
