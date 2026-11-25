@@ -31,10 +31,26 @@
       justify-content: space-between;
     }
     .tool-item {
+      display: block;
+      inline-size: 100%;
+      text-align: start;
+      background: var(--bg-paper);
+      color: var(--text-black);
+      border: 0;
       border-bottom: 1px solid var(--border-black);
       padding: var(--space-3) var(--space-4);
       cursor: pointer;
+      box-shadow: none;
     }
+    .tool-item .tool-name, .tool-item .tool-desc { display: block; white-space: normal; overflow-wrap: anywhere; }
+    .layout > * { min-inline-size: 0; }
+    @media (max-width: 480px) { .param-row { grid-template-columns: minmax(0, 1fr); } }
+    .tool-item:focus-visible { outline: 3px solid var(--accent-blue); outline-offset: -3px; }
+    :root { --target-size: 24px; }
+    @media (pointer: coarse) { :root { --target-size: 44px; } }
+    .tool-item, .clear-btn, .invoke-btn, .param-row input, .param-row select { min-block-size: var(--target-size); }
+    .invoke-desc { font-size: 0.85rem; font-family: var(--font-serif); color: var(--text-charcoal); margin-bottom: var(--space-3); }
+    .note[data-mode="live"] { border-left-color: var(--accent-emerald); }
     .tool-item:last-child { border-bottom: none; }
     .tool-item:hover { background: var(--bg-stone); }
     .tool-item.active { background: var(--text-black); }
@@ -62,7 +78,7 @@
 
     .param-row {
       display: grid;
-      grid-template-columns: max-content 1fr;
+      grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
       gap: var(--space-2) var(--space-3);
       align-items: center;
       margin-bottom: var(--space-3);
@@ -141,7 +157,7 @@
       font-size: 0.68rem;
       padding: 2px 8px;
       cursor: pointer;
-      color: var(--text-muted);
+      color: var(--text-charcoal);
     }
     .clear-btn:hover { background: var(--bg-stone); }
 
@@ -162,17 +178,14 @@
   <header class="lede-block">
     <p class="eyebrow">v146 · MCP Tool Tester</p>
     <h1>MCP Tool Tester</h1>
-    <p class="lede">Select a tool from a simulated MCP server's tool registry, fill in parameters, and invoke it. The JSON-RPC trace panel shows the exact <code>tools/call</code> request the model sends and the <code>result</code> response the server returns — the core of the Model Context Protocol message flow.</p>
+    <p class="lede">Pick one of this page's WebMCP tools, fill in its parameters and invoke it. The trace shows the three hops: the MCP <code>tools/call</code> an agent would send, the <code>document.modelContext.executeTool()</code> call the page really makes, and the MCP <code>result</code> (with <code>isError</code> for rejections and invalid input) that goes back. When a tool throws, Chrome also logs <q>WebMCP tool execution failed</q> to the console; that line is expected.</p>
   </header>
 
-  <div class="note">
-    <strong>Chrome 146 — WebMCP API.</strong> WebMCP exposes an MCP server endpoint directly from a web page. This demo simulates the MCP JSON-RPC message exchange without a live server. Real usage requires <code>navigator.mcpServer</code> availability in Chrome 146+ with the WebMCP flag.
-    <span id="api-badge" style="font-family:var(--font-mono);font-size:0.7rem;margin-left:var(--space-3);border:1px solid var(--border-black);padding:1px 6px;background:var(--bg-ivory)"></span>
-  </div>
+  <div class="note mode-status" id="mc-status" role="status">Checking for <code>document.modelContext</code>…</div>
 
   <div class="layout">
     <div class="tools-panel">
-      <div class="panel-head"><span>Tool registry</span><span>4 tools</span></div>
+      <div class="panel-head"><span>Tool registry</span><span id="tool-count">…</span></div>
       <div id="tool-list"></div>
     </div>
 
@@ -188,11 +201,11 @@
 
       <div class="rpc-trace">
         <div class="trace-head">
-          <span>JSON-RPC trace</span>
-          <button class="clear-btn" onclick="clearTrace()">clear</button>
+          <span id="trace-title">call trace</span>
+          <button class="clear-btn" id="clear" type="button">clear</button>
         </div>
-        <div class="trace-body" id="trace-body">
-          <div class="trace-msg trace-placeholder"><pre class="trace-json" style="color:var(--text-muted)">// Invoke a tool to see the JSON-RPC exchange here…</pre></div>
+        <div class="trace-body" id="trace-body" role="log" aria-live="polite" aria-labelledby="trace-title" tabindex="0">
+          <div class="trace-msg trace-placeholder"><pre class="trace-json">// Invoke a tool to see the exchange here…</pre></div>
         </div>
       </div>
     </div>
@@ -202,13 +215,21 @@
   <ul>
     <li><a href="../tool-registry-explorer/">Tool Registry Explorer</a> — define and register tools</li>
     <li><a href="../agent-handshake-simulator/">Agent Handshake Simulator</a> — watch an agent invoke a tool end-to-end</li>
+    <li><a href="../tool-call-replay/">Tool call replay</a> — natural-language prompts routed to tools</li>
     <li><a href="https://chromestatus.com/feature/5117755740913664" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://webmachinelearning.github.io/webmcp/" target="_blank" rel="noopener">WebMCP specification</a> (getTools, executeTool)</li>
     <li><a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">Model Context Protocol</a></li>
   </ul>
 </main>
 
-<script>
-const tools = [
+<script type="module">
+import { connectModelContext, describeError, validateAgainstSchema } from '../webmcp-live.js';
+
+const $ = (id) => document.getElementById(id);
+const mc = connectModelContext($('mc-status'));
+
+// The page's tools, registered with the real (or simulated) document.modelContext.
+const definitions = [
   {
     name: 'search_documents',
     description: 'Search through available documents by keyword',
@@ -220,16 +241,18 @@ const tools = [
       },
       required: ['query'],
     },
-    handler(args) {
+    annotations: { readOnlyHint: true },
+    async execute(args) {
+      const q = String(args.query).toLowerCase();
       const results = ['README.md', 'API Reference.pdf', 'Setup Guide.docx', 'Changelog.md']
-        .filter(f => f.toLowerCase().includes((args.query || '').toLowerCase().slice(0, 3)) || Math.random() > 0.5)
+        .filter((f) => f.toLowerCase().includes(q))
         .slice(0, args.limit || 5);
       return { results, total: results.length, query: args.query };
     },
   },
   {
     name: 'get_weather',
-    description: 'Get current weather for a location',
+    description: 'Get current weather for a location (sample data)',
     inputSchema: {
       type: 'object',
       properties: {
@@ -238,65 +261,62 @@ const tools = [
       },
       required: ['location'],
     },
-    handler(args) {
-      const temps = { metric: `${Math.round(12 + Math.random() * 15)}°C`, imperial: `${Math.round(55 + Math.random() * 27)}°F` };
+    annotations: { readOnlyHint: true },
+    async execute(args) {
+      const c = 12 + (String(args.location).length * 7) % 15;
       return {
         location: args.location,
-        temperature: temps[args.units || 'metric'],
-        condition: ['Partly cloudy', 'Clear', 'Overcast', 'Light rain'][Math.floor(Math.random() * 4)],
-        humidity: `${Math.round(50 + Math.random() * 35)}%`,
+        temperature: args.units === 'imperial' ? `${Math.round(c * 9 / 5 + 32)}°F` : `${c}°C`,
+        condition: ['Partly cloudy', 'Clear', 'Overcast', 'Light rain'][String(args.location).length % 4],
       };
     },
   },
   {
     name: 'run_calculation',
-    description: 'Evaluate a mathematical expression',
+    description: 'Evaluate an arithmetic expression (digits, + - * / and parentheses only)',
     inputSchema: {
       type: 'object',
-      properties: {
-        expression: { type: 'string', description: 'Math expression, e.g. 2 + 3 * 4' },
-      },
+      properties: { expression: { type: 'string', description: 'Math expression, e.g. 2 + 3 * 4' } },
       required: ['expression'],
     },
-    handler(args) {
-      try {
-        // Safe eval: only allow numbers and operators
-        const expr = (args.expression || '').replace(/[^0-9+\-*/().\s]/g, '');
-        const result = Function('"use strict"; return (' + expr + ')')();
-        return { expression: args.expression, result, type: typeof result };
-      } catch (e) {
-        return { expression: args.expression, error: 'Invalid expression', detail: e.message };
-      }
+    async execute(args) {
+      const expr = String(args.expression);
+      // Reject rather than strip: a tool should not silently change what the agent asked for.
+      if (!/^[0-9+\-*/().\s]+$/.test(expr)) throw new Error(`Unsupported characters in "${expr}"`);
+      const result = Function('"use strict"; return (' + expr + ')')();
+      if (!Number.isFinite(result)) throw new Error(`"${expr}" did not produce a finite number`);
+      return { expression: expr, result };
     },
   },
   {
     name: 'list_files',
-    description: 'List files in a directory path',
+    description: 'List files in a directory path (sample tree)',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Directory path', default: '/' },
         recursive: { type: 'boolean', description: 'Include subdirectories' },
       },
-      required: [],
     },
-    handler(args) {
-      const fakeFiles = {
+    annotations: { readOnlyHint: true },
+    async execute(args) {
+      const tree = {
         '/': ['src/', 'docs/', 'tests/', 'README.md', 'package.json'],
         '/src': ['index.js', 'app.ts', 'utils/', 'components/'],
         '/docs': ['API.md', 'Setup.md', 'Contributing.md'],
       };
-      const files = fakeFiles[args.path || '/'] || fakeFiles['/'];
-      return { path: args.path || '/', files, count: files.length, recursive: args.recursive || false };
+      const path = args.path || '/';
+      if (!tree[path]) throw new Error(`No such directory: ${path}`);
+      return { path, files: tree[path], count: tree[path].length, recursive: args.recursive || false };
     },
   },
 ];
 
-let selectedTool = null;
+let tools = [];
+let selected = null;
 let reqId = 1;
 
-// Syntax-highlight JSON by building text nodes + spans (never innerHTML):
-// tool arguments are user-typed, so they must render as literal text.
+// Syntax-highlight JSON with text nodes + spans (never innerHTML): arguments are user-typed.
 function highlightJSON(obj, pre) {
   const json = JSON.stringify(obj, null, 2);
   const token = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
@@ -313,123 +333,130 @@ function highlightJSON(obj, pre) {
   pre.append(json.slice(last));
 }
 
-function appendTrace(label, obj, isResponse) {
-  const body = document.getElementById('trace-body');
-  const placeholder = body.querySelector('.trace-placeholder');
-  if (placeholder) placeholder.remove();
-
+function appendTrace(label, body, color) {
+  const trace = $('trace-body');
+  trace.querySelector('.trace-placeholder')?.remove();
   const div = document.createElement('div');
   div.className = 'trace-msg';
   const labelEl = document.createElement('div');
   labelEl.className = 'trace-label';
-  labelEl.style.color = isResponse ? 'var(--accent-emerald)' : 'var(--accent-blue)';
+  labelEl.style.color = color;
   labelEl.textContent = label;
   const pre = document.createElement('pre');
   pre.className = 'trace-json';
-  highlightJSON(obj, pre);
+  if (typeof body === 'string') pre.textContent = body;
+  else highlightJSON(body, pre);
   div.append(labelEl, pre);
-  body.appendChild(div);
-  body.scrollTop = body.scrollHeight;
+  trace.appendChild(div);
+  trace.scrollTop = trace.scrollHeight;
 }
 
 function clearTrace() {
-  document.getElementById('trace-body').innerHTML =
-    '<div class="trace-msg trace-placeholder"><pre class="trace-json" style="color:var(--text-muted)">// Invoke a tool to see the JSON-RPC exchange here…</pre></div>';
+  const pre = Object.assign(document.createElement('pre'), { className: 'trace-json', textContent: '// Invoke a tool to see the exchange here…' });
+  const msg = Object.assign(document.createElement('div'), { className: 'trace-msg trace-placeholder' });
+  msg.append(pre);
+  $('trace-body').replaceChildren(msg);
 }
 
 function renderToolList() {
-  const list = document.getElementById('tool-list');
-  list.innerHTML = tools.map((t, i) => `
-    <div class="tool-item" id="tool-item-${i}" onclick="selectTool(${i})" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">
-      <div class="tool-name">${t.name}</div>
-      <div class="tool-desc">${t.description}</div>
-    </div>`).join('');
+  $('tool-count').textContent = `${tools.length} tools · ${mc.simulated ? 'simulated' : 'live'} getTools()`;
+  $('tool-list').replaceChildren(...tools.map((t, i) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tool-item';
+    btn.setAttribute('aria-pressed', 'false');
+    btn.append(
+      Object.assign(document.createElement('span'), { className: 'tool-name', textContent: t.name }),
+      Object.assign(document.createElement('span'), { className: 'tool-desc', textContent: t.description }),
+    );
+    btn.addEventListener('click', () => selectTool(i));
+    return btn;
+  }));
 }
 
 function selectTool(idx) {
-  selectedTool = tools[idx];
-  document.querySelectorAll('.tool-item').forEach((el, i) => el.classList.toggle('active', i === idx));
+  selected = tools[idx];
+  document.querySelectorAll('.tool-item').forEach((el, i) => {
+    el.classList.toggle('active', i === idx);
+    el.setAttribute('aria-pressed', String(i === idx));
+  });
+  $('invoke-head').replaceChildren(Object.assign(document.createElement('span'), { textContent: `executeTool — ${selected.name}` }));
 
-  document.getElementById('invoke-head').innerHTML = `<span>tools/call — ${selectedTool.name}</span>`;
-
-  const props = selectedTool.inputSchema.properties || {};
-  const required = selectedTool.inputSchema.required || [];
-
-  let html = `<p style="font-size:0.8rem;font-family:var(--font-serif);color:var(--text-charcoal);margin-bottom:var(--space-3)">${selectedTool.description}</p>`;
-  html += '<div class="param-row">';
-
-  for (const [name, prop] of Object.entries(props)) {
-    const req = required.includes(name) ? ' *' : '';
-    html += `<label>${name}${req}</label>`;
-    if (prop.enum) {
-      html += `<select id="param-${name}" aria-label="Param ${name}"><option value="">—</option>${prop.enum.map(v => `<option value="${v}">${v}</option>`).join('')}</select>`;
-    } else if (prop.type === 'boolean') {
-      html += `<select id="param-${name}" aria-label="Param ${name}"><option value="">—</option><option value="true">true</option><option value="false">false</option></select>`;
+  const schema = selected.inputSchema ?? {};
+  const required = new Set(schema.required ?? []);
+  const body = $('invoke-body');
+  const desc = Object.assign(document.createElement('p'), { className: 'invoke-desc', textContent: selected.description });
+  const row = Object.assign(document.createElement('div'), { className: 'param-row' });
+  for (const [name, prop] of Object.entries(schema.properties ?? {})) {
+    const id = `param-${name}`;
+    const label = Object.assign(document.createElement('label'), { htmlFor: id, textContent: name + (required.has(name) ? ' (required)' : '') });
+    let control;
+    if (prop.enum || prop.type === 'boolean') {
+      control = document.createElement('select');
+      for (const v of ['', ...(prop.enum ?? ['true', 'false'])]) control.append(new Option(v || '—', v));
     } else {
-      html += `<input type="${prop.type === 'number' ? 'number' : 'text'}" id="param-${name}" placeholder="${prop.description}" value="${prop.default || ''}" aria-label="${prop.description}">`;
+      control = document.createElement('input');
+      control.type = prop.type === 'number' ? 'number' : 'text';
+      control.placeholder = prop.description ?? '';
+      control.value = prop.default ?? '';
     }
+    control.id = id;
+    control.dataset.param = name;
+    control.dataset.type = prop.type;
+    if (required.has(name)) control.setAttribute('aria-required', 'true');
+    row.append(label, control);
   }
-  html += '</div>';
-  html += '<button class="invoke-btn" onclick="invokeTool()">▶ Invoke tool</button>';
-
-  document.getElementById('invoke-body').innerHTML = html;
+  const invoke = Object.assign(document.createElement('button'), { type: 'button', className: 'invoke-btn', textContent: '▶ Invoke tool' });
+  invoke.addEventListener('click', invokeTool);
+  body.replaceChildren(desc, row, invoke);
 }
 
-function invokeTool() {
-  if (!selectedTool) return;
-  // Snapshot the invoked tool: the user may select another tool during the
-  // simulated delay, and the response must still come from this one.
-  const tool = selectedTool;
-
-  const props = tool.inputSchema.properties || {};
+async function invokeTool() {
+  if (!selected) return;
+  // Snapshot: the user may pick another tool while this call is in flight.
+  const tool = selected;
   const args = {};
-  for (const [name, prop] of Object.entries(props)) {
-    const el = document.getElementById(`param-${name}`);
-    if (!el) continue;
-    let val = el.value;
-    if (!val) continue;
-    if (prop.type === 'number') val = parseFloat(val);
-    if (prop.type === 'boolean') val = val === 'true';
-    args[name] = val;
+  for (const el of $('invoke-body').querySelectorAll('[data-param]')) {
+    if (!el.value) continue;
+    args[el.dataset.param] = el.dataset.type === 'number' ? parseFloat(el.value)
+      : el.dataset.type === 'boolean' ? el.value === 'true' : el.value;
   }
+  const id = reqId++;
+  appendTrace('① Agent → browser (MCP tools/call, as an agent would frame it)', {
+    jsonrpc: '2.0', id, method: 'tools/call', params: { name: tool.name, arguments: args },
+  }, 'var(--accent-blue)');
 
-  const request = {
-    jsonrpc: '2.0',
-    id: reqId++,
-    method: 'tools/call',
-    params: {
-      name: tool.name,
-      arguments: args,
-    },
-  };
+  const reply = (text, isError) => appendTrace(
+    `③ Browser → agent (MCP result${isError ? ', isError' : ''})`,
+    { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], isError } },
+    isError ? 'var(--accent-rose)' : 'var(--accent-emerald)',
+  );
 
-  appendTrace('→ Model → MCP Server (tools/call request)', request, false);
-
-  // Simulate processing delay
-  setTimeout(() => {
-    const result = tool.handler(args);
-    const response = {
-      jsonrpc: '2.0',
-      id: request.id,
-      result: {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        isError: false,
-      },
-    };
-    appendTrace('← MCP Server → Model (tools/call response)', response, true);
-  }, 300 + Math.random() * 400);
+  const problems = validateAgainstSchema(tool.inputSchema, args);
+  if (problems.length) {
+    appendTrace('② Page (not called)', `Input fails inputSchema: ${problems.join('; ')}.\nThe browser does not validate input, so the caller must; executeTool() was not called.`, 'var(--accent-rose)');
+    reply(`Invalid arguments: ${problems.join('; ')}`, true);
+    return;
+  }
+  appendTrace('② WebMCP call the page actually made', `await document.modelContext.executeTool(tool /* ${tool.name} */, ${JSON.stringify(args)})`, 'var(--text-charcoal)');
+  try {
+    const json = await mc.executeTool(tool, args);
+    reply(json, false);
+  } catch (err) {
+    reply(`executeTool() rejected: ${describeError(err)}`, true);
+  }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
-  const badge = document.getElementById('api-badge');
-  if (navigator.mcpServer !== undefined) {
-    badge.textContent = '✓ navigator.mcpServer available';
-    badge.style.borderColor = 'var(--accent-emerald)';
-  } else {
-    badge.textContent = '⚠ navigator.mcpServer not available — live MCP tool calls unavailable';
+$('clear').addEventListener('click', clearTrace);
+for (const def of definitions) {
+  try {
+    await mc.registerTool(def);
+  } catch (err) {
+    appendTrace(`registerTool(${def.name}) rejected`, describeError(err), 'var(--accent-rose)');
   }
-  renderToolList();
-});
+}
+tools = await mc.getTools();
+renderToolList();
 </script>
 </body>
 </html>
