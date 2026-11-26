@@ -34,6 +34,10 @@
       color: var(--text-charcoal);
     }
     .scenario-btn:hover { transform: translate(-1px,-1px); box-shadow: var(--flat-shadow); color: var(--text-black); }
+    :root { --target-size: 24px; }
+    @media (pointer: coarse) { :root { --target-size: 44px; } }
+    .scenario-btn, .btn-step, .btn-reset { min-block-size: var(--target-size); }
+    .ot-note[data-mode="live"] { border-left-color: var(--accent-emerald); }
     .scenario-btn.active { background: var(--text-black); color: var(--bg-ivory); box-shadow: none; transform: none; }
 
     .handshake-arena {
@@ -223,23 +227,22 @@
   <header class="lede-block">
     <p class="eyebrow">v146 · Agent Handshake Simulator</p>
     <h1>Agent Handshake Simulator</h1>
-    <p class="lede">Step through the complete WebMCP interaction: an AI agent discovers the page's registered tools, selects the right one, sends a structured call, and the page handler returns a result. Every message is annotated.</p>
+    <p class="lede">Step through the complete WebMCP interaction: an AI agent discovers the page's registered tools with <code>getTools()</code>, selects one, calls it with <code>executeTool()</code>, and the page's <code>execute()</code> callback returns a result. The agent's reasoning is scripted; every page-side message is what <code>document.modelContext</code> actually returned when you reached that step.</p>
   </header>
 
-  <div class="ot-note">
-    <strong>Origin Trial simulation.</strong> This is a faithful simulation of the <code>navigator.modelContext</code> protocol — no real agent, no real OT token required.
-  </div>
+  <div class="ot-note mode-status" id="mc-status" role="status">Checking for <code>document.modelContext</code>…</div>
 
   <div class="scenario-row">
-    <span style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);align-self:center">Scenario:</span>
-    <button class="scenario-btn active" onclick="loadScenario('ecommerce')">E-commerce search</button>
-    <button class="scenario-btn" onclick="loadScenario('booking')">Travel booking</button>
-    <button class="scenario-btn" onclick="loadScenario('error')">Error: unknown tool</button>
+    <span id="scenario-label" style="font-family:var(--font-mono);font-size:0.75rem;color:var(--text-muted);align-self:center">Scenario:</span>
+    <button class="scenario-btn active" type="button" aria-pressed="true" data-scenario="ecommerce">E-commerce search</button>
+    <button class="scenario-btn" type="button" aria-pressed="false" data-scenario="booking">Travel booking</button>
+    <button class="scenario-btn" type="button" aria-pressed="false" data-scenario="error">Error: unknown tool</button>
+    <button class="scenario-btn" type="button" aria-pressed="false" data-scenario="failure">Rejection and timeout</button>
   </div>
 
   <div class="controls">
-    <button class="btn-step" id="btn-step" onclick="advanceStep()">Step →</button>
-    <button class="btn-reset" onclick="resetSimulation()">Reset</button>
+    <button class="btn-step" id="btn-step" type="button">Step →</button>
+    <button class="btn-reset" id="btn-reset" type="button">Reset</button>
     <span class="step-indicator" id="step-indicator">Step 0 of 0</span>
   </div>
 
@@ -258,179 +261,234 @@
   </div>
 
   <div class="annotation" id="annotation" aria-live="polite">
-    Pick a scenario and click <strong>Step →</strong> to begin.
+    Pick a scenario and click Step → to begin.
   </div>
 
   <h2>Protocol sequence</h2>
-  <pre><code>// Phase 1: Discovery
-// The agent reads the tool manifest from the page
-const tools = await navigator.modelContext.tools;
-// tools = [{ name, description, inputSchema }, ...]
+  <pre tabindex="0" aria-label="WebMCP protocol sequence"><code>// Phase 1: Discovery. WebMCP lives on Document.
+const tools = await document.modelContext.getTools();
+// tools = [Tool { name, title, description, inputSchema, annotations, origin }, ...]
 
-// Phase 2: Selection
-// The agent's LLM picks the best tool for the current task
-const chosen = selectTool(tools, agentTask);
+// Phase 2: Selection. The agent's model picks a tool for the task.
+const tool = tools.find((t) =&gt; t.name === 'search_products');
 
-// Phase 3: Invocation
-// Agent sends a structured call — inputs validated against inputSchema
-const result = await navigator.modelContext.callTool(
-  chosen.name,
-  { query: 'running shoes', category: 'footwear', limit: 5 }
+// Phase 3: Invocation. Pass the Tool object itself, an input object, and
+// optionally a signal. The browser does not validate input against inputSchema.
+const json = await document.modelContext.executeTool(
+  tool,
+  { query: 'running shoes', category: 'footwear', limit: 5 },
+  { signal: AbortSignal.timeout(10_000) }
 );
 
-// Phase 4: Response
-// Page handler ran, result passed back to agent
-// result = { products: [...] }
+// Phase 4: Response. json is the JSON-stringified return value of execute().
+// A throwing execute() rejects with OperationError; an aborted signal rejects
+// with the signal's reason.
+const { products } = JSON.parse(json);
 
-// Phase 5: Agent action
-// Agent uses the result to continue the task
-// (render to user, chain another tool call, etc.)</code></pre>
+// Phase 5: Agent action: show the result, chain another call, or ask the user.</code></pre>
 
   <h2>see also</h2>
   <ul>
     <li><a href="../tool-registry-explorer/">Tool Registry Explorer</a> — define and register tools</li>
+    <li><a href="../tool-tester/">MCP Tool Tester</a> — invoke each tool by hand</li>
     <li><a href="https://chromestatus.com/feature/5117755740913664" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+    <li><a href="https://webmachinelearning.github.io/webmcp/" target="_blank" rel="noopener">WebMCP specification</a> (getTools, executeTool, ToolAnnotations)</li>
     <li><a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">Model Context Protocol</a></li>
   </ul>
 </main>
 
-<script>
+<script type="module">
+import { connectModelContext, describeError } from '../webmcp-live.js';
+
+const $ = (id) => document.getElementById(id);
+const mc = connectModelContext($('mc-status'));
+const pretty = (json) => { try { return JSON.stringify(JSON.parse(json), null, 2); } catch { return json; } };
+
+// Each scenario registers real tools (inputSchema + execute). Steps with `run` call the real
+// (or simulated) document.modelContext when the visitor reaches them, so the page-side messages
+// are what the API actually returned, not canned text.
 const scenarios = {
   ecommerce: {
     tools: [
-      { name: 'search_products', description: 'Search the product catalogue.', inputSchema: { type: 'object', properties: { query: { type: 'string' }, category: { type: 'string' }, limit: { type: 'number' } }, required: ['query'] } },
-      { name: 'add_to_cart', description: 'Add a product to the cart.', inputSchema: { type: 'object', properties: { product_id: { type: 'string' }, quantity: { type: 'number' } }, required: ['product_id'] } }
+      { name: 'search_products', description: 'Search the product catalogue.', inputSchema: { type: 'object', properties: { query: { type: 'string' }, category: { type: 'string' }, limit: { type: 'number' } }, required: ['query'] },
+        annotations: { readOnlyHint: true },
+        async execute({ query, limit = 5 }) {
+          return { query, products: [{ id: 'sh-001', name: 'TrailRun Pro', price: 89.99 }, { id: 'sh-002', name: 'SpeedStep X', price: 74.5 }].slice(0, limit) };
+        } },
+      { name: 'add_to_cart', description: 'Add a product to the cart.', inputSchema: { type: 'object', properties: { product_id: { type: 'string' }, quantity: { type: 'number' } }, required: ['product_id'] },
+        async execute({ product_id, quantity = 1 }) { return { added: product_id, quantity }; } },
     ],
-    agentTask: 'Find me running shoes under $100',
-    callTool: 'search_products',
-    callInputs: { query: 'running shoes', category: 'footwear', limit: 5 },
-    handlerResult: { products: [{ id: 'sh-001', name: 'TrailRun Pro', price: 89.99, url: '/p/sh-001' }, { id: 'sh-002', name: 'SpeedStep X', price: 74.50, url: '/p/sh-002' }] },
     steps: [
-      { phase: 'agent', text: 'Task received: "Find me running shoes under $100"', annotation: 'The user gave the agent a natural-language task. The agent needs to figure out which tools this page offers before doing anything.' },
-      { phase: 'agent', text: 'Calling navigator.modelContext.tools to discover page tools…', annotation: 'Phase 1: Discovery. The agent reads the live tool manifest. No scraping, no selector guessing — structured capability disclosure.' },
-      { phase: 'page', type: 'page-out', label: 'tool manifest', content: JSON.stringify([{ name: 'search_products', description: 'Search the product catalogue.' }, { name: 'add_to_cart', description: 'Add a product to the cart.' }], null, 2), annotation: 'The page returns the manifest of all registered tools. Each entry includes name, description, and the inputSchema the agent uses to validate its call.' },
-      { phase: 'agent', text: 'Evaluating tools for task… search_products matches (query aligns with task)', annotation: 'Phase 2: Selection. The agent\'s LLM maps the task onto the available tools. "search_products" clearly matches — it takes a query and optional category.' },
-      { phase: 'agent', text: 'Calling navigator.modelContext.callTool("search_products", inputs)…', annotation: 'Phase 3: Invocation. The agent sends a structured JSON call. Inputs are validated against inputSchema before the page handler runs.' },
-      { phase: 'page', type: 'agent-out', label: 'tool call from agent', content: JSON.stringify({ tool: 'search_products', inputs: { query: 'running shoes', category: 'footwear', limit: 5 } }, null, 2), annotation: 'The page\'s registered handler for "search_products" receives the call. The handler can query a database, call an API, or do any async work.' },
-      { phase: 'page', type: 'page-out', label: 'handler result', content: JSON.stringify({ products: [{ id: 'sh-001', name: 'TrailRun Pro', price: 89.99 }, { id: 'sh-002', name: 'SpeedStep X', price: 74.50 }] }, null, 2), annotation: 'Phase 4: Response. The handler\'s return value is serialised and passed back to the agent as a structured result — no HTML parsing, no screen coordinates.' },
-      { phase: 'agent', text: 'Result received. 2 products found. Presenting to user.', annotation: 'Phase 5: Agent action. The agent has a clean, typed result. It can format it for the user, chain another tool call (e.g. add_to_cart), or ask a follow-up question — all without re-scraping.' }
-    ]
+      { phase: 'agent', text: 'Task received: "Find me running shoes under $100"', annotation: 'The user gave the agent a natural-language task. The agent needs to know which tools this page offers before doing anything.' },
+      { phase: 'agent', text: 'Calling document.modelContext.getTools()…', annotation: 'Phase 1: Discovery. getTools() resolves to Tool objects (name, title, description, inputSchema, origin). No scraping, no selector guessing.' },
+      { phase: 'page', type: 'page-out', label: 'getTools() resolved', run: manifest, annotation: 'This is what getTools() really returned on this page just now. Each entry carries the inputSchema the agent uses to shape its call.' },
+      { phase: 'agent', text: 'Evaluating tools… search_products matches the task', annotation: 'Phase 2: Selection. The agent\'s model maps the task onto the tools. "search_products" takes a query and an optional category.' },
+      { phase: 'agent', text: 'Calling document.modelContext.executeTool(search_products, input)…', annotation: 'Phase 3: Invocation. executeTool() takes the Tool object from getTools() and a plain input object.' },
+      { phase: 'page', type: 'agent-out', label: 'executeTool() input', content: JSON.stringify({ query: 'running shoes', category: 'footwear', limit: 5 }, null, 2), annotation: 'The page\'s execute() callback receives this object plus { signal }. The browser does not validate it against inputSchema, so execute() must.' },
+      { phase: 'page', type: 'page-out', label: 'executeTool() resolved', run: () => call('search_products', { query: 'running shoes', category: 'footwear', limit: 5 }), annotation: 'Phase 4: Response. executeTool() resolves to the JSON-stringified return value of execute().' },
+      { phase: 'agent', text: 'Result received. 2 products found. Presenting to user.', annotation: 'Phase 5: Agent action. The agent has a typed result. It can show it, chain add_to_cart, or ask a follow-up question without re-scraping.' },
+    ],
   },
   booking: {
     tools: [
-      { name: 'search_flights', description: 'Search available flights between two airports.', inputSchema: { type: 'object', properties: { origin: { type: 'string' }, destination: { type: 'string' }, date: { type: 'string' } }, required: ['origin', 'destination', 'date'] } },
-      { name: 'book_flight', description: 'Book a specific flight.', inputSchema: { type: 'object', properties: { flight_id: { type: 'string' }, passenger_name: { type: 'string' } }, required: ['flight_id', 'passenger_name'] } }
+      { name: 'search_flights', description: 'Search available flights between two airports.', inputSchema: { type: 'object', properties: { origin: { type: 'string' }, destination: { type: 'string' }, date: { type: 'string' } }, required: ['origin', 'destination', 'date'] },
+        annotations: { readOnlyHint: true },
+        async execute() { return { flights: [{ id: 'BA456', departs: '07:15', price: 89 }, { id: 'EZY102', departs: '09:45', price: 64 }, { id: 'FR901', departs: '13:20', price: 71 }] }; } },
+      { name: 'book_flight', description: 'Book a specific flight.', inputSchema: { type: 'object', properties: { flight_id: { type: 'string' }, passenger_name: { type: 'string' } }, required: ['flight_id', 'passenger_name'] },
+        annotations: { consequentialHint: true },
+        async execute({ flight_id, passenger_name }) { return { booking_ref: `EZ-${flight_id}`, passenger_name, status: 'confirmed', total: 64, currency: 'GBP' }; } },
     ],
-    agentTask: 'Book the cheapest London to Paris flight tomorrow',
-    callTool: 'search_flights',
-    callInputs: { origin: 'LHR', destination: 'CDG', date: '2026-05-31' },
     steps: [
-      { phase: 'agent', text: 'Task: "Book cheapest London–Paris flight tomorrow"', annotation: 'The user asked the agent to complete a multi-step booking. The agent needs to search first, then book — two separate tool calls.' },
-      { phase: 'agent', text: 'Discovering tools via navigator.modelContext.tools…', annotation: 'Discovery phase. The agent reads what the travel site can do before deciding which tools to call in which order.' },
-      { phase: 'page', type: 'page-out', label: 'tool manifest', content: JSON.stringify([{ name: 'search_flights', description: 'Search available flights.' }, { name: 'book_flight', description: 'Book a specific flight.' }], null, 2), annotation: 'Two tools registered: search (step 1) and book (step 2). The agent plans a two-step sequence.' },
-      { phase: 'agent', text: 'Plan: search_flights → select cheapest → book_flight. Calling search_flights…', annotation: 'Phase 3: Invocation of the first tool. IATA codes are passed as structured input — the agent inferred LHR and CDG from "London" and "Paris".' },
-      { phase: 'page', type: 'agent-out', label: 'tool call', content: JSON.stringify({ tool: 'search_flights', inputs: { origin: 'LHR', destination: 'CDG', date: '2026-05-31' } }, null, 2), annotation: 'Handler receives the structured call. It queries the flight inventory system and returns available options.' },
-      { phase: 'page', type: 'page-out', label: 'flights result', content: JSON.stringify({ flights: [{ id: 'BA456', departs: '07:15', price: 89 }, { id: 'EZY102', departs: '09:45', price: 64 }, { id: 'FR901', departs: '13:20', price: 71 }] }, null, 2), annotation: 'Three flights returned. The agent will sort by price and pick EZY102 at £64 as the cheapest.' },
-      { phase: 'agent', text: 'Cheapest: EZY102 at £64. Now calling book_flight…', annotation: 'The agent chains directly to the second tool — no page reload, no form-fill guessing. The tool call carries the flight ID from the previous result.' },
-      { phase: 'page', type: 'agent-out', label: 'tool call', content: JSON.stringify({ tool: 'book_flight', inputs: { flight_id: 'EZY102', passenger_name: 'Alex Kim' } }, null, 2), annotation: 'Phase 4 (second tool): The booking handler processes the reservation. In a real flow this would require user-consent confirmation before the agent can call booking tools.' },
-      { phase: 'page', type: 'page-out', label: 'booking result', content: JSON.stringify({ booking_ref: 'EZ-2026-KIM', status: 'confirmed', total: 64, currency: 'GBP' }), annotation: 'Booking confirmed. The agent passes the reference back to the user. Two tool calls, zero scraping, zero fragile selector chains.' }
-    ]
+      { phase: 'agent', text: 'Task: "Book the cheapest London to Paris flight tomorrow"', annotation: 'A multi-step task: search first, then book. Two separate tool calls.' },
+      { phase: 'agent', text: 'Discovering tools with document.modelContext.getTools()…', annotation: 'Discovery. The agent reads what the travel site can do before planning the order of calls.' },
+      { phase: 'page', type: 'page-out', label: 'getTools() resolved', run: manifest, annotation: 'Two tools. book_flight carries annotations.consequentialHint: true, the spec\'s signal that a call has real-world effects, so an agent should confirm with the user first.' },
+      { phase: 'agent', text: 'Plan: search_flights → pick cheapest → book_flight. Calling search_flights…', annotation: 'Invocation of the first tool. The agent inferred LHR and CDG from "London" and "Paris".' },
+      { phase: 'page', type: 'page-out', label: 'executeTool(search_flights) resolved', run: () => call('search_flights', { origin: 'LHR', destination: 'CDG', date: tomorrow() }), annotation: 'Three flights. The agent sorts by price and picks EZY102.' },
+      { phase: 'agent', text: 'Cheapest: EZY102 at £64. book_flight is consequential: asking the user to confirm…', annotation: 'Because of consequentialHint, a well-behaved agent pauses for consent before calling book_flight.' },
+      { phase: 'page', type: 'page-out', label: 'executeTool(book_flight) resolved', run: () => call('book_flight', { flight_id: 'EZY102', passenger_name: 'Alex Kim' }), annotation: 'After consent, the agent chains the second call with the flight id from the first result. No page reload, no form-fill guessing.' },
+    ],
   },
   error: {
     tools: [
-      { name: 'get_account_balance', description: 'Retrieve the current account balance.', inputSchema: { type: 'object', properties: { account_id: { type: 'string' } }, required: ['account_id'] } }
+      { name: 'get_account_balance', description: 'Retrieve the current account balance.', inputSchema: { type: 'object', properties: { account_id: { type: 'string' } }, required: ['account_id'] },
+        annotations: { readOnlyHint: true },
+        async execute({ account_id }) { return { account_id, balance: 1240.5, currency: 'USD' }; } },
     ],
-    agentTask: 'Transfer $500 to my savings account',
-    callTool: 'transfer_funds',
-    callInputs: { amount: 500, destination: 'savings' },
     steps: [
-      { phase: 'agent', text: 'Task: "Transfer $500 to savings account"', annotation: 'The agent attempts to fulfil a transfer request. It will discover tools first to see if a transfer tool exists.' },
-      { phase: 'agent', text: 'Reading tool manifest…', annotation: 'Discovery phase — critical because agents must not assume tool existence. They have to discover what the page actually offers.' },
-      { phase: 'page', type: 'page-out', label: 'tool manifest', content: JSON.stringify([{ name: 'get_account_balance', description: 'Retrieve the current account balance.' }], null, 2), annotation: 'The page only has get_account_balance. There is no transfer_funds tool — it hasn\'t been registered, perhaps because the site requires 2FA before exposing it.' },
-      { phase: 'agent', text: 'Evaluating tools… no "transfer_funds" tool found. Only get_account_balance.', annotation: 'The agent correctly identifies that the task cannot be completed with the available tools. This is safer than trying to manipulate a form by scraping — the agent knows exactly what it can and cannot do.' },
-      { phase: 'agent', text: 'Cannot fulfil transfer task. Informing user.', annotation: 'Phase 5: Agent action — in this case, communicating a capability gap. The user can then navigate to the transfer page manually or authenticate to unlock the tool.' },
-      { phase: 'page', type: 'error-out', label: 'agent response to user', content: '"I can check your balance but the transfer tool isn\'t available on this page yet. You may need to authenticate or navigate to the Transfer section."', annotation: 'Clean failure. No hallucinated DOM clicks, no guessed form fields. WebMCP gives agents accurate capability information so they fail gracefully instead of silently causing harm.' }
-    ]
-  }
+      { phase: 'agent', text: 'Task: "Transfer $500 to my savings account"', annotation: 'The agent must check whether a transfer tool exists before acting.' },
+      { phase: 'agent', text: 'Calling document.modelContext.getTools()…', annotation: 'Agents must not assume a tool exists. They discover what the page actually offers.' },
+      { phase: 'page', type: 'page-out', label: 'getTools() resolved', run: manifest, annotation: 'Only get_account_balance is registered. Perhaps the site only registers transfer_funds after the user re-authenticates.' },
+      { phase: 'agent', text: 'No "transfer_funds" tool. Cannot fulfil the task.', annotation: 'The agent knows exactly what it can and cannot do, which is safer than guessing at a form.' },
+      { phase: 'page', type: 'error-out', label: 'agent reply to user', content: '"I can check your balance, but this page does not offer a transfer tool. You may need to sign in again or open the Transfer section."', annotation: 'A clean capability gap: no hallucinated clicks, no guessed fields.' },
+    ],
+  },
+  failure: {
+    tools: [
+      { name: 'place_order', description: 'Charge the saved card and place the order.', inputSchema: { type: 'object', properties: { order_id: { type: 'string' } }, required: ['order_id'] },
+        annotations: { consequentialHint: true },
+        async execute() { throw new Error('Payment declined by the card issuer'); } },
+      { name: 'track_parcel', description: 'Look up a parcel status from the carrier (slow).', inputSchema: { type: 'object', properties: { parcel_id: { type: 'string' } }, required: ['parcel_id'] },
+        annotations: { readOnlyHint: true },
+        async execute({ parcel_id }, { signal }) {
+          await new Promise((resolve) => {
+            const t = setTimeout(resolve, 2000);
+            signal?.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+          });
+          return signal?.aborted ? { cancelled: true } : { parcel_id, status: 'out for delivery' };
+        } },
+    ],
+    steps: [
+      { phase: 'agent', text: 'Task: "Place order 1042, then tell me where my last parcel is"', annotation: 'Two calls, and both will go wrong in different ways.' },
+      { phase: 'page', type: 'page-out', label: 'getTools() resolved', run: manifest, annotation: 'place_order is consequential; track_parcel is read-only but slow.' },
+      { phase: 'agent', text: 'Calling executeTool(place_order, { order_id: "1042" })…', annotation: 'The page\'s execute() throws.' },
+      { phase: 'page', type: 'error-out', label: 'executeTool(place_order) rejected', run: () => call('place_order', { order_id: '1042' }), annotation: 'A throwing execute() makes executeTool() reject with an OperationError. The page\'s own error text is not passed to the agent; Chrome logs it to the console as "WebMCP tool execution failed".' },
+      { phase: 'agent', text: 'Calling executeTool(track_parcel, …, { signal: AbortSignal.timeout(300) })…', annotation: 'The agent will only wait 300 ms. It passes an AbortSignal in the third argument.' },
+      { phase: 'page', type: 'error-out', label: 'executeTool(track_parcel) rejected', run: () => call('track_parcel', { parcel_id: 'P-77' }, { signal: AbortSignal.timeout(300) }), annotation: 'The deadline fired: executeTool() rejected with the signal\'s reason (TimeoutError), and execute() saw its own { signal } abort so it could stop the carrier lookup.' },
+      { phase: 'agent', text: 'Order failed and tracking timed out. Telling the user both, without inventing results.', annotation: 'Failure modes are part of the contract: rejections and cancellations reach the agent as distinct, typed errors.' },
+    ],
+  },
 };
 
-let currentScenario = null;
+let registration = null; // AbortController for the active scenario's tools
+let current = null;
 let currentStep = -1;
+let busy = false;
 
-function loadScenario(key) {
-  currentScenario = scenarios[key];
+function tomorrow() {
+  const d = new Date(Date.now() + 86400000);
+  return d.toISOString().slice(0, 10);
+}
+
+async function manifest() {
+  const tools = await mc.getTools();
+  return JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, annotations: t.annotations ?? null })), null, 2);
+}
+
+async function call(name, input, options) {
+  const tool = (await mc.getTools()).find((t) => t.name === name);
+  if (!tool) return `No tool named "${name}" in getTools()`;
+  try {
+    return pretty(await mc.executeTool(tool, input, options));
+  } catch (err) {
+    return describeError(err);
+  }
+}
+
+async function loadScenario(key) {
+  current = scenarios[key];
   currentStep = -1;
-
-  document.querySelectorAll('.scenario-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.getAttribute('onclick').includes(key));
+  document.querySelectorAll('.scenario-btn').forEach((btn) => {
+    const on = btn.dataset.scenario === key;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', String(on));
   });
-
-  // Render agent steps (greyed initially)
-  const agentStepsList = document.getElementById('agent-steps');
-  agentStepsList.innerHTML = currentScenario.steps
-    .filter(s => s.phase === 'agent')
-    .map((s, i) => `<li class="step-item" data-agent-step="${i}">${s.text}</li>`)
-    .join('');
-
-  // Clear message log
-  document.getElementById('message-log').innerHTML = '';
-  document.getElementById('annotation').innerHTML = 'Click <strong>Step →</strong> to begin.';
+  // Unregister the previous scenario's tools (the spec's way: abort the signal), register these.
+  registration?.abort();
+  registration = new AbortController();
+  for (const def of current.tools) {
+    try {
+      await mc.registerTool(def, { signal: registration.signal });
+    } catch (err) {
+      console.warn(`registerTool(${def.name}) rejected`, err);
+    }
+  }
+  $('agent-steps').replaceChildren(...current.steps.filter((s) => s.phase === 'agent').map((s, i) => {
+    const li = Object.assign(document.createElement('li'), { className: 'step-item', textContent: s.text });
+    li.dataset.agentStep = i;
+    return li;
+  }));
+  $('message-log').replaceChildren();
+  setAnnotation('Click Step → to begin.');
   updateControls();
 }
 
-function advanceStep() {
-  if (!currentScenario) return;
+function setAnnotation(text) {
+  $('annotation').textContent = text;
+}
+
+async function advanceStep() {
+  if (!current || busy || currentStep >= current.steps.length - 1) return;
+  busy = true;
+  updateControls();
   currentStep++;
-  if (currentStep >= currentScenario.steps.length) return;
-
-  const step = currentScenario.steps[currentStep];
-
+  const step = current.steps[currentStep];
   if (step.phase === 'agent') {
-    // Highlight the agent step
-    const agentItems = document.querySelectorAll('[data-agent-step]');
-    let agentIdx = 0;
-    for (let i = 0; i <= currentStep; i++) {
-      if (currentScenario.steps[i].phase === 'agent') agentIdx++;
-    }
-    agentItems.forEach((item, i) => {
-      const stepCount = agentIdx - 1;
-      if (i < stepCount) item.className = 'step-item done';
-      else if (i === stepCount) item.className = 'step-item active';
-      else item.className = 'step-item';
+    const agentIdx = current.steps.slice(0, currentStep + 1).filter((s) => s.phase === 'agent').length - 1;
+    document.querySelectorAll('[data-agent-step]').forEach((item, i) => {
+      item.className = 'step-item' + (i < agentIdx ? ' done' : i === agentIdx ? ' active' : '');
     });
   } else {
-    // Add message to log
-    const log = document.getElementById('message-log');
-    const msg = document.createElement('div');
-    msg.className = `message ${step.type || 'page-out'}`;
-    msg.innerHTML = `<div class="msg-label">${step.label}</div><pre style="background:transparent;color:inherit;border:none;padding:0;margin:0;font-size:0.72rem">${step.content}</pre>`;
-    log.appendChild(msg);
-    log.scrollTop = log.scrollHeight;
+    const content = step.run ? await step.run() : step.content;
+    const msg = Object.assign(document.createElement('div'), { className: `message ${step.type || 'page-out'}` });
+    const pre = Object.assign(document.createElement('pre'), { textContent: content });
+    pre.style.cssText = 'background:transparent;color:inherit;border:none;padding:0;margin:0;font-size:0.72rem';
+    msg.append(Object.assign(document.createElement('div'), { className: 'msg-label', textContent: step.label }), pre);
+    $('message-log').appendChild(msg);
+    $('message-log').scrollTop = $('message-log').scrollHeight;
   }
-
-  // Update annotation
-  document.getElementById('annotation').innerHTML = step.annotation;
+  setAnnotation(step.annotation);
+  busy = false;
   updateControls();
 }
 
 function resetSimulation() {
-  if (!currentScenario) return;
+  if (!current) return;
   currentStep = -1;
-  document.querySelectorAll('.step-item').forEach(el => el.className = 'step-item');
-  document.getElementById('message-log').innerHTML = '';
-  document.getElementById('annotation').innerHTML = 'Click <strong>Step →</strong> to begin.';
+  document.querySelectorAll('.step-item').forEach((el) => { el.className = 'step-item'; });
+  $('message-log').replaceChildren();
+  setAnnotation('Click Step → to begin.');
   updateControls();
 }
 
 function updateControls() {
-  const total = currentScenario ? currentScenario.steps.length : 0;
-  const btn = document.getElementById('btn-step');
-  btn.disabled = !currentScenario || currentStep >= total - 1;
-  document.getElementById('step-indicator').textContent =
-    currentScenario ? `Step ${currentStep + 1} of ${total}` : 'Step 0 of 0';
+  const total = current ? current.steps.length : 0;
+  $('btn-step').disabled = !current || busy || currentStep >= total - 1;
+  $('step-indicator').textContent = current ? `Step ${currentStep + 1} of ${total}` : 'Step 0 of 0';
 }
 
-// Init with first scenario
+document.querySelectorAll('.scenario-btn').forEach((btn) => btn.addEventListener('click', () => loadScenario(btn.dataset.scenario)));
+$('btn-step').addEventListener('click', advanceStep);
+$('btn-reset').addEventListener('click', resetSimulation);
 loadScenario('ecommerce');
 </script>
 </body>

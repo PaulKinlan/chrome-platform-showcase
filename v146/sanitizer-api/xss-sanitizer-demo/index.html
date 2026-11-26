@@ -96,6 +96,9 @@
       opacity: 0.85;
     }
 
+    :root { --target-size: 24px; }
+    @media (pointer: coarse) { :root { --target-size: 44px; } }
+    button { min-block-size: var(--target-size); }
     .strip-log {
       background: var(--bg-stone);
       border: 1px solid var(--border-black);
@@ -136,8 +139,8 @@
     <p class="lede">Type or paste HTML containing potentially dangerous markup. The default <code>Sanitizer</code> strips scripts, inline event handlers, and <code>javascript:</code> URLs before injecting into the DOM. The serialized output shows exactly what survived sanitization.</p>
   </header>
 
-  <div class="note" id="support-note">
-    <strong>Chrome 146 required</strong> for the native Sanitizer API. In older browsers this demo falls back to a JavaScript innerHTML-based approach with a simplistic pattern-filter to illustrate the concept — it is NOT a real sanitizer.
+  <div class="note" id="support-note" role="status">
+    <strong>Chrome 146 required</strong> for the native Sanitizer API (<code>Element.setHTML()</code>). Checking this browser…
   </div>
 
   <section>
@@ -151,12 +154,12 @@
 
     <div class="editor-grid">
       <div>
-        <div class="panel-label">Input HTML (untrusted):</div>
-        <textarea id="html-input" spellcheck="false" placeholder="Paste or type HTML here…" aria-label="Paste or type HTML here…"></textarea>
+        <label class="panel-label" for="html-input">Input HTML (untrusted):</label>
+        <textarea id="html-input" spellcheck="false" placeholder="Paste or type HTML here…"></textarea>
       </div>
       <div>
-        <div class="panel-label">Rendered output (after sanitization):</div>
-        <div class="output-panel" id="render-output"></div>
+        <div class="panel-label" id="render-label">Rendered output (after sanitization):</div>
+        <div class="output-panel" id="render-output" role="region" aria-labelledby="render-label"></div>
       </div>
     </div>
 
@@ -167,7 +170,7 @@
 
     <div style="margin-top:0.5rem;">
       <div class="panel-label">What was stripped / kept:</div>
-      <div class="strip-log" id="strip-log">&mdash;</div>
+      <div class="strip-log" id="strip-log" role="status" aria-live="polite">&mdash;</div>
     </div>
 
     <div class="btn-row" style="margin-top:0.75rem;">
@@ -206,6 +209,7 @@ output.innerHTML = userInput; // XSS risk!</code></pre>
     <ul>
       <li><a href="../custom-config-demo/">Custom Sanitizer Config</a> — restrict to a specific allow-list</li>
       <li><a href="https://chromestatus.com/feature/5814067399491584" target="_blank" rel="noopener">ChromeStatus entry</a></li>
+      <li><a href="https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#dom-element-sethtml" target="_blank" rel="noopener">HTML Standard — setHTML() and the Sanitizer</a></li>
       <li><a href="https://developer.mozilla.org/en-US/docs/Web/API/Sanitizer" target="_blank" rel="noopener">MDN — Sanitizer</a></li>
     </ul>
   </section>
@@ -219,7 +223,7 @@ output.innerHTML = userInput; // XSS risk!</code></pre>
 <script>alert('XSS via script tag')<\/script>
 <img src="x" onerror="alert('XSS via onerror')" alt="">
 <a href="javascript:alert('XSS via href')">Click me</a>
-<p onclick="alert('XSS via onclick')" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">Click this paragraph</p>`,
+<p onclick="alert('XSS via onclick')">Click this paragraph</p>`,
 
     safe: `<h2>Meeting Notes</h2>
 <p>Team discussed the <strong>Q3 roadmap</strong> and agreed on the following:</p>
@@ -249,10 +253,17 @@ output.innerHTML = userInput; // XSS risk!</code></pre>
   document.getElementById('btn-preset-tricky').addEventListener('click', () => { input.value = PRESETS.tricky; });
 
   const supportsSetHTML = typeof Element.prototype.setHTML === 'function';
+  const note = document.getElementById('support-note');
+  const strong = (t) => Object.assign(document.createElement('strong'), { textContent: t });
+  const code = (t) => Object.assign(document.createElement('code'), { textContent: t });
   if (supportsSetHTML) {
-    document.getElementById('support-note').innerHTML =
-      '<strong>Chrome 146+ detected</strong> — native <code>Sanitizer</code> API is available. Results are from the real browser sanitizer.';
+    note.replaceChildren(strong('Element.setHTML() is available.'), ' Results are from the browser\'s own sanitizer.');
+  } else {
+    // No fake sanitizer: a regex filter feeding innerHTML is exactly the anti-pattern
+    // this API replaces, and payloads like <svg/onload=…> get through it.
+    note.replaceChildren(strong('Element.setHTML() is not available in this browser.'), ' Nothing will be rendered as HTML here; the output shows your input as inert text. Use Chrome 146 or later to see the sanitizer at work, or a vetted library such as DOMPurify in the meantime.');
   }
+  window.showcaseTelemetry?.support?.('Element.prototype.setHTML', supportsSetHTML ? 'supported' : 'unsupported');
 
   function escapeForDisplay(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -260,7 +271,13 @@ output.innerHTML = userInput; // XSS risk!</code></pre>
 
   document.getElementById('btn-sanitize').addEventListener('click', () => {
     const raw = input.value;
-    if (!raw.trim()) return;
+    if (!raw.trim()) {
+      // Empty input: clear every readout instead of leaving the last result on screen.
+      renderOutput.replaceChildren();
+      serialOutput.textContent = '(empty input)';
+      stripLog.textContent = 'Nothing to sanitize.';
+      return;
+    }
 
     // Detect what was in the original
     const dangerPatterns = [
@@ -271,17 +288,13 @@ output.innerHTML = userInput; // XSS risk!</code></pre>
       { label: '<embed>/<object>', re: /<(embed|object)/i },
     ];
 
-    if (supportsSetHTML) {
-      renderOutput.setHTML(raw);
-    } else {
-      // Fallback: basic pattern stripping (NOT a real sanitizer — demo only)
-      let safe = raw
-        .replace(/<script[\s\S]*?<\/script>/gi, '')
-        .replace(/\son\w+\s*=\s*["'][^"']*["']/gi, '')
-        .replace(/\son\w+\s*=\s*[^\s>]*/gi, '')
-        .replace(/href\s*=\s*["']?\s*javascript:[^"'\s>]*/gi, 'href="#"');
-      renderOutput.innerHTML = safe;
+    if (!supportsSetHTML) {
+      renderOutput.textContent = raw;
+      serialOutput.textContent = '(not sanitized: Element.setHTML() is unavailable, so the input is shown as text)';
+      stripLog.textContent = 'No sanitizer ran in this browser.';
+      return;
     }
+    renderOutput.setHTML(raw);
 
     const sanitizedHTML = renderOutput.innerHTML;
 
@@ -309,11 +322,12 @@ output.innerHTML = userInput; // XSS risk!</code></pre>
         }
       }
     }
+    // "Kept" is read from the sanitized DOM itself, not a fixed list.
+    const kept = [...new Set([...renderOutput.querySelectorAll('*')].map((el) => el.localName))];
     if (logs.length === 0) {
-      logs.push(logItem('strip-ok', '✓ No dangerous patterns detected in input — all content passed through'));
-    } else {
-      logs.push(logItem('strip-ok', '✓ Safe elements preserved (b, p, strong, em, a[href], ul, li, etc.)'));
+      logs.push(logItem('strip-ok', '✓ No dangerous patterns detected in input.'));
     }
+    logs.push(logItem('strip-ok', kept.length ? `✓ Elements kept: ${kept.map((n) => `<${n}>`).join(', ')}` : '✓ No elements kept (text only).'));
     stripLog.replaceChildren(...logs);
   });
 
