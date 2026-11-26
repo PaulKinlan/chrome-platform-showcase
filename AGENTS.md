@@ -46,7 +46,7 @@ npm run check-demo-coverage # No-demo-pending gate — run before EVERY push (se
 npm run gen:feature-servers # Rebuild routes/_feature-servers.generated.ts from v<N>/*/_server.ts
 npm run check-feature-servers # Verify routes/_feature-servers.generated.ts matches disk
 npm run check:writing   # Check demo prose for AI-slop filler
-npm run demo-index      # Rebuild demo-index.json after adding or moving a feature folder
+npm run demo-index      # Optional: write demo-index.json locally (synthesized at Worker build)
 npm run route-manifest  # Emit the published-demo route manifest
 npm run start
 npm run auto-research   # Starts the local server and displays the quality/conformance status
@@ -237,8 +237,10 @@ only in the milestone folder they are rendering. `demo-index.json` is that map, 
 feature id to demo folder, built by scanning every `v*/*/index.html` for its ChromeStatus link and
 preferring `feature-lineage.json`'s canonical folder when a feature has several.
 
-- After adding, moving, or renaming a feature folder, run `npm run demo-index`. `npm run check`
-  fails if the committed index no longer matches what is on disk.
+- `demo-index.json` is gitignored: `scripts/build-worker-assets.mjs` synthesizes it automatically at
+  Worker build time, and `routes/pages/demo-index.ts` computes it on demand in memory during local
+  Node runs. Routines and contributors do not need to run `npm run demo-index` or commit
+  `demo-index.json`. `npm run check-demo-index` verifies the index builds cleanly from disk.
 - Run `npm run check-demo-coverage` before every push. It reads the live milestone listings and
   fails if any listed feature resolves to no demo anywhere — the exact condition that renders a
   "demo pending" badge. A milestone listing it cannot fetch is a failure, not a skip.
@@ -331,7 +333,8 @@ targeted compatibility fixes — never a destructive rewrite, never a new slug t
 
 **Run the responsive matrix before every push** with `npm run responsive-check` and record each
 touched demo's result in its per-feature `v<N>/<feature-slug>/_support.json` sidecar (`ok` /
-`unsupported`+evidence per class, updated via `npm run responsive-check -- <id> --merge`).
+`unsupported`+evidence per class, updated via `npm run responsive-check -- <id> --merge`). The
+ephemeral `reports/responsive/last-run.json` summary is gitignored and never needs to be committed.
 
 ## modern-web-guidance is mandatory for all frontend work
 

@@ -227,6 +227,11 @@ test(
         assert(files.has(required), `manifest is missing ${required}`);
         assert(staged.has(required), `staged assets missing ${required}`);
       }
+      const stagedDemoIndex = JSON.parse(await readFile(`${out}/demo-index.json`, "utf8"));
+      assert(
+        stagedDemoIndex.count > 0 && Object.keys(stagedDemoIndex.demos ?? {}).length > 0,
+        "synthesized demo-index.json must cover repository features",
+      );
       assert(
         ![...files].some((f) => f === "_server.ts" || f.endsWith("/_server.ts")),
         "_server.ts handlers must be bundled as code, never in fs-manifest.json",
@@ -308,7 +313,7 @@ test(
 );
 
 test(
-  "staging fixture actively skips _server.ts and _support.json and bundles _questions.json/conformance.json/page.json without duplicating them",
+  "staging fixture synthesizes demo-index.json without a pre-committed file, skips _server.ts and _support.json, and bundles metadata without duplicating them",
   async () => {
     const tmp = await mkdtemp(join(tmpdir(), "worker-assets-fixture-"));
     const fixtureRoot = join(tmp, "repo");
@@ -317,16 +322,22 @@ test(
       await mkdir(join(fixtureRoot, "public"), { recursive: true });
       await mkdir(join(fixtureRoot, "v151", "sample-demo", "basic"), { recursive: true });
       const questionsBody = JSON.stringify({ feature: "sample-demo", questions: [] });
-      const conformanceBody = JSON.stringify({ feature: "sample-demo", tests: [] });
+      const conformanceBody = JSON.stringify({
+        feature: "sample-demo",
+        assertions: [{ kind: "exists", test: "window.SampleApi" }],
+      });
       const pageBody = JSON.stringify({
         title: "Basic sample",
         blurb: "Exercises the sample feature.",
         kind: "starter",
       });
-      await writeFile(join(fixtureRoot, "demo-index.json"), "{}");
+      // Deliberately omit demo-index.json in fixtureRoot to verify synthesis.
       await writeFile(join(fixtureRoot, "gendn-links.json"), "{}");
       await writeFile(join(fixtureRoot, "public", "styles.css"), "body {}");
-      await writeFile(join(fixtureRoot, "v151", "sample-demo", "index.html"), "<h1>ok</h1>");
+      await writeFile(
+        join(fixtureRoot, "v151", "sample-demo", "index.html"),
+        '<h1><a href="https://chromestatus.com/feature/1234567890">ok</a></h1>',
+      );
       await writeFile(
         join(fixtureRoot, "v151", "sample-demo", "_server.ts"),
         "export default () => new Response('secret');",
@@ -367,7 +378,7 @@ test(
           "v151/sample-demo/conformance.json",
           "v151/sample-demo/index.html",
         ],
-        "manifest must omit _server.ts, _support.json, .DS_Store and keep bundled files",
+        "manifest must include synthesized demo-index.json, omit _server.ts/_support.json/.DS_Store, and keep bundled files",
       );
       assertEquals(
         staged,
@@ -381,7 +392,18 @@ test(
           "public/styles.css",
           "v151/sample-demo/index.html",
         ],
-        "staged output must contain only non-bundled files plus _worker metadata/bundles",
+        "staged output must contain synthesized demo-index.json, non-bundled files, and _worker metadata/bundles",
+      );
+
+      const synthesizedIndex = JSON.parse(await readFile(`${out}/demo-index.json`, "utf8"));
+      assertEquals(
+        synthesizedIndex,
+        {
+          count: 1,
+          demos: { "1234567890": "v151/sample-demo" },
+          probes: { "1234567890": { kind: "exists", test: "window.SampleApi" } },
+        },
+        "synthesized demo-index.json must reflect the fixture's feature and conformance probe",
       );
 
       const qBundle = JSON.parse(await readFile(`${out}/_worker/bundle-_questions.json`, "utf8"));

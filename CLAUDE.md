@@ -282,7 +282,8 @@ targeted compatibility fixes — never a destructive rewrite, never a new slug t
 
 **Run the responsive matrix before every push** with `npm run responsive-check` and record each
 touched demo's result in its per-feature `v<N>/<feature-slug>/_support.json` sidecar (`ok` /
-`unsupported`+evidence per class, updated via `npm run responsive-check -- <id> --merge`).
+`unsupported`+evidence per class, updated via `npm run responsive-check -- <id> --merge`). The
+ephemeral `reports/responsive/last-run.json` summary is gitignored and never needs to be committed.
 
 ## modern-web-guidance is mandatory for all frontend work
 
@@ -379,8 +380,10 @@ is built in one of them, so three release pages would report "demo pending" for 
 category and catalogue pages resolve through it — a feature built elsewhere renders `demo in v152`,
 not a pending badge.
 
-- Rebuild it with `npm run demo-index` after adding, moving or renaming a feature folder.
-  `npm run check` fails when the committed index no longer matches disk.
+- `demo-index.json` is gitignored: `scripts/build-worker-assets.mjs` synthesizes it automatically at
+  Worker build time, and `routes/pages/demo-index.ts` computes it on demand locally. Routines and
+  contributors no longer need to run `npm run demo-index` or commit `demo-index.json`.
+  `npm run check-demo-index` verifies the index builds cleanly from disk.
 - `npm run check-demo-coverage` reads the live milestone listings and fails if any listed feature
   resolves to no demo anywhere. Run it before every push. A listing it cannot fetch fails the gate
   rather than being skipped.

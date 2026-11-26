@@ -56,25 +56,116 @@ async function featureHasDemo(release: string, feature: FeatureSummary): Promise
   }
 }
 
-// Feature id → the folder that demonstrates it + primary conformance probe,
-// built by `npm run demo-index` and kept honest by `npm run check-demo-index`.
-let demoIndexCache: { at: number; data: DemoIndexData } | null = null;
+const CHROMESTATUS_RE = /chromestatus\.com\/feature\/(\d+)/g;
+const UNSAFE_SCRIPT_RE =
+  /\basync\b|\bawait\b|\bPromise\b|\bimport\s*\(|\bfetch\s*\(|\bWebSocket\b|\bXMLHttpRequest\b|\bWorker\b|\biframe\b|\bsetTimeout\b|\brequestAnimationFrame\b|\bshowOpenFilePicker\b|\bgetUserMedia\b|\brequestDevice\b|\bcredentials\b|\.src\s*=|\blocation\b/;
 
-export async function getDemoIndexData(): Promise<DemoIndexData> {
-  if (demoIndexCache && Date.now() - demoIndexCache.at < BUILT_DIRS_TTL_MS) {
-    return demoIndexCache.data;
+// Compute the feature id → demo folder + primary conformance probe index
+// directly via platform() when ./demo-index.json is absent (the default in
+// local Node checkouts, where demo-index.json is gitignored and only
+// synthesized into dist/worker-assets/ at Worker build time).
+async function computeDemoIndexFromPlatform(): Promise<DemoIndexData> {
+  const fs = platform();
+  let canonicalById = new Map<number, string>();
+  try {
+    const lineage = JSON.parse(await fs.readTextFile("./feature-lineage.json")) as {
+      features?: Record<string, { canonical?: string }>;
+    };
+    for (const [id, record] of Object.entries(lineage.features ?? {})) {
+      if (record?.canonical) canonicalById.set(Number(id), record.canonical);
+    }
+  } catch {
+    canonicalById = new Map();
   }
+
+  const folders = new Map<number, string[]>();
+  try {
+    for await (const release of fs.readDir(".")) {
+      if (!release.isDirectory || !/^v\d+$/.test(release.name)) continue;
+      for await (const feature of fs.readDir(release.name)) {
+        if (!feature.isDirectory) continue;
+        let html: string;
+        try {
+          html = await fs.readTextFile(`./${release.name}/${feature.name}/index.html`);
+        } catch {
+          continue;
+        }
+        const dir = `${release.name}/${feature.name}`;
+        for (const match of html.matchAll(CHROMESTATUS_RE)) {
+          const id = Number(match[1]);
+          const list = folders.get(id) ?? [];
+          if (!list.includes(dir)) list.push(dir);
+          folders.set(id, list);
+        }
+      }
+    }
+  } catch {
+    // Fallback if root readDir is restricted
+  }
+
+  const demos: Record<string, string> = {};
+  const probes: Record<string, DemoProbe> = {};
+  for (const [id, dirs] of [...folders.entries()].sort((a, b) => a[0] - b[0])) {
+    const canonical = canonicalById.get(id);
+    const sorted = [...dirs].sort((a, b) =>
+      Number(b.slice(1).split("/")[0]) - Number(a.slice(1).split("/")[0])
+    );
+    const dir = canonical && dirs.includes(canonical) ? canonical : sorted[0];
+    demos[String(id)] = dir;
+
+    try {
+      const suite = JSON.parse(await fs.readTextFile(`./${dir}/conformance.json`)) as {
+        assertions?: Array<{ kind?: string; test?: string; expect?: string }>;
+      };
+      const assertions = (suite?.assertions ?? []).filter(
+        (a): a is { kind: string; test: string; expect?: string } =>
+          Boolean(a && a.kind && a.kind !== "manual" && typeof a.test === "string"),
+      );
+      const declarative = assertions.find((a) =>
+        a.kind === "css-supports" || a.kind === "exists" || a.kind === "typeof"
+      );
+      const safeScript = assertions.find((a) =>
+        (a.kind === "script" || a.kind === "throws") && !UNSAFE_SCRIPT_RE.test(a.test)
+      );
+      const autoAssertion = declarative ?? safeScript;
+      if (autoAssertion) {
+        const probe: DemoProbe = { kind: autoAssertion.kind, test: autoAssertion.test };
+        if (autoAssertion.expect) probe.expect = autoAssertion.expect;
+        probes[String(id)] = probe;
+      }
+    } catch {
+      // No conformance.json or unreadable
+    }
+  }
+
+  return { demos, probes };
+}
+
+// Feature id → the folder that demonstrates it + primary conformance probe.
+// On Cloudflare Workers ./demo-index.json is staged at build time; locally it
+// is computed in-memory once per process when absent on disk.
+let demoIndexPromise: Promise<DemoIndexData> | null = null;
+
+async function loadDemoIndexData(): Promise<DemoIndexData> {
   try {
     const parsed = JSON.parse(await platform().readTextFile("./demo-index.json"));
-    const data: DemoIndexData = {
+    return {
       demos: (parsed?.demos ?? {}) as Record<string, string>,
       probes: (parsed?.probes ?? {}) as Record<string, DemoProbe>,
     };
-    demoIndexCache = { at: Date.now(), data };
   } catch {
-    demoIndexCache = { at: Date.now(), data: { demos: {}, probes: {} } };
+    return await computeDemoIndexFromPlatform();
   }
-  return demoIndexCache.data;
+}
+
+export function getDemoIndexData(): Promise<DemoIndexData> {
+  if (!demoIndexPromise) {
+    demoIndexPromise = loadDemoIndexData().catch((err) => {
+      demoIndexPromise = null;
+      throw err;
+    });
+  }
+  return demoIndexPromise;
 }
 
 async function getDemoIndex(): Promise<Record<string, string>> {

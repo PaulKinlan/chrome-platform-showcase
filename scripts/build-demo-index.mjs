@@ -7,9 +7,12 @@
 // pending", which is false and was the reason a reader could land on a
 // milestone page and find nothing to open.
 //
-// This writes demo-index.json so the server reads one small file instead of
-// scanning every feature folder on each isolate start. Rebuild with
-// `npm run demo-index`; `npm run check-demo-index` fails if it is stale.
+// This builds the demo index in memory (used directly by
+// `scripts/build-worker-assets.mjs` to synthesize `demo-index.json` into
+// `dist/worker-assets/` at Worker build time, and on demand via
+// `npm run demo-index` for local debugging). `npm run check-demo-index`
+// verifies that the index builds cleanly from disk (and matches any local
+// `demo-index.json` if one is present).
 
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -20,16 +23,20 @@ const OUTPUT = join(ROOT, "demo-index.json");
 
 const CHROMESTATUS = /chromestatus\.com\/feature\/(\d+)/g;
 
-export async function buildIndex(root = ROOT) {
+export async function buildDemoIndex(root = ROOT) {
   // Duplicated features record which folder is canonical — the milestone the
   // feature actually shipped in. Prefer that one when a feature has several.
   let canonicalById = new Map();
   try {
-    const lineage = JSON.parse(await readFile(join(root, "feature-lineage.json"), "utf8"));
+    const raw = await readFile(join(root, "feature-lineage.json"), "utf8");
+    const lineage = JSON.parse(raw);
     for (const [id, record] of Object.entries(lineage.features ?? {})) {
       if (record?.canonical) canonicalById.set(Number(id), record.canonical);
     }
-  } catch {
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      throw new Error(`failed to read feature-lineage.json: ${err.message}`, { cause: err });
+    }
     canonicalById = new Map();
   }
 
@@ -98,15 +105,40 @@ export async function buildIndex(root = ROOT) {
   };
 }
 
+export { buildDemoIndex as buildIndex };
+
 if (import.meta.main) {
   const check = process.argv.slice(2).includes("--check");
-  const built = await buildIndex();
+  let built;
+  try {
+    built = await buildDemoIndex();
+  } catch (err) {
+    console.error(`FAIL — ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
   if (check) {
+    if (built.count <= 0) {
+      console.error("FAIL — demo index built 0 features from disk.");
+      process.exit(1);
+    }
+    let rawExisting;
+    try {
+      rawExisting = await readFile(OUTPUT, "utf8");
+    } catch (err) {
+      if (err?.code === "ENOENT") {
+        console.log(
+          `PASS — demo index builds cleanly from disk (${built.count} features covered)`,
+        );
+        process.exit(0);
+      }
+      console.error(`FAIL — could not read demo-index.json: ${err.message}`);
+      process.exit(1);
+    }
     let existing;
     try {
-      existing = JSON.parse(await readFile(OUTPUT, "utf8"));
-    } catch {
-      console.error("FAIL — demo-index.json is missing. Run `npm run demo-index`.");
+      existing = JSON.parse(rawExisting);
+    } catch (err) {
+      console.error(`FAIL — demo-index.json is malformed JSON: ${err.message}`);
       process.exit(1);
     }
     const before = JSON.stringify(existing.demos ?? {});

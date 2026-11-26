@@ -202,7 +202,8 @@ targeted compatibility fixes — never a destructive rewrite, never a new slug t
 
 **Run the responsive matrix before every push** with `npm run responsive-check` and record each
 touched demo's result in its per-feature `v<N>/<feature-slug>/_support.json` sidecar (`ok` /
-`unsupported`+evidence per class, updated via `npm run responsive-check -- <id> --merge`).
+`unsupported`+evidence per class, updated via `npm run responsive-check -- <id> --merge`). The
+ephemeral `reports/responsive/last-run.json` summary is gitignored and never needs to be committed.
 
 ## modern-web-guidance is mandatory for all frontend work
 
@@ -778,7 +779,10 @@ Log channels, per-milestone counts, features built (SHA + live URL), any `_serve
   support sidecars (`v<N>/<feature-slug>/_support.json`, updated via
   `npm run responsive-check -- <id> --merge`) and co-located feature handlers
   (`v<N>/<feature-slug>/_server.ts`) live inside `v<N>/`, so you may write them freely; the ONLY
-  outside-`v<N>/` generated output you may write is `reports/responsive/` (screenshots).
+  outside-`v<N>/` generated output you may write is `reports/responsive/` (screenshots and
+  gitignored `reports/responsive/last-run.json`). Do NOT run `npm run demo-index` or commit
+  `demo-index.json` or `reports/responsive/last-run.json` — `demo-index.json` is synthesized
+  automatically at Worker build time (and computed on demand locally) and both files are gitignored.
 - Run `npm run check-routes` (read-only) before every push; it must PASS. Never destructively
   replace a published route/slug/identity — add new slugs, patch existing demos in the smallest way.
 - Each run pushes to its own `claude/*` branch and opens one PR; a human merges it. Stack on the

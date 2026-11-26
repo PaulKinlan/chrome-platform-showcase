@@ -77,10 +77,10 @@ let base = (explicitBase ?? "http://localhost:3000").replace(/\/+$/, "");
 const sampleN = Number(flag("--sample") ?? 0);
 const nextN = Number(flag("--next") ?? flag("--untested") ?? 0);
 const milestone = flag("--milestone");
-const explicitIds = args.filter((a) => !a.startsWith("--"));
 // Per-page probe budget. A wedged renderer is the one thing a per-page target
 // cannot fix, so bound the call rather than inheriting CDP's 120s default.
 const perPageMs = Number(flag("--timeout-ms") ?? 8000);
+const explicitIds = args.filter((a) => !a.startsWith("--"));
 
 // Last-resort net: a page that stalls CDP must never take the run with it.
 // Deno 2.9 (measured, not assumed) supports the node-compat hook below but treats

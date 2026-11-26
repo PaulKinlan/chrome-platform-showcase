@@ -13,7 +13,7 @@
 //                      _worker/ instead of staged individually, while
 //                      remaining in fs-manifest.json)
 //   public/**          shared design system + client scripts
-//   demo-index.json    feature id -> demo folder
+//   demo-index.json    synthesized at staging time (feature id -> demo folder)
 //   gendn-links.json   reference-doc cross links
 // Never staged: `_server.ts` handlers (bundled into the Worker as code instead),
 // `_support.json` (build/audit responsive-support metadata), and `.DS_Store`.
@@ -35,6 +35,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildDemoIndex } from "./build-demo-index.mjs";
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const rootArg = process.argv.indexOf("--root");
@@ -46,7 +47,7 @@ const OUT = resolve(ROOT, outArg !== -1 ? process.argv[outArg + 1] : "dist/worke
 const MAX_FILES = 20_000;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
-const ROOT_FILES = ["demo-index.json", "gendn-links.json"];
+const ROOT_FILES = ["gendn-links.json"];
 const SKIP_NAMES = new Set(["_server.ts", "_support.json", ".DS_Store"]);
 // Must match BUNDLED_NAMES in worker/fs.ts.
 const BUNDLED_NAMES = ["_questions.json", "conformance.json", "page.json"];
@@ -71,14 +72,24 @@ for (const entry of readdirSync(ROOT, { withFileTypes: true })) {
 }
 for (const name of ROOT_FILES) sources.push(join(ROOT, name));
 
-const files = sources.map((full) => relative(ROOT, full).split("\\").join("/")).sort();
+const diskFiles = sources.map((full) => relative(ROOT, full).split("\\").join("/")).sort();
 
-// Partition into files staged individually vs files served exclusively from
-// _worker/bundle-<name>. Both remain in fs-manifest.json so platform().stat()
-// and platform().readDir() on the Worker see every file identically.
+// Synthesize demo-index.json directly into the staged assets so Cloudflare
+// Workers reads a prebuilt index with zero runtime scanning while git never
+// has to track or merge-resolve demo-index.json.
+const synthesizedFiles = new Map([
+  ["demo-index.json", JSON.stringify(await buildDemoIndex(ROOT))],
+]);
+
+const files = [...diskFiles, ...synthesizedFiles.keys()].sort();
+
+// Partition disk files into files staged individually vs files served
+// exclusively from _worker/bundle-<name>. Both remain in fs-manifest.json so
+// platform().stat() and platform().readDir() on the Worker see every file
+// identically.
 const individualFiles = [];
 const bundledFiles = [];
-for (const file of files) {
+for (const file of diskFiles) {
   if (BUNDLED_SET.has(basename(file))) bundledFiles.push(file);
   else individualFiles.push(file);
 }
@@ -100,17 +111,24 @@ for (const name of BUNDLED_NAMES) {
 
 const manifestJson = JSON.stringify({ generatedAt: new Date().toISOString(), files });
 const workerMetaCount = 1 + BUNDLED_NAMES.length;
-const stagedCount = individualFiles.length + workerMetaCount;
+const individualCount = individualFiles.length + synthesizedFiles.size;
+const stagedCount = individualCount + workerMetaCount;
 
 const problems = [];
 if (stagedCount > MAX_FILES) {
   problems.push(
-    `${stagedCount} staged files (${individualFiles.length} individual + ${workerMetaCount} _worker) exceeds the ${MAX_FILES}-file static-assets limit`,
+    `${stagedCount} staged files (${individualCount} individual + ${workerMetaCount} _worker) exceeds the ${MAX_FILES}-file static-assets limit`,
   );
 }
 for (const file of individualFiles) {
   const size = statSync(join(ROOT, file)).size;
   if (size > MAX_FILE_BYTES) problems.push(`${file} is ${size} bytes (limit ${MAX_FILE_BYTES})`);
+}
+for (const [relPath, body] of synthesizedFiles) {
+  const size = Buffer.byteLength(body, "utf8");
+  if (size > MAX_FILE_BYTES) {
+    problems.push(`${relPath} is ${size} bytes (limit ${MAX_FILE_BYTES})`);
+  }
 }
 for (const [bundlePath, json] of bundles) {
   const size = Buffer.byteLength(json, "utf8");
@@ -133,6 +151,11 @@ for (const file of individualFiles) {
   mkdirSync(dirname(dest), { recursive: true });
   copyFileSync(join(ROOT, file), dest);
 }
+for (const [relPath, body] of synthesizedFiles) {
+  const dest = join(OUT, relPath);
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, body);
+}
 
 mkdirSync(join(OUT, "_worker"), { recursive: true });
 for (const [bundlePath, json] of bundles) {
@@ -141,7 +164,7 @@ for (const [bundlePath, json] of bundles) {
 writeFileSync(join(OUT, "_worker", "fs-manifest.json"), manifestJson);
 
 console.log(
-  `build-worker-assets: staged ${stagedCount} files (${individualFiles.length} individual + ${workerMetaCount} _worker; ${bundledFiles.length} bundled, ${files.length} total in manifest) into ${
+  `build-worker-assets: staged ${stagedCount} files (${individualCount} individual + ${workerMetaCount} _worker; ${bundledFiles.length} bundled, ${files.length} total in manifest) into ${
     relative(ROOT, OUT)
   }/`,
 );
