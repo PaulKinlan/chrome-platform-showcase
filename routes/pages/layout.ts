@@ -3,8 +3,72 @@ import { escapeHTML } from "../html.ts";
 
 const CHROMIUM_DASH_BASE = "https://chromiumdash.appspot.com";
 
-export const BYLINE_FOOTER =
-  `<footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>`;
+export type ShellNavKey =
+  | "releases"
+  | "features"
+  | "categories"
+  | "experiments"
+  | "friction"
+  | "critiques"
+  | "conformance";
+
+const SHELL_NAV_ITEMS: readonly { key: ShellNavKey; label: string; href: string }[] = [
+  { key: "releases", label: "Releases", href: "/" },
+  { key: "features", label: "Features", href: "/features" },
+  { key: "categories", label: "Categories", href: "/categories/" },
+  { key: "experiments", label: "Experiments", href: "/experiments/" },
+  { key: "friction", label: "Friction", href: "/friction/" },
+  { key: "critiques", label: "Critiques", href: "/critiques/" },
+  { key: "conformance", label: "Conformance", href: "/conformance/" },
+];
+
+export function renderSiteHeader(active?: ShellNavKey): string {
+  const navLinks = SHELL_NAV_ITEMS.map((item) => {
+    const isCurrent = item.key === active;
+    return `<a class="site-nav-link${isCurrent ? " is-active" : ""}" href="${
+      escapeHTML(item.href)
+    }"${isCurrent ? ' aria-current="page"' : ""}>${escapeHTML(item.label)}</a>`;
+  }).join("");
+
+  return `<a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="site-header">
+    <div class="site-header-inner">
+      <a class="site-brand" href="/">
+        <span class="site-mark" aria-hidden="true">CP</span>
+        <span class="site-wordmark">Chrome Platform Showcase</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary">${navLinks}</nav>
+    </div>
+  </header>`;
+}
+
+export function renderSiteFooter(): string {
+  return `<footer class="byline site-footer">
+    <div class="site-footer-meta">
+      <strong class="site-footer-title">Chrome Platform Showcase</strong>
+      <span>Made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a> &middot; Data from <a href="https://chromestatus.com/" target="_blank" rel="noopener">ChromeStatus</a> &amp; <a href="https://chromiumdash.appspot.com/" target="_blank" rel="noopener">Chromium Dash</a></span>
+    </div>
+    <nav class="site-footer-links" aria-label="Footer">
+      <a href="/features">Catalogue</a>
+      <a href="/categories/">Categories</a>
+      <a href="/experiments/">Experiments</a>
+      <a href="/friction/">Friction</a>
+      <a href="/conformance/run-all/">Conformance</a>
+      <a href="https://github.com/PaulKinlan/chrome-platform-showcase" target="_blank" rel="noopener">GitHub &nearr;</a>
+    </nav>
+  </footer>`;
+}
+
+export const BYLINE_FOOTER = renderSiteFooter();
+
+export function channelTone(status: string): string {
+  const s = status.toLowerCase();
+  if (s === "dev" || s === "upcoming") return "dev";
+  if (s === "beta") return "beta";
+  if (s.includes("rolling")) return "rolling";
+  if (s.startsWith("stable")) return "stable";
+  return "archive";
+}
 
 export interface CommitInfo {
   sha: string;

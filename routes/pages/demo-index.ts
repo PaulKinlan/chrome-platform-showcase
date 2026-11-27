@@ -227,7 +227,10 @@ export function renderDemoCard(
   const titleHrefAttr = escapeHTML(titleHref);
   const chromeStatusHrefAttr = escapeHTML(chromeStatusUrl(f.id));
   const probeAttrs = renderProbeAttrs(probe);
-  return `<li class="demo-card"${probeAttrs}>
+  const searchAttr = escapeHTML(
+    `${f.name} ${f.summary ?? ""} ${categoryTag(group.category)}`.toLowerCase(),
+  );
+  return `<li class="demo-card"${probeAttrs} data-search="${searchAttr}">
         <h3><a href="${titleHrefAttr}"${demo ? "" : ' target="_blank" rel="noopener"'}>${
     escapeHTML(f.name)
   }</a></h3>

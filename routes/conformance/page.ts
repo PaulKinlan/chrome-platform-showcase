@@ -1,5 +1,6 @@
 import type { ConformanceSuite } from "../../lib/conformance.ts";
 import { escapeHTML } from "../html.ts";
+import { BYLINE_FOOTER, renderSiteHeader } from "../pages/layout.ts";
 
 export function renderConformancePage(s: ConformanceSuite): string {
   const label = s.conceptSlug
@@ -55,8 +56,9 @@ export function renderConformancePage(s: ConformanceSuite): string {
     .spec-link { font-size: 0.78rem; color: var(--accent-blue); }
   </style>
 </head>
-<body>
-<main>
+<body class="shell-page">
+${renderSiteHeader("conformance")}
+<main id="main-content">
   <p class="crumbs"><a href="${escapeHTML(back)}">&larr; back to ${escapeHTML(label)}</a></p>
 
   <header class="lede-block">
@@ -103,7 +105,7 @@ export function renderConformancePage(s: ConformanceSuite): string {
   </table>
   </div>
 
-  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+  ${BYLINE_FOOTER}
 </main>
 
 <script type="module">

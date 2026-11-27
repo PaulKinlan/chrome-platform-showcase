@@ -8,7 +8,7 @@ import {
   resolveDemo,
 } from "./demo-index.ts";
 import type { DemoProbe } from "./demo-index.ts";
-import { BYLINE_FOOTER, categoryTag } from "./layout.ts";
+import { BYLINE_FOOTER, categoryTag, renderSiteHeader } from "./layout.ts";
 
 // ----- /features (flat, filterable catalogue) -----
 
@@ -142,13 +142,12 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
   <title>all features — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    main { max-width: 1100px; }
     .filters {
       display: flex;
       gap: 0.75rem;
       flex-wrap: wrap;
-      margin: 1rem 0 1.5rem;
-      padding: 1rem;
+      margin: 0 0 1.25rem;
+      padding: 0.9rem 1rem;
       background: var(--bg-paper);
       border: 2px solid var(--border-black);
       box-shadow: var(--thin-shadow);
@@ -156,23 +155,27 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
     .filters input, .filters select {
       font-family: var(--font-mono);
       font-size: 0.85rem;
-      padding: 0.45rem 0.6rem;
-      background: var(--bg-paper);
+      min-height: 44px;
+      padding: 0.45rem 0.65rem;
+      background: var(--bg-ivory);
       color: var(--text-black);
       border: 2px solid var(--border-black);
       outline: none;
     }
-    .filters input:focus, .filters select:focus { box-shadow: var(--thin-shadow); }
-    .filters input[type=search] { flex: 1; min-width: 160px; }
-    .features-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-    .features-table th, .features-table td { padding: 0.6rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border-black); vertical-align: top; }
+    .filters input:focus, .filters select:focus { box-shadow: var(--thin-shadow); background: var(--bg-paper); }
+    .filters input[type=search] { flex: 1; min-width: 180px; }
+    .features-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); }
+    .features-table th, .features-table td { padding: 0.7rem 0.75rem; text-align: left; border-bottom: 1px solid var(--border-hairline); vertical-align: middle; }
+    .features-table tbody tr:hover { background: var(--surface-warm); }
     .features-table th {
       font-family: var(--font-mono);
-      font-size: 0.7rem;
+      font-size: 0.72rem;
+      font-weight: 700;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: var(--text-muted);
-      background: var(--bg-stone);
+      color: var(--text-black);
+      background: var(--surface-warm);
+      border-bottom: 2px solid var(--border-black);
     }
     /* Defer off-screen rendering for rows below the fold (modern-web-guidance: defer-rendering-heavy-content) */
     .features-table tbody tr:nth-child(n+25) {
@@ -180,24 +183,46 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
       contain-intrinsic-size: auto none auto 52px;
     }
     .features-table tr.hidden { display: none; }
-    .features-table td a { color: var(--text-black); text-decoration: underline; text-underline-offset: 3px; }
-    .features-table td a:hover { color: var(--accent-blue); }
-    .features-table td .tag, .features-table td .release-status { font-family: var(--font-mono); }
-    .features-table td .release-status { background: var(--text-black); color: var(--bg-ivory); padding: 0.15rem 0.5rem; font-size: 0.75rem; }
-    .tag-compat-yes {
-      background: color-mix(in srgb, var(--accent-emerald) 15%, var(--bg-paper));
-      color: var(--accent-emerald);
-      border-color: var(--accent-emerald);
+    .features-table td a { color: var(--text-black); text-decoration: underline; text-decoration-color: var(--border-subtle); text-underline-offset: 3px; }
+    .features-table td a:hover { color: var(--accent-blue); text-decoration-color: var(--accent-blue); }
+    .features-table td .tag, .features-table td .release-status { font-family: var(--font-mono); white-space: nowrap; }
+    .features-table td .tag {
+      display: inline-block;
+      font-size: 0.7rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 0.16rem 0.5rem;
+      border: 1px solid var(--border-black);
+      background: var(--bg-paper);
+      color: var(--text-black);
+      margin: 0.12rem 0.25rem 0.12rem 0;
     }
-    .tag-compat-no {
+    .features-table td .tag-live {
+      background: var(--text-black);
+      color: var(--bg-ivory);
+      border-color: var(--text-black);
+      text-decoration: none;
+    }
+    .features-table td .tag-live:hover {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+      color: var(--bg-paper);
+    }
+    .features-table td .release-status { background: var(--text-black); color: var(--bg-ivory); padding: 0.18rem 0.55rem; font-size: 0.74rem; }
+    .features-table td .tag-compat-yes {
+      background: color-mix(in srgb, var(--accent-emerald) 15%, var(--bg-paper));
+      color: var(--accent-emerald-dark);
+      border-color: var(--accent-emerald-dark);
+    }
+    .features-table td .tag-compat-no {
       background: color-mix(in srgb, var(--accent-amber) 16%, var(--bg-paper));
       color: var(--text-black);
       border-color: var(--accent-amber);
     }
-    .stats { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem; display: flex; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
+    .stats { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem; display: flex; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
 
     @media (max-width: 640px) {
-      main { padding-left: var(--space-4); padding-right: var(--space-4); }
+      .features-table { background: transparent; border: none; box-shadow: none; }
       .features-table thead { display: none; }
       .features-table, .features-table tbody, .features-table tr, .features-table td {
         display: block;
@@ -210,6 +235,7 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
         padding: var(--space-3);
         box-shadow: var(--thin-shadow);
       }
+      .features-table tbody tr:hover { background: var(--bg-paper); }
       .features-table td {
         border: none;
         padding: 0.25rem 0;
@@ -224,13 +250,12 @@ export async function renderFeaturesCatalogue(channels: Channels): Promise<strin
     }
   </style>
 </head>
-<body>
-<main>
-  <p class="crumbs"><a href="/">&larr; home</a></p>
-
+<body class="shell-page">
+${renderSiteHeader("features")}
+<main id="main-content">
   <header class="lede-block">
     <p class="eyebrow">catalogue</p>
-    <h1>all features</h1>
+    <h1>All features</h1>
     <p class="lede">Every feature with a demo available, deduplicated to its canonical demo across every milestone. Filter by name, milestone, status, or whether the feature works live in your current browser.</p>
   </header>
 

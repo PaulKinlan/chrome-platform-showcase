@@ -5,7 +5,7 @@ import {
   type ExperimentRecord,
 } from "../lib/experiment.ts";
 import { escapeHTML, htmlResponse } from "./html.ts";
-import { BYLINE_FOOTER } from "./pages/layout.ts";
+import { BYLINE_FOOTER, renderSiteHeader } from "./pages/layout.ts";
 
 const KIND_LABELS: Record<ExperimentKind, string> = {
   starter: "Starter",
@@ -183,22 +183,6 @@ export function renderExperimentsPage(records: ExperimentRecord[]): string {
   <title>experiments — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    main { max-width: 1040px; }
-    .skip-link {
-      position: absolute;
-      left: -9999px;
-      top: 0;
-      background: var(--text-black);
-      color: var(--bg-ivory);
-      padding: var(--space-3) var(--space-4);
-      font-family: var(--font-mono);
-      font-size: 0.85rem;
-      z-index: 100;
-    }
-    .skip-link:focus {
-      left: var(--space-3);
-      top: var(--space-3);
-    }
     .header-links {
       display: flex;
       flex-wrap: wrap;
@@ -328,9 +312,9 @@ export function renderExperimentsPage(records: ExperimentRecord[]): string {
       flex-direction: column;
       background: var(--bg-paper);
       border: 2px solid var(--border-black);
-      box-shadow: var(--flat-shadow);
+      box-shadow: var(--shadow-card);
       padding: var(--space-5);
-      overflow-wrap: break-word;
+      overflow-wrap: anywhere;
     }
     .experiment-card[hidden] { display: none; }
     .card-meta {
@@ -402,6 +386,7 @@ export function renderExperimentsPage(records: ExperimentRecord[]): string {
       font-size: 0.76rem;
       color: var(--text-muted);
       margin: 0 0 var(--space-3);
+      overflow-wrap: anywhere;
     }
     .card-blurb {
       font-size: 1rem;
@@ -542,9 +527,9 @@ export function renderExperimentsPage(records: ExperimentRecord[]): string {
     }
   </style>
 </head>
-<body>
-<a href="#content" class="skip-link">Skip to content</a>
-<main id="content" tabindex="-1">
+<body class="shell-page">
+${renderSiteHeader("experiments")}
+<main id="main-content" tabindex="-1">
   <nav class="breadcrumbs" aria-label="Breadcrumb">
     <ol>
       <li><a href="/">Home</a></li>
@@ -554,7 +539,7 @@ export function renderExperimentsPage(records: ExperimentRecord[]): string {
 
   <header class="lede-block">
     <p class="eyebrow">experiment index</p>
-    <h1>experiments</h1>
+    <h1>Experiments</h1>
     <p class="lede">Every structured showcase concept page indexed by its experiment kind, driving question, observed result, APIs, and cross-feature compositions.</p>
     <div class="header-links">
       <a href="/friction/">View friction ledger &rarr;</a>

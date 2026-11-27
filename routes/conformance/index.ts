@@ -1,4 +1,5 @@
 import { escapeHTML } from "../html.ts";
+import { BYLINE_FOOTER, renderSiteHeader } from "../pages/layout.ts";
 import { collectConformanceSuites } from "./loader.ts";
 
 export async function renderConformanceIndex(): Promise<string> {
@@ -34,26 +35,31 @@ export async function renderConformanceIndex(): Promise<string> {
   <title>conformance — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    main { max-width: 1000px; }
-    table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.85rem; }
-    th, td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border-black); text-align: left; vertical-align: top; }
-    th { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); background: var(--bg-stone); }
+    .table-scroll { width: 100%; min-width: 0; max-width: 100%; overflow-x: auto; contain: inline-size; }
+    table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-paper); border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); }
+    th, td { padding: 0.65rem 0.75rem; border-bottom: 1px solid var(--border-hairline); text-align: left; vertical-align: top; }
+    tbody tr:hover { background: var(--surface-warm); }
+    th { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-black); background: var(--surface-warm); border-bottom: 2px solid var(--border-black); }
     td.num { text-align: right; font-variant-numeric: tabular-nums; }
-    .kind { font-size: 0.72rem; color: var(--text-muted); padding: 0.05rem 0.35rem; border: 1px solid var(--border-black); background: var(--bg-stone); margin-right: 0.2rem; }
+    .kind { font-size: 0.72rem; color: var(--text-charcoal); padding: 0.08rem 0.38rem; border: 1px solid var(--border-black); background: var(--bg-stone); margin-right: 0.2rem; display: inline-block; margin-bottom: 0.2rem; }
   </style>
 </head>
-<body>
-<main>
-  <p class="crumbs"><a href="/">&larr; home</a></p>
+<body class="shell-page">
+${renderSiteHeader("conformance")}
+<main id="main-content">
   <header class="lede-block">
     <p class="eyebrow">conformance</p>
-    <h1>spec-vs-implementation probes</h1>
+    <h1>Spec-vs-implementation probes</h1>
     <p class="lede">Each suite is a list of assertions drawn from the spec text. Click into one and your browser runs the assertions live — Chrome stable, Chrome canary, Firefox, and Safari each give their own verdict. This is the live "does it actually work the way the spec says" matrix.</p>
     <p class="updated-line">${all.length} suite${
     all.length === 1 ? "" : "s"
   } · ${totalAssertions} total assertion${totalAssertions === 1 ? "" : "s"}</p>
+    <div class="home-actions">
+      <a class="action-btn action-btn-primary" href="/conformance/run-all/">Run all suites in browser &rarr;</a>
+    </div>
   </header>
 
+  <div class="table-scroll" tabindex="0" role="region" aria-label="Conformance suites">
   <table>
     <thead><tr><th>page</th><th>assertions</th><th>kinds</th></tr></thead>
     <tbody>${
@@ -61,8 +67,9 @@ export async function renderConformanceIndex(): Promise<string> {
     `<tr><td colspan="3">No conformance suites yet. Generate them with the conformance-author subagent.</td></tr>`
   }</tbody>
   </table>
+  </div>
 
-  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+  ${BYLINE_FOOTER}
 </main>
 </body>
 </html>`;

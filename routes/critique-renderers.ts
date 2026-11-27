@@ -2,6 +2,7 @@ import { platform } from "../lib/platform.ts";
 import type { CritiqueReport } from "../lib/critique.ts";
 import { scoreVerdicts } from "../lib/critique.ts";
 import { escapeHTML } from "./html.ts";
+import { BYLINE_FOOTER, renderSiteHeader } from "./pages/layout.ts";
 
 export async function readCritique(path: string): Promise<CritiqueReport | null> {
   try {
@@ -315,12 +316,12 @@ export async function renderCritiquesIndex(opts: CritiquesIndexOptions = {}): Pr
     .qchip-moderate { background: color-mix(in srgb, var(--accent-amber) 14%, var(--bg-paper)); color: var(--accent-amber); border-color: var(--accent-amber); }
   </style>
 </head>
-<body>
-<main>
-  <p class="crumbs"><a href="/">&larr; home</a></p>
+<body class="shell-page">
+${renderSiteHeader("critiques")}
+<main id="main-content">
   <header class="lede-block">
     <p class="eyebrow">${eyebrow}</p>
-    <h1>open questions${titleSuffix}</h1>
+    <h1>Open questions${titleSuffix}</h1>
     <p class="lede">A second pair of eyes on every concept page. A reviewer agent reads each page cold against the rubric (does the demo demonstrate what the spec promises? edge cases? interactive surface? blurb match? references? design system?) and writes the verdict plus follow-up work items here. The list below is sorted weakest first so the next routine fire knows where to focus.</p>
     <p class="updated-line">${totalItems} pages reviewed · ${totalConcepts} concepts · ${totalQuestions} open questions · ${rangeSummary}</p>
   </header>
@@ -345,7 +346,7 @@ export async function renderCritiquesIndex(opts: CritiquesIndexOptions = {}): Pr
 
   ${paginationNav}
 
-  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+  ${BYLINE_FOOTER}
 </main>
 </body>
 </html>`;
@@ -426,8 +427,9 @@ export function renderCritiqueDetail(c: CritiqueReport): string {
     .qchip-moderate { background: color-mix(in srgb, var(--accent-amber) 14%, var(--bg-paper)); color: var(--accent-amber); border-color: var(--accent-amber); }
   </style>
 </head>
-<body>
-<main>
+<body class="shell-page">
+${renderSiteHeader("critiques")}
+<main id="main-content">
   <p class="crumbs"><a href="/critiques/">&larr; all critiques</a></p>
   <header class="lede-block">
     <p class="eyebrow">critique · ${escapeHTML(c.release)}</p>
@@ -458,7 +460,7 @@ export function renderCritiqueDetail(c: CritiqueReport): string {
     c.conceptSlug ? escapeHTML(c.conceptSlug) + "/" : ""
   }">view the page being critiqued &rarr;</a></p>
 
-  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+  ${BYLINE_FOOTER}
 </main>
 </body>
 </html>`;

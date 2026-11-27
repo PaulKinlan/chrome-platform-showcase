@@ -6,7 +6,7 @@ import {
   isSafeHttpUrl,
 } from "../lib/experiment.ts";
 import { escapeHTML, htmlResponse } from "./html.ts";
-import { BYLINE_FOOTER } from "./pages/layout.ts";
+import { BYLINE_FOOTER, renderSiteHeader } from "./pages/layout.ts";
 
 const KIND_LABELS: Record<FrictionKind, string> = {
   "browser-bug": "Browser bug",
@@ -155,22 +155,6 @@ export function renderFrictionPage(entries: FrictionRecord[]): string {
   <title>friction ledger — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    main { max-width: 980px; }
-    .skip-link {
-      position: absolute;
-      left: -9999px;
-      top: 0;
-      background: var(--text-black);
-      color: var(--bg-ivory);
-      padding: var(--space-3) var(--space-4);
-      font-family: var(--font-mono);
-      font-size: 0.85rem;
-      z-index: 100;
-    }
-    .skip-link:focus {
-      left: var(--space-3);
-      top: var(--space-3);
-    }
     .header-links {
       display: flex;
       flex-wrap: wrap;
@@ -287,9 +271,9 @@ export function renderFrictionPage(entries: FrictionRecord[]): string {
       min-width: 0;
       background: var(--bg-paper);
       border: 2px solid var(--border-black);
-      box-shadow: var(--flat-shadow);
+      box-shadow: var(--shadow-card);
       padding: var(--space-5);
-      overflow-wrap: break-word;
+      overflow-wrap: anywhere;
     }
     .friction-card[hidden] { display: none; }
     .card-meta {
@@ -343,12 +327,14 @@ export function renderFrictionPage(entries: FrictionRecord[]): string {
       border: 1px solid var(--border-black);
       background: var(--bg-stone);
       color: var(--text-charcoal);
+      overflow-wrap: anywhere;
     }
     .friction-card h2 {
       font-size: 1.35rem;
       margin: 0 0 var(--space-2);
       padding-bottom: 0;
       border-bottom: none;
+      overflow-wrap: anywhere;
     }
     .source-line {
       font-family: var(--font-mono);
@@ -358,6 +344,7 @@ export function renderFrictionPage(entries: FrictionRecord[]): string {
     }
     .source-path {
       color: var(--text-muted);
+      overflow-wrap: anywhere;
     }
     .friction-details {
       margin: 0 0 var(--space-3);
@@ -468,9 +455,9 @@ export function renderFrictionPage(entries: FrictionRecord[]): string {
     }
   </style>
 </head>
-<body>
-<a href="#content" class="skip-link">Skip to content</a>
-<main id="content" tabindex="-1">
+<body class="shell-page">
+${renderSiteHeader("friction")}
+<main id="main-content" tabindex="-1">
   <nav class="breadcrumbs" aria-label="Breadcrumb">
     <ol>
       <li><a href="/">Home</a></li>
@@ -480,7 +467,7 @@ export function renderFrictionPage(entries: FrictionRecord[]): string {
 
   <header class="lede-block">
     <p class="eyebrow">friction ledger</p>
-    <h1>friction</h1>
+    <h1>Friction</h1>
     <p class="lede">Browser bugs, spec mismatches, platform limits, interop gaps, and ergonomics rough edges surfaced while building showcase experiments. Every row links back to its live repro.</p>
     <div class="header-links">
       <a href="/experiments/">Browse experiments &rarr;</a>
