@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ReadableStream + Opus encoder pipeline — OfflineAudioContext incremental rendering — Chrome 158 — chrome platform showcase</title>
+  <link rel="stylesheet" href="/public/styles.css">
+  <style>
+    .flag-banner { background: var(--bg-stone); color: var(--text-charcoal); border: 2px solid var(--border-black); border-left: 6px solid var(--accent-blue); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; font-size: 0.9rem; overflow-wrap: anywhere; }
+    .flag-banner[data-tier="supported"] { border-left-color: var(--accent-emerald); }
+    .flag-banner[data-tier="missing"] { border-left-color: var(--accent-rose); }
+    .stage { border: 2px solid var(--border-black); box-shadow: var(--thin-shadow); background: var(--bg-paper); padding: var(--space-4); margin: var(--space-4) 0; min-width: 0; display: grid; gap: var(--space-3); }
+    .stage > * { min-width: 0; }
+    .controls { display: grid; gap: var(--space-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); align-items: end; }
+    .field { display: grid; gap: var(--space-1); }
+    .field label { font-weight: 700; font-size: 0.9rem; }
+    .field input, .field select { border: 2px solid var(--border-black); background: var(--bg-ivory); color: var(--text-black); padding: var(--space-2); font: inherit; min-height: 44px; width: 100%; box-sizing: border-box; }
+    .buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    button { min-height: 44px; background: var(--text-black); color: var(--bg-ivory); border: 2px solid var(--border-black); padding: var(--space-2) var(--space-3); font: inherit; font-weight: 700; cursor: pointer; }
+    button.secondary { background: var(--bg-paper); color: var(--text-black); }
+    button[disabled] { opacity: 0.55; cursor: not-allowed; }
+    dl.meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: var(--space-2); margin: 0; }
+    dl.meters div { border: 2px solid var(--border-black); background: var(--bg-stone); padding: var(--space-2) var(--space-3); }
+    dl.meters dt { font-size: 0.75rem; color: var(--text-charcoal); text-transform: uppercase; letter-spacing: 0.04em; }
+    dl.meters dd { margin: 0; font-family: var(--font-mono); font-weight: 700; font-size: 1.05rem; color: var(--text-black); overflow-wrap: anywhere; }
+    output { display: block; border: 2px solid var(--border-black); background: var(--bg-stone); color: var(--text-charcoal); padding: var(--space-3); font-size: 0.9rem; overflow-wrap: anywhere; }
+    .table-wrap { overflow-x: auto; max-width: 100%; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; background: var(--bg-paper); }
+    caption { text-align: left; font-weight: 700; padding-bottom: var(--space-2); }
+    th, td { border: 1px solid var(--border-black); padding: 0.4rem 0.55rem; text-align: left; overflow-wrap: anywhere; }
+    th { background: var(--bg-stone); color: var(--text-black); }
+    .ok { color: var(--accent-emerald-dark); font-weight: 700; }
+    .err { color: var(--accent-rose); font-weight: 700; }
+    details.live-checks { margin: var(--space-5) 0; border: 2px solid var(--border-black); background: var(--bg-paper); box-shadow: var(--thin-shadow); min-width: 0; }
+    details.live-checks > summary { display: flex; align-items: center; min-height: 44px; padding: var(--space-2) var(--space-4); font-family: var(--font-mono); font-size: 0.85rem; background: var(--bg-stone); color: var(--text-black); cursor: pointer; }
+    details.live-checks .table-wrap { padding: var(--space-3); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="crumbs"><a href="../">&larr; OfflineAudioContext incremental rendering</a></p>
+  <header class="lede-block">
+    <p class="eyebrow">v158 · track b · cross-api composition</p>
+    <h1>ReadableStream + Opus encoder pipeline</h1>
+    <p class="lede">The explainer floats a future <code>startRenderingStream()</code>. You can build it today: wrap an indefinite-length context in a <code>ReadableStream</code> whose <code>pull()</code> calls <code>startRendering()</code> and whose <code>cancel()</code> calls <code>close()</code>, then pipe the chunks into a WebCodecs <code>AudioEncoder</code>. The question: does the stream's backpressure really stop the audio graph from rendering ahead of a slow consumer, and does cancelling the stream really stop the context?</p>
+  </header>
+
+  <div class="flag-banner" id="support-banner" role="status" aria-live="polite">Probing&hellip;</div>
+
+  <section class="stage" aria-labelledby="demo-heading">
+    <h2 id="demo-heading">Live pipeline</h2>
+    <div class="controls">
+      <div class="field">
+        <label for="hwm">highWaterMark (chunks the stream may buffer)</label>
+        <select id="hwm">
+          <option value="0">0</option>
+          <option value="1" selected>1</option>
+          <option value="4">4</option>
+          <option value="16">16</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="delay">consumer delay per chunk (ms)</label>
+        <select id="delay">
+          <option value="0">0 (as fast as possible)</option>
+          <option value="20" selected>20 (slow consumer)</option>
+          <option value="80">80 (real time for 80 ms chunks)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="seconds">stop after (seconds of audio)</label>
+        <select id="seconds">
+          <option value="2">2</option>
+          <option value="5" selected>5</option>
+          <option value="30">30</option>
+        </select>
+      </div>
+    </div>
+    <div class="buttons">
+      <button type="button" id="run-btn">Start the pipeline</button>
+      <button type="button" id="cancel-btn" class="secondary" disabled>Cancel the stream now</button>
+    </div>
+    <dl class="meters" aria-label="Pipeline meters">
+      <div><dt>chunks rendered (pull)</dt><dd id="m-rendered">0</dd></div>
+      <div><dt>chunks consumed</dt><dd id="m-consumed">0</dd></div>
+      <div><dt>max rendered ahead</dt><dd id="m-ahead">0</dd></div>
+      <div><dt>audio seconds</dt><dd id="m-seconds">0.00</dd></div>
+      <div><dt>encoded bytes</dt><dd id="m-bytes">0</dd></div>
+      <div><dt>context state</dt><dd id="m-state">none</dd></div>
+    </dl>
+    <output id="run-out" aria-live="polite">Pick a buffer size and consumer speed, then start. The source is an endless two-oscillator drone, so the context has no length and only stops when the stream is cancelled.</output>
+  </section>
+
+  <details class="show-code" data-code-label="Stream source over startRendering() + AudioEncoder sink (live page source)">
+    <summary>Show the code (live page source)</summary>
+  </details>
+
+  <section aria-labelledby="how-heading">
+    <h2 id="how-heading">How it works</h2>
+    <ol>
+      <li><strong>Source.</strong> <code>new ReadableStream({ pull, cancel }, new CountQueuingStrategy({ highWaterMark }))</code>. The stream calls <code>pull()</code> only while its queue holds fewer than <code>highWaterMark</code> chunks, and each <code>pull()</code> renders one 3,840-frame chunk (80&nbsp;ms at 48&nbsp;kHz, 30 render quanta, so Chrome does not round it).</li>
+      <li><strong>Sink.</strong> A <code>WritableStream</code> wraps each <code>AudioBuffer</code> as <code>f32-planar</code> <code>AudioData</code> and hands it to an <code>AudioEncoder</code> configured for Opus. Encoded packets are counted, not kept.</li>
+      <li><strong>Stop.</strong> When the target length is reached, or you press cancel, the page aborts the pipe. The abort cancels the readable side, which runs <code>cancel()</code>, which awaits <code>ctx.close()</code>. Any render still in flight rejects with <code>AbortError</code>.</li>
+    </ol>
+    <p>"Max rendered ahead" is rendered chunks minus chunks the sink has finished with, measured each time a chunk is rendered. If backpressure works it never exceeds <code>highWaterMark</code> (or 1 when <code>highWaterMark</code> is 0, because a waiting reader still asks for one chunk), however slow the consumer is.</p>
+  </section>
+
+  <section aria-labelledby="checks-heading">
+    <h2 id="checks-heading">Live checks</h2>
+    <details class="live-checks">
+      <summary>Inspect the composition probes</summary>
+      <div class="table-wrap" tabindex="0" role="region" aria-labelledby="checks-caption">
+        <table>
+          <caption id="checks-caption">Probes for each API in the pipeline</caption>
+          <thead><tr><th scope="col">Check</th><th scope="col">Result</th><th scope="col">Observed</th></tr></thead>
+          <tbody id="checks-body"><tr><td colspan="3">Running probes&hellip;</td></tr></tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+
+  <section aria-labelledby="findings-heading">
+    <h2 id="findings-heading">Findings</h2>
+    <p id="findings-text">Chrome for Testing 158.0.8127.36, headless, no flags, 2026-11-27. Backpressure held exactly: with a 20&nbsp;ms consumer, 5&nbsp;s of audio (63 chunks) never rendered more than 1 chunk ahead at highWaterMark 1, and never more than 16 ahead at highWaterMark 16 (78 rendered, 63 consumed when the target was reached; the 15 surplus chunks were discarded by the cancel). highWaterMark 0 behaved like 1, because the pipe's waiting read still triggers one <code>pull()</code>. Cancelling, by reaching the target or by the button, left the context <code>"closed"</code>, and a render still pending at <code>close()</code> rejected with <code>AbortError</code> ("Audio context is going away"). Opus output was 11.9 to 12.4&nbsp;KB per audio second at the 96&nbsp;kbit/s target. With no consumer delay the graph rendered 2&nbsp;s of stereo audio in about 90&nbsp;ms, roughly 22 times faster than real time.</p>
+    <ul>
+      <li><a href="../">OfflineAudioContext incremental rendering</a>: feature overview</li>
+      <li><a href="../wav-export-pipeline/">WAV export pipeline</a> (the same idea, without streams)</li>
+      <li><a href="../start/">Minimal chunked render starter</a></li>
+      <li><a href="https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/OfflineAudioContext/explainer.md" target="_blank" rel="noopener">Explainer (startRenderingStream alternative)</a></li>
+      <li><a href="https://streams.spec.whatwg.org/#rs-model" target="_blank" rel="noopener">Streams Standard: backpressure model</a></li>
+    </ul>
+  </section>
+  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+</main>
+<script>
+(() => {
+  'use strict';
+  const RATE = 48000, CHANNELS = 2, CHUNK = 3840;
+  const hasOAC = typeof OfflineAudioContext === 'function';
+  const hasIncremental = hasOAC && typeof OfflineAudioContext.prototype.close === 'function';
+  const hasEncoder = typeof AudioEncoder === 'function' && typeof AudioData === 'function';
+  const $ = (id) => document.getElementById(id);
+  const banner = $('support-banner');
+  const runBtn = $('run-btn');
+  const cancelBtn = $('cancel-btn');
+  const out = $('run-out');
+
+  let encoderOk = false;
+  const encoderConfig = { codec: 'opus', sampleRate: RATE, numberOfChannels: CHANNELS, bitrate: 96000 };
+
+  async function initSupport() {
+    if (hasEncoder) {
+      try { encoderOk = (await AudioEncoder.isConfigSupported(encoderConfig)).supported === true; } catch { encoderOk = false; }
+    }
+    banner.dataset.tier = hasIncremental ? 'supported' : 'missing';
+    if (!hasIncremental) {
+      banner.innerHTML = '<strong>Not available here:</strong> <code>OfflineAudioContext.prototype.close</code> is missing, so there is no indefinite-length context to stream from and the pipeline cannot run. Chrome 158 enables incremental rendering by default; on an older build that carries the code try <code>--enable-blink-features=OfflineAudioContextIncrementalRendering</code>.';
+      runBtn.disabled = true;
+    } else {
+      banner.innerHTML = '<strong>Supported:</strong> incremental rendering is on. ' + (encoderOk
+        ? 'WebCodecs <code>AudioEncoder</code> accepts Opus at 48&nbsp;kHz stereo, so chunks are really encoded.'
+        : 'WebCodecs Opus encoding is <strong>not</strong> available here, so the sink counts PCM bytes instead and labels them as PCM.');
+    }
+    globalThis.showcaseTelemetry?.support('OfflineAudioContext.prototype.close', hasIncremental ? 'supported' : 'unsupported', { encoderOk });
+  }
+
+  // --- demo ---
+  function renderSource(highWaterMark, stats) {
+    let ctx;
+    return new ReadableStream({
+      start() {
+        ctx = new OfflineAudioContext({ numberOfChannels: CHANNELS, sampleRate: RATE, length: null });
+        const drone = new OscillatorNode(ctx, { type: 'sawtooth', frequency: 110 });
+        const wobble = new OscillatorNode(ctx, { frequency: 0.5 });
+        const depth = new GainNode(ctx, { gain: 400 });
+        const filter = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 700, Q: 6 });
+        const level = new GainNode(ctx, { gain: 0.3 });
+        wobble.connect(depth).connect(filter.frequency);
+        drone.connect(filter).connect(level).connect(ctx.destination);
+        drone.start(); wobble.start();
+        stats.ctx = ctx;
+      },
+      async pull(controller) {
+        const chunk = await ctx.startRendering(CHUNK); // renders only when the queue has room
+        stats.rendered += 1;
+        stats.maxAhead = Math.max(stats.maxAhead, stats.rendered - stats.consumed);
+        controller.enqueue(chunk);
+      },
+      async cancel() {
+        await ctx.close(); // cancelling the stream stops the audio graph
+      },
+    }, new CountQueuingStrategy({ highWaterMark }));
+  }
+
+  function encoderSink(stats, delayMs, useOpus) {
+    let encoder, timestamp = 0;
+    return new WritableStream({
+      start() {
+        if (!useOpus) return;
+        encoder = new AudioEncoder({
+          output: (packet) => { stats.bytes += packet.byteLength; },
+          error: (e) => { stats.encoderError = e.message; },
+        });
+        encoder.configure(encoderConfig);
+      },
+      async write(buffer) {
+        const planar = new Float32Array(buffer.length * CHANNELS);
+        for (let c = 0; c < CHANNELS; c++) planar.set(buffer.getChannelData(c), c * buffer.length);
+        if (useOpus) {
+          const data = new AudioData({ format: 'f32-planar', sampleRate: RATE, numberOfChannels: CHANNELS, numberOfFrames: buffer.length, timestamp, data: planar });
+          encoder.encode(data);
+          data.close();
+        } else {
+          stats.bytes += buffer.length * CHANNELS * 2; // what 16-bit PCM would take
+        }
+        timestamp += Math.round(buffer.length / RATE * 1e6);
+        stats.frames += buffer.length;
+        stats.consumed += 1;
+        stats.onConsumed?.();
+        if (delayMs) await new Promise((r) => setTimeout(r, delayMs)); // a slow consumer
+      },
+      async close() { if (encoder) await encoder.flush(); },
+      async abort() { if (encoder && encoder.state === 'configured') await encoder.flush().catch(() => {}); },
+    });
+  }
+  // --- /demo ---
+
+  let current = null;
+  function paint(stats) {
+    $('m-rendered').textContent = stats.rendered;
+    $('m-consumed').textContent = stats.consumed;
+    $('m-ahead').textContent = stats.maxAhead;
+    $('m-seconds').textContent = (stats.frames / RATE).toFixed(2);
+    $('m-bytes').textContent = stats.bytes.toLocaleString('en-US');
+    $('m-state').textContent = stats.ctx ? stats.ctx.state : 'none';
+  }
+
+  runBtn.addEventListener('click', async () => {
+    const hwm = Number($('hwm').value), delay = Number($('delay').value), seconds = Number($('seconds').value);
+    const stats = { rendered: 0, consumed: 0, maxAhead: 0, frames: 0, bytes: 0, ctx: null, encoderError: null };
+    const controller = new AbortController();
+    current = { controller, stats };
+    runBtn.disabled = true; cancelBtn.disabled = false;
+    out.textContent = 'Running: highWaterMark ' + hwm + ', consumer delay ' + delay + ' ms, target ' + seconds + ' s…';
+    stats.onConsumed = () => {
+      if (stats.frames >= seconds * RATE && !controller.signal.aborted) controller.abort(new DOMException('target length reached', 'AbortError'));
+    };
+    const timer = setInterval(() => paint(stats), 100);
+    const t0 = performance.now();
+    let endReason = 'finished';
+    try {
+      await renderSource(hwm, stats).pipeTo(encoderSink(stats, delay, encoderOk), { signal: controller.signal });
+    } catch (error) {
+      endReason = error && error.message ? error.message : String(error);
+    }
+    clearInterval(timer);
+    await new Promise((r) => setTimeout(r, 60));
+    paint(stats);
+    const ms = Math.round(performance.now() - t0);
+    const audioS = stats.frames / RATE;
+    out.textContent = 'Stopped (' + endReason + ') after ' + ms + ' ms: ' + audioS.toFixed(2) + ' s of audio, ' + stats.rendered + ' chunks rendered, ' + stats.consumed + ' consumed, rendered at most ' + stats.maxAhead + ' ahead of the consumer with highWaterMark ' + hwm + '. Context state: "' + (stats.ctx ? stats.ctx.state : 'none') + '". ' +
+      (encoderOk ? 'Opus: ' + stats.bytes.toLocaleString('en-US') + ' bytes (' + (audioS ? Math.round(stats.bytes / audioS / 1024 * 10) / 10 : 0) + ' KB per audio second).' : 'PCM-equivalent bytes: ' + stats.bytes.toLocaleString('en-US') + ' (Opus unavailable).') +
+      (stats.encoderError ? ' Encoder error: ' + stats.encoderError : '');
+    globalThis.showcaseTelemetry?.assert('oac-stream-backpressure', stats.maxAhead <= Math.max(1, hwm), { hwm, delay, maxAhead: stats.maxAhead, rendered: stats.rendered, consumed: stats.consumed });
+    globalThis.showcaseTelemetry?.assert('oac-stream-cancel-closes', !stats.ctx || stats.ctx.state === 'closed', { state: stats.ctx && stats.ctx.state });
+    runBtn.disabled = false; cancelBtn.disabled = true; current = null;
+  });
+
+  cancelBtn.addEventListener('click', () => {
+    if (current) current.controller.abort(new DOMException('cancelled by the user', 'AbortError'));
+  });
+
+  (async () => {
+    await initSupport();
+    const checks = [
+      { name: 'typeof OfflineAudioContext.prototype.close', ok: hasIncremental, detail: hasOAC ? typeof OfflineAudioContext.prototype.close : 'no OfflineAudioContext' },
+      { name: "AudioEncoder.isConfigSupported({ codec: 'opus', 48 kHz, 2 ch })", ok: encoderOk, detail: hasEncoder ? String(encoderOk) : 'no AudioEncoder' },
+    ];
+    if (hasIncremental) {
+      try {
+        const c = new OfflineAudioContext({ numberOfChannels: 1, sampleRate: 8000, length: null });
+        const pending = c.startRendering(8000 * 60);
+        const closing = c.close();
+        let detail;
+        try { await pending; detail = 'pending render resolved'; } catch (e) { detail = 'pending render rejected ' + e.name; }
+        await closing;
+        checks.push({ name: 'close() during a pending startRendering()', ok: c.state === 'closed', detail: detail + ', state ' + c.state });
+      } catch (e) { checks.push({ name: 'close() during a pending startRendering()', ok: false, detail: e.name }); }
+    }
+    $('checks-body').replaceChildren(...checks.map((c) => {
+      const tr = document.createElement('tr');
+      const a = document.createElement('td'); const code = document.createElement('code'); code.textContent = c.name; a.append(code);
+      const b = document.createElement('td'); b.className = c.ok ? 'ok' : 'err'; b.textContent = c.ok ? 'PASS' : 'FAIL';
+      const d = document.createElement('td'); d.textContent = c.detail;
+      tr.append(a, b, d);
+      return tr;
+    }));
+  })();
+})();
+</script>
+</body>
+</html>
