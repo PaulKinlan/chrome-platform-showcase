@@ -172,7 +172,9 @@ export async function renderIndex(channels: Channels): Promise<string> {
     `<li class="hub-card">
       <a class="hub-card-link" href="${escapeHTML(lens.href)}">
         <span class="hub-card-kicker">${escapeHTML(lens.kicker)}</span>
-        <span class="hub-card-title">${escapeHTML(lens.title)} <span aria-hidden="true">&rarr;</span></span>
+        <span class="hub-card-title">${
+      escapeHTML(lens.title)
+    } <span aria-hidden="true">&rarr;</span></span>
         <p class="hub-card-blurb">${escapeHTML(lens.blurb)}</p>
       </a>
     </li>`

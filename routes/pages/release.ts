@@ -220,9 +220,9 @@ export async function renderReleasePage(
     <header class="lede-block">
       <div class="release-meta-strip">
         <span class="channel-pill channel-pill-${escapeHTML(tone)}">${escapeHTML(status)}</span>
-        <span>${features.total} feature${features.total === 1 ? "" : "s"} &middot; ${builtCount} demo${
-    builtCount === 1 ? "" : "s"
-  } live</span>
+        <span>${features.total} feature${
+    features.total === 1 ? "" : "s"
+  } &middot; ${builtCount} demo${builtCount === 1 ? "" : "s"} live</span>
         ${dateRange ? `<span>Stable window: ${escapeHTML(dateRange)}</span>` : ""}
       </div>
       <h1>Chrome ${milestone} platform demos</h1>
