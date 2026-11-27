@@ -1,6 +1,7 @@
 import { platform } from "../../lib/platform.ts";
 import { chromeStatusUrl, slugify } from "../../lib/chromestatus.ts";
 import type { Channels, FeatureSummary } from "../../lib/chromestatus.ts";
+import { renderMarkdown } from "../../lib/markdown.ts";
 import { escapeHTML } from "../html.ts";
 import { categoryTag } from "./layout.ts";
 
@@ -221,7 +222,7 @@ export function renderDemoCard(
   probe: DemoProbe | undefined,
   group: { category: string },
 ): string {
-  const summary = (f.summary ?? "").slice(0, 220);
+  const summaryHtml = renderMarkdown(f.summary ?? "", { maxChars: 280 });
   const titleHref = demo ? demo.href : chromeStatusUrl(f.id);
   const titleHrefAttr = escapeHTML(titleHref);
   const chromeStatusHrefAttr = escapeHTML(chromeStatusUrl(f.id));
@@ -230,7 +231,7 @@ export function renderDemoCard(
         <h3><a href="${titleHrefAttr}"${demo ? "" : ' target="_blank" rel="noopener"'}>${
     escapeHTML(f.name)
   }</a></h3>
-        <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
+        ${summaryHtml ? `<div class="demo-summary">${summaryHtml}</div>` : ""}
         <div class="demo-tags">
           <span class="tag">${escapeHTML(categoryTag(group.category))}</span>
           ${probe ? `<span class="tag tag-compat" data-compat-badge hidden>checking…</span>` : ""}

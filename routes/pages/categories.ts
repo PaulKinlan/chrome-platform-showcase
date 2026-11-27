@@ -1,5 +1,6 @@
 import { getMilestoneFeatures, slugify } from "../../lib/chromestatus.ts";
 import type { Channels } from "../../lib/chromestatus.ts";
+import { renderMarkdown } from "../../lib/markdown.ts";
 import { escapeHTML } from "../html.ts";
 import { knownReleaseMilestones, resolveDemo } from "./demo-index.ts";
 import type { ResolvedDemo } from "./demo-index.ts";
@@ -765,12 +766,12 @@ export async function renderCategoriesIndex(channels: Channels): Promise<string>
 export function renderCategoryCard(
   r: { name: string; summary?: string | null; id: number | string; demo: ResolvedDemo | null },
 ): string {
-  const summary = (r.summary ?? "").slice(0, 220);
+  const summaryHtml = renderMarkdown(r.summary ?? "", { maxChars: 280 });
   return `<li class="demo-card">
         <h3>${
     r.demo ? `<a href="${escapeHTML(r.demo.href)}">${escapeHTML(r.name)}</a>` : escapeHTML(r.name)
   }</h3>
-        <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
+        ${summaryHtml ? `<div class="demo-summary">${summaryHtml}</div>` : ""}
         <div class="demo-tags">
           <a class="tag" href="${
     escapeHTML(`https://chromestatus.com/feature/${r.id}`)
