@@ -1,5 +1,6 @@
 import type { ConformanceAssertion, ConformanceSuite } from "../../lib/conformance.ts";
 import { escapeHTML } from "../html.ts";
+import { BYLINE_FOOTER, renderSiteHeader } from "../pages/layout.ts";
 
 const ROUTE_CONTEXT_PATTERN =
   /\bfetch\s*\(\s*(?:['"`]\.\.?\/|location\.href\b)|\bnew\s+URL\s*\(\s*['"`]\.\.?\/|\bdocument\.(?:featurePolicy|permissionsPolicy)\b|\bnew\s+(?:(?:globalThis|window|self)\.)?Profiler\b|\bself\.Profiler\b/;
@@ -213,13 +214,14 @@ export function renderConformanceRunAllPage(
     }
   </style>
 </head>
-<body>
-<main>
+<body class="shell-page">
+${renderSiteHeader("conformance")}
+<main id="main-content">
   <p class="crumbs"><a href="/conformance">&larr; all conformance suites</a></p>
 
   <header class="lede-block">
     <p class="eyebrow">${eyebrowScope}</p>
-    <h1>conformance dashboard${titleScope}</h1>
+    <h1>Conformance dashboard${titleScope}</h1>
     <p class="lede">Run spec-vs-implementation probes directly in your browser context to check which contracts pass or fail. Filter by Chrome milestone for a fast focused run, or run the full catalogue. Assertions that depend on relative routes or Document-Policy headers automatically execute inside their own suite iframe.</p>
     <div class="meta">
       <span>browser: <strong id="ua">…</strong></span>
@@ -290,7 +292,7 @@ export function renderConformanceRunAllPage(
   </table>
   </div>
 
-  <footer class="byline">made by <a href="https://paul.kinlan.me/" target="_blank" rel="noopener">Paul Kinlan</a></footer>
+  ${BYLINE_FOOTER}
 </main>
 
 <script type="module">

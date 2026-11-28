@@ -1,9 +1,10 @@
 import { getMilestoneFeatures, slugify } from "../../lib/chromestatus.ts";
 import type { Channels } from "../../lib/chromestatus.ts";
+import { renderMarkdown } from "../../lib/markdown.ts";
 import { escapeHTML } from "../html.ts";
 import { knownReleaseMilestones, resolveDemo } from "./demo-index.ts";
 import type { ResolvedDemo } from "./demo-index.ts";
-import { BYLINE_FOOTER } from "./layout.ts";
+import { BYLINE_FOOTER, renderSiteHeader } from "./layout.ts";
 
 // ----- Categories taxonomy -----
 //
@@ -696,24 +697,26 @@ export async function renderCategoriesIndex(channels: Channels): Promise<string>
   <title>browse by category — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
   <style>
-    main { max-width: 1100px; }
     .category-grid {
       list-style: none;
       padding: 0;
       margin: var(--space-5) 0;
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
       gap: var(--space-4);
     }
     .category-tile {
+      min-width: 0;
       background: var(--bg-paper);
       border: 2px solid var(--border-black);
-      box-shadow: var(--flat-shadow);
-      transition: transform 80ms ease, box-shadow 80ms ease;
+      box-shadow: var(--shadow-card);
+      transition: var(--transition);
     }
-    .category-tile:hover { transform: translate(-2px, -2px); box-shadow: var(--flat-shadow-hover); }
+    .category-tile:hover { transform: translate(-2px, -2px); box-shadow: var(--shadow-card-hover); }
     .category-tile a {
-      display: block;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
       padding: var(--space-4);
       text-decoration: none;
       color: var(--text-black);
@@ -721,32 +724,34 @@ export async function renderCategoriesIndex(channels: Channels): Promise<string>
     .category-tile h3 {
       margin: 0 0 var(--space-2);
       font-family: var(--font-display);
-      font-size: 1.4rem;
+      font-size: 1.38rem;
       letter-spacing: -0.01em;
     }
+    .category-tile:hover h3 { color: var(--accent-blue); }
     .category-blurb {
       margin: 0 0 var(--space-3);
       font-family: var(--font-serif);
       color: var(--text-charcoal);
       line-height: 1.5;
-      font-size: 0.95rem;
+      font-size: 0.94rem;
     }
     .category-count {
-      margin: 0;
+      margin: auto 0 0;
+      padding-top: var(--space-3);
+      border-top: 1px solid var(--border-hairline);
       font-family: var(--font-mono);
-      font-size: 0.78rem;
+      font-size: 0.76rem;
       letter-spacing: 0.04em;
       color: var(--text-muted);
     }
   </style>
 </head>
-<body>
-<main>
-  <p class="crumbs"><a href="/">&larr; home</a></p>
-
+<body class="shell-page">
+${renderSiteHeader("categories")}
+<main id="main-content">
   <header class="lede-block">
     <p class="eyebrow">explore</p>
-    <h1>browse by category</h1>
+    <h1>Browse by category</h1>
     <p class="lede">Demos grouped by theme. Identity bundles passkeys + WebAuthn + FedCM + autofill. On-device AI bundles Prompt + Summariser + Translator + speech. Drill into any category to see every demo, grouped by milestone.</p>
   </header>
 
@@ -765,12 +770,12 @@ export async function renderCategoriesIndex(channels: Channels): Promise<string>
 export function renderCategoryCard(
   r: { name: string; summary?: string | null; id: number | string; demo: ResolvedDemo | null },
 ): string {
-  const summary = (r.summary ?? "").slice(0, 220);
+  const summaryHtml = renderMarkdown(r.summary ?? "", { maxChars: 280 });
   return `<li class="demo-card">
         <h3>${
     r.demo ? `<a href="${escapeHTML(r.demo.href)}">${escapeHTML(r.name)}</a>` : escapeHTML(r.name)
   }</h3>
-        <p>${escapeHTML(summary)}${summary.length === 220 ? "..." : ""}</p>
+        ${summaryHtml ? `<div class="demo-summary">${summaryHtml}</div>` : ""}
         <div class="demo-tags">
           <a class="tag" href="${
     escapeHTML(`https://chromestatus.com/feature/${r.id}`)
@@ -823,8 +828,9 @@ export async function renderCategoryPage(slug: string, channels: Channels): Prom
   <title>${escapeHTML(cat.label)} — chrome platform showcase</title>
   <link rel="stylesheet" href="/public/styles.css">
 </head>
-<body>
-<main>
+<body class="shell-page">
+${renderSiteHeader("categories")}
+<main id="main-content">
   <p class="crumbs"><a href="/categories/">&larr; all categories</a></p>
 
   <header class="lede-block">
